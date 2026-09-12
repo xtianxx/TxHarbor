@@ -37,7 +37,9 @@ research.md, data-model.md, contracts/observability.md, quickstart.md)
 - [ ] T004 lease 与协调协议 `internal/indexer/lease.go`（+ 集成测试）：CAS 获取、心跳续约
   （锁优先短事务：取锁→复核 owner→延租约）、过期接管（token+1），失权（续约 0 行/复核失败）
   立即停写 ——关联 FR-08/14、R2；依赖 T001；完成标准：双实例下恰一持有者，
-  杀持有者连接后租约过期被接管（TTL 15s/心跳 5s，DB 时间口径）。
+  杀持有者连接后租约过期被接管（生产默认 TTL 15s/心跳 5s，DB 时间口径；测试经内部参数
+  注入短值）。接管测试必须验证真实过期条件：以带超时上限的条件等待确认 lease owner
+  变更（超时仅作测试失败），禁用裸 sleep 猜测完成时间。
 - [ ] T005 扫描主循环 `internal/indexer/scanner.go`（+ 集成测试）：启动 `CheckChainID` 门禁、
   S 高于链头零写入等待、首块边界（免父校验/断言高度 S/同事务建 checkpoint）、精确守卫推进
   （`height=$n-1 AND block_hash=$parent`）、三态核验、持久化暂停、不确定提交恢复
@@ -55,8 +57,11 @@ research.md, data-model.md, contracts/observability.md, quickstart.md)
 
 ## Phase 3: US1/US2 连续同步与故障（P1）
 
-- [ ] T007 [US1] 集成测试：首次扫描顺序/重启恢复（验收场景 1、5）——依赖 T005；
-  完成标准：空库首行即 S、无跳块；SIGTERM 重启后从 N+1 继续，SC-01 通过。
+- [ ] T007 [US1] 集成测试：首次扫描顺序/重启恢复/起始高度变更拒绝/创世扫描
+  （验收场景 1、5；FR-02/03/05）——依赖 T005；
+  完成标准：空库首行即 S、无跳块；SIGTERM 重启后从 N+1 继续，SC-01 通过；
+  已有 checkpoint 时改 START_HEIGHT 重启，断言拒绝启动且 blocks/checkpoint/`start_height`
+  全不变；S=0 创世变体：首块 parent 全零保存、checkpoint 建行、S+1 父子衔接正常。
 - [ ] T008 [US2] 集成测试：S 高于链头/追头等待/RPC 中断/DB 写入失败（场景 2、3、6、7）
   ——依赖 T005；完成标准：等待期零写入零 checkpoint、故障期 checkpoint 推进 0、
   恢复后自动继续，SC-03/04/08 通过。
@@ -83,14 +88,16 @@ research.md, data-model.md, contracts/observability.md, quickstart.md)
 ## Phase 7: T1–T4 确定性并发测试（真 PG，同步点构造，禁 sleep 碰运气）
 
 - [ ] T014 [P] T1 暂停-推进互斥：测试事务持协调锁写 pause 未提交时，另一会话推进阻塞于锁
-  （不断言超时通过）；提交后推进继续但被裁决拒绝，checkpoint 逐字段不变 ——依赖 T004、T005。
+  ——以数据库锁等待状态（`pg_locks`/`pg_stat_activity`）或等价可靠同步机制确认阻塞中，
+  所有等待设超时上限，失败输出锁等待诊断，禁用裸 sleep；提交后推进继续但被裁决拒绝，
+  checkpoint 逐字段不变 ——依赖 T004、T005。
 - [ ] T015 [P] T2 旧 token 拒绝：接管 bump 后，旧 token 写事务（含暂停事务）在步骤 4 被拒，
   零写入 ——依赖 T004、T005。
 - [ ] T016 [P] T3 双首写互斥：起跑屏障并发首块协议，终态一行 checkpoint + 一行区块 S，
   败者转 S+1（同哈希）或走暂停（异哈希）——依赖 T004、T005。
 - [ ] T017 [P] T4 暂停后零推进：pause 提交前后 checkpoint 精确比对，多实例 N 次尝试后
   完全一致 ——依赖 T004、T005、T012。
-- [ ] 注：T014–T017 仅可并行编写，运行需 `-race` 且共享测试库时串行执行。
+  注：T014–T017 仅可并行编写，运行需 `-race` 且共享测试库时串行执行。
 
 ## Phase 8: 收尾门禁
 

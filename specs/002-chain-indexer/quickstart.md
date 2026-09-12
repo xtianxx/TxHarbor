@@ -12,7 +12,8 @@
 ## 场景映射（spec Acceptance Matrix 1–13）
 
 1. **首次扫描**：空库 + Anvil 预生 N 块，`START_HEIGHT=S` 启动；断言首行即 S、顺序连续、
-   `checkpoint=(S+k, hash)` 且外键行存在。
+   `checkpoint=(S+k, hash)` 且外键行存在。含 S=0 创世变体：首块 parent 全零保存、
+   checkpoint 建行、`start_height=0` 冻结，S+1 父子衔接正常。
 2. **S 高于链头**：S=H+5 启动；断言零 block 行、checkpoint 无行、`state=1`、无 error 日志；
    再产块至 S，断言首块事务一次建成。
 3. **追上链头**：追平后停产块；断言 `state=1`、checkpoint 不动、readyz 仍 200；复产后继续。

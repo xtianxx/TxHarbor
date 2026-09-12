@@ -39,21 +39,26 @@ decided here — the spec deferred them to plan; retry/interval *values* are dec
   - 事务级 `pg_advisory_xact_lock`：仅在极短事务内串行化时有意义，本设计所有写已由行级约束
     串行化，无需引入。
 
-## R3 — 原子提交：短事务，先 RPC 后 DB
+## R3 — 原子提交：短事务，先 RPC 后 DB，锁优先裁决
 
-- **Decision**: 每个高度一个短事务，事务内只做本地读写：
-  `INSERT block … ON CONFLICT (chain_id, number) DO NOTHING` → 同事务重读同高度已存哈希比对
-  （不同即回滚走暂停事务）→ 单条 checkpoint 推进
-  `UPDATE … WHERE height = $n-1 AND block_hash = $parent AND NOT EXISTS (pause)
-   AND <fencing EXISTS 谓词>` → commit。RPC 取头在 `BEGIN` 之前完成（带超时）；
-  事务内永不调外部网络、永不 `pool.Acquire` 常持。内存持有的"我是主"标志仅为提示，
-  写语句内的 fencing/暂停谓词才是权威裁决——校验与写入同属一条语句，不存在竞争窗口
-  （Read Committed 下语句级快照，并发推进语句经行锁串行后逐条重估 WHERE）。
+- **Decision**: 每个高度一个短事务，事务内只做本地读写，统一走协调锁协议：
+  确保 lease 行 → `SELECT … FOR UPDATE` 取全链唯一协调锁 → 后续独立语句重读裁决
+  （无暂停行 + owner/token/有效期 + 精确守卫 `height=$n-1 AND block_hash=$parent`，
+  首块断言无 checkpoint 行且高度=S）→ `INSERT block … ON CONFLICT DO NOTHING` →
+  同事务重读同高度已存哈希比对（不同即回滚走暂停事务）→ 写 checkpoint → commit。
+  RPC 取头在 `BEGIN` 之前完成（带超时）；事务内永不调外部网络、永不 `pool.Acquire` 常持。
+  内存持有的"我是主"标志仅为提示，持锁后的独立语句裁决才是权威——
+  Read Committed 下后续语句取新快照，可见锁等待期间提交的一切事务。
   辅以 `statement_timeout` / `idle_in_transaction_session_timeout` 作为护栏。
-- **Rationale**: 精确守卫（`height = $n-1` + 父哈希等于旧 checkpoint 哈希）在一条语句内同时强制
-  +1、连续性、暂停即停、失权即停；0 行即停推重读。`DO NOTHING` 使重放与并发插入幂等；
-  崩溃时两者同滚，不存在半进度。不确定提交的恢复规则：重连后 `SELECT` checkpoint + block 行，
-  以数据库为准、幂等继续（不假设成功/失败）。
+- **Rationale**: 锁把"校验→写入"变成持锁临界区，所有写事务在协调锁上串行化；
+  精确守卫在裁决读中同时强制 +1、连续性；暂停/失权在裁决读中被新快照捕获。
+  `DO NOTHING` 使重放与并发插入幂等；崩溃时两者同滚，不存在半进度。
+  不确定提交的恢复规则：重连后 `SELECT` checkpoint + block 行，以数据库为准、幂等继续
+  （不假设成功/失败）。
+- **已否决的历史方案（保留说明，禁止采用）**：单语句 `UPDATE … WHERE height<n
+  AND NOT EXISTS (pause) AND EXISTS (lease…)` 式"谓词同语句即无窗口"论证——
+  Read Committed 下阻塞语句仅目标行走 EPQ 重检，跨表子查询沿用语句旧快照，
+  该论证不成立（详见 data-model 并发正确性论证）。
 - **Alternatives considered**: 先开事务再取块（否决：持锁等 RPC，无界事务）；应用层"先查后写"
   替代约束（否决：竞态下不可靠，违反 Constitution II/VI）。
 
