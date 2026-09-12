@@ -143,6 +143,47 @@ func runScanTo(t *testing.T, sc *Scanner, want uint64, timeout time.Duration) {
 	}
 }
 
+// seedScanTo deterministically commits heights [S,N] through the real write
+// protocol (lease Acquire + commitBlock loop, no Run loop, hence no overshoot
+// race). It returns the resulting checkpoint height (always N).
+func seedScanTo(t *testing.T, ctx context.Context, pool *pgxpool.Pool, chain *scriptChain, owner string, S, N uint64) uint64 {
+	t.Helper()
+	lease := newTestLease(t, pool, scanChainID, owner, 3*time.Second, time.Second)
+	won, _, err := lease.Acquire(ctx)
+	if err != nil || !won {
+		t.Fatalf("seed acquire = (%v, %v), want win", won, err)
+	}
+	sc, err := NewScanner(pool, chain, lease, Config{
+		StartHeight: S, RPCTimeout: 2 * time.Second, PollInterval: 25 * time.Millisecond,
+		RetryInitial: 25 * time.Millisecond, RetryMax: 250 * time.Millisecond,
+	}, slog.New(slog.DiscardHandler))
+	if err != nil {
+		t.Fatalf("NewScanner(): %v", err)
+	}
+	type hw struct {
+		n uint64
+		h string
+		p string
+	}
+	chain.mu.Lock()
+	var writes []hw
+	for n := S; n <= N; n++ {
+		hdr := chain.heads[n]
+		if hdr == nil {
+			chain.mu.Unlock()
+			t.Fatalf("seed chain missing height %d", n)
+		}
+		writes = append(writes, hw{n, hashHex(hdr.Hash()), hashHex(hdr.ParentHash)})
+	}
+	chain.mu.Unlock()
+	for _, w := range writes {
+		if err := sc.commitBlock(ctx, blockWrite{number: w.n, hash: w.h, parent: w.p, first: w.n == S}); err != nil {
+			t.Fatalf("seed commit %d: %v", w.n, err)
+		}
+	}
+	return N
+}
+
 func scanBlockCount(t *testing.T, ctx context.Context, pool *pgxpool.Pool, from, to uint64) int {
 	t.Helper()
 	var n int
@@ -219,12 +260,28 @@ func TestScanFirstScanOrderAndRestart(t *testing.T) {
 	_, sc := newScanScanner(t, pool, chain, "scan-a", 3)
 
 	runScanTo(t, sc, 6, 15*time.Second)
-	if got := scanBlockCount(t, ctx, pool, 0, 2); got != 0 {
-		t.Fatalf("blocks below S persisted = %d, want 0", got)
+	// The run may commit one block past the observed target before observing
+	// cancel; anchor every assertion on the actual checkpoint, never on 6.
+	cp0, ok := readCoordCheckpoint(t, ctx, pool, scanChainID)
+	if !ok {
+		t.Fatal("no checkpoint after first run")
 	}
-	if got := scanBlockCount(t, ctx, pool, 3, 6); got != 4 {
-		t.Fatalf("blocks [3,6] = %d, want 4", got)
+	H := uint64(cp0.height)
+	if H < 6 {
+		t.Fatalf("checkpoint = %d, want >= 6", H)
 	}
+	var minN int64
+	if err := pool.QueryRow(ctx, `SELECT min(number) FROM chain_blocks WHERE chain_id=$1`, scanChainID).Scan(&minN); err != nil {
+		t.Fatalf("min height: %v", err)
+	}
+	if minN != 3 {
+		t.Fatalf("first persisted height = %d, want S=3", minN)
+	}
+	assertScanGapFree(t, ctx, pool, 3, H)
+	if H >= 4 {
+		assertScanLinked(t, ctx, pool, 4, H)
+	}
+	assertScanSingleRecord(t, ctx, pool, 3, H)
 
 	// Restart with a fresh instance: must continue from N+1 with no gap.
 	_, sc2 := newScanScanner(t, pool, chain, "scan-b", 3)
@@ -252,8 +309,9 @@ func TestScanStartHeightChangeRefused(t *testing.T) {
 	if !ok {
 		t.Fatal("no checkpoint after first run")
 	}
+	H := uint64(before.height)
 
-	_, sc2 := newScanScanner(t, pool, chain, "scan-b", 7)
+	_, sc2 := newScanScanner(t, pool, chain, "scan-b", H+10)
 	rctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	err := sc2.Run(rctx)
@@ -264,7 +322,7 @@ func TestScanStartHeightChangeRefused(t *testing.T) {
 	if !ok || !sameCoordCheckpoint(before, after) {
 		t.Fatalf("checkpoint changed by refused run: before=%+v after=%+v", before, after)
 	}
-	if got := scanBlockCount(t, ctx, pool, 6, 100); got != 0 {
+	if got := scanBlockCount(t, ctx, pool, H+1, 100); got != 0 {
 		t.Fatalf("refused run wrote %d blocks, want 0", got)
 	}
 }
@@ -283,14 +341,16 @@ func TestScanGenesisBoundary(t *testing.T) {
 	if err := pool.QueryRow(ctx, `SELECT parent_hash FROM chain_blocks WHERE chain_id=$1 AND number=0`, scanChainID).Scan(&parent); err != nil {
 		t.Fatalf("genesis row: %v", err)
 	}
-	if parent != coordHash(0)[:len(parent)] && parent != "0x"+strings.Repeat("00", 32) {
+	if parent != "0x"+strings.Repeat("00", 32) {
 		t.Fatalf("genesis parent = %s, want all-zero", parent)
 	}
 	cp, ok := readCoordCheckpoint(t, ctx, pool, scanChainID)
-	if !ok || cp.height != 2 || cp.startHeight != 0 {
-		t.Fatalf("checkpoint = %+v, want height 2 start 0", cp)
+	if !ok || cp.height < 2 || cp.startHeight != 0 {
+		t.Fatalf("checkpoint = %+v, want height >= 2 start 0", cp)
 	}
-	assertScanLinked(t, ctx, pool, 1, 2)
+	H := uint64(cp.height)
+	assertScanLinked(t, ctx, pool, 1, H)
+	assertScanSingleRecord(t, ctx, pool, 0, H)
 }
 
 // TestScanStartAboveHeadWaits: scene 2, FR-10, clarification #1.
@@ -437,18 +497,28 @@ func TestScanUncertainCommitIdempotent(t *testing.T) {
 	ctx := context.Background()
 	pool := openIndexerPool(t, dsn)
 	defer pool.Close()
-	chain := newScriptChain(31337, 6, 0xA8)
+	chain := newScriptChain(31337, 10, 0xA8)
 	_, sc := newScanScanner(t, pool, chain, "scan-a", 4)
 	runScanTo(t, sc, 4, 15*time.Second)
-	h5 := hashHex(chain.heads[5].Hash())
-	p5 := hashHex(chain.heads[5].ParentHash)
+	// Anchor on the actual checkpoint: the run above may commit one block
+	// past the observed target before observing cancel.
+	base, ok := readCoordCheckpoint(t, ctx, pool, scanChainID)
+	if !ok {
+		t.Fatal("no checkpoint after first run")
+	}
+	next := uint64(base.height) + 1
+	if next > 10 {
+		t.Fatalf("overshoot to %d exceeds test chain, widen it", next)
+	}
+	hn := hashHex(chain.heads[next].Hash())
+	// Parent comes from durable truth, not from a second chain read.
 	var wg sync.WaitGroup
 	errs := make([]error, 2)
 	for i := 0; i < 2; i++ {
 		wg.Add(1)
 		go func(i int) {
 			defer wg.Done()
-			errs[i] = sc.commitBlock(ctx, blockWrite{number: 5, hash: h5, parent: p5})
+			errs[i] = sc.commitBlock(ctx, blockWrite{number: next, hash: hn, parent: base.hash})
 		}(i)
 	}
 	wg.Wait()
@@ -457,16 +527,16 @@ func TestScanUncertainCommitIdempotent(t *testing.T) {
 			t.Fatalf("concurrent commitBlock = %v, want nil or stale-state", err)
 		}
 	}
-	if got := scanBlockCount(t, ctx, pool, 5, 5); got != 1 {
-		t.Fatalf("height 5 rows = %d, want 1", got)
+	if got := scanBlockCount(t, ctx, pool, next, next); got != 1 {
+		t.Fatalf("height %d rows = %d, want 1", next, got)
 	}
 	cp, ok := readCoordCheckpoint(t, ctx, pool, scanChainID)
-	if !ok || uint64(cp.height) != 5 || cp.hash != h5 || uint64(cp.startHeight) != 4 {
-		t.Fatalf("checkpoint = %+v, want (5,%s,4)", cp, h5)
+	if !ok || uint64(cp.height) != next || cp.hash != hn || uint64(cp.startHeight) != 4 {
+		t.Fatalf("checkpoint = %+v, want (%d,%s,4)", cp, next, hn)
 	}
 	// Idempotent continuation to the tip proves no skip/double after doubt.
-	runScanTo(t, sc, 6, 15*time.Second)
-	assertScanGapFree(t, ctx, pool, 4, 6)
+	runScanTo(t, sc, 9, 15*time.Second)
+	assertScanGapFree(t, ctx, pool, 4, 9)
 }
 
 // TestScanSafeExit: scene 13, FR-13 — cancel mid-loop leaves paired state.
@@ -562,15 +632,15 @@ func TestScanParentBreakPauses(t *testing.T) {
 	pool := openIndexerPool(t, dsn)
 	defer pool.Close()
 	chain := newScriptChain(31337, 7, 0xAC)
-	_, sc := newScanScanner(t, pool, chain, "scan-a", 2)
-	runScanTo(t, sc, 5, 15*time.Second)
+	seedScanTo(t, ctx, pool, chain, "scan-seed", 2, 5)
 	// Corrupt the next header's parent on the chain side only.
 	chain.mu.Lock()
 	broken := *chain.heads[6]
 	broken.ParentHash = common.HexToHash(coordHash(0xFF))
 	chain.heads[6] = &broken
 	chain.mu.Unlock()
-	rctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	_, sc := newScanScanner(t, pool, chain, "scan-a", 2)
+	rctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
 	err := sc.Run(rctx)
 	if err == nil || !errors.Is(err, errPaused) {
@@ -604,8 +674,7 @@ func TestScanCheckpointChangedPauses(t *testing.T) {
 	pool := openIndexerPool(t, dsn)
 	defer pool.Close()
 	chain := newScriptChain(31337, 6, 0xAD)
-	_, sc := newScanScanner(t, pool, chain, "scan-a", 2)
-	runScanTo(t, sc, 4, 15*time.Second)
+	seedScanTo(t, ctx, pool, chain, "scan-seed", 2, 4)
 	// Simulate downtime reorg: rebuild the chain with a different tag so
 	// height 4 (and later) resolve to different hashes.
 	chain2 := newScriptChain(31337, 6, 0xAE)
@@ -613,7 +682,7 @@ func TestScanCheckpointChangedPauses(t *testing.T) {
 	chain.heads = chain2.heads
 	chain.mu.Unlock()
 	_, sc2 := newScanScanner(t, pool, chain, "scan-b", 2)
-	rctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	rctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
 	if err := sc2.Run(rctx); !errors.Is(err, errPaused) {
 		t.Fatalf("Run() after checkpoint change = %v, want paused", err)
