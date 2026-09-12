@@ -92,8 +92,9 @@ migrations/000002_chain_indexer.sql  # 新增 4 表
 
 ```
 启动 → CheckChainID 门禁 → 取 lease（获胜/旁观）→ checkpoint 核验（三态）→ 循环：
-  取头(RPC, 超时) → 高度/父哈希预检 → 短事务(INSERT块 + 同高度哈希重读比对 + 精确守卫推进
-  checkpoint：height=$n-1 AND block_hash=$parent AND 无暂停 AND fencing 通过) → commit
+  取头(RPC, 超时) → 高度/父哈希预检 → 短事务[确保 lease 行 → FOR UPDATE 取协调锁 →
+  独立语句重读裁决(无暂停 + owner/token/有效期 + 精确守卫 height=$n-1 AND block_hash=$parent) →
+  INSERT块 + 同高度哈希重读比对 + 写 checkpoint/pause] → commit
   追头/空结果 → state=1 等待轮询 ｜ 可重试错 → state=2 退避 ｜ 哈希分歧 → 持久化暂停 state=3
   失权/不可重试错/shutdown → 停写（续约0行即停；暂停行存在即停）
 ```

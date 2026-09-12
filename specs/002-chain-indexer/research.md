@@ -18,9 +18,15 @@ decided here — the spec deferred them to plan; retry/interval *values* are dec
 ## R2 — 多实例协调：lease 行 + 心跳 + fencing token；拒绝常持 session advisory lock
 
 - **Decision**: 新增 `indexer_lease` 单行（按 chain_id），以原子 CAS 获取、
-  短语句心跳续约；每一次写事务都在同一事务内用 `EXISTS (lease owner=me AND token=tok AND 未过期)`
-  做 fencing；一致性约束（PK/单调 checkpoint）作为第二道防线。任何情况下都不在池连接上
+  短语句心跳续约；该行同时是全链唯一**协调行**：每一次写事务（首块、推进、暂停）先
+  `INSERT … ON CONFLICT DO NOTHING` 确保行存在，再 `SELECT … FOR UPDATE` 取锁，
+  持锁后用后续独立语句重读 lease/pause/checkpoint 并裁决（Read Committed 语句级新快照），
+  锁保持到事务结束。一致性约束（PK/外键/精确守卫）作为第二道防线。任何情况下都不在池连接上
   常持 `pg_advisory_lock`，不在事务内调 RPC。
+- **Rationale**: 协调锁把"校验→写入"变成持锁临界区：校验读发生在获取锁之后，
+  其快照新于一切在锁等待期间提交的事务（接管/暂停/并发推进），故旧 token 与暂停后推进
+  必被拒绝——该结论仅依赖"行锁互斥 + 后续语句新快照"两条成立语义，不依赖子查询快照刷新
+  （旧"同一语句谓词即无窗口"论证已被撤回，见 data-model 并发正确性论证）。
 - **Rationale**: session advisory lock 在连接丢失时静默失效（应用无感知）、与 pgxpool 的连接复用
   冲突（lock/unlock 必须同物理连接；`Release` 不重置会话状态导致锁泄漏回池）、`MaxConnLifetime`/
   健康检查可能在不知情下销毁持锁连接。lease+心跳把 leadership 变成显式 durable 状态，
