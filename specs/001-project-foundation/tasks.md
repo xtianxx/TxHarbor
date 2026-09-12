@@ -141,8 +141,8 @@
 
 ### Implementation for User Story 5
 
-- [ ] T033 [US5] 在 `internal/app/serve.go` 实现信号处理与退出预算（`TXHARBOR_SHUTDOWN_TIMEOUT`，超时强制结束并记错）（FR-013/014，contracts/cli.md）
-- [ ] T034 [US5] 枚举并补齐全部外部调用点的 `context.WithTimeout`：serve 启动链各步（PG Ping、版本查询、ChainID 校验各 5s，总和 < 30s 启动预算）、DB/RPC 运行期探针单次 5s、migrate 锁等待 `TXHARBOR_MIGRATE_LOCK_TIMEOUT`；取消 MUST 经 ctx 传播到 pgx/ethclient 调用（禁止无 ctx 裸调用）；验证：T035 慢 RPC 超时单测 + T012 httptest 超时分支 + 复核无裸调用（FR-013，research §2–3）
+- [ ] T033 [US5] 在 `internal/app/serve.go` 实现信号处理与退出预算：退出各步骤共享 15 秒总预算（单个 parent deadline，`TXHARBOR_SHUTDOWN_TIMEOUT`），超时强制结束并记错（FR-013/014，contracts/cli.md）
+- [ ] T034 [US5] 枚举并补齐全部外部调用点的 `context.WithTimeout`：serve 启动链各步共享 30 秒总预算（单个 parent deadline：PG Ping、版本查询、ChainID 校验每步单次 ≤5s）、DB/RPC 运行期探针单次 5s、migrate 锁等待 `TXHARBOR_MIGRATE_LOCK_TIMEOUT`；取消 MUST 经 ctx 传播到 pgx/ethclient 调用（禁止无 ctx 裸调用）；验证：T035 慢 RPC 超时单测 + T012 httptest 超时分支 + 复核无裸调用（FR-013，research §2–3）
 - [ ] T035 [US5] 在 `internal/eth/slow_rpc_test.go` 写慢 RPC 超时单测（httptest 延迟 > probe timeout，断言调用失败而非挂起）（FR-013）
 
 **Checkpoint**: 全部用户故事独立可用 —— 退出可控可计时

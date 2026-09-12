@@ -24,7 +24,7 @@
 
 **Project Type**: 后端服务，单二进制 CLI（`serve` + `migrate up|status`）。
 
-**Performance Goals**: 验收界限（可配置，默认即验收值；计时不含镜像/依赖准备）：依赖可用时启动后 30s 内就绪、启动持续失败 30s 预算非零退出、依赖中断 10s 内转未就绪、恢复 10s 内重回就绪、终止后 15s 内退出（超时强制结束记错）。换算：探针 interval 2s + 单次 5s → 最坏感知约 7s < 10s。
+**Performance Goals**: 验收界限（可配置，默认即验收值；计时不含镜像/依赖准备）：依赖可用时启动后 30s 内就绪、启动持续失败 30s 预算非零退出、依赖中断 10s 内转未就绪、恢复 10s 内重回就绪、终止后 15s 内退出（超时强制结束记错）。换算：探针 interval 2s + 单次 5s → 最坏感知约 7s（下一 tick ≤2s + 单次超时 5s，翻转同步完成）< 10s，恢复同理。启动各步骤共享 30s 总预算（单个 parent deadline，每步单次调用 ≤5s）；退出各步骤共享 15s 总预算；migrate 锁等待独立 30s，不计入 serve 预算。
 
 **Constraints**: 配置载体仅环境变量；迁移经独立命令、启动永不自动迁移；日志凭据脱敏（`[REDACTED]`，保留非敏感结构信息）；`/metrics` 仅基础进程指标/就绪 gauge/探测计数，无业务指标、不部署 Prometheus/Grafana；禁止 `NO TRANSACTION` 迁移。
 
