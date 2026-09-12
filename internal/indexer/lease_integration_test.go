@@ -168,6 +168,10 @@ func TestLeaseExactlyOneHolderAndExpiryTakeover(t *testing.T) {
 
 	holderPool := openIndexerPool(t, dsn)
 	contenderPool := openIndexerPool(t, dsn)
+	// observerPool is a dedicated read/write-path pool that is never closed
+	// mid-test: killing the winner's instance pool must not break observation.
+	observerPool := openIndexerPool(t, dsn)
+	defer observerPool.Close()
 	defer contenderPool.Close()
 	defer holderPool.Close() // idempotent; may also be closed mid-test
 
@@ -214,7 +218,7 @@ func TestLeaseExactlyOneHolderAndExpiryTakeover(t *testing.T) {
 	if winner == nil || contender == nil {
 		t.Fatalf("race did not produce one winner and one contender")
 	}
-	if owner, token, _ := leaseRow(t, ctx, contenderPool, chainID); owner != winner.ownerID || token != winToken {
+	if owner, token, _ := leaseRow(t, ctx, observerPool, chainID); owner != winner.ownerID || token != winToken {
 		t.Fatalf("lease after race = (%s, %d), want (%s, %d)", owner, token, winner.ownerID, winToken)
 	}
 	if ok, _, err := contender.Acquire(ctx); err != nil || ok {
@@ -222,25 +226,31 @@ func TestLeaseExactlyOneHolderAndExpiryTakeover(t *testing.T) {
 	}
 
 	// The holder heartbeats and keeps the lease past its original expiry.
-	_, _, initialExpiry := leaseRow(t, ctx, contenderPool, chainID)
+	_, _, initialExpiry := leaseRow(t, ctx, observerPool, chainID)
 	hbCtx, hbCancel := context.WithCancel(ctx)
 	hbErr := make(chan error, 1)
 	go func() { hbErr <- winner.Heartbeat(hbCtx) }()
 	waitUntil(t, time.Now().Add(10*time.Second), "heartbeat renewal to extend expires_at", func() bool {
-		_, _, expires := leaseRow(t, ctx, contenderPool, chainID)
+		_, _, expires := leaseRow(t, ctx, observerPool, chainID)
 		return expires.After(initialExpiry)
 	})
 	if ok, _, err := contender.Acquire(ctx); err != nil || ok {
 		t.Fatalf("contender Acquire() while heartbeat runs = (%v, %v), want (false, nil)", ok, err)
 	}
 
-	// Kill the holder: stop its heartbeat, then close its pool (connections
-	// die, no further renewal happens).
+	// Kill the holder: stop its heartbeat, then close the WINNER's pool
+	// (connections die, no further renewal happens). The winner is whichever
+	// instance won the race above — closing a fixed pool variable would kill
+	// the contender instead whenever instance-b wins.
 	hbCancel()
 	if err := <-hbErr; err != nil {
 		t.Fatalf("Heartbeat() after cancel = %v, want nil", err)
 	}
-	holderPool.Close()
+	winnerPool := holderPool
+	if winner == instanceB {
+		winnerPool = contenderPool
+	}
+	winnerPool.Close()
 
 	// Real-expiry takeover: bounded conditional wait (no bare sleep guessing
 	// the completion time), then token must have advanced by exactly one.
@@ -269,13 +279,13 @@ func TestLeaseExactlyOneHolderAndExpiryTakeover(t *testing.T) {
 	if tookToken != winToken+1 {
 		t.Fatalf("takeover token = %d, want %d (winner token + 1)", tookToken, winToken+1)
 	}
-	if owner, token, expires := leaseRow(t, ctx, contenderPool, chainID); owner != contender.ownerID || token != tookToken || !expires.After(time.Now()) {
+	if owner, token, expires := leaseRow(t, ctx, observerPool, chainID); owner != contender.ownerID || token != tookToken || !expires.After(time.Now()) {
 		t.Fatalf("lease after takeover = (%s, %d, %s), want (%s, %d, unexpired)",
 			owner, token, expires, contender.ownerID, tookToken)
 	}
 
 	// Renewal of a stale owner is reported as loss; the real holder renews.
-	stale := newTestLease(t, contenderPool, chainID, winner.ownerID, ttl, heartbeat)
+	stale := newTestLease(t, observerPool, chainID, winner.ownerID, ttl, heartbeat)
 	if err := stale.Renew(ctx); !errors.Is(err, ErrLeaseLost) {
 		t.Fatalf("stale Renew() error = %v, want ErrLeaseLost", err)
 	}
@@ -285,7 +295,7 @@ func TestLeaseExactlyOneHolderAndExpiryTakeover(t *testing.T) {
 
 	// Heartbeat surfaces loss immediately instead of writing on: a ghost with
 	// the old owner id fails on its first renewal.
-	ghost := newTestLease(t, contenderPool, chainID, winner.ownerID, 200*time.Millisecond, 20*time.Millisecond)
+	ghost := newTestLease(t, observerPool, chainID, winner.ownerID, 200*time.Millisecond, 20*time.Millisecond)
 	if err := ghost.Heartbeat(ctx); !errors.Is(err, ErrLeaseLost) {
 		t.Fatalf("stale Heartbeat() error = %v, want ErrLeaseLost", err)
 	}
@@ -295,25 +305,25 @@ func TestLeaseExactlyOneHolderAndExpiryTakeover(t *testing.T) {
 	const number = int64(1)
 	hash := "0x" + strings.Repeat("ab", 32)
 	parentHash := "0x" + strings.Repeat("cd", 32)
-	before := countChainBlocks(t, ctx, contenderPool, chainID, number)
-	allowed, err := tryWriteWithToken(ctx, contenderPool, chainID, number, hash, parentHash, winner.ownerID, winToken)
+	before := countChainBlocks(t, ctx, observerPool, chainID, number)
+	allowed, err := tryWriteWithToken(ctx, observerPool, chainID, number, hash, parentHash, winner.ownerID, winToken)
 	if err != nil {
 		t.Fatalf("stale write attempt: %v", err)
 	}
 	if allowed {
 		t.Fatal("write with stale owner/token was allowed, want rejected")
 	}
-	if got := countChainBlocks(t, ctx, contenderPool, chainID, number); got != before {
+	if got := countChainBlocks(t, ctx, observerPool, chainID, number); got != before {
 		t.Fatalf("stale write leaked %d row(s), want 0", got-before)
 	}
-	allowed, err = tryWriteWithToken(ctx, contenderPool, chainID, number, hash, parentHash, contender.ownerID, contender.Token())
+	allowed, err = tryWriteWithToken(ctx, observerPool, chainID, number, hash, parentHash, contender.ownerID, contender.Token())
 	if err != nil {
 		t.Fatalf("holder write attempt: %v", err)
 	}
 	if !allowed {
 		t.Fatal("write with the current owner/token was rejected, want allowed")
 	}
-	if got := countChainBlocks(t, ctx, contenderPool, chainID, number); got != before+1 {
+	if got := countChainBlocks(t, ctx, observerPool, chainID, number); got != before+1 {
 		t.Fatalf("holder write rows = %d, want %d", got, before+1)
 	}
 }
