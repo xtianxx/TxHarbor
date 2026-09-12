@@ -20,12 +20,12 @@ research.md, data-model.md, contracts/observability.md, quickstart.md)
   身份 UNIQUE/格式 CHECK）/`indexer_checkpoint`（三元组外键/`start_height`）/`indexer_lease`/
   `indexer_pause`（kind CHECK）——关联 FR-04/06/12、data-model.md；完成标准：`migrate up`
   从空库一次成功，`migrate status` 无 pending，非法行（坏哈希/孤 checkpoint）被约束拒绝。
-- [ ] T002 [P] 配置扩展 `internal/config/config.go`（+ `.env.example`）：`TXHARBOR_START_HEIGHT`
+- [X] T002 [P] 配置扩展 `internal/config/config.go`（+ `.env.example`）：`TXHARBOR_START_HEIGHT`
   （必需，`>=0`）、`INDEX_RPC_TIMEOUT`（默认 5s）、`INDEX_POLL_INTERVAL`（默认 1s）、
   `INDEX_RETRY_INITIAL/MAX`（默认 200ms/30s）；`Summary` 中 RPC URL 走 `logx.Redact`
   ——关联 FR-02/15、R6；完成标准：缺失/非法逐项拒绝启动并点名变量，日志无凭据明文
   （单元测试，验收 US5-AC3/场景 13 脱敏抽查前置）。
-- [ ] T003 [P] 取块与错误分类 `internal/eth/client.go`：`HeaderByNumber` 封装、
+- [X] T003 [P] 取块与错误分类 `internal/eth/client.go`：`HeaderByNumber` 封装、
   `KindNotFound`（等待极）/`KindRateLimited`（可重试）、429 与 `ethereum.NotFound` 映射
   ——关联 FR-09/10/11、R1/R4；完成标准：httptest 覆盖超时/429/空结果/非法响应/chain_id 错误
   的分类断言（单元测试）。
