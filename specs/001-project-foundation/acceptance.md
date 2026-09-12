@@ -86,6 +86,16 @@ Docker 访问说明：当前登录会话 `id` 未含 docker 组，但 `/etc/grou
 
 ### 6.5 剩余限制
 
-- 工作流首次真实执行需 push 后在 GitHub 触发；本机经 `sg docker` 验证，CI 不走 sg。
+- 本机经 `sg docker` 验证；CI runner 直连 Docker，不走 sg。
 - integration job 需外网拉取两个 pinned 镜像（本机已缓存，CI 首次运行实拉）。
 - “工作流存在≠门禁生效”：main 分支保护与 required status checks 需在 GitHub 配置后才具约束力（现状与待办见 PR 描述）。
+
+### 6.6 CI 首跑结果（GitHub Actions，PR #1）
+
+| Run | SHA | 结论 | wall | 备注 |
+|---|---|---|---|---|
+| [34700354205](https://github.com/xtianxx/TxHarbor/actions/runs/34700354205) | 3027360 | success（4/4 job） | 97s | unit 94s / integration 83s / build 52s / lint 65s |
+| [34700504329](https://github.com/xtianxx/TxHarbor/actions/runs/34700504329) | 37f87e2 | success（4/4 job） | 82s | actions checkout@v7 + setup-go@v7（node24），无 annotation |
+
+- lint / build / unit / integration 四个 job 均真实执行；integration 在 runner 上拉取 pin 镜像并运行 testcontainers，非 skip。
+- Node.js 20 弃用告警（checkout@v4 / setup-go@v5）经升级到 v7 major 消除，升版后复跑仍全绿。
