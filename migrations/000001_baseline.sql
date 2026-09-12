@@ -1,0 +1,17 @@
+-- +goose Up
+-- TxHarbor 001-project-foundation baseline.
+--
+-- Intentionally creates no schema objects: the foundation scope owns no
+-- business tables and must not pre-build structures for later specs
+-- (FR-017/FR-018). The goose version table (goose_db_version) is created and
+-- maintained by the migration tool itself, not by this file.
+--
+-- This migration exists so that `migrate up` has a deterministic target
+-- version to reach from an empty database, and it still runs inside goose's
+-- default single transaction. Real schema changes arrive in later,
+-- separately specified features.
+
+-- +goose Down
+-- Nothing to undo: the baseline is a deliberate no-op. Dropping it would
+-- leave the schema version record in an undefined state without changing
+-- any structure.
