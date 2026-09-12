@@ -9,6 +9,7 @@ Scope: 001-project-foundation. Verified against the module versions pinned in
 |---|---|---|---|
 | github.com/ethereum/go-ethereum | v1.17.5 | LGPL-3.0 (library, see below) | JSON-RPC client + chain-id check |
 | github.com/jackc/pgx/v5 | v5.11.0 | MIT | PostgreSQL pool + `database/sql` bridge |
+| github.com/moby/moby/api | v1.55.0 | Apache-2.0 | test-only (integration build tag): container/network types for fixed host-port bindings |
 | github.com/pressly/goose/v3 | v3.28.0 | MIT | versioned migrations |
 | github.com/prometheus/client_golang | v1.24.1 | Apache-2.0 | `/metrics` exposition |
 | github.com/testcontainers/testcontainers-go (+ modules/postgres) | v0.44.0 | MIT | test-only (integration tests) |
