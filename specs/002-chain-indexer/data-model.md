@@ -74,8 +74,11 @@
 
 - 获取（原子 CAS）：`INSERT … ON CONFLICT (chain_id) DO UPDATE SET owner/expiry/token+1
   WHERE indexer_lease.expires_at < now()`；返回行即获胜，token+1 仅获胜者可见新值。
-- 续约：`UPDATE … SET expires_at = now() + ttl WHERE chain_id=$c AND owner=$me`；
-  影响 0 行 = 失权，立即停写（不得"再试一次写"）。续约是单语句短写，不参与协调锁协议。
+- 续约（同样遵守协调协议）：`BEGIN` → `SELECT … FOR UPDATE` 取协调锁（行缺失则视为无租约，
+  走获取路径）→ 复核 `owner=$me`（不符即 ROLLBACK 并上报失权）→
+  `UPDATE … SET expires_at = now() + ttl WHERE chain_id=$c` → `COMMIT`。
+  影响 0 行或复核失败 = 失权，立即停写。心跳每 5s 一次短事务，与写事务串行化，
+  临界区仅两条点语句。
 - TTL/心跳：ttl = 15s，心跳每 5s（≈1/3 ttl，DB 时间口径，防时钟偏斜）；连接断开后不续约，
   租约自然过期，他实例接管。过期前任的写事务被 in-tx 重读裁决拒绝（见"写事务协议"）。
 - **协调行角色**：lease 行即全链唯一的协调行。首块、推进、暂停三种写事务必须首先

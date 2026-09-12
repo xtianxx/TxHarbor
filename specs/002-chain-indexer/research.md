@@ -18,7 +18,7 @@ decided here — the spec deferred them to plan; retry/interval *values* are dec
 ## R2 — 多实例协调：lease 行 + 心跳 + fencing token；拒绝常持 session advisory lock
 
 - **Decision**: 新增 `indexer_lease` 单行（按 chain_id），以原子 CAS 获取、
-  短语句心跳续约；该行同时是全链唯一**协调行**：每一次写事务（首块、推进、暂停）先
+  短语句心跳续约（续约同样走协调锁短事务：取锁→复核 owner→延租约，见 data-model）；该行同时是全链唯一**协调行**：每一次写事务（首块、推进、暂停）先
   `INSERT … ON CONFLICT DO NOTHING` 确保行存在，再 `SELECT … FOR UPDATE` 取锁，
   持锁后用后续独立语句重读 lease/pause/checkpoint 并裁决（Read Committed 语句级新快照），
   锁保持到事务结束。一致性约束（PK/外键/精确守卫）作为第二道防线。任何情况下都不在池连接上
