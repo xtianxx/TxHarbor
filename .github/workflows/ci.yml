@@ -1,0 +1,92 @@
+# TxHarbor CI: lint, build and unit checks need no Docker; the integration
+# job uses testcontainers, which manages its own PostgreSQL 18.6-trixie and
+# Foundry v1.8.1 containers (images pinned in the test sources). No deploy
+# steps by design.
+#
+# Local and CI share the same entry points: every job runs a Makefile target.
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+# Fictional credentials only. The integration suite provisions ephemeral
+# container credentials; these values exist so any accidental dependence on
+# operator configuration fails fast and so nothing real is ever needed.
+env:
+  TXHARBOR_PG_DSN: postgres://txharbor:txharbor@127.0.0.1:5432/txharbor?sslmode=disable
+  TXHARBOR_RPC_URL: http://127.0.0.1:8545
+  TXHARBOR_CHAIN_ID: "31337"
+
+jobs:
+  lint:
+    name: lint (gofmt + vet)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version: "1.26.5"
+          cache: true
+      - name: gofmt + go vet (unit and integration tags)
+        run: make lint
+        timeout-minutes: 10
+
+  build:
+    name: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version: "1.26.5"
+          cache: true
+      - name: go build ./...
+        run: make build
+        timeout-minutes: 10
+
+  unit:
+    name: unit tests (+ race)
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version: "1.26.5"
+          cache: true
+      - name: unit tests
+        run: make test
+        timeout-minutes: 10
+      - name: unit tests (race detector)
+        run: make test-race
+        timeout-minutes: 15
+
+  integration:
+    name: integration tests (Docker)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version: "1.26.5"
+          cache: true
+      - name: verify Docker daemon for testcontainers
+        run: docker info
+        timeout-minutes: 5
+      # Never echo credentials. The integration tests redact via logx; this
+      # masks the fictional DSN should it ever reach the log stream.
+      - name: mask test credentials in logs
+        run: |
+          set -euo pipefail
+          echo "::add-mask::${TXHARBOR_PG_DSN}"
+      - name: migrations, readiness flip and SIGTERM end to end
+        run: make test-integration
+        timeout-minutes: 20
