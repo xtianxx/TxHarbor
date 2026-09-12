@@ -51,10 +51,11 @@ func TestReadyzFlipsAndRecoversWithRealDependencies(t *testing.T) {
 	go func() {
 		done <- app.Serve(ctx, app.Deps{
 			Getenv: envMap(map[string]string{
-				"TXHARBOR_PG_DSN":    dsn,
-				"TXHARBOR_RPC_URL":   rpcURL,
-				"TXHARBOR_CHAIN_ID":  "31337",
-				"TXHARBOR_HTTP_ADDR": addr,
+				"TXHARBOR_PG_DSN":       dsn,
+				"TXHARBOR_RPC_URL":      rpcURL,
+				"TXHARBOR_CHAIN_ID":     "31337",
+				"TXHARBOR_START_HEIGHT": "0",
+				"TXHARBOR_HTTP_ADDR":    addr,
 			}),
 			Stderr:  os.Stderr,
 			Signals: signals,

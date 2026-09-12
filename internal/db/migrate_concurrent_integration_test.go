@@ -50,6 +50,7 @@ func cliEnv(dsn string, lockTimeout time.Duration) []string {
 		"TXHARBOR_PG_DSN="+dsn,
 		"TXHARBOR_RPC_URL=http://127.0.0.1:1",
 		"TXHARBOR_CHAIN_ID=31337",
+		"TXHARBOR_START_HEIGHT=0",
 		fmt.Sprintf("TXHARBOR_MIGRATE_LOCK_TIMEOUT=%s", lockTimeout),
 	)
 }
@@ -110,18 +111,24 @@ func TestConcurrentMigrateProcessesSerialize(t *testing.T) {
 		}
 		applied += n
 	}
-	if applied != 1 {
-		t.Fatalf("total applied = %d across %d processes, want exactly 1", applied, processes)
+	files, err := MigrationFiles(Migrations)
+	if err != nil {
+		t.Fatalf("list embedded migrations: %v", err)
+	}
+	if applied != len(files) {
+		t.Fatalf("total applied = %d across %d processes, want exactly %d (one process applies every version once)", applied, processes, len(files))
 	}
 
 	sqlDB := openTestSQL(t, dsn)
-	var rows int
-	if err := sqlDB.QueryRowContext(context.Background(),
-		"SELECT count(*) FROM goose_db_version WHERE version_id = 1 AND is_applied").Scan(&rows); err != nil {
-		t.Fatalf("count version rows: %v", err)
-	}
-	if rows != 1 {
-		t.Fatalf("version table forked: %d applied rows for version 1, want 1", rows)
+	for _, f := range files {
+		var rows int
+		if err := sqlDB.QueryRowContext(context.Background(),
+			"SELECT count(*) FROM goose_db_version WHERE version_id = $1 AND is_applied", f.Version).Scan(&rows); err != nil {
+			t.Fatalf("count version rows: %v", err)
+		}
+		if rows != 1 {
+			t.Fatalf("version table forked: %d applied rows for version %d, want 1", rows, f.Version)
+		}
 	}
 }
 

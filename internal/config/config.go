@@ -22,12 +22,17 @@ const (
 	EnvPGDSN              = "TXHARBOR_PG_DSN"
 	EnvRPCURL             = "TXHARBOR_RPC_URL"
 	EnvChainID            = "TXHARBOR_CHAIN_ID"
+	EnvStartHeight        = "TXHARBOR_START_HEIGHT"
 	EnvHTTPAddr           = "TXHARBOR_HTTP_ADDR"
 	EnvStartupTimeout     = "TXHARBOR_STARTUP_TIMEOUT"
 	EnvProbeInterval      = "TXHARBOR_PROBE_INTERVAL"
 	EnvProbeTimeout       = "TXHARBOR_PROBE_TIMEOUT"
 	EnvShutdownTimeout    = "TXHARBOR_SHUTDOWN_TIMEOUT"
 	EnvMigrateLockTimeout = "TXHARBOR_MIGRATE_LOCK_TIMEOUT"
+	EnvIndexRPCTimeout    = "TXHARBOR_INDEX_RPC_TIMEOUT"
+	EnvIndexPollInterval  = "TXHARBOR_INDEX_POLL_INTERVAL"
+	EnvIndexRetryInitial  = "TXHARBOR_INDEX_RETRY_INITIAL"
+	EnvIndexRetryMax      = "TXHARBOR_INDEX_RETRY_MAX"
 )
 
 // Defaults from data-model §1. Acceptance runs use these values (FR-013).
@@ -38,6 +43,10 @@ const (
 	DefaultProbeTimeout       = 5 * time.Second
 	DefaultShutdownTimeout    = 15 * time.Second
 	DefaultMigrateLockTimeout = 30 * time.Second
+	DefaultIndexRPCTimeout    = 5 * time.Second
+	DefaultIndexPollInterval  = 1 * time.Second
+	DefaultIndexRetryInitial  = 200 * time.Millisecond
+	DefaultIndexRetryMax      = 30 * time.Second
 
 	// probeBudget is the hard ceiling for interval+timeout so that an
 	// outage is observed/recovered well inside the 10s acceptance bound.
@@ -49,12 +58,17 @@ type Config struct {
 	PGDSN              string
 	RPCURL             string
 	ChainID            uint64
+	StartHeight        uint64
 	HTTPAddr           string
 	StartupTimeout     time.Duration
 	ProbeInterval      time.Duration
 	ProbeTimeout       time.Duration
 	ShutdownTimeout    time.Duration
 	MigrateLockTimeout time.Duration
+	IndexRPCTimeout    time.Duration
+	IndexPollInterval  time.Duration
+	IndexRetryInitial  time.Duration
+	IndexRetryMax      time.Duration
 }
 
 // Getenv looks up an environment variable (os.LookupEnv compatible).
@@ -71,6 +85,10 @@ func Load(getenv Getenv) (*Config, error) {
 		ProbeTimeout:       DefaultProbeTimeout,
 		ShutdownTimeout:    DefaultShutdownTimeout,
 		MigrateLockTimeout: DefaultMigrateLockTimeout,
+		IndexRPCTimeout:    DefaultIndexRPCTimeout,
+		IndexPollInterval:  DefaultIndexPollInterval,
+		IndexRetryInitial:  DefaultIndexRetryInitial,
+		IndexRetryMax:      DefaultIndexRetryMax,
 	}
 
 	// Required values: presence first, then format.
@@ -98,6 +116,14 @@ func Load(getenv Getenv) (*Config, error) {
 		c.ChainID = id
 	}
 
+	if raw, err := require(getenv, EnvStartHeight); err != nil {
+		errs = append(errs, err)
+	} else if h, err := parseStartHeight(raw); err != nil {
+		errs = append(errs, invalid(EnvStartHeight, "%v", err))
+	} else {
+		c.StartHeight = h
+	}
+
 	if raw, ok := getenv(EnvHTTPAddr); ok && raw != "" {
 		if err := validateHTTPAddr(raw); err != nil {
 			errs = append(errs, invalid(EnvHTTPAddr, "%v", err))
@@ -111,6 +137,10 @@ func Load(getenv Getenv) (*Config, error) {
 	c.ProbeTimeout = duration(getenv, EnvProbeTimeout, c.ProbeTimeout, &errs)
 	c.ShutdownTimeout = duration(getenv, EnvShutdownTimeout, c.ShutdownTimeout, &errs)
 	c.MigrateLockTimeout = duration(getenv, EnvMigrateLockTimeout, c.MigrateLockTimeout, &errs)
+	c.IndexRPCTimeout = duration(getenv, EnvIndexRPCTimeout, c.IndexRPCTimeout, &errs)
+	c.IndexPollInterval = duration(getenv, EnvIndexPollInterval, c.IndexPollInterval, &errs)
+	c.IndexRetryInitial = duration(getenv, EnvIndexRetryInitial, c.IndexRetryInitial, &errs)
+	c.IndexRetryMax = duration(getenv, EnvIndexRetryMax, c.IndexRetryMax, &errs)
 
 	// FR-013: interval+timeout must stay under the 10s perception bound.
 	if c.ProbeInterval+c.ProbeTimeout >= probeBudget {
@@ -129,9 +159,10 @@ func Load(getenv Getenv) (*Config, error) {
 // one startup echo line (FR-003).
 func (c *Config) Summary() string {
 	return fmt.Sprintf(
-		"pg=%s rpc=%s chain_id=%d http_addr=%s startup_timeout=%s probe_interval=%s probe_timeout=%s shutdown_timeout=%s migrate_lock_timeout=%s",
-		logx.Redact(c.PGDSN), c.RPCURL, c.ChainID, c.HTTPAddr,
+		"pg=%s rpc=%s chain_id=%d start_height=%d http_addr=%s startup_timeout=%s probe_interval=%s probe_timeout=%s shutdown_timeout=%s migrate_lock_timeout=%s index_rpc_timeout=%s index_poll_interval=%s index_retry_initial=%s index_retry_max=%s",
+		logx.Redact(c.PGDSN), logx.Redact(c.RPCURL), c.ChainID, c.StartHeight, c.HTTPAddr,
 		c.StartupTimeout, c.ProbeInterval, c.ProbeTimeout, c.ShutdownTimeout, c.MigrateLockTimeout,
+		c.IndexRPCTimeout, c.IndexPollInterval, c.IndexRetryInitial, c.IndexRetryMax,
 	)
 }
 
@@ -184,6 +215,16 @@ func validateHTTPURL(raw string) error {
 		return errors.New("missing host")
 	}
 	return nil
+}
+
+// parseStartHeight accepts any uint64 including genesis 0; negative and
+// non-decimal input is rejected.
+func parseStartHeight(raw string) (uint64, error) {
+	h, err := strconv.ParseUint(raw, 10, 64)
+	if err != nil {
+		return 0, fmt.Errorf("%q is not a non-negative decimal integer", raw)
+	}
+	return h, nil
 }
 
 func parseChainID(raw string) (uint64, error) {

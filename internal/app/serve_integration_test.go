@@ -26,10 +26,11 @@ import (
 func TestServeConfigErrorsEndToEnd(t *testing.T) {
 	addr := freeAddr(t)
 	base := map[string]string{
-		"TXHARBOR_PG_DSN":    "postgres://txharbor:txharbor@127.0.0.1:5432/txharbor?sslmode=disable",
-		"TXHARBOR_RPC_URL":   "http://127.0.0.1:8545",
-		"TXHARBOR_CHAIN_ID":  "31337",
-		"TXHARBOR_HTTP_ADDR": addr,
+		"TXHARBOR_PG_DSN":       "postgres://txharbor:txharbor@127.0.0.1:5432/txharbor?sslmode=disable",
+		"TXHARBOR_RPC_URL":      "http://127.0.0.1:8545",
+		"TXHARBOR_CHAIN_ID":     "31337",
+		"TXHARBOR_START_HEIGHT": "0",
+		"TXHARBOR_HTTP_ADDR":    addr,
 	}
 	cases := []struct {
 		name    string
@@ -76,10 +77,11 @@ func TestServeRefusesUnmigratedDatabaseEndToEnd(t *testing.T) {
 	var stderr bytes.Buffer
 	code := Serve(ctx, Deps{
 		Getenv: envGetter(map[string]string{
-			"TXHARBOR_PG_DSN":    dsn,
-			"TXHARBOR_RPC_URL":   "http://127.0.0.1:1",
-			"TXHARBOR_CHAIN_ID":  "31337",
-			"TXHARBOR_HTTP_ADDR": addr,
+			"TXHARBOR_PG_DSN":       dsn,
+			"TXHARBOR_RPC_URL":      "http://127.0.0.1:1",
+			"TXHARBOR_CHAIN_ID":     "31337",
+			"TXHARBOR_START_HEIGHT": "0",
+			"TXHARBOR_HTTP_ADDR":    addr,
 		}),
 		Stderr:  &stderr,
 		Signals: make(chan os.Signal),
@@ -110,10 +112,11 @@ func TestServeWrongChainEndToEnd(t *testing.T) {
 	var stderr bytes.Buffer
 	code := Serve(ctx, Deps{
 		Getenv: envGetter(map[string]string{
-			"TXHARBOR_PG_DSN":    dsn,
-			"TXHARBOR_RPC_URL":   rpcURL,
-			"TXHARBOR_CHAIN_ID":  "1",
-			"TXHARBOR_HTTP_ADDR": freeAddr(t),
+			"TXHARBOR_PG_DSN":       dsn,
+			"TXHARBOR_RPC_URL":      rpcURL,
+			"TXHARBOR_CHAIN_ID":     "1",
+			"TXHARBOR_START_HEIGHT": "0",
+			"TXHARBOR_HTTP_ADDR":    freeAddr(t),
 		}),
 		Stderr:  &stderr,
 		Signals: make(chan os.Signal),

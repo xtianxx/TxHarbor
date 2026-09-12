@@ -67,7 +67,7 @@ func TestMigrateUpStatusAndRepeatOnEmptyDatabase(t *testing.T) {
 	if err := MigrateUp(ctx, opts, &out); err != nil {
 		t.Fatalf("first MigrateUp() error = %v", err)
 	}
-	if !strings.Contains(out.String(), "applied=1 skipped=0 pending=0") {
+	if !strings.Contains(out.String(), "applied=2 skipped=0 pending=0") {
 		t.Fatalf("first MigrateUp() output = %q", out.String())
 	}
 
@@ -75,7 +75,7 @@ func TestMigrateUpStatusAndRepeatOnEmptyDatabase(t *testing.T) {
 	if err := MigrateStatus(ctx, opts, &out); err != nil {
 		t.Fatalf("MigrateStatus() error = %v", err)
 	}
-	if !strings.Contains(out.String(), "current_version=1") || !strings.Contains(out.String(), "pending=none") {
+	if !strings.Contains(out.String(), "current_version=2") || !strings.Contains(out.String(), "pending=none") {
 		t.Fatalf("MigrateStatus() output = %q", out.String())
 	}
 
@@ -87,19 +87,21 @@ func TestMigrateUpStatusAndRepeatOnEmptyDatabase(t *testing.T) {
 	if err := MigrateUp(ctx, opts, &out); err != nil {
 		t.Fatalf("second MigrateUp() error = %v", err)
 	}
-	if !strings.Contains(out.String(), "applied=0 skipped=1 pending=0") {
+	if !strings.Contains(out.String(), "applied=0 skipped=2 pending=0") {
 		t.Fatalf("second MigrateUp() output = %q", out.String())
 	}
 
-	// Exactly one applied row for version 1: no duplicate application.
+	// Exactly one applied row per version: no duplicate application.
 	sqlDB := openTestSQL(t, dsn)
-	var rows int
-	if err := sqlDB.QueryRowContext(ctx,
-		"SELECT count(*) FROM goose_db_version WHERE version_id = 1 AND is_applied").Scan(&rows); err != nil {
-		t.Fatalf("count version rows: %v", err)
-	}
-	if rows != 1 {
-		t.Fatalf("goose_db_version rows for version 1 = %d, want 1", rows)
+	for _, v := range []int64{1, 2} {
+		var rows int
+		if err := sqlDB.QueryRowContext(ctx,
+			"SELECT count(*) FROM goose_db_version WHERE version_id = $1 AND is_applied", v).Scan(&rows); err != nil {
+			t.Fatalf("count version rows: %v", err)
+		}
+		if rows != 1 {
+			t.Fatalf("goose_db_version rows for version %d = %d, want 1", v, rows)
+		}
 	}
 }
 

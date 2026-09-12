@@ -1,28 +1,38 @@
-// Package metrics wires the minimal Prometheus surface for 001: process/go
-// collectors plus readiness and dependency probe counters. No business
-// metrics, no histograms, no backlog reservations (FR-019).
+// Package metrics wires the minimal Prometheus surface for 001/002: process/go
+// collectors plus readiness, dependency probe and chain indexer metrics. No
+// business metrics, no histograms, no backlog reservations (FR-019).
 package metrics
 
 import (
 	"net/http"
+	"strconv"
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/collectors"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
 
-// Names of the two custom metrics.
+// Custom metric names (contracts/observability.md freezes the indexer names).
 const (
 	ReadyMetricName = "txharbor_ready"
 	ProbeMetricName = "txharbor_probe_total"
+
+	IndexerCheckpointMetricName = "txharbor_indexer_checkpoint_height"
+	IndexerStateMetricName      = "txharbor_indexer_state"
+	IndexerRPCMetricName        = "txharbor_indexer_rpc_total"
+	IndexerPauseMetricName      = "txharbor_indexer_pause_total"
 )
 
 // Metrics owns a private registry so multiple instances (tests, restarts of
 // config) never collide.
 type Metrics struct {
-	registry   *prometheus.Registry
-	probeTotal *prometheus.CounterVec
-	handler    http.Handler
+	registry      *prometheus.Registry
+	probeTotal    *prometheus.CounterVec
+	indexerHeight *prometheus.GaugeVec
+	indexerState  *prometheus.GaugeVec
+	indexerRPC    *prometheus.CounterVec
+	indexerPause  *prometheus.CounterVec
+	handler       http.Handler
 }
 
 // New builds the registry and the /metrics handler. ready is evaluated on
@@ -49,11 +59,35 @@ func New(ready func() bool) *Metrics {
 		Help: "Total dependency probes by dependency and result.",
 	}, []string{"dep", "result"})
 
-	registry.MustRegister(readyGauge, probeTotal)
+	indexerHeight := prometheus.NewGaugeVec(prometheus.GaugeOpts{
+		Name: IndexerCheckpointMetricName,
+		Help: "Indexer checkpoint height per chain; absent while progress is empty.",
+	}, []string{"chain"})
+
+	indexerState := prometheus.NewGaugeVec(prometheus.GaugeOpts{
+		Name: IndexerStateMetricName,
+		Help: "Indexer state per chain: 0=running, 1=waiting, 2=retrying, 3=paused.",
+	}, []string{"chain"})
+
+	indexerRPC := prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: IndexerRPCMetricName,
+		Help: "Indexer chain RPC outcomes by failure class and result; not-found/ok is the wait polarity.",
+	}, []string{"kind", "result"})
+
+	indexerPause := prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: IndexerPauseMetricName,
+		Help: "Indexer pauses observed per chain; monotonic and independent of pause rows.",
+	}, []string{"chain"})
+
+	registry.MustRegister(readyGauge, probeTotal, indexerHeight, indexerState, indexerRPC, indexerPause)
 	return &Metrics{
-		registry:   registry,
-		probeTotal: probeTotal,
-		handler:    promhttp.HandlerFor(registry, promhttp.HandlerOpts{}),
+		registry:      registry,
+		probeTotal:    probeTotal,
+		indexerHeight: indexerHeight,
+		indexerState:  indexerState,
+		indexerRPC:    indexerRPC,
+		indexerPause:  indexerPause,
+		handler:       promhttp.HandlerFor(registry, promhttp.HandlerOpts{}),
 	}
 }
 
@@ -71,3 +105,36 @@ func (m *Metrics) ObserveProbe(dep string, ok bool) {
 	}
 	m.probeTotal.WithLabelValues(dep, result).Inc()
 }
+
+// ObserveIndexerState records the scanner state for chain: 0 running,
+// 1 waiting, 2 retrying, 3 paused (contracts/observability.md).
+func (m *Metrics) ObserveIndexerState(chain int64, state int) {
+	m.indexerState.WithLabelValues(chainLabel(chain)).Set(float64(state))
+}
+
+// ObserveIndexerCheckpoint records the checkpoint height for chain. ok=false
+// means empty progress: the series is removed rather than zeroed.
+func (m *Metrics) ObserveIndexerCheckpoint(chain int64, height uint64, ok bool) {
+	if !ok {
+		m.indexerHeight.DeleteLabelValues(chainLabel(chain))
+		return
+	}
+	m.indexerHeight.WithLabelValues(chainLabel(chain)).Set(float64(height))
+}
+
+// ObserveIndexerRPC counts one classified chain RPC outcome. ok is true only
+// for the not-found wait polarity; every other outcome is a failure class.
+func (m *Metrics) ObserveIndexerRPC(kind string, ok bool) {
+	result := "error"
+	if ok {
+		result = "ok"
+	}
+	m.indexerRPC.WithLabelValues(kind, result).Inc()
+}
+
+// ObserveIndexerPause counts one observed pause for chain.
+func (m *Metrics) ObserveIndexerPause(chain int64) {
+	m.indexerPause.WithLabelValues(chainLabel(chain)).Inc()
+}
+
+func chainLabel(chain int64) string { return strconv.FormatInt(chain, 10) }

@@ -11,6 +11,10 @@ func TestRegistryExposesOnlyFoundationMetrics(t *testing.T) {
 	m.ObserveProbe("db", true)
 	m.ObserveProbe("db", false)
 	m.ObserveProbe("rpc", true)
+	m.ObserveIndexerState(31337, 0)
+	m.ObserveIndexerCheckpoint(31337, 1, true)
+	m.ObserveIndexerRPC("timeout", false)
+	m.ObserveIndexerPause(31337)
 
 	families, err := m.Gatherer().Gather()
 	if err != nil {
@@ -18,8 +22,13 @@ func TestRegistryExposesOnlyFoundationMetrics(t *testing.T) {
 	}
 
 	allowed := func(name string) bool {
-		return name == ReadyMetricName || name == ProbeMetricName ||
-			strings.HasPrefix(name, "go_") || strings.HasPrefix(name, "process_")
+		switch name {
+		case ReadyMetricName, ProbeMetricName,
+			IndexerCheckpointMetricName, IndexerStateMetricName,
+			IndexerRPCMetricName, IndexerPauseMetricName:
+			return true
+		}
+		return strings.HasPrefix(name, "go_") || strings.HasPrefix(name, "process_")
 	}
 
 	var sawReady, sawProbe, sawProcess bool
@@ -117,4 +126,81 @@ func gatherGauge(t *testing.T, m *Metrics, name string) float64 {
 	}
 	t.Fatalf("metric %q not found", name)
 	return 0
+}
+
+// TestIndexerMetricsContract covers the 002 observability contract: four state
+// values, checkpoint series absent while progress is empty, RPC outcome kinds,
+// and a monotonic pause counter.
+func TestIndexerMetricsContract(t *testing.T) {
+	m := New(func() bool { return true })
+
+	for _, state := range []int{0, 1, 2, 3} {
+		m.ObserveIndexerState(31337, state)
+		if got := gatherGauge(t, m, IndexerStateMetricName); got != float64(state) {
+			t.Fatalf("%s = %v, want %d", IndexerStateMetricName, got, state)
+		}
+	}
+
+	m.ObserveIndexerCheckpoint(31337, 42, true)
+	if got := gatherGauge(t, m, IndexerCheckpointMetricName); got != 42 {
+		t.Fatalf("%s = %v, want 42", IndexerCheckpointMetricName, got)
+	}
+	m.ObserveIndexerCheckpoint(31337, 42, false)
+	if got := familyLen(t, m, IndexerCheckpointMetricName); got != 0 {
+		t.Fatalf("empty progress exposed %d %s series, want 0", got, IndexerCheckpointMetricName)
+	}
+
+	m.ObserveIndexerRPC("not-found", true)
+	m.ObserveIndexerRPC("timeout", false)
+	m.ObserveIndexerRPC("timeout", false)
+	rpc := gatherCounters(t, m, IndexerRPCMetricName)
+	if rpc["kind=not-found,result=ok"] != 1 || rpc["kind=timeout,result=error"] != 2 {
+		t.Fatalf("%s = %v", IndexerRPCMetricName, rpc)
+	}
+
+	m.ObserveIndexerPause(31337)
+	m.ObserveIndexerPause(31337)
+	if got := gatherCounters(t, m, IndexerPauseMetricName)["chain=31337"]; got != 2 {
+		t.Fatalf("%s = %v, want 2", IndexerPauseMetricName, got)
+	}
+}
+
+func familyLen(t *testing.T, m *Metrics, name string) int {
+	t.Helper()
+	families, err := m.Gatherer().Gather()
+	if err != nil {
+		t.Fatalf("Gather() error = %v", err)
+	}
+	total := 0
+	for _, f := range families {
+		if f.GetName() == name {
+			total += len(f.GetMetric())
+		}
+	}
+	return total
+}
+
+func gatherCounters(t *testing.T, m *Metrics, name string) map[string]float64 {
+	t.Helper()
+	families, err := m.Gatherer().Gather()
+	if err != nil {
+		t.Fatalf("Gather() error = %v", err)
+	}
+	out := map[string]float64{}
+	for _, f := range families {
+		if f.GetName() != name {
+			continue
+		}
+		for _, metric := range f.GetMetric() {
+			key := ""
+			for _, lp := range metric.GetLabel() {
+				if key != "" {
+					key += ","
+				}
+				key += lp.GetName() + "=" + lp.GetValue()
+			}
+			out[key] = metric.GetCounter().GetValue()
+		}
+	}
+	return out
 }

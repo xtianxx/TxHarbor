@@ -1,5 +1,5 @@
-// Package eth wraps go-ethereum's ethclient for the only chain interaction the
-// foundation needs: a bounded, classified chain-id check.
+// Package eth wraps go-ethereum's ethclient for the chain interactions the
+// foundation needs: a bounded, classified chain-id check and header fetch.
 package eth
 
 import (
@@ -9,15 +9,19 @@ import (
 	"fmt"
 	"math/big"
 	"net"
+	"net/http"
 	"sync"
 	"time"
 
+	"github.com/ethereum/go-ethereum"
+	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/ethclient"
 	gethrpc "github.com/ethereum/go-ethereum/rpc"
 )
 
 // Kind classifies external RPC failures (research/plan: transport, timeout,
-// chain-mismatch, invalid-response) so callers can react and count them.
+// chain-mismatch, invalid-response, not-found, rate-limited) so callers can
+// react and count them.
 type Kind string
 
 const (
@@ -25,6 +29,12 @@ const (
 	KindTimeout         Kind = "timeout"
 	KindChainMismatch   Kind = "chain-mismatch"
 	KindInvalidResponse Kind = "invalid-response"
+	// KindNotFound means the requested height has no block yet: a wait
+	// polarity, not a failure (R1/R4, FR-11).
+	KindNotFound Kind = "not-found"
+	// KindRateLimited means the endpoint throttled the request: retryable
+	// with backoff (R4, FR-09).
+	KindRateLimited Kind = "rate-limited"
 )
 
 // Error is a classified chain client error.
@@ -105,7 +115,30 @@ func (c *Client) CheckChainID(ctx context.Context, expected *big.Int, timeout ti
 	return nil
 }
 
+// HeaderByNumber returns the header at number via eth_getBlockByNumber with
+// fullTx=false (R1). A height beyond the current head comes back as
+// ethereum.NotFound wrapped in a KindNotFound Error: callers wait/retry
+// instead of treating it as a fault. errors.Is(err, ethereum.NotFound) holds.
+func (c *Client) HeaderByNumber(ctx context.Context, number *big.Int) (*types.Header, error) {
+	header, err := c.client.HeaderByNumber(ctx, number)
+	if err != nil {
+		return nil, &Error{Kind: classify(err, ctx), Op: "eth_getBlockByNumber", Err: err}
+	}
+	if header == nil {
+		// Defensive: ethclient already turns a null result into ethereum.NotFound.
+		return nil, &Error{Kind: KindNotFound, Op: "eth_getBlockByNumber", Err: ethereum.NotFound}
+	}
+	return header, nil
+}
+
 func classify(err error, ctx context.Context) Kind {
+	if errors.Is(err, ethereum.NotFound) {
+		return KindNotFound
+	}
+	var httpErr gethrpc.HTTPError
+	if errors.As(err, &httpErr) && httpErr.StatusCode == http.StatusTooManyRequests {
+		return KindRateLimited
+	}
 	if errors.Is(err, context.DeadlineExceeded) || errors.Is(ctx.Err(), context.DeadlineExceeded) {
 		return KindTimeout
 	}
