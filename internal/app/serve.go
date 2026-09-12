@@ -8,6 +8,8 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
+	"math"
 	"math/big"
 	"net"
 	"net/http"
@@ -16,10 +18,13 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/ethereum/go-ethereum/core/types"
+
 	"github.com/xtianxx/txharbor/internal/config"
 	"github.com/xtianxx/txharbor/internal/db"
 	"github.com/xtianxx/txharbor/internal/eth"
 	"github.com/xtianxx/txharbor/internal/health"
+	"github.com/xtianxx/txharbor/internal/indexer"
 	"github.com/xtianxx/txharbor/internal/logx"
 	"github.com/xtianxx/txharbor/internal/metrics"
 )
@@ -149,6 +154,39 @@ func Serve(ctx context.Context, d Deps) int {
 		Observe: m.ObserveProbe,
 	}
 
+	// 5b. Indexer: startup-unique lease owner plus the scanner. RPC outcomes
+	// feed only the indexer metrics; readiness stays dependency-probe driven.
+	if cfg.ChainID > math.MaxInt64 {
+		ethClient.Close()
+		pool.Close()
+		return fail("startup failed (indexer): chain id %d exceeds the bigint column range", cfg.ChainID)
+	}
+	chainID := int64(cfg.ChainID)
+	ownerID, err := indexer.NewOwnerID()
+	if err != nil {
+		ethClient.Close()
+		pool.Close()
+		return fail("startup failed (indexer): %s", logx.Redact(err.Error()))
+	}
+	lease, err := indexer.NewLease(pool, chainID, indexer.Params{OwnerID: ownerID})
+	if err != nil {
+		ethClient.Close()
+		pool.Close()
+		return fail("startup failed (indexer): %s", logx.Redact(err.Error()))
+	}
+	scanner, err := indexer.NewScanner(pool, indexerRPC{client: ethClient, m: m}, lease, indexer.Config{
+		StartHeight:  cfg.StartHeight,
+		RPCTimeout:   cfg.IndexRPCTimeout,
+		PollInterval: cfg.IndexPollInterval,
+		RetryInitial: cfg.IndexRetryInitial,
+		RetryMax:     cfg.IndexRetryMax,
+	}, slog.Default())
+	if err != nil {
+		ethClient.Close()
+		pool.Close()
+		return fail("startup failed (indexer): %s", logx.Redact(err.Error()))
+	}
+
 	srv := &http.Server{
 		Handler:           health.NewServer(agg, m.Handler()).Handler(),
 		ReadHeaderTimeout: cfg.ProbeTimeout,
@@ -161,26 +199,64 @@ func Serve(ctx context.Context, d Deps) int {
 	}
 	startupCancel()
 
+	observer := &indexerObserver{scanner: scanner, m: m, chainID: chainID}
+	observer.observe()
+
 	go runner.Run(runCtx)
 	serveErr := make(chan error, 1)
 	go func() { serveErr <- srv.Serve(listener) }()
+	indexerErr := make(chan error, 1)
+	indexerDone := make(chan struct{})
+	go func() {
+		indexerErr <- scanner.Run(runCtx)
+		close(indexerDone)
+	}()
 	fmt.Fprintf(stdout, "txharbor serve: listening on %s\n", listener.Addr())
 
+	// Mirror scanner snapshots into metrics for as long as serve runs. A
+	// scanner failure is terminal exactly like an HTTP server failure: record
+	// the terminal state, then shut down with a non-zero exit code.
+	metricTicker := time.NewTicker(indexerMetricInterval)
+	defer metricTicker.Stop()
+
 	exitCode := 0
-	select {
-	case <-runCtx.Done():
-	case err := <-serveErr:
-		if err != nil && !errors.Is(err, http.ErrServerClosed) {
-			fmt.Fprintf(stderr, "txharbor serve: http server error: %s\n", logx.Redact(err.Error()))
-			exitCode = 1
+serveLoop:
+	for {
+		select {
+		case <-runCtx.Done():
+			break serveLoop
+		case err := <-serveErr:
+			if err != nil && !errors.Is(err, http.ErrServerClosed) {
+				fmt.Fprintf(stderr, "txharbor serve: http server error: %s\n", logx.Redact(err.Error()))
+				exitCode = 1
+			}
+			break serveLoop
+		case err := <-indexerErr:
+			observer.observe() // capture the terminal state before teardown
+			if err != nil && !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) {
+				fmt.Fprintf(stderr, "txharbor serve: indexer stopped: %s\n", logx.Redact(err.Error()))
+				exitCode = 1
+			}
+			break serveLoop
+		case <-metricTicker.C:
+			observer.observe()
 		}
 	}
-	cancel() // stop probe loop before releasing resources
+	cancel() // stop probe loop and indexer before releasing resources
 
-	// 6. Shutdown: stop accepting work first, then release resources, all
-	// sharing one 15s budget. Budget exhaustion is recorded and exits non-zero.
+	// 6. Shutdown: stop accepting work, let the indexer exit, then release
+	// resources, all sharing one 15s budget. Budget exhaustion is recorded and
+	// exits non-zero.
 	if err := runShutdown(context.Background(), cfg.ShutdownTimeout,
 		func(shCtx context.Context) error { return srv.Shutdown(shCtx) },
+		func(shCtx context.Context) error {
+			select {
+			case <-indexerDone:
+				return nil
+			case <-shCtx.Done():
+				return shCtx.Err()
+			}
+		},
 		func(context.Context) error { ethClient.Close(); return nil },
 		func(context.Context) error { pool.Close(); return nil },
 	); err != nil {
@@ -188,6 +264,66 @@ func Serve(ctx context.Context, d Deps) int {
 		exitCode = 1
 	}
 	return exitCode
+}
+
+// indexerMetricInterval is how often scanner state and checkpoint snapshots
+// are mirrored into metrics; short enough to observe the default 1s poll and
+// 200ms initial backoff windows.
+const indexerMetricInterval = 100 * time.Millisecond
+
+// indexerRPC decorates the chain client with txharbor_indexer_rpc_total
+// bookkeeping. Successful reads carry no failure class and are not counted;
+// not-found is the wait polarity and is counted as ok, every other classified
+// failure as error (contracts/observability.md).
+type indexerRPC struct {
+	client indexer.HeaderClient
+	m      *metrics.Metrics
+}
+
+func (r indexerRPC) ChainID(ctx context.Context) (*big.Int, error) {
+	id, err := r.client.ChainID(ctx)
+	r.observe(err)
+	return id, err
+}
+
+func (r indexerRPC) HeaderByNumber(ctx context.Context, number *big.Int) (*types.Header, error) {
+	header, err := r.client.HeaderByNumber(ctx, number)
+	r.observe(err)
+	return header, err
+}
+
+func (r indexerRPC) observe(err error) {
+	if err == nil {
+		return
+	}
+	kind := eth.KindOf(err)
+	if kind == "" {
+		kind = eth.KindInvalidResponse
+	}
+	r.m.ObserveIndexerRPC(string(kind), kind == eth.KindNotFound)
+}
+
+// indexerObserver mirrors the scanner's snapshot-only state and checkpoint
+// into the metrics registry: it is sampled on a ticker and once more when the
+// scanner stops. Pauses increment txharbor_indexer_pause_total on the
+// transition into the paused state.
+type indexerObserver struct {
+	scanner *indexer.Scanner
+	m       *metrics.Metrics
+	chainID int64
+	last    indexer.State
+	sampled bool
+}
+
+func (o *indexerObserver) observe() {
+	state := o.scanner.State()
+	if state == indexer.StatePaused && (!o.sampled || o.last != indexer.StatePaused) {
+		o.m.ObserveIndexerPause(o.chainID)
+	}
+	o.last, o.sampled = state, true
+	o.m.ObserveIndexerState(o.chainID, int(state))
+	height, _, ok := o.scanner.Checkpoint()
+	o.m.ObserveIndexerCheckpoint(o.chainID, height, ok)
 }
 
 // runShutdown executes steps in order under one shared budget. Remaining
