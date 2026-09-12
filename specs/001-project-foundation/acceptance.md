@@ -99,3 +99,13 @@ Docker 访问说明：当前登录会话 `id` 未含 docker 组，但 `/etc/grou
 
 - lint / build / unit / integration 四个 job 均真实执行；integration 在 runner 上拉取 pin 镜像并运行 testcontainers，非 skip。
 - Node.js 20 弃用告警（checkout@v4 / setup-go@v5）经升级到 v7 major 消除，升版后复跑仍全绿。
+
+### 6.7 main 保护启用与 PR #1 合并记录（2026-09-12，收尾事实）
+
+- 启用前：`GET /branches/main/protection` 返回 404（无保护）；`GET /rulesets` 为 0 条。
+- 已配置 classic branch protection（API 配置，未新建 ruleset）：Require a pull request before merging（required approving review count = 0，未增加审批人数要求）；required status checks 且 strict/up-to-date；dismiss stale reviews = true；force push / branch deletion = false；enforce admins = false；conversation resolution = false（未启用未要求的约束）。
+- 必需检查名取自 commit `594a5d5` 的 check-runs API（非显示文本）：`lint (gofmt + vet)`、`build`、`unit tests (+ race)`、`integration tests (Docker)`；配置后 GitHub 将四个 context 绑定到 GitHub Actions app（app_id 15368）。
+- 生效确认：配置后重读 protection，四项 context、strict、PR 要求均如上述返回。
+- PR #1（`chore/add-ci` → `main`）经正常门禁合并：head SHA `594a5d5`，4/4 必需 checks success，mergeable=MERGEABLE、mergeStateStatus=CLEAN，无 review、无未解决 review thread；执行 `gh pr merge 1 --merge`，未使用 `--admin`/`--force`。合并提交 `335d44be2a81ba40c84d11a77fbaecc4c86316ac`，merged_at 2026-09-12T15:00:58Z。
+- main push CI（run [34700947787](https://github.com/xtianxx/TxHarbor/actions/runs/34700947787)，event=push，commit 335d44b）：success，4/4 job（lint / build / unit / integration）。
+- §6.5 中「分支保护待配置」事项至此关闭。
