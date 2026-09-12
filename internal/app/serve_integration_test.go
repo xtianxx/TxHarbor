@@ -151,8 +151,12 @@ func startAnvilContainer(t *testing.T) testcontainers.Container {
 		ContainerRequest: testcontainers.ContainerRequest{
 			Image:        "ghcr.io/foundry-rs/foundry:v1.8.1",
 			ExposedPorts: []string{"8545/tcp"},
-			Cmd:          []string{"anvil", "--host", "0.0.0.0", "--port", "8545", "--chain-id", "31337"},
-			WaitingFor:   wait.ForLog("Listening on"),
+			// Image entrypoint is /bin/sh -c: override it, otherwise
+			// anvil never receives --host and binds 127.0.0.1
+			// inside the container (unreachable via port mapping).
+			Entrypoint: []string{"anvil"},
+			Cmd:        []string{"--host", "0.0.0.0", "--port", "8545", "--chain-id", "31337"},
+			WaitingFor: wait.ForLog("Listening on"),
 		},
 		Started: true,
 	})

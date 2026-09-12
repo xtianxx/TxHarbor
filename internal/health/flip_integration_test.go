@@ -8,7 +8,9 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/netip"
 	"os"
+	"strconv"
 	"strings"
 	"syscall"
 	"testing"
@@ -17,6 +19,9 @@ import (
 	"github.com/testcontainers/testcontainers-go"
 	"github.com/testcontainers/testcontainers-go/modules/postgres"
 	"github.com/testcontainers/testcontainers-go/wait"
+
+	dockercontainer "github.com/moby/moby/api/types/container"
+	mobynetwork "github.com/moby/moby/api/types/network"
 
 	"github.com/xtianxx/txharbor/internal/app"
 	"github.com/xtianxx/txharbor/internal/db"
@@ -107,12 +112,20 @@ func TestReadyzFlipsAndRecoversWithRealDependencies(t *testing.T) {
 func startPostgres(t *testing.T) *postgres.PostgresContainer {
 	t.Helper()
 	ctx := context.Background()
+	// Pin the host port: testcontainers reassigns a random mapped port on
+	// container Start, but serve keeps the DSN from startup (as in
+	// production, where the address is stable). A fixed port makes
+	// stop/start recovery observable on the same address.
+	pgPort := fixedPort(t)
 	ctr, err := postgres.Run(ctx, "postgres:18.6-trixie",
 		postgres.WithDatabase("txharbor"),
 		postgres.WithUsername("txharbor"),
 		postgres.WithPassword("txharbor"),
 		testcontainers.WithWaitStrategy(
 			wait.ForLog("database system is ready to accept connections").WithOccurrence(2)),
+		testcontainers.WithHostConfigModifier(func(hc *dockercontainer.HostConfig) {
+			hc.PortBindings = mustPortMap(t, "5432/tcp", pgPort)
+		}),
 	)
 	if err != nil {
 		t.Fatalf("start postgres: %v", err)
@@ -124,12 +137,22 @@ func startPostgres(t *testing.T) *postgres.PostgresContainer {
 func startAnvil(t *testing.T) testcontainers.Container {
 	t.Helper()
 	ctx := context.Background()
+	// Same fixed-port rationale as startPostgres: the RPC URL is captured
+	// at startup and must survive container stop/start.
+	rpcPort := fixedPort(t)
 	ctr, err := testcontainers.GenericContainer(ctx, testcontainers.GenericContainerRequest{
 		ContainerRequest: testcontainers.ContainerRequest{
 			Image:        "ghcr.io/foundry-rs/foundry:v1.8.1",
 			ExposedPorts: []string{"8545/tcp"},
-			Cmd:          []string{"anvil", "--host", "0.0.0.0", "--port", "8545", "--chain-id", "31337"},
-			WaitingFor:   wait.ForLog("Listening on"),
+			// Image entrypoint is /bin/sh -c: override it, otherwise
+			// anvil never receives --host and binds 127.0.0.1
+			// inside the container (unreachable via port mapping).
+			Entrypoint: []string{"anvil"},
+			Cmd:        []string{"--host", "0.0.0.0", "--port", "8545", "--chain-id", "31337"},
+			WaitingFor: wait.ForLog("Listening on"),
+			HostConfigModifier: func(hc *dockercontainer.HostConfig) {
+				hc.PortBindings = mustPortMap(t, "8545/tcp", rpcPort)
+			},
 		},
 		Started: true,
 	})
@@ -172,6 +195,30 @@ func freeAddr(t *testing.T) string {
 	addr := ln.Addr().String()
 	ln.Close()
 	return addr
+}
+
+// fixedPort reserves a host port for container port bindings (see
+// startPostgres/startAnvil). Small inherent race, acceptable in tests.
+func fixedPort(t *testing.T) string {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("reserve port: %v", err)
+	}
+	port := ln.Addr().(*net.TCPAddr).Port
+	ln.Close()
+	return strconv.Itoa(port)
+}
+
+// mustPortMap binds one container port to a fixed host port (see
+// startPostgres/startAnvil).
+func mustPortMap(t *testing.T, containerPort, hostPort string) mobynetwork.PortMap {
+	t.Helper()
+	p, err := mobynetwork.ParsePort(containerPort)
+	if err != nil {
+		t.Fatalf("parse container port %s: %v", containerPort, err)
+	}
+	return mobynetwork.PortMap{p: {{HostIP: netip.MustParseAddr("127.0.0.1"), HostPort: hostPort}}}
 }
 
 func envMap(m map[string]string) func(string) (string, bool) {

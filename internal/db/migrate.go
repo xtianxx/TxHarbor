@@ -227,7 +227,7 @@ func MigrateUp(ctx context.Context, opts MigrateOptions, out io.Writer) error {
 	if err != nil {
 		return err
 	}
-	fmt.Fprintf(out, "applied=%d skipped=%d pending=%d\n", len(results), len(state.Applied), len(state.Pending))
+	fmt.Fprintf(out, "applied=%d skipped=%d pending=%d\n", len(results), len(files)-len(results), len(state.Pending))
 	return nil
 }
 

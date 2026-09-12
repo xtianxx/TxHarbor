@@ -48,6 +48,7 @@
 - **Rationale**: 并发迁移互斥、优雅退出等行为必须跨进程/真依赖验证；testcontainers 自带生命周期、端口随机、状态隔离，CI 确定；外部 compose 常驻模式并行性差、易 flaky。
 - **Alternatives considered**: 外部 compose 就绪模式 —— 仅作本地热迭代 fallback。dockertest —— 维护弱于 testcontainers。Anvil 官方 testcontainers 模块 —— 不存在，用 GenericContainer（有生产先例）。
 - **命令**: `go test ./...`（unit，含 `-race` 对并发敏感包）、`go test -tags integration ./...`（CI 门禁，需 Docker）。
+- **实测修正（集成验收）**: testcontainers 在容器 Stop 后 Start 会重分配宿主机映射端口，而 serve 持有启动时 DSN（如生产，地址稳定）。凡 stop/start 恢复类测试必须用 `HostConfigModifier` 固定宿主机端口，否则恢复断言恒失败——此为测试脚手架约束，非产品缺陷。
 
 ## 6. PostgreSQL 镜像与 Compose
 
@@ -59,6 +60,7 @@
 
 - **Decision**: `ghcr.io/foundry-rs/foundry:v1.8.1`；`anvil --host 0.0.0.0 --port 8545 --chain-id 31337`，保持默认 automine；healthcheck 用镜像自带 cast：`["CMD","cast","chain-id","--rpc-url","http://localhost:8545"]`（interval 2s/timeout 5s/retries 10）；端口仅绑 `127.0.0.1:8545`。
 - **Rationale**: 官方镜像与文档推荐；`--host 0.0.0.0` 必需（默认只绑容器内 loopback）；默认 chain-id 31337 与 Go 侧期望断言一致；automine 下交易即时出块，测试确定性最好；Anvil 纯内存，容器重启即全新链，与 PG 保留策略互补。
+- **实测修正（集成验收）**: 该镜像 `ENTRYPOINT` 为 `/bin/sh -c`，`command:`/`Cmd:` 参数会被 sh 吞掉，anvil 以默认配置启动（仅绑容器内 127.0.0.1，端口映射不可达）。Compose 与 testcontainers 必须显式覆写 entrypoint 为 `["anvil"]` 再传参；容器内 healthcheck 通过会掩盖此问题，须以宿主机直连验证为准。
 - **Alternatives considered**: `:stable` 浮动 —— 重启可能换版本。`--block-time 1` —— 需 Go 侧轮询 receipt，本阶段不需要。
 
 ## 8. 结构性决策（无需外部研究）
