@@ -279,6 +279,13 @@ func (s *Scanner) serve(ctx context.Context) error {
 	if err != nil {
 		return nil // ctx cancelled
 	}
+	if cp != nil {
+		// Mirror durable truth for State()/Checkpoint() observers (metrics):
+		// a scanner that starts already caught up may never commit, yet must
+		// still report the checkpoint. Writes always re-decide under the
+		// coordination lock; this mirror never authorizes anything.
+		s.setProgress(cp)
+	}
 	if cp != nil && cp.startHeight != s.cfg.StartHeight {
 		return fmt.Errorf("start height changed: configured %d but checkpoint was created with %d; refusing to scan (FR-03)",
 			s.cfg.StartHeight, cp.startHeight)

@@ -497,18 +497,19 @@ func TestScanUncertainCommitIdempotent(t *testing.T) {
 	ctx := context.Background()
 	pool := openIndexerPool(t, dsn)
 	defer pool.Close()
-	chain := newScriptChain(31337, 10, 0xA8)
+	chain := newScriptChain(31337, 30, 0xA8)
 	_, sc := newScanScanner(t, pool, chain, "scan-a", 4)
 	runScanTo(t, sc, 4, 15*time.Second)
-	// Anchor on the actual checkpoint: the run above may commit one block
-	// past the observed target before observing cancel.
+	// Anchor on the actual checkpoint: the run above may commit several
+	// blocks past the observed target before observing cancel. The chain is
+	// long on purpose so next/continue targets always exist.
 	base, ok := readCoordCheckpoint(t, ctx, pool, scanChainID)
 	if !ok {
 		t.Fatal("no checkpoint after first run")
 	}
 	next := uint64(base.height) + 1
-	if next > 10 {
-		t.Fatalf("overshoot to %d exceeds test chain, widen it", next)
+	if next+5 > 30 {
+		t.Fatalf("overshoot to %d leaves no headroom, widen the chain", next)
 	}
 	hn := hashHex(chain.heads[next].Hash())
 	// Parent comes from durable truth, not from a second chain read.
@@ -534,9 +535,11 @@ func TestScanUncertainCommitIdempotent(t *testing.T) {
 	if !ok || uint64(cp.height) != next || cp.hash != hn || uint64(cp.startHeight) != 4 {
 		t.Fatalf("checkpoint = %+v, want (%d,%s,4)", cp, next, hn)
 	}
-	// Idempotent continuation to the tip proves no skip/double after doubt.
-	runScanTo(t, sc, 9, 15*time.Second)
-	assertScanGapFree(t, ctx, pool, 4, 9)
+	// Idempotent continuation proves no skip/double after doubt; the target
+	// stays well below the tip regardless of first-run overshoot.
+	runScanTo(t, sc, next+5, 30*time.Second)
+	assertScanGapFree(t, ctx, pool, 4, next+5)
+	assertScanSingleRecord(t, ctx, pool, 4, next+5)
 }
 
 // TestScanSafeExit: scene 13, FR-13 — cancel mid-loop leaves paired state.
