@@ -34,7 +34,7 @@
 - **Decision**: `go-ethereum v1.17.5`，`ethclient.DialContext` + 自带超时的 `ChainID(ctx)` 启动校验（`id.Cmp(expected)`），运行期每次调用独立 ctx 超时，退出时 `Client.Close()`。
 - **Rationale**: `DialContext` 的 ctx 只覆盖握手，后续调用必须各自包超时；`ChainID` 即 `eth_chainId`， mismatch 即拒绝就绪（FR-010）。启动探针可附带 `BlockNumber`。
 - **Alternatives considered**: `simulated` 后端 —— 仅单元测试用，不验证真实 RPC 行为。`httptest` 假 JSON-RPC —— 测超时/错误分支，零容器。
-- **注意**: v1.17.5 为 GPL-3.0/LGPL-3.0，实现阶段确认合规策略。
+- **许可证（已按上游仓库核实，非按项目名推断）**: 001 实际引用的 `ethclient`、`rpc` 包均位于上游 `cmd/` 目录之外，适用 `COPYING.LESSER`（LGPL-3.0）；GPL-3.0（`COPYING`）仅覆盖 `cmd/` 内二进制。依据：上游 README/仓库根 `COPYING` 与 `COPYING.LESSER` 双文件。实现阶段由 T040 按所用版本复核并记录分发策略。
 
 ## 4. /metrics 最小实现
 

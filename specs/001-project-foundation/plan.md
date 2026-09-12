@@ -86,6 +86,7 @@ internal/
 ├── db/                  # pgxpool 装配 + goose Provider（SessionLocker）
 ├── eth/                 # ethclient 封装：DialContext + ChainID 校验
 ├── health/              # Prober（db/rpc）+ 聚合 + /livez /readyz handler
+├── logx/                # 凭据脱敏（[REDACTED]，保留非敏感结构信息）
 ├── metrics/             # /metrics 注册（ready GaugeFunc + probe CounterVec）
 └── app/                 # 生命周期：启动链、探针循环、信号退出
 migrations/              # goose SQL（000001_*.sql…，单事务，禁 NO TRANSACTION）

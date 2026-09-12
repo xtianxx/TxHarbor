@@ -2,6 +2,8 @@
 
 前置：Go 1.26.5、`docker compose` v5（顶层不写 `version:`）。计时口径：以下时间界限**不含**镜像下载、依赖安装与本地依赖启动；界限可配置，验收用默认值。
 
+**环境限制（C1）**: 带 `integration` tag 的测试（tasks T014/T022/T028/T031）要求 Docker daemon 可用（`docker info` 通过）。当前记录：本机仅有 compose CLI、无 daemon，集成层在此环境不可运行。执行前提：本地备好 Docker 或在有 Docker 的 CI/机器上跑集成层；`go test ./...`（unit）无需 Docker，可先行。规则：不得以 mock 替代真实依赖验收；`SkipIfProviderIsNotHealthy` 跳过计为未执行、不得视为通过。
+
 ## 1. 启动依赖
 
 ```bash
