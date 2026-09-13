@@ -2886,3 +2886,155 @@ func isDepositMismatch(err error) bool {
 	var mismatch *depositConfigMismatchError
 	return errors.As(err, &mismatch)
 }
+
+// depositRunLoopOnce runs ServeLoop until it returns (refusals return fast)
+// and fails on timeout; loops expected to keep running must use
+// depositRunLoop instead.
+func depositRunLoopOnce(t *testing.T, sc *DepositScanner, lease *Lease) error {
+	t.Helper()
+	loopCtx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { done <- sc.ServeLoop(loopCtx, lease, nil) }()
+	select {
+	case err := <-done:
+		return err
+	case <-time.After(15 * time.Second):
+		t.Fatalf("ServeLoop did not return within 15s")
+		return nil
+	}
+}
+
+// TestDepositGapRecoveryBehavior is T012 (US4): an in-range watermark wait
+// advances nothing, survives a slow upstream without a timeout verdict, and
+// resumes idempotently from the original gap once coverage is backfilled;
+// required history below the upstream start and assets the upstream never
+// indexed stop with a structural gap carrying range/cause/config version.
+// Identity adoption for structural gaps is the T025 authorization path and is
+// asserted there, not here; this test locks classification, wait/stop
+// behavior, no-skip, no phantom zero-marks and no silent start/height shifts.
+func TestDepositGapRecoveryBehavior(t *testing.T) {
+	dsn := startIndexerPostgres(t)
+	pool := openIndexerPool(t, dsn)
+	defer pool.Close()
+	ctx := context.Background()
+
+	t.Run("transient_wait_then_backfill_resumes", func(t *testing.T) {
+		const chainID = 70
+		cfg := depositITConfig(t, chainID, testContractA)
+		cfg.PollInterval = 20 * time.Millisecond
+		cfg.RetryInitial = 20 * time.Millisecond
+		cfg.RetryMax = 100 * time.Millisecond
+		// Watermark covers nothing at the position: N_u=10 <= a=10.
+		depositSeedUpstream(t, ctx, pool, chainID, 0, cfg.LogConfigHash, 10)
+
+		sc := depositITScanner(t, pool, cfg)
+		stop := depositRunLoop(t, ctx, sc, depositITLease(t, pool, chainID))
+		// Slow upstream: a full second behind must still be a wait, never a
+		// timeout verdict and never an advance.
+		time.Sleep(time.Second)
+		if _, _, _, ok := depositCheckpointState(t, ctx, pool, chainID); ok {
+			t.Fatal("checkpoint row exists while the watermark covers nothing (must wait with zero advance)")
+		}
+		if n := depositCountRows(t, ctx, pool, "deposit_observations", chainID); n != 0 {
+			t.Fatalf("observations = %d while waiting, want 0", n)
+		}
+		// Manual repair backfill: canonical history, the watermark advance and
+		// the source row arrive together.
+		depositSeedCanonical(t, ctx, pool, chainID, 10, 20, true)
+		if _, err := pool.Exec(ctx, `UPDATE log_checkpoint SET next_block = 21 WHERE chain_id = $1`, chainID); err != nil {
+			t.Fatalf("advance upstream watermark: %v", err)
+		}
+		depositSeedTransferRow(t, ctx, pool, chainID, 15, depositBlockHash(15), depositTxHash(15, 0), 0,
+			common.HexToAddress(testContractA), common.HexToAddress(testContractB), common.HexToAddress(depositWatchAddr), big.NewInt(1))
+		// The loop resumes from the original gap and commits exactly [10,20].
+		waitUntil(t, time.Now().Add(10*time.Second), "gap resume next_block 21", func() bool {
+			_, _, next, ok := depositCheckpointState(t, ctx, pool, chainID)
+			return ok && next == 21
+		})
+		time.Sleep(100 * time.Millisecond)
+		stop()
+		start, hash, next, ok := depositCheckpointState(t, ctx, pool, chainID)
+		if !ok || start != 10 || hash != cfg.ConfigHash || next != 21 {
+			t.Fatalf("checkpoint = (%d,%s,%d,%v), want (10,%s,21,true): no skip, no start shift", start, hash, next, ok, cfg.ConfigHash)
+		}
+		if n := depositCountRows(t, ctx, pool, "deposit_observations", chainID); n != 1 {
+			t.Fatalf("observations = %d, want exactly 1 (no phantom marks, no duplicate)", n)
+		}
+		if n := depositCountRows(t, ctx, pool, "deposit_config_history", chainID); n != 1 {
+			t.Fatalf("history rows = %d, want 1 bootstrap row", n)
+		}
+	})
+
+	t.Run("structural_below_upstream_start_stops", func(t *testing.T) {
+		const chainID = 71
+		cfg := depositITConfig(t, chainID, testContractA)
+		// Required history [10,..] starts below the upstream start S_u=15.
+		depositSeedUpstream(t, ctx, pool, chainID, 15, cfg.LogConfigHash, 25)
+		sc := depositITScanner(t, pool, cfg)
+		err := depositRunLoopOnce(t, sc, depositITLease(t, pool, chainID))
+		var gap *depositGap
+		if !errors.As(err, &gap) {
+			t.Fatalf("ServeLoop() = %v (%T), want *depositGap", err, err)
+		}
+		if gap.class != depositGapStructural || gap.cause != gapCauseBelowUpstreamStart {
+			t.Fatalf("gap = class %q cause %q, want structural/below_upstream_start", gap.class, gap.cause)
+		}
+		if gap.from != 10 || gap.to != 24 || gap.configHash != cfg.ConfigHash {
+			t.Fatalf("gap = %d-%d config %s, want 10-24 with the current config version", gap.from, gap.to, gap.configHash)
+		}
+		for _, want := range []string{"structural", "10-24", gapCauseBelowUpstreamStart, cfg.ConfigHash} {
+			if !strings.Contains(err.Error(), want) {
+				t.Fatalf("gap line %q misses %q (range/cause/config version must be complete)", err.Error(), want)
+			}
+		}
+		if _, _, _, ok := depositCheckpointState(t, ctx, pool, chainID); ok {
+			t.Fatal("checkpoint row exists after a structural gap (must stop, never trim the start)")
+		}
+		if n := depositCountRows(t, ctx, pool, "deposit_observations", chainID); n != 0 {
+			t.Fatalf("observations = %d, want 0 after a structural stop", n)
+		}
+	})
+
+	t.Run("structural_asset_not_indexed_stops", func(t *testing.T) {
+		const chainID = 72
+		// Upstream whitelist {B} never indexed asset A (effective 10 <= b).
+		cfg := depositITConfig(t, chainID, testContractB)
+		depositSeedUpstream(t, ctx, pool, chainID, 0, cfg.LogConfigHash, 21)
+		sc := depositITScanner(t, pool, cfg)
+		err := depositRunLoopOnce(t, sc, depositITLease(t, pool, chainID))
+		var gap *depositGap
+		if !errors.As(err, &gap) {
+			t.Fatalf("ServeLoop() = %v (%T), want *depositGap", err, err)
+		}
+		if gap.class != depositGapStructural || gap.cause != gapCauseAssetNotIndexed {
+			t.Fatalf("gap = class %q cause %q, want structural/asset_not_indexed", gap.class, gap.cause)
+		}
+		if gap.from != 10 || gap.to != 20 || gap.configHash != cfg.ConfigHash {
+			t.Fatalf("gap = %d-%d config %s, want 10-20 with the current config version", gap.from, gap.to, gap.configHash)
+		}
+		if _, _, _, ok := depositCheckpointState(t, ctx, pool, chainID); ok {
+			t.Fatal("checkpoint row exists after a structural gap")
+		}
+		if n := depositCountRows(t, ctx, pool, "deposit_observations", chainID); n != 0 {
+			t.Fatalf("observations = %d, want 0 after a structural stop", n)
+		}
+	})
+
+	t.Run("no_timeout_verdict_over_time", func(t *testing.T) {
+		cfg := depositITConfig(t, 73, testContractA)
+		up := &upstreamState{chainID: cfg.ChainID, startBlock: 0, configHash: cfg.LogConfigHash, nextBlock: 10}
+		first := classifyUpstreamGap(cfg, up, 10, 20)
+		time.Sleep(300 * time.Millisecond)
+		second := classifyUpstreamGap(cfg, up, 10, 20)
+		if first == nil || second == nil {
+			t.Fatalf("gaps = %v/%v, want transient verdicts (unit uncovered at N_u=10)", first, second)
+		}
+		if *first != *second {
+			t.Fatalf("verdict changed over time: %+v vs %+v (elapsed time is never an input)", first, second)
+		}
+		if second.class != depositGapTransient || second.cause != gapCauseBehindHead {
+			t.Fatalf("gap = %+v, want transient/behind_head", second)
+		}
+	})
+}

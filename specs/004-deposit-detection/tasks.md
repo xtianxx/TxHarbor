@@ -178,13 +178,14 @@ T000-L / T000-P 见上（本阶段即二者建档）。**Checkpoint**: 门禁状
     启动前断言两侧同有同无 + 行内与最新 history 行关联一致，单侧缺失即损坏态报错（禁补建/改回/授权修复）；
     本条仅覆盖意外漂移改回路径；有意授权转换见 T025–T028，两条路径不得混同。
   - 状态（2026-09-13）：CLOSED。证据：TestDepositRestartConfigComparison真库8子项全过（资产/监控地址/起点/生效高度四变体各拒*depositConfigMismatchError且检查点next=15、观察快照、history=1零破坏；起点单变体证比较对象为行内start+hash非hash alone；三空白集构造器同步拒绝零表行；上游ff持久身份拒upstream_drift且无检查点行；单侧checkpoint-only/history-only/行内与最新seq2dd分歧三态皆*depositCorruptStateError，loop层复验checkpoint-only；改配置拒后改回原配置精确守卫通过15→21，新观察amount=1/version=1，孤儿行字节一致）。回归：go build净+全仓单元283过。未验证：T012+、完整验收。
-- [ ] T012 [US4] 缺口分类与恢复：暂时等待自动续 + 结构报错停止 + 修复重验后原缺口幂等恢复（`internal/indexer/deposit_integration_test.go`，按序执行）
+- [x] T012 [US4] 缺口分类与恢复：暂时等待自动续 + 结构报错停止 + 修复重验后原缺口幂等恢复（`internal/indexer/deposit_integration_test.go`，按序执行）
   - 需求：FR-07/I3/I6，research R5。验收场景：D6/D7（SC-06 部分、SC-08）。依赖：T006。
   - 完成条件：`p >= N_u`（范围内）→ 等待零推进，补齐后自动从缺口继续；
     `E < S_u` / 资产不在覆盖 → 报错停止 + `upstream_gap(structural)` 行（范围/原因/配置版本齐全）；
     禁超时判定（慢速上游不得误判，有专用断言）；人工修复补扫后重验完整，从原缺口幂等恢复；
     结构缺口的身份采纳走授权转换（T025），本条不断言身份更新本身，只断言缺口分类与等待/停止行为；
     全程不跳位、不记无充值、不静默调起点/高度。真库断言。
+  - 状态（2026-09-13）：CLOSED。证据：TestDepositGapRecoveryBehavior真库4子项全过（瞬态N_u=10<=a等待1s慢上游零推进零误判，补齐canonical+水位21+15块来源行后自动从原缺口恢复恰[10,20]→21、观察恰1/history恰1；E<S_u停structural/below_upstream_start，gap=10-24+原因+配置版本齐全行内断言，零检查点零观察；资产未索引停structural/asset_not_indexed，gap=10-20；300ms前后classifyUpstreamGap逐值相等无时间输入）。结构缺口身份采纳归T025，本条未断言。未验证：T013+、完整验收。
 - [ ] T013 [US4] 覆盖证明专项验证：checkpoint 高度永不单独作为完整证明（`internal/indexer/deposit_integration_test.go`，按序执行）
   - 需求：FR-07/FR-11/I3。验收场景：D2/D5/D6/D8 交叉。依赖：T005，T006。
   - 完成条件：空区间（零行但 `N_u > b`）推进 vs 上游缺失（`N_u <= b`）停留的对照断言；
