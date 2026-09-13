@@ -1,8 +1,11 @@
 package metrics
 
 import (
+	"reflect"
 	"strings"
 	"testing"
+
+	"github.com/xtianxx/txharbor/internal/logx"
 )
 
 func TestRegistryExposesOnlyFoundationMetrics(t *testing.T) {
@@ -20,6 +23,12 @@ func TestRegistryExposesOnlyFoundationMetrics(t *testing.T) {
 	m.ObserveLogLag(31337, 0, true)
 	m.ObserveLogRPC("incomplete", false)
 	m.ObserveLogPause(31337)
+	m.ObserveDepositState(31337, 0)
+	m.ObserveDepositNext(31337, 1, true)
+	m.ObserveDepositLag(31337, 0, true)
+	m.ObserveDepositObservation(31337, "nomatch")
+	m.ObserveDepositPause(31337)
+	m.ObserveDepositTransition(31337, "ok")
 
 	families, err := m.Gatherer().Gather()
 	if err != nil {
@@ -32,7 +41,9 @@ func TestRegistryExposesOnlyFoundationMetrics(t *testing.T) {
 			IndexerCheckpointMetricName, IndexerStateMetricName,
 			IndexerRPCMetricName, IndexerPauseMetricName,
 			LogCheckpointNextMetricName, LogLagMetricName,
-			LogStateMetricName, LogRPCMetricName, LogPauseMetricName:
+			LogStateMetricName, LogRPCMetricName, LogPauseMetricName,
+			DepositNextMetricName, DepositLagMetricName, DepositStateMetricName,
+			DepositObservationsMetricName, DepositPauseMetricName, DepositTransitionMetricName:
 			return true
 		}
 		return strings.HasPrefix(name, "go_") || strings.HasPrefix(name, "process_")
@@ -213,6 +224,134 @@ func TestLogMetricsContract(t *testing.T) {
 	m.ObserveLogPause(31337)
 	if got := gatherCounters(t, m, LogPauseMetricName)["chain=31337"]; got != 2 {
 		t.Fatalf("%s = %v, want 2", LogPauseMetricName, got)
+	}
+}
+
+// TestDepositMetricsContract covers the 004 observability contract: five
+// deposit states (4 = structural gap halt), next/lag series absent while
+// progress is empty, the four observation result classes, the monotonic pause
+// counter and the authorised-transition result counter.
+func TestDepositMetricsContract(t *testing.T) {
+	m := New(func() bool { return true })
+
+	for _, state := range []int{0, 1, 2, 3, 4} {
+		m.ObserveDepositState(31337, state)
+		if got := gatherGauge(t, m, DepositStateMetricName); got != float64(state) {
+			t.Fatalf("%s = %v, want %d", DepositStateMetricName, got, state)
+		}
+	}
+
+	m.ObserveDepositNext(31337, 42, true)
+	if got := gatherGauge(t, m, DepositNextMetricName); got != 42 {
+		t.Fatalf("%s = %v, want 42", DepositNextMetricName, got)
+	}
+	m.ObserveDepositNext(31337, 42, false)
+	if got := familyLen(t, m, DepositNextMetricName); got != 0 {
+		t.Fatalf("empty progress exposed %d %s series, want 0", got, DepositNextMetricName)
+	}
+
+	m.ObserveDepositLag(31337, 7, true)
+	if got := gatherGauge(t, m, DepositLagMetricName); got != 7 {
+		t.Fatalf("%s = %v, want 7", DepositLagMetricName, got)
+	}
+	m.ObserveDepositLag(31337, 7, false)
+	if got := familyLen(t, m, DepositLagMetricName); got != 0 {
+		t.Fatalf("empty checkpoint exposed %d %s series, want 0", got, DepositLagMetricName)
+	}
+
+	observed := []string{"matched", "nomatch", "zero", "invalid"}
+	for _, result := range observed {
+		m.ObserveDepositObservation(31337, result)
+	}
+	results := gatherCounters(t, m, DepositObservationsMetricName)
+	for _, result := range observed {
+		if got := results["chain=31337,result="+result]; got != 1 {
+			t.Fatalf("%s{result=%s} = %v, want 1 (all: %v)", DepositObservationsMetricName, result, got, results)
+		}
+	}
+
+	m.ObserveDepositPause(31337)
+	m.ObserveDepositPause(31337)
+	if got := gatherCounters(t, m, DepositPauseMetricName)["chain=31337"]; got != 2 {
+		t.Fatalf("%s = %v, want 2", DepositPauseMetricName, got)
+	}
+
+	for _, result := range []string{"ok", "error", "rejected"} {
+		m.ObserveDepositTransition(31337, result)
+	}
+	transitions := gatherCounters(t, m, DepositTransitionMetricName)
+	for _, result := range []string{"ok", "error", "rejected"} {
+		if got := transitions["chain=31337,result="+result]; got != 1 {
+			t.Fatalf("%s{result=%s} = %v, want 1 (all: %v)", DepositTransitionMetricName, result, got, transitions)
+		}
+	}
+}
+
+// TestDepositStateDoesNotFlipReady freezes readyz semantics: deposit pause
+// (state=3) and structural halt (state=4) must not change readiness, which
+// only reflects dependency health (contracts/observability.md).
+func TestDepositStateDoesNotFlipReady(t *testing.T) {
+	ready := true
+	m := New(func() bool { return ready })
+
+	for _, state := range []int{3, 4} {
+		m.ObserveDepositState(31337, state)
+		if got := gatherGauge(t, m, ReadyMetricName); got != 1 {
+			t.Fatalf("txharbor_ready = %v with deposit_state=%d, want 1 (readyz frozen)", got, state)
+		}
+	}
+	ready = false
+	if got := gatherGauge(t, m, ReadyMetricName); got != 0 {
+		t.Fatalf("txharbor_ready = %v after dependency loss, want 0", got)
+	}
+}
+
+// TestDepositLogContract freezes the structured log manifest and the
+// redaction hook (contracts/observability.md, SC-09): every event carries
+// chain_id first, no field name is credential-bearing, and DepositLogRedact
+// scrubs credentials before they reach slog.
+func TestDepositLogContract(t *testing.T) {
+	want := map[string][]string{
+		DepositLogAdvance:      {"chain_id", "from_block", "to_block", "matched", "nomatch", "zero", "attempt"},
+		DepositLogWait:         {"chain_id", "next_block", "reason"},
+		DepositLogRetry:        {"chain_id", "from_block", "to_block", "kind", "attempt", "retry_in"},
+		DepositLogGap:          {"chain_id", "gap_from", "gap_to", "class", "cause", "config"},
+		DepositLogPause:        {"chain_id", "pause_id", "revision", "height", "kind", "detail"},
+		DepositLogRelease:      {"chain_id", "pause_id", "revision", "operator", "reason", "result"},
+		DepositLogConfigReject: {"chain_id", "reason", "detail"},
+		DepositLogTransition:   {"chain_id", "request_id", "operator", "old_config", "new_config", "replay_from", "result", "reason"},
+	}
+	if !reflect.DeepEqual(DepositLogFields, want) {
+		t.Fatalf("DepositLogFields drifted from contracts/observability.md:\ngot  %v\nwant %v", DepositLogFields, want)
+	}
+
+	for event, fields := range DepositLogFields {
+		if len(fields) == 0 || fields[0] != "chain_id" {
+			t.Errorf("event %q fields %v: chain_id must come first", event, fields)
+		}
+		seen := map[string]bool{}
+		for _, field := range fields {
+			if seen[field] {
+				t.Errorf("event %q repeats field %q", event, field)
+			}
+			seen[field] = true
+			for _, banned := range []string{"token", "secret", "password", "passwd", "pwd", "dsn", "url", "key", "authorization"} {
+				if strings.Contains(strings.ToLower(field), banned) {
+					t.Errorf("event %q field %q looks credential-bearing", event, field)
+				}
+			}
+		}
+	}
+
+	line := "dsn=postgres://txharbor:hunter2@db:5432/txharbor Authorization: Bearer sk-live-123 authorization=Bearer sk-live-456 password=p@ss"
+	got := DepositLogRedact(line)
+	for _, secret := range []string{"hunter2", "sk-live-123", "sk-live-456", "p@ss"} {
+		if strings.Contains(got, secret) {
+			t.Fatalf("DepositLogRedact(%q) leaked %q: %q", line, secret, got)
+		}
+	}
+	if !strings.Contains(got, logx.Redacted) {
+		t.Fatalf("DepositLogRedact(%q) = %q, want %s", line, got, logx.Redacted)
 	}
 }
 

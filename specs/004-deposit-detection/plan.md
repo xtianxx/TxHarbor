@@ -140,7 +140,7 @@ Coordinator 取 lease（获胜/旁观）→ 配置比较（行存在且 start/co
 - Q3–Q6（授权跃迁/生效时机/回放位置/收缩语义）落实：FR-06/R11（授权事务 + 审计 + 双解除路径）、
   FR-07/R5（最小值回放规则 + 上游起点仅检查 + 混合双规则）、data-model Table 3–5 + 授权/回放协议、
   请求身份（意图参数比对、request_id 持久化）与暂停实例身份（不可复用 pause_id + 修订 + 同事务审计）已同步 research R11、contracts 审计查询、quickstart D8/D11、tasks（T001/T006/T015/T019/T025/T027/T028/Notes）。
-  contracts 审计字段与 transition 计数、quickstart D5/D7/D11；tasks 首轮同步已完成（E2 保持开放待复核）。
+  contracts 审计字段与 transition 计数、quickstart D5/D7/D11；tasks 首轮同步已完成（首轮当时E2保持开放待复核，保留；2026-09-13最终：E2经定向修正与静态复验闭合，见spec 244-245。）
   请求幂等与版本隔离强化轮：request_id 身份（同参返原/异参拒绝/异 ID 独立）与 seq 隔离
   （消费捕获+提交核验、授权验预期 seq、暂停锁内重估）已同步 research R11、data-model 协议、
   contracts 审计查询、quickstart D11、tasks（T001/T006/T019/T025/T027/T028/Notes）。

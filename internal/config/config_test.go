@@ -1,6 +1,8 @@
 package config
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"strings"
 	"testing"
 	"time"
@@ -15,12 +17,15 @@ func fakeEnv(m map[string]string) Getenv {
 
 func baseEnv() map[string]string {
 	return map[string]string{
-		EnvPGDSN:          "postgres://txharbor:sup3rs3cret@127.0.0.1:5432/txharbor?sslmode=disable",
-		EnvRPCURL:         "http://127.0.0.1:8545",
-		EnvChainID:        "31337",
-		EnvStartHeight:    "0",
-		EnvLogStartHeight: "0",
-		EnvLogContracts:   "0x1111111111111111111111111111111111111111",
+		EnvPGDSN:                 "postgres://txharbor:sup3rs3cret@127.0.0.1:5432/txharbor?sslmode=disable",
+		EnvRPCURL:                "http://127.0.0.1:8545",
+		EnvChainID:               "31337",
+		EnvStartHeight:           "0",
+		EnvLogStartHeight:        "0",
+		EnvLogContracts:          "0x1111111111111111111111111111111111111111",
+		EnvDepositStartHeight:    "0",
+		EnvDepositContracts:      "0x1111111111111111111111111111111111111111",
+		EnvDepositWatchAddresses: "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
 	}
 }
 
@@ -107,7 +112,10 @@ func TestLoadCustomValues(t *testing.T) {
 }
 
 func TestLoadMissingRequiredNamesVariable(t *testing.T) {
-	for _, name := range []string{EnvPGDSN, EnvRPCURL, EnvChainID, EnvStartHeight, EnvLogStartHeight, EnvLogContracts} {
+	for _, name := range []string{
+		EnvPGDSN, EnvRPCURL, EnvChainID, EnvStartHeight, EnvLogStartHeight, EnvLogContracts,
+		EnvDepositStartHeight, EnvDepositContracts, EnvDepositWatchAddresses,
+	} {
 		t.Run(name, func(t *testing.T) {
 			env := baseEnv()
 			delete(env, name)
@@ -127,7 +135,10 @@ func TestLoadMissingAllReportsEveryVariable(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error for empty environment")
 	}
-	for _, name := range []string{EnvPGDSN, EnvRPCURL, EnvChainID, EnvStartHeight, EnvLogStartHeight, EnvLogContracts} {
+	for _, name := range []string{
+		EnvPGDSN, EnvRPCURL, EnvChainID, EnvStartHeight, EnvLogStartHeight, EnvLogContracts,
+		EnvDepositStartHeight, EnvDepositContracts, EnvDepositWatchAddresses,
+	} {
 		if !strings.Contains(err.Error(), name) {
 			t.Errorf("error %q does not name %s", err, name)
 		}
@@ -304,6 +315,387 @@ func TestLoadLogBatchBlocks(t *testing.T) {
 		env[EnvLogBatchBlocks] = raw
 		if _, err := Load(fakeEnv(env)); err == nil {
 			t.Fatalf("Load() with batch %q: expected error", raw)
+		}
+	}
+}
+
+// --- 004 deposit detection (T002) ---
+
+const (
+	depositContractA = "0x1111111111111111111111111111111111111111"
+	depositContractB = "0x2222222222222222222222222222222222222222"
+	depositWatchA    = "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	depositWatchB    = "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+
+	// Research R3 standard vector: the exact hashed preimage (printf with no
+	// trailing newline) and its SHA-256.
+	depositVectorInput = "deposit:v1\nstart:0\nasset:" + depositContractA + ":0\nwatch:" + depositWatchA + ":0"
+	depositVectorHash  = "31822b65a6444c91bdaaa04a86582f4db25f35d5dd8ee02b7c2c12a4cf6600f0"
+)
+
+func TestLoadDepositDefaultsAndStandardVector(t *testing.T) {
+	cfg, err := Load(fakeEnv(baseEnv()))
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if cfg.DepositStartHeight != 0 {
+		t.Errorf("DepositStartHeight = %d, want 0", cfg.DepositStartHeight)
+	}
+	if len(cfg.DepositContracts) != 1 ||
+		cfg.DepositContracts[0] != (DepositEntry{Address: depositContractA, Effective: 0}) {
+		t.Errorf("DepositContracts = %+v, want single entry with effective 0", cfg.DepositContracts)
+	}
+	if len(cfg.DepositWatchAddresses) != 1 ||
+		cfg.DepositWatchAddresses[0] != (DepositEntry{Address: depositWatchA, Effective: 0}) {
+		t.Errorf("DepositWatchAddresses = %+v, want single entry with effective 0", cfg.DepositWatchAddresses)
+	}
+	if cfg.DepositBatchBlocks != DefaultDepositBatchBlocks {
+		t.Errorf("DepositBatchBlocks = %d, want default %d", cfg.DepositBatchBlocks, DefaultDepositBatchBlocks)
+	}
+	if cfg.DepositConfigHash != depositVectorHash {
+		t.Errorf("DepositConfigHash = %q, want R3 vector %q", cfg.DepositConfigHash, depositVectorHash)
+	}
+}
+
+// TestDepositIdentityStandardVector pins the exact bytes of the identity
+// preimage (domain separator, no BOM, no trailing newline) and re-derives the
+// R3 digest independently of the production code path.
+func TestDepositIdentityStandardVector(t *testing.T) {
+	contracts := []DepositEntry{{Address: depositContractA, Effective: 0}}
+	watches := []DepositEntry{{Address: depositWatchA, Effective: 0}}
+	lines := []string{"asset:" + depositContractA + ":0", "watch:" + depositWatchA + ":0"}
+
+	if got := depositIdentityInput(0, lines); got != depositVectorInput {
+		t.Fatalf("identity input = %q, want %q", got, depositVectorInput)
+	}
+	if strings.HasPrefix(depositVectorInput, "\ufeff") || strings.HasSuffix(depositVectorInput, "\n") {
+		t.Fatal("vector preimage must carry no BOM and no trailing newline")
+	}
+	if got := depositIdentity(0, contracts, watches); got != depositVectorHash {
+		t.Fatalf("depositIdentity = %q, want %q", got, depositVectorHash)
+	}
+	sum := sha256.Sum256([]byte(depositVectorInput))
+	if hex.EncodeToString(sum[:]) != depositVectorHash {
+		t.Fatalf("independent digest of pinned preimage = %q, want %q",
+			hex.EncodeToString(sum[:]), depositVectorHash)
+	}
+}
+
+func TestParseDepositEntriesNormalizes(t *testing.T) {
+	entries, err := parseDepositEntries(
+		"0x2222222222222222222222222222222222222222,0X1111111111111111111111111111111111111111", 0)
+	if err != nil {
+		t.Fatalf("parseDepositEntries() error = %v", err)
+	}
+	want := []DepositEntry{
+		{Address: depositContractA, Effective: 0},
+		{Address: depositContractB, Effective: 0},
+	}
+	assertEntries(t, entries, want)
+
+	// Checksummed mixed case and a bare 40-hex address both converge to the
+	// lowercase 0x-prefixed canonical form (FR-04).
+	entries, err = parseDepositEntries("0xAbCdEf1234567890abcDEF1234567890ABCdEF12,abcdef1234567890abcdef1234567890abcdef12", 0)
+	if err != nil {
+		t.Fatalf("parseDepositEntries() error = %v", err)
+	}
+	want = []DepositEntry{{Address: "0xabcdef1234567890abcdef1234567890abcdef12", Effective: 0}}
+	assertEntries(t, entries, want)
+
+	// Exact duplicates (including case variants) collapse; the same address at
+	// different heights stays distinct and sorts by canonical line.
+	entries, err = parseDepositEntries(
+		"0x1111111111111111111111111111111111111111:5,0x1111111111111111111111111111111111111111:10,"+
+			"0x1111111111111111111111111111111111111111:10,0x1111111111111111111111111111111111111111", 0)
+	if err != nil {
+		t.Fatalf("parseDepositEntries() error = %v", err)
+	}
+	want = []DepositEntry{
+		{Address: depositContractA, Effective: 0},
+		{Address: depositContractA, Effective: 10},
+		{Address: depositContractA, Effective: 5},
+	}
+	assertEntries(t, entries, want)
+
+	// Without an explicit suffix the effective height defaults to the global
+	// start; an explicit `:height` overrides it, including height 0.
+	entries, err = parseDepositEntries("0x1111111111111111111111111111111111111111,0x2222222222222222222222222222222222222222:0", 100)
+	if err != nil {
+		t.Fatalf("parseDepositEntries() error = %v", err)
+	}
+	want = []DepositEntry{
+		{Address: depositContractA, Effective: 100},
+		{Address: depositContractB, Effective: 0},
+	}
+	assertEntries(t, entries, want)
+}
+
+func TestParseDepositEntriesRejects(t *testing.T) {
+	cases := []struct {
+		name string
+		raw  string
+	}{
+		{name: "empty", raw: ""},
+		{name: "blank", raw: "   "},
+		{name: "blank entry", raw: "0x1111111111111111111111111111111111111111,,0x2222222222222222222222222222222222222222"},
+		{name: "short address", raw: "0x1234"},
+		{name: "not hex", raw: "not-an-address"},
+		{name: "empty effective", raw: "0x1111111111111111111111111111111111111111:"},
+		{name: "negative effective", raw: "0x1111111111111111111111111111111111111111:-1"},
+		{name: "float effective", raw: "0x1111111111111111111111111111111111111111:1.5"},
+		{name: "non-decimal effective", raw: "0x1111111111111111111111111111111111111111:0x10"},
+		{name: "extra colon", raw: "0x1111111111111111111111111111111111111111:5:6"},
+		{name: "effective overflow", raw: "0x1111111111111111111111111111111111111111:18446744073709551616"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if _, err := parseDepositEntries(tc.raw, 0); err == nil {
+				t.Fatalf("parseDepositEntries(%q): expected error", tc.raw)
+			}
+		})
+	}
+}
+
+func TestLoadRejectsInvalidDepositConfiguration(t *testing.T) {
+	cases := []struct {
+		name    string
+		mutate  func(map[string]string)
+		wantVar string
+	}{
+		{name: "missing start", mutate: func(m map[string]string) { delete(m, EnvDepositStartHeight) }, wantVar: EnvDepositStartHeight},
+		{name: "blank start", mutate: func(m map[string]string) { m[EnvDepositStartHeight] = "" }, wantVar: EnvDepositStartHeight},
+		{name: "negative start", mutate: func(m map[string]string) { m[EnvDepositStartHeight] = "-1" }, wantVar: EnvDepositStartHeight},
+		{name: "non-decimal start", mutate: func(m map[string]string) { m[EnvDepositStartHeight] = "1.5" }, wantVar: EnvDepositStartHeight},
+		{name: "missing contracts", mutate: func(m map[string]string) { delete(m, EnvDepositContracts) }, wantVar: EnvDepositContracts},
+		{name: "blank contracts", mutate: func(m map[string]string) { m[EnvDepositContracts] = "   " }, wantVar: EnvDepositContracts},
+		{name: "empty contracts list", mutate: func(m map[string]string) { m[EnvDepositContracts] = "," }, wantVar: EnvDepositContracts},
+		{name: "invalid contract", mutate: func(m map[string]string) { m[EnvDepositContracts] = "0x1234" }, wantVar: EnvDepositContracts},
+		{name: "missing watches", mutate: func(m map[string]string) { delete(m, EnvDepositWatchAddresses) }, wantVar: EnvDepositWatchAddresses},
+		{name: "blank watches", mutate: func(m map[string]string) { m[EnvDepositWatchAddresses] = " " }, wantVar: EnvDepositWatchAddresses},
+		{name: "invalid watch effective", mutate: func(m map[string]string) { m[EnvDepositWatchAddresses] = depositWatchA + ":abc" }, wantVar: EnvDepositWatchAddresses},
+		{name: "zero batch blocks", mutate: func(m map[string]string) { m[EnvDepositBatchBlocks] = "0" }, wantVar: EnvDepositBatchBlocks},
+		{name: "negative batch blocks", mutate: func(m map[string]string) { m[EnvDepositBatchBlocks] = "-5" }, wantVar: EnvDepositBatchBlocks},
+		{name: "non-decimal batch blocks", mutate: func(m map[string]string) { m[EnvDepositBatchBlocks] = "abc" }, wantVar: EnvDepositBatchBlocks},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			env := baseEnv()
+			tc.mutate(env)
+			cfg, err := Load(fakeEnv(env))
+			if err == nil {
+				t.Fatalf("Load() with %s: expected error", tc.name)
+			}
+			if cfg != nil {
+				t.Fatalf("Load() returned config alongside error: %+v", cfg)
+			}
+			if !strings.Contains(err.Error(), tc.wantVar) {
+				t.Fatalf("error %q does not name %s", err, tc.wantVar)
+			}
+		})
+	}
+}
+
+func TestLoadDepositIdentityConvergence(t *testing.T) {
+	cfg, err := Load(fakeEnv(baseEnv()))
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	baseHash := cfg.DepositConfigHash
+
+	variants := []struct {
+		name      string
+		contracts string
+		watches   string
+		start     string
+	}{
+		{
+			name:      "order duplicates spaces and case",
+			contracts: "0x1111111111111111111111111111111111111111, 0x1111111111111111111111111111111111111111",
+			watches:   "0xAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+			start:     "0",
+		},
+		{
+			name:      "0X prefix",
+			contracts: "0X1111111111111111111111111111111111111111",
+			watches:   "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+			start:     "0",
+		},
+		{
+			name:      "explicit height equal to default start",
+			contracts: depositContractA + ":0",
+			watches:   depositWatchA,
+			start:     "0",
+		},
+	}
+	for _, v := range variants {
+		t.Run(v.name, func(t *testing.T) {
+			env := baseEnv()
+			env[EnvDepositStartHeight] = v.start
+			env[EnvDepositContracts] = v.contracts
+			env[EnvDepositWatchAddresses] = v.watches
+			cfg, err := Load(fakeEnv(env))
+			if err != nil {
+				t.Fatalf("Load() error = %v", err)
+			}
+			if cfg.DepositConfigHash != baseHash {
+				t.Fatalf("DepositConfigHash = %q, want converged %q", cfg.DepositConfigHash, baseHash)
+			}
+		})
+	}
+}
+
+func TestLoadDepositIdentityChangesWithSemantics(t *testing.T) {
+	cfg, err := Load(fakeEnv(baseEnv()))
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	baseHash := cfg.DepositConfigHash
+	cases := []struct {
+		name   string
+		mutate func(map[string]string)
+	}{
+		{name: "add contract", mutate: func(m map[string]string) {
+			m[EnvDepositContracts] = depositContractA + "," + depositContractB
+		}},
+		{name: "add watch address", mutate: func(m map[string]string) {
+			m[EnvDepositWatchAddresses] = depositWatchA + "," + depositWatchB
+		}},
+		{name: "change effective height", mutate: func(m map[string]string) {
+			m[EnvDepositContracts] = depositContractA + ":5"
+		}},
+		{name: "change start height", mutate: func(m map[string]string) {
+			m[EnvDepositStartHeight] = "1"
+		}},
+		{name: "move entry between collections", mutate: func(m map[string]string) {
+			m[EnvDepositContracts] = depositWatchA
+		}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			env := baseEnv()
+			tc.mutate(env)
+			cfg, err := Load(fakeEnv(env))
+			if err != nil {
+				t.Fatalf("Load() error = %v", err)
+			}
+			if cfg.DepositConfigHash == baseHash {
+				t.Fatalf("DepositConfigHash unchanged (%q) after %s", baseHash, tc.name)
+			}
+		})
+	}
+}
+
+// TestLoadDepositIdentityExcludesTuningKnobs locks FR-06: batch and timeout
+// parameters never enter the identity.
+func TestLoadDepositIdentityExcludesTuningKnobs(t *testing.T) {
+	cfg, err := Load(fakeEnv(baseEnv()))
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	baseHash := cfg.DepositConfigHash
+	env := baseEnv()
+	env[EnvDepositBatchBlocks] = "17"
+	env[EnvIndexPollInterval] = "9s"
+	env[EnvIndexRetryInitial] = "1s"
+	env[EnvIndexRetryMax] = "2m"
+	cfg, err = Load(fakeEnv(env))
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if cfg.DepositConfigHash != baseHash {
+		t.Fatalf("DepositConfigHash = %q, want identity independent of tuning knobs %q",
+			cfg.DepositConfigHash, baseHash)
+	}
+}
+
+func TestLoadDepositEffectiveDefaultsToGlobalStart(t *testing.T) {
+	env := baseEnv()
+	env[EnvDepositStartHeight] = "100"
+	env[EnvDepositContracts] = depositContractB + "," + depositContractA + ":5"
+	env[EnvDepositWatchAddresses] = depositWatchA
+	cfg, err := Load(fakeEnv(env))
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	assertEntries(t, cfg.DepositContracts, []DepositEntry{
+		{Address: depositContractA, Effective: 5},
+		{Address: depositContractB, Effective: 100},
+	})
+	assertEntries(t, cfg.DepositWatchAddresses, []DepositEntry{
+		{Address: depositWatchA, Effective: 100},
+	})
+}
+
+func TestDepositSnapshotEncoding(t *testing.T) {
+	entries := []DepositEntry{
+		{Address: depositContractB, Effective: 3},
+		{Address: depositContractA, Effective: 10},
+		{Address: depositContractA, Effective: 5},
+	}
+	got := DepositSnapshot(entries)
+	want := depositContractA + ":10\n" + depositContractA + ":5\n" + depositContractB + ":3"
+	if got != want {
+		t.Fatalf("DepositSnapshot = %q, want %q", got, want)
+	}
+	if strings.HasSuffix(got, "\n") {
+		t.Fatalf("DepositSnapshot has trailing newline: %q", got)
+	}
+	if strings.Contains(got, "asset:") || strings.Contains(got, "watch:") {
+		t.Fatalf("history snapshot lines must be <address>:<effective> without stream prefix: %q", got)
+	}
+	if got := DepositSnapshot(nil); got != "" {
+		t.Fatalf("DepositSnapshot(nil) = %q, want empty", got)
+	}
+
+	// The Load path feeds the same encoder T025 will use for history rows.
+	cfg, err := Load(fakeEnv(baseEnv()))
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if got := DepositSnapshot(cfg.DepositContracts); got != depositContractA+":0" {
+		t.Fatalf("contracts snapshot = %q, want %q", got, depositContractA+":0")
+	}
+	if got := DepositSnapshot(cfg.DepositWatchAddresses); got != depositWatchA+":0" {
+		t.Fatalf("watches snapshot = %q, want %q", got, depositWatchA+":0")
+	}
+}
+
+// TestSummaryDepositFieldsRedacted locks the FR-15 startup echo: deposit
+// state is visible as counts and identity, never as a raw address dump.
+func TestSummaryDepositFieldsRedacted(t *testing.T) {
+	env := baseEnv()
+	env[EnvDepositContracts] = depositContractA + "," + depositContractB
+	cfg, err := Load(fakeEnv(env))
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	summary := cfg.Summary()
+	for _, want := range []string{
+		"deposit_start_height=0",
+		"deposit_contracts=2",
+		"deposit_watch_addresses=1",
+		"deposit_config_hash=" + cfg.DepositConfigHash,
+		"deposit_batch_blocks=500",
+	} {
+		if !strings.Contains(summary, want) {
+			t.Errorf("summary %q does not contain %q", summary, want)
+		}
+	}
+	for _, leak := range []string{depositContractA, depositContractB, depositWatchA, "sup3rs3cret"} {
+		if strings.Contains(summary, leak) {
+			t.Errorf("summary leaks raw value %q: %s", leak, summary)
+		}
+	}
+}
+
+func assertEntries(t *testing.T, got, want []DepositEntry) {
+	t.Helper()
+	if len(got) != len(want) {
+		t.Fatalf("entries = %+v, want %+v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("entries[%d] = %+v, want %+v (all: %+v)", i, got[i], want[i], got)
 		}
 	}
 }

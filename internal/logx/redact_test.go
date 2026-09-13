@@ -50,6 +50,18 @@ func TestRedact(t *testing.T) {
 			secrets: []string{"eyJhbGciOiJIUzI1NiJ9.payload.sig"},
 		},
 		{
+			name:    "logfmt authorization bearer",
+			in:      "level=info authorization=Bearer SYNTHETIC-TOKEN-123 msg=started",
+			want:    []string{"level=info", "authorization=", "msg=started"},
+			secrets: []string{"SYNTHETIC-TOKEN-123"},
+		},
+		{
+			name:    "url query bearer",
+			in:      "GET /rpc?token=Bearer SYNTHETIC-TOKEN-123 failed",
+			want:    []string{"/rpc?token="},
+			secrets: []string{"SYNTHETIC-TOKEN-123"},
+		},
+		{
 			name: "plain text untouched",
 			in:   "listening on 127.0.0.1:8080, chain id 31337",
 			want: []string{"127.0.0.1:8080", "31337"},
