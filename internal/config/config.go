@@ -24,23 +24,27 @@ import (
 // Environment variable names. TXHARBOR_MUST be the only configuration carrier
 // in 001 (FR-001).
 const (
-	EnvPGDSN              = "TXHARBOR_PG_DSN"
-	EnvRPCURL             = "TXHARBOR_RPC_URL"
-	EnvChainID            = "TXHARBOR_CHAIN_ID"
-	EnvStartHeight        = "TXHARBOR_START_HEIGHT"
-	EnvHTTPAddr           = "TXHARBOR_HTTP_ADDR"
-	EnvStartupTimeout     = "TXHARBOR_STARTUP_TIMEOUT"
-	EnvProbeInterval      = "TXHARBOR_PROBE_INTERVAL"
-	EnvProbeTimeout       = "TXHARBOR_PROBE_TIMEOUT"
-	EnvShutdownTimeout    = "TXHARBOR_SHUTDOWN_TIMEOUT"
-	EnvMigrateLockTimeout = "TXHARBOR_MIGRATE_LOCK_TIMEOUT"
-	EnvIndexRPCTimeout    = "TXHARBOR_INDEX_RPC_TIMEOUT"
-	EnvIndexPollInterval  = "TXHARBOR_INDEX_POLL_INTERVAL"
-	EnvIndexRetryInitial  = "TXHARBOR_INDEX_RETRY_INITIAL"
-	EnvIndexRetryMax      = "TXHARBOR_INDEX_RETRY_MAX"
-	EnvLogStartHeight     = "TXHARBOR_LOG_START_HEIGHT"
-	EnvLogContracts       = "TXHARBOR_LOG_CONTRACTS"
-	EnvLogBatchBlocks     = "TXHARBOR_LOG_BATCH_BLOCKS"
+	EnvPGDSN                 = "TXHARBOR_PG_DSN"
+	EnvRPCURL                = "TXHARBOR_RPC_URL"
+	EnvChainID               = "TXHARBOR_CHAIN_ID"
+	EnvStartHeight           = "TXHARBOR_START_HEIGHT"
+	EnvHTTPAddr              = "TXHARBOR_HTTP_ADDR"
+	EnvStartupTimeout        = "TXHARBOR_STARTUP_TIMEOUT"
+	EnvProbeInterval         = "TXHARBOR_PROBE_INTERVAL"
+	EnvProbeTimeout          = "TXHARBOR_PROBE_TIMEOUT"
+	EnvShutdownTimeout       = "TXHARBOR_SHUTDOWN_TIMEOUT"
+	EnvMigrateLockTimeout    = "TXHARBOR_MIGRATE_LOCK_TIMEOUT"
+	EnvIndexRPCTimeout       = "TXHARBOR_INDEX_RPC_TIMEOUT"
+	EnvIndexPollInterval     = "TXHARBOR_INDEX_POLL_INTERVAL"
+	EnvIndexRetryInitial     = "TXHARBOR_INDEX_RETRY_INITIAL"
+	EnvIndexRetryMax         = "TXHARBOR_INDEX_RETRY_MAX"
+	EnvLogStartHeight        = "TXHARBOR_LOG_START_HEIGHT"
+	EnvLogContracts          = "TXHARBOR_LOG_CONTRACTS"
+	EnvLogBatchBlocks        = "TXHARBOR_LOG_BATCH_BLOCKS"
+	EnvDepositStartHeight    = "TXHARBOR_DEPOSIT_START_HEIGHT"
+	EnvDepositContracts      = "TXHARBOR_DEPOSIT_CONTRACTS"
+	EnvDepositWatchAddresses = "TXHARBOR_DEPOSIT_WATCH_ADDRESSES"
+	EnvDepositBatchBlocks    = "TXHARBOR_DEPOSIT_BATCH_BLOCKS"
 )
 
 // Defaults from data-model §1. Acceptance runs use these values (FR-013).
@@ -61,10 +65,19 @@ const (
 	// against the provider annex without changing history semantics).
 	DefaultLogBatchBlocks = uint64(500)
 
+	// DefaultDepositBatchBlocks bounds one deposit scan interval (research
+	// R7: same round-trip trade-off as the 003 log stream; tuning it never
+	// changes history semantics and it is not part of the config identity).
+	DefaultDepositBatchBlocks = uint64(500)
+
 	// logConfigVersion prefixes the config identity encoding (clarification
 	// A1). The version is part of the hashed input so future encodings never
 	// collide with this one.
 	logConfigVersion = "erc20-transfer:v1"
+
+	// depositConfigVersion is the domain separator of the deposit config
+	// identity (research R3); the following newline is part of the encoding.
+	depositConfigVersion = "deposit:v1"
 
 	// probeBudget is the hard ceiling for interval+timeout so that an
 	// outage is observed/recovered well inside the 10s acceptance bound.
@@ -93,6 +106,33 @@ type Config struct {
 	LogContracts   []string
 	LogConfigHash  string
 	LogBatchBlocks uint64
+	// Deposit detection (004): receive-side start bound, normalized
+	// contract/watch entries with effective heights, its versioned config
+	// identity, and the per-interval block cap. Batch/timeout knobs are
+	// deliberately excluded from the identity (research R3/R7).
+	DepositStartHeight    uint64
+	DepositContracts      []DepositEntry
+	DepositWatchAddresses []DepositEntry
+	DepositConfigHash     string
+	DepositBatchBlocks    uint64
+}
+
+// DepositEntry is one normalized `address[:effective]` configuration item: a
+// lowercase 0x-prefixed 20-byte EVM address plus the first block at which the
+// asset or watched address is eligible (explicit suffix, or the global
+// deposit start height when omitted; FR-04/FR-05). The same address with
+// different effective heights denotes distinct entries and is never merged
+// (research R3).
+type DepositEntry struct {
+	Address   string
+	Effective uint64
+}
+
+// String renders the canonical history-snapshot line `address:effective`
+// (data-model Table 4: assets/watches snapshot, lexicographic, no trailing
+// newline).
+func (e DepositEntry) String() string {
+	return e.Address + ":" + strconv.FormatUint(e.Effective, 10)
 }
 
 // Getenv looks up an environment variable (os.LookupEnv compatible).
@@ -175,6 +215,49 @@ func Load(getenv Getenv) (*Config, error) {
 		}
 	}
 
+	// Deposit detection (004): the start bound and both collections are
+	// required — a blank collection is a configuration error and never
+	// degrades into all-address monitoring (FR-04, research R7). The
+	// collection entries default their effective height to the global start.
+	if raw, err := require(getenv, EnvDepositStartHeight); err != nil {
+		errs = append(errs, err)
+	} else if h, err := parseStartHeight(raw); err != nil {
+		errs = append(errs, invalid(EnvDepositStartHeight, "%v", err))
+	} else {
+		c.DepositStartHeight = h
+	}
+
+	var contracts, watches []DepositEntry
+	if raw, err := require(getenv, EnvDepositContracts); err != nil {
+		errs = append(errs, err)
+	} else if entries, err := parseDepositEntries(raw, c.DepositStartHeight); err != nil {
+		errs = append(errs, invalid(EnvDepositContracts, "%v", err))
+	} else {
+		contracts = entries
+	}
+	if raw, err := require(getenv, EnvDepositWatchAddresses); err != nil {
+		errs = append(errs, err)
+	} else if entries, err := parseDepositEntries(raw, c.DepositStartHeight); err != nil {
+		errs = append(errs, invalid(EnvDepositWatchAddresses, "%v", err))
+	} else {
+		watches = entries
+	}
+	if contracts != nil && watches != nil {
+		c.DepositContracts = contracts
+		c.DepositWatchAddresses = watches
+		c.DepositConfigHash = depositIdentity(c.DepositStartHeight, contracts, watches)
+	}
+
+	c.DepositBatchBlocks = DefaultDepositBatchBlocks
+	if raw, ok := getenv(EnvDepositBatchBlocks); ok && raw != "" {
+		n, err := strconv.ParseUint(raw, 10, 64)
+		if err != nil || n == 0 {
+			errs = append(errs, invalid(EnvDepositBatchBlocks, "%q is not a positive decimal integer", raw))
+		} else {
+			c.DepositBatchBlocks = n
+		}
+	}
+
 	if raw, ok := getenv(EnvHTTPAddr); ok && raw != "" {
 		if err := validateHTTPAddr(raw); err != nil {
 			errs = append(errs, invalid(EnvHTTPAddr, "%v", err))
@@ -210,11 +293,13 @@ func Load(getenv Getenv) (*Config, error) {
 // one startup echo line (FR-003).
 func (c *Config) Summary() string {
 	return fmt.Sprintf(
-		"pg=%s rpc=%s chain_id=%d start_height=%d http_addr=%s startup_timeout=%s probe_interval=%s probe_timeout=%s shutdown_timeout=%s migrate_lock_timeout=%s index_rpc_timeout=%s index_poll_interval=%s index_retry_initial=%s index_retry_max=%s log_start_height=%d log_contracts=%d log_config_hash=%s log_batch_blocks=%d",
+		"pg=%s rpc=%s chain_id=%d start_height=%d http_addr=%s startup_timeout=%s probe_interval=%s probe_timeout=%s shutdown_timeout=%s migrate_lock_timeout=%s index_rpc_timeout=%s index_poll_interval=%s index_retry_initial=%s index_retry_max=%s log_start_height=%d log_contracts=%d log_config_hash=%s log_batch_blocks=%d deposit_start_height=%d deposit_contracts=%d deposit_watch_addresses=%d deposit_config_hash=%s deposit_batch_blocks=%d",
 		logx.Redact(c.PGDSN), logx.Redact(c.RPCURL), c.ChainID, c.StartHeight, c.HTTPAddr,
 		c.StartupTimeout, c.ProbeInterval, c.ProbeTimeout, c.ShutdownTimeout, c.MigrateLockTimeout,
 		c.IndexRPCTimeout, c.IndexPollInterval, c.IndexRetryInitial, c.IndexRetryMax,
 		c.LogStartHeight, len(c.LogContracts), c.LogConfigHash, c.LogBatchBlocks,
+		c.DepositStartHeight, len(c.DepositContracts), len(c.DepositWatchAddresses),
+		c.DepositConfigHash, c.DepositBatchBlocks,
 	)
 }
 
@@ -249,6 +334,81 @@ func NormalizeWhitelist(raw string) ([]string, string, error) {
 	sort.Strings(out)
 	sum := sha256.Sum256([]byte(logConfigVersion + "\n" + strings.Join(out, "\n")))
 	return out, hex.EncodeToString(sum[:]), nil
+}
+
+// parseDepositEntries validates a comma-separated collection of
+// `0x…[:effective]` items and returns the canonical form: lowercase
+// 0x-prefixed addresses with their effective height (explicit decimal suffix,
+// or defaultEffective when omitted), sorted by canonical line and
+// deduplicated. The same address with different effective heights stays as
+// distinct entries (research R3); a blank item or an empty collection is a
+// configuration error (FR-04/FR-05).
+func parseDepositEntries(raw string, defaultEffective uint64) ([]DepositEntry, error) {
+	parts := strings.Split(raw, ",")
+	seen := make(map[string]struct{}, len(parts))
+	out := make([]DepositEntry, 0, len(parts))
+	for _, p := range parts {
+		p = strings.TrimSpace(p)
+		if p == "" {
+			return nil, errors.New("address list contains a blank entry")
+		}
+		addr, effRaw, hasEff := strings.Cut(p, ":")
+		if !common.IsHexAddress(addr) {
+			return nil, fmt.Errorf("%q is not a 20-byte EVM address", addr)
+		}
+		e := DepositEntry{Address: strings.ToLower(common.HexToAddress(addr).Hex()), Effective: defaultEffective}
+		if hasEff {
+			h, err := strconv.ParseUint(effRaw, 10, 64)
+			if err != nil {
+				return nil, fmt.Errorf("effective height %q is not a non-negative decimal integer", effRaw)
+			}
+			e.Effective = h
+		}
+		if _, dup := seen[e.String()]; dup {
+			continue
+		}
+		seen[e.String()] = struct{}{}
+		out = append(out, e)
+	}
+	if len(out) == 0 {
+		return nil, errors.New("address list is empty")
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].String() < out[j].String() })
+	return out, nil
+}
+
+// depositIdentity computes SHA-256 over the versioned, deterministic encoding
+// `deposit:v1\nstart:<S>\n` + `asset:<contract>:<effective>` lines +
+// `watch:<address>:<effective>` lines, each collection in lexicographic order
+// with no trailing newline (research R3, data-model config identity section).
+func depositIdentity(start uint64, contracts, watches []DepositEntry) string {
+	lines := make([]string, 0, len(contracts)+len(watches))
+	for _, e := range contracts {
+		lines = append(lines, "asset:"+e.String())
+	}
+	for _, e := range watches {
+		lines = append(lines, "watch:"+e.String())
+	}
+	sum := sha256.Sum256([]byte(depositIdentityInput(start, lines)))
+	return hex.EncodeToString(sum[:])
+}
+
+// depositIdentityInput builds the exact bytes hashed by depositIdentity; kept
+// separate so tests can pin the encoding (no BOM, no trailing newline).
+func depositIdentityInput(start uint64, lines []string) string {
+	return depositConfigVersion + "\nstart:" + strconv.FormatUint(start, 10) + "\n" + strings.Join(lines, "\n")
+}
+
+// DepositSnapshot encodes entries as `<address>:<effective>` lines in
+// lexicographic order with no trailing newline — the canonical `assets` /
+// `watches` history snapshot text (data-model Table 4, research R11).
+func DepositSnapshot(entries []DepositEntry) string {
+	lines := make([]string, 0, len(entries))
+	for _, e := range entries {
+		lines = append(lines, e.String())
+	}
+	sort.Strings(lines)
+	return strings.Join(lines, "\n")
 }
 
 func require(getenv Getenv, name string) (string, error) {

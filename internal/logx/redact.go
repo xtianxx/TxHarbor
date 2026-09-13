@@ -32,9 +32,12 @@ var (
 // Redact replaces credential values in s with [REDACTED]. It is safe to call
 // on strings that contain no credentials.
 func Redact(s string) string {
+	// Bearer runs first: the kv/url bare-value classes stop at whitespace, so
+	// they would otherwise eat the "Bearer" keyword and leave the token behind
+	// (authorization=Bearer <token>). Order matters.
+	s = bearer.ReplaceAllString(s, "${1}"+Redacted)
 	s = uriCreds.ReplaceAllString(s, "${1}"+Redacted+"${3}")
 	s = urlParam.ReplaceAllString(s, "${1}"+Redacted)
 	s = kvSecret.ReplaceAllString(s, "${1}="+Redacted)
-	s = bearer.ReplaceAllString(s, "${1}"+Redacted)
 	return s
 }

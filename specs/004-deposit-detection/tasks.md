@@ -1,0 +1,448 @@
+# Tasks: 004-deposit-detection
+
+**Input**: Design documents from `/specs/004-deposit-detection/` (spec.md + 6 澄清 Q1–Q6， plan.md, research.md R1–R11, data-model.md, contracts/observability.md, quickstart.md)
+
+**Prerequisites**: plan.md, spec.md, research.md, data-model.md, contracts/ 均已就绪
+
+**Tests**: 本规格以行为正确性为核心（章程 X/XI），集成测试为必选；单元测试覆盖纯逻辑（解析、编码、分类）。
+并发一致性必须用真实 PostgreSQL + 双 worker 断言，`-race` 仅为补充，不得替代。
+已知偶发本地失败（原因未知）不得豁免任何门禁：时序敏感测试按固定批次执行（每批次恰好 5 次，记录全部结果；任一次失败则该批次不通过；重跑另记批次），证据齐全方可关闭；未解释失败持续为未解决事项（后续成功不自动关闭），无新证据停跑并报告待诊断问题。
+
+**门禁说明**：T000-L 关闭 → 可开始本地范围实现（Anvil + DB 播种）；
+T000-P 关闭 + T022（本地验收）通过 → 方可谈生产接入就绪。本地验收通过不等于生产就绪。
+生产就绪额外依赖上游 003 E1（provider 附录）；004 自身零 RPC，但消费的上游覆盖语义受其约束。
+
+- [x] T000-L 本地实现前置检查（Anvil + DB 播种范围；满足即可关闭）
+  - 需求：R10 待核验项。依赖：无。
+  - 内容：`Coordinator` 第三循环注册点形状确认（`coordinator.go:124-125` 现双循环）；
+    `serve.go` 接线位置确认；goose `000004` 在 `000003` 之后顺序与 `embed.go` 收录确认；
+    pgx → `NUMERIC` 的 `big.Int` 十进制映射写法确认（常规用法，单测锁定）；
+    `deposit:v1` 标准向量 `31822b65…cf6600f0` 复现（`printf | sha256sum`）；
+    Anvil 测试 token 部署方式确认；DB 播种清单完备（canonical 块 + 日志行、前置暂停行、冲突行）。
+    授权事务载体二选一清单确认（SQL 事务函数 vs 受控 SQL 脚本，语义见 R11；选型由 T024 交付）。
+    这些结果仅证明本地行为，不证明生产行为。
+  - 完成条件：上项逐项可勾选；关闭后 T001–T020、T022、T024–T028 可在本地范围按依赖执行。
+  - 状态（2026-09-13）：CLOSED。证据：1)Coordinator形状 coordinator.go:43 RunPair双serve、:123 chan2、:124-125双goroutine、:131 join2，第三循环落点同处；2)serve.go:238 RunPair调用点唯一；3)goose机制 migrate.go:65-93 glob+排序+最高版本target、embed.go:10-13 *.sql自动收录，000004待T001新建；4)pgx v5.11.0标准Numeric{Int,Exp,Valid}用法成立、仓库零现例、T002/T004单测锁定；5)printf无尾换行复现 deposit:v1向量 31822b65…cf6600f0 MATCH；6)Anvil方法=setCode+emitCode无forge先例，T007须显式采用；7)DB播种三类清单分散存在无汇总seed代码符合实现前；8)授权载体二选一封闭（事务函数vs受控脚本，R11），选型归T024。
+- [ ] T000-P 生产门禁（保持 open；约束生产接入与部署，不阻塞本地实现）
+  - 需求：生产就绪。依赖：上游 003 T000-P（E1）关闭 + T022 通过。
+  - 完成条件：在此之前 004 不得标为生产可用；本地验收通过不得自动关闭本任务。
+
+## Format: `[ID] [P?] [Story] Description`
+
+- **[P]**: 可并行（不同文件、无依赖）
+- **[Story]**: 归属用户故事（US1–US5，对应 spec.md 五个故事）
+- 每个任务含：需求、验收场景、依赖、完成条件、涉及文件
+
+---
+
+## Phase 1: Setup (Shared Infrastructure)
+
+**Purpose**: 门禁状态显式记录（无新脚手架；沿用 001/002/003 工程底座）
+
+T000-L / T000-P 见上（本阶段即二者建档）。**Checkpoint**: 门禁状态显式记录；本地工作可继续。
+
+---
+
+## Phase 2: Foundational (Blocking Prerequisites)
+
+**Purpose**: 迁移、配置身份、纯解析逻辑、可观测契约——所有用户故事的前置
+
+**⚠️ CRITICAL**: 本阶段完成前不得开始用户故事实现
+
+- [x] T001 [P] 新增迁移 `migrations/000004_deposit_detection.sql`（5 表 + 序列 + 约束 + 索引）及迁移测试
+  - 需求：FR-06/FR-09/FR-12/I1/I2，data-model Table 1–5。验收场景：D10。依赖：T000-L（本地范围）。
+  - 完成条件：空库迁移、从 003 库升级、重复迁移三条件绿；PK（来源身份）/ `amount > 0` /
+    `status = 'pending'` / `config_hash` 全小写 hex / `next_block >= start_block` / `kind` 枚举约束逐项有断言；
+    history 表 PK（来源链 + 版本 seq，本链递增）、`prev_seq` 链不断、行只增不改（无 UPDATE/DELETE 路径断言）；
+    `request_id` 非空本链唯一 + 首版本 NULL 单行（partial unique）；
+    history 预期目标列（expected_pause_id/revision，双空或双非空 CHECK）；
+    观察行 `version_seq` 外键指向 history（chain_id, version_seq）；
+    暂停表 `pause_id`（SEQUENCE 永不复用）+ `revision` 列 + 审计表 Table 5（含 action 枚举与实例事件唯一约束）；
+    两处二级索引存在（history/审计表无二级索引）；原数据与 002/003 进度零破坏；`DOWN` 先删新表（含 sequence）。
+  - 状态（2026-09-13）：CLOSED。证据：空库/003升级/重复迁移绿（集成37子项），约束负例+正例，pause序列不复用，DOWN回滚后重升；prev_seq自引用FK为存储层落实；NUMERIC真库往返（deposit_numeric_roundtrip集成实跑）：1wei与2^256-1精确，Exp归一探针过，0/-1触CHECK(23514)拒绝。
+- [x] T002 [P] 配置：`TXHARBOR_DEPOSIT_START_HEIGHT` / `DEPOSIT_CONTRACTS` / `DEPOSIT_WATCH_ADDRESSES`
+  （`addr[:effective]` 语法）/ `DEPOSIT_BATCH_BLOCKS` 解析、校验与配置身份（`internal/config/`）
+  - 需求：FR-04/FR-05/FR-06/I5，research R3/R7。验收场景：D5（SC-07 部分）。依赖：无。
+  - 完成条件：单元测试绿——20 字节校验/小写归一化/排序去重（同条目不同高度不合并）/缺省高度=全局起点/
+    任一集合空白拒绝启动；配置身份与 R3 向量一致（`"deposit:v1\n"` 前缀、无 BOM、无尾换行；
+    标准向量 `31822b65…cf6600f0` 实现必须复现）；大小写/顺序/重复差异收敛同一身份；
+    批次/超时参数不在身份内；非法值拒绝启动且 `Summary` 脱敏；
+    history 快照编码（`contract:effective` / `address:effective` 行，字典序，无尾换行）有单测锁定，供 T025 写入。
+  - 状态（2026-09-13）：CLOSED。证据：config单元90通过（含向量复现/归一/拒绝/收敛/脱敏），R3向量独立复算一致；回归夹具env已补（db并发+app三处）；.env.example补4变量（3必填+1可选默认500），示例serve黑盒加载过（deposit_config_hash复现R3向量，后续失败为迁移未应用依赖态）。
+- [x] T003 [P] `deposit_*` 指标组与观测契约测试（`internal/metrics/metrics.go`，`contracts/observability.md`）
+  - 需求：FR-15，research R8。验收场景：SC-09（D1–D9 状态断言共用）。依赖：无。
+  - 完成条件：六指标名/标签/语义按契约断言（含 `state=4` 结构停止、`result` 四分类计数器、
+    `transition_total{result}` 授权审计计数）；
+    空进度删序列；`readyz` 语义冻结（充值暂停/停止不翻转）；日志字段清单与脱敏要求有测试钩子。
+  - 状态（2026-09-13）：CLOSED。证据：metrics 8/8通过（含-race），六指标/标签/语义按契约，readyz不翻转，日志字段与脱敏钩子锁定；logx顺序缺陷已修（bearer先于kvSecret，合成凭据回归，logx/metrics复绿）；残余authorization=Basic无正则留后续。
+- [x] T004 [P] Transfer 解析与匹配纯逻辑 + 单元测试（`internal/indexer/depositparse.go` 新文件）
+  - 需求：FR-01/FR-02/FR-03/FR-04/FR-05。验收场景：D1/D2 的逻辑部分。依赖：无（纯函数，不碰 DB）。
+  - 完成条件：单元测试绿——`topic0` 以 `Keccak256("Transfer(address,address,uint256)")` 断言
+    （禁无断言魔法字符串）；地址 topic 高 12 字节零检查；sender/recipient 低 20 字节提取；
+    `data` 32 字节 big-endian → 十进制字符串（零、1 wei、uint256 最大值 `2^256-1` 边界全覆盖，
+    精确无浮点）；三元组生效高度闭区间规则；白名单/监控集合精确匹配；任一非法整批失败语义。
+    本文件只做纯逻辑，零 DB、零 RPC。
+  - 状态（2026-09-13）：CLOSED。证据：10顶层/26子测试全过（签名派生/归一/零值·1wei·2^256-1往返/闭区间/精确匹配/整批失败），全仓单元绿，count=5与-race附加通过；DB级NUMERIC往返归T002/T006/T001。
+- [x] T024 [P] 授权事务载体选型与模块骨架（`internal/indexer/depositauth.go` 新文件）
+  - 需求：FR-06/FR-12，research R11。验收场景：D11（选型部分）。依赖：T000-L。
+  - 完成条件：SQL 事务函数 vs 受控 SQL 脚本二选一并书面记录理由（注释 + 任务完成记录）；
+    骨架声明授权事务边界（重验门、原子提交项、幂等/过期规则），无业务逻辑也可先合入；
+    依赖本选型的 T025/T027/T028 在此之前不得假定任一载体。
+  - 状态（2026-09-13）：CLOSED。选型：受控SQL脚本（参数化语句序列+显式BEGIN..COMMIT，非PL/pgSQL函数）。依据见depositauth.go头注释：语句级故障注入、协议步骤1为Go工作、零存储过程先例、被评审即被执行产物、入口权限不变；骨架含重验门/原子提交项/幂等过期规则，入口stub待T025实现。
+
+**Checkpoint**: Foundation ready —— 迁移、配置身份、解析逻辑、可观测契约、授权载体全部落定
+
+---
+
+## Phase 3: User Story 1 — 合法匹配生成 Pending 充值观察（Priority: P1）🎯 MVP
+
+**Goal**: 匹配日志恰好一条 Pending 观察；上游对齐与覆盖证明成立；单元原子提交
+
+**Independent Test**: Anvil 部署测试 token 转入监控地址，真库启动，每条匹配恰好一条 Pending 且字段一致
+
+- [x] T005 [US1] 上游对齐与覆盖证明：`H'` 重算比对 + `(S_u,H_u,N_u)` 读取 + `N_u > b` 证明 +
+  canonical 重核（`internal/indexer/depositscanner.go` 新文件）
+  - 需求：FR-07/FR-11/I4，research R2/R5。验收场景：D1/D2（SC-01 部分）。依赖：T001–T004。
+  - 完成条件：env 白名单重算身份与上游行 `config_hash` 不一致即拒绝启动（`upstream_drift`）；
+    覆盖证明除 `N_u > b` 外同时核验链身份一致、上游起点、暂停三行皆无、引用块逐块 canonical；
+     证明逻辑有单测 + 集成断言；先读 checkpoint 后读行的语句序在注释中说明理由（R2）。
+  - 状态（2026-09-13）：CLOSED。证据：depositscanner.go新建（零写入零RPC）；单测7顶层/15子全过；集成7顶层/14子全过（drift拒绝/逐块canonical/三缺口/三暂停阻断/空区间/完整性五分支）；H'重算、N_u>b+链身份+上游起点+暂停皆无+逐行绑定齐全。
+- [x] T006 [US1] 扫描循环 + 单元原子提交（观察写入 + `next_block=b+1` 同事务，精确守卫）（`internal/indexer/depositcommit.go` 新文件；循环骨架落入 `depositscanner.go`，与 T005 同文件按序扩展）
+  - 需求：FR-08/FR-09/I1/I2/I3，data-model 写事务协议。验收场景：D1/D4（SC-01/SC-04 部分）。依赖：T005。
+  - 完成条件：成功单元推进恰为 `b+1`；首单元原子建行（含首版本 history 行，version_seq=1，request_id=NULL，operator=`bootstrap`，与 checkpoint 首行同事务）；
+    读取时捕获当时版本 seq，提交时在锁内按 version_seq 核对仍一致（不一致即放弃重读；回环下哈希相同亦须放弃）；
+    新观察写入捕获版本（禁取提交时刻最新 seq 冒充）；冲突内容比对排除 `version_seq`（回放保留原值）；
+    精确守卫 `next_block=a` + 配置一致；单侧缺失（checkpoint/history 恰其一有行）即损坏态报错，禁补建；
+     行数核对（插入 + 已存在一致 + 合法零生成 = 去重身份数）；未知提交结果重读 DB 幂等继续；
+     任何失败无部分提交。真库断言。
+  - 状态（2026-09-13）：CLOSED。证据：depositcommit.go新建（513行）+scanner循环骨架按序扩展；全仓单元274过；集成TestDeposit 56过（含T005回归）+race附加过；首单元原子/bootstrap同事务/版本锁内重验/冲突排除version_seq/精确守卫/单侧损坏禁补建/行数核对/未知提交重读齐全。未验证：Anvil全栈归T007；durable暂停行与恢复归T014/T015；ServeLoop的*Lease注册包装归T018。记录：批次边界已修正为b=min(a+BatchBlocks-1,N_u-1)（上限语义，依据research R167；溢出/下溢有守卫），仅N_u<=a等待；V1–V6真库验证全过（orchestrator独立重跑三项新集成14过）；commitResultVisible经协议复核无误判窗口（lease串行+精确守卫+行数核对，见lane报告），不重构。
+- [x] T007 [US1] Anvil 全栈集成测试：匹配生成 Pending（`internal/indexer/deposit_integration_test.go`）
+  - 需求：FR-01/FR-02/FR-11。验收场景：D1（SC-01）。依赖：T006。
+  - 完成条件：测试 token 转入监控地址 → 恰好一条 Pending，sender/recipient/amount/来源与区块身份一致；
+    多条匹配各一条；真库。
+  - 状态（2026-09-13）：CLOSED。证据：TestDepositAnvilFullStackPending真Anvil(v1.8.1隔离链)+真PG(18.6)实跑过；2笔真实Transfer经002/003索引后各恰一条Pending（sender/recipient/1与2wei/来源与区块身份/版本与配置哈希逐项对链真值）；非匹配零生成但推进；BatchBlocks=500下完整尾部一次消费（next==N_u）；上游身份重算一致。lane实跑5.44s通过，orchestrator独立重跑通过。测试入口直连组件，不等于生产serve接入（T018开放）。未验证：T008+、完整验收。
+
+**Checkpoint**: US1 独立可跑：匹配生成 + 覆盖证明 + 原子推进成立
+
+---
+
+## Phase 4: User Story 2 — 非匹配与零值不生成但正确推进（Priority: P1）
+
+**Goal**: 非监控/非白名单/零值/低于生效高度零生成且进度连续
+
+**Independent Test**: 预置混合区间，零观察生成，进度单调推进
+
+- [x] T008 [US2] 非匹配与零值推进测试（`internal/indexer/deposit_integration_test.go`，与 T007 同文件，按序执行）
+  - 需求：FR-01/FR-03/FR-05。验收场景：D2（SC-01）。依赖：T006。
+  - 完成条件：非监控地址/非白名单资产/零值/低于任一生效高度逐项零生成且进度越过；
+    合法空区间零生成并推进到 `b+1`；`observations_total{result}` 四分类计数正确。真库断言。
+  - 状态（2026-09-13）：CLOSED。证据：TestDepositMixedIntervalZeroGeneration真库实跑过（DB播种上游行，方法已声明；Anvil路径归T007）；低于生效高度/非白名单/非监控/零值逐项零生成且进度越过，空尾区间推进到b+1；来源行字节一致无新增；四分类 matched=0/nomatch=3/zero=1/invalid=0；最小修正：depositscanner结果观察钩子（nil-safe，T018前默认nil）。lane单跑+5/5批次+TestDeposit回归全过，orchestrator独立重跑通过。未验证：T009+、完整验收。
+
+**Checkpoint**: US1+US2：生成精确，不生成同样精确
+
+---
+
+## Phase 5: User Story 3 — 重复处理与崩溃恢复不重复生成（Priority: P1）
+
+**Goal**: 重放收敛、冲突显式失败；崩溃/未知提交恢复无漏判无部分提交
+
+**Independent Test**: 同单元重放两次；处理中途 kill、事务中断、提交响应丢弃后重启
+
+- [x] T009 [US3] 幂等重放 + 冲突内容比对测试（`internal/indexer/deposit_integration_test.go`，按序执行）
+  - 需求：FR-09/FR-10/I1。验收场景：D3（SC-02）、D2 冲突部分（SC-05）。依赖：T006。
+  - 完成条件：`ON CONFLICT DO NOTHING` + 逐字段比对 + 行数核对；完全重复收敛零新增；
+    任一字段不同整批失败且进度不变；永不无条件忽略冲突。真库断言。
+  - 状态（2026-09-13）：CLOSED。证据：完全重复重放整行含版本关联逐字段相等零新增；5可构造字段逐一整批失败、进度不变、先插新身份回滚、已存行字节不变、零暂停行（status异值受CHECK约束不可播种已声明）。orchestrator独立重跑通过。未验证：T011+、完整验收。
+- [x] T010 [US3] 崩溃与不确定提交恢复 + 事务回滚测试（conn-wrapper 故障注入；`internal/indexer/deposit_integration_test.go`，按序执行；本条按固定批次执行：每批次恰好 5 次并记录全部结果，任一次失败则该批次不通过，不追加运行凑成功；修复或明确诊断后的重跑另记批次并保留原证据）
+  - 需求：FR-09/I2，research R9。验收场景：D3（SC-03）、D4（SC-04）。依赖：T006。
+  - 完成条件：查询后退出/事务中失败/提交响应丢失后重启，从持久化进度继续，无漏判无重复无部分提交；
+    未知结果先重读 DB 再决策（有专用断言）；DB 瞬时错误有界退避零推进。
+  - 状态（2026-09-13）：CLOSED。证据：conn-wrapper确定性注入（转发后断连/转发前断连/闸门同步，无睡眠碰撞）；查询后退出/事务中失败/提交响应丢失/瞬时错误四场景重启无漏判无重复无部分提交；已提交vs未提交专用判定对（连接错误不当回滚）；固定批次恰5次全过（9.5–13.0s），修复前失败日志保留另记批次；最小修正：ServeLoop取消守卫（+7行，取消属关停非裁决）。lane回归TestDeposit 96过+race净，orchestrator独立重跑15过。回滚/未知恢复不报告未经证实成功（发射仅在提交单元与拒收批次）。未验证：T011+、完整验收。
+
+**Checkpoint**: 重试与崩溃行为全部可恢复、可解释
+
+---
+
+## Phase 6: User Story 4 — 配置、生效高度与历史补扫（Priority: P1）
+
+**Goal**: 配置变化拒绝零破坏；暂时缺口等待恢复；结构缺口报错停止并可恢复
+
+**Independent Test**: 改配置后重启；上游滞后追赶；所需历史超出上游范围时的停止与修复恢复
+
+- [x] T011 [US4] 重启配置比较 + 空白名单拒绝 + 上游漂移拒绝测试（`internal/indexer/deposit_integration_test.go`，按序执行）
+  - 需求：FR-06/I5。验收场景：D5（SC-07）。依赖：T002，T006。
+  - 完成条件：改资产/地址/高度/起点重启即拒绝退出（码非零），观察与进度零破坏；
+    比较对象是行内 `start_block` + `config_hash`；空白名单拒绝且绝无上游外读；
+    env 白名单与上游行身份漂移即拒绝（`upstream_drift`）；改回原配置后重启，
+    精确守卫通过并从原进度继续，观察零变化（真库断言）；
+    启动前断言两侧同有同无 + 行内与最新 history 行关联一致，单侧缺失即损坏态报错（禁补建/改回/授权修复）；
+    本条仅覆盖意外漂移改回路径；有意授权转换见 T025–T028，两条路径不得混同。
+  - 状态（2026-09-13）：CLOSED。证据：TestDepositRestartConfigComparison真库8子项全过（资产/监控地址/起点/生效高度四变体各拒*depositConfigMismatchError且检查点next=15、观察快照、history=1零破坏；起点单变体证比较对象为行内start+hash非hash alone；三空白集构造器同步拒绝零表行；上游ff持久身份拒upstream_drift且无检查点行；单侧checkpoint-only/history-only/行内与最新seq2dd分歧三态皆*depositCorruptStateError，loop层复验checkpoint-only；改配置拒后改回原配置精确守卫通过15→21，新观察amount=1/version=1，孤儿行字节一致）。回归：go build净+全仓单元283过。未验证：T012+、完整验收。
+- [x] T012 [US4] 缺口分类与恢复：暂时等待自动续 + 结构报错停止 + 修复重验后原缺口幂等恢复（`internal/indexer/deposit_integration_test.go`，按序执行）
+  - 需求：FR-07/I3/I6，research R5。验收场景：D6/D7（SC-06 部分、SC-08）。依赖：T006。
+  - 完成条件：`p >= N_u`（范围内）→ 等待零推进，补齐后自动从缺口继续；
+    `E < S_u` / 资产不在覆盖 → 报错停止 + `upstream_gap(structural)` 行（范围/原因/配置版本齐全）；
+    禁超时判定（慢速上游不得误判，有专用断言）；人工修复补扫后重验完整，从原缺口幂等恢复；
+    结构缺口的身份采纳走授权转换（T025），本条不断言身份更新本身，只断言缺口分类与等待/停止行为；
+    全程不跳位、不记无充值、不静默调起点/高度。真库断言。
+  - 状态（2026-09-13）：CLOSED。证据：TestDepositGapRecoveryBehavior真库4子项全过（瞬态N_u=10<=a等待1s慢上游零推进零误判，补齐canonical+水位21+15块来源行后自动从原缺口恢复恰[10,20]→21、观察恰1/history恰1；E<S_u停structural/below_upstream_start，gap=10-24+原因+配置版本齐全行内断言，零检查点零观察；资产未索引停structural/asset_not_indexed，gap=10-20；300ms前后classifyUpstreamGap逐值相等无时间输入）。结构缺口身份采纳归T025，本条未断言。未验证：T013+、完整验收。
+- [x] T013 [US4] 覆盖证明专项验证：checkpoint 高度永不单独作为完整证明（`internal/indexer/deposit_integration_test.go`，按序执行）
+  - 需求：FR-07/FR-11/I3。验收场景：D2/D5/D6/D8 交叉。依赖：T005，T006。
+  - 完成条件：空区间（零行但 `N_u > b`）推进 vs 上游缺失（`N_u <= b`）停留的对照断言；
+    新增资产（覆盖内外两种）、配置不一致、提交期间链状态变化（canonical 翻转）四场景下，
+     证明五要素（高度水位、链身份、上游起点、配置指纹+白名单、三暂停行、canonical、lease）缺一即停推。
+     真库断言。
+  - 状态（2026-09-13）：CLOSED。证据：TestDepositCoverageProofElements真库4子项全过（空区间loop推进21零观察 vs N_u<=a停留无行对照；新资产生效12在单元内停structural/asset_not_indexed vs 生效25超b本单元照常提交21后fail-fast停，同错零检查点；deposit_pause行loop停*streamPauseError零写；纯外链覆盖本链等待零状态）。配置不一致引用T011四变体，提交期canonical翻转引用TestDepositCommitCanonicalRevertAborts，暂停三流read层/水位/起点引用既有测试，不重复。未验证：T025+、完整验收。
+- [x] T025 [US4] 授权转换实现：身份更新/位置回放/暂停处置/审计原子提交 + 前置重验（`internal/indexer/depositauth.go`，与 T024 同文件按序扩展）
+  - 需求：FR-06/FR-09/FR-12/I2，research R11，data-model 授权协议。验收场景：D7/D11。依赖：T024，T006。
+  - 完成条件：同一 lease 锁下重验（身份仍旧 + 覆盖重证明 + canonical + 暂停处置条件），任一失败全回滚；
+    history 行以 version_seq 为身份（持锁取 max+1），审计字段（request_id、expected_old_seq、操作者/时间/旧新哈希/位置变化/原因）齐全，缺任一即回滚；
+    暂停处置按实例 + 修订匹配（含调用方 expected_pause，非空必须一致，否则按目标替换拒绝）并同事务写审计行；
+    双空目标按保留／必须处置分支执行：证据在 scope 外可保留时提交身份／位置／history 且暂停行原样保留
+    （消费仍停）；证据在 scope 内已证解决而无目标时拒绝（2026-09-13 批准修订：拒绝无记录不绑定 ID，同 ID 补目标按独立候选完整重验）；
+    锁内暂停状态与依据不一致 → 回滚并报告状态变化，不扩大授权；
+    授权入口完整性前检（两侧同有＋行内与最新 history 关联一致），损坏态拒绝（只读返回不受影响）；
+    授权路径禁 UPDATE／合并暂停行（仅保留或条件 DELETE＋同事务审计）；
+    请求幂等按 request_id 先查 history：同 ID 同参返回已记录结果（即使已进入更晚版本），同 ID 异参明确拒绝（已记录；未记录失败不绑定，见 T027 绑定规则），
+    异 ID 即使同参亦独立校验；expected_old_seq 等于当前最新 seq 否则过期拒绝；过期拒绝报告预期与当前版本；
+    提交成功即生效；切换前已提交有效；跳过 owner/token 检查但操作员身份入审计；空授权（H′==H）拒绝。真库断言。
+  - 状态（2026-09-13）：CLOSED。证据：depositauth.go受控SQL脚本实现（BEGIN→过期占位lease行→FOR UPDATE锁→锁内重验→原子提交；步骤1完整性分流+request_id四则只读返回，H'重算/replay min/过期/空变更/上游绑定/缺口可行/暂停依据，步骤3锁内重验，步骤4 history+checkpoint精确守卫+条件DELETE+审计同事务，未知提交以DB为准，并发request_id冲突回滚重查）。单测4过（R3向量/快照解析/回放min/缺口解析）；集成TestDepositAuth 3顶层+9子项全过（lane 3轮，orchestrator独立重跑14过）：H1→H2(v2/replay12/retained)+旧依据提交版本隔离拒零写+v3后跨版本回读v2、同ID异参拒、异ID过期/空变更独立裁决、显式目标释放+审计、needs_006无目标保留/有目标拒、可处置无目标拒、目标替换拒、无源版本拒、双侧单侧损坏态，每拒皆快照零变化。偏差（已澄清，2026-09-13 裁决）：同步 SET start_block=S_new 为正确语义，偏差关闭（起点列与身份在授权事务内原子更新，首版及历次起点由 history 不可变保留；next_block 仍按回放 min/收缩规则，不跳过区间）；实现 depositauth.go:522-525 已与裁决一致，无需改动。回放缺口起点候选与收缩边界归T026。未验证：T026+、完整验收。
+- [x] T026 [US4] 历史回放与收缩边界实现：最小值规则/收缩向前/混合双规则/history 快照读写（`internal/indexer/depositscanner.go`/`depositcommit.go` 按序扩展 + `depositauth.go` 回放计算）
+  - 需求：FR-05/FR-06/FR-07/I1/I3，research R5/R11。验收场景：D6/D7/D11。依赖：T025。
+  - 完成条件：组合有效起点 max 规则 + replay min 规则 + 上游起点仅检查（禁抬高裁剪）；
+    纯收缩 replay_from = 当前 next；收缩边界 = 切换前 next，禁追溯；回放幂等不新增不重置；
+    history 快照读写；混合增减双规则并存。真库断言。
+  - 状态（2026-09-13）：CLOSED。证据：实现增量仅缺口起点折入（basis.gapFrom+主流程min；消费侧零改动，复用既有版本隔离/收敛路径）。TestDepositAuthReplayShrink真库5子项全过（推迟高度replay=15位置不动、旧观察(5,1)保留；起点提高replay=15；加B再删B三版本链replay=12、B观察(7,2)保留；resolved gap=10-14+新资产eff18经显式目标释放replay=10确证fold、审计release v2；新起点5<S_u=20判structural拒零变化）。TestDepositReplayConsumerConverges真库过（回放[10,20]观察仍2且版本皆1、history仍2行，后续覆盖观察3版本2、位置26）。回归：全仓单元287过。嵌套/二次转换归T028。未验证：T027+、完整验收。
+- [x] T027 [US4] D11 授权子集测试（1）：失败回滚/重复/过期/未知/旧在途隔离/越权解除（`internal/indexer/deposit_integration_test.go`，按序执行；本条按固定批次执行：每批次恰好 5 次并记录全部结果，任一次失败则该批次不通过，不追加运行凑成功；修复或明确诊断后的重跑另记批次并保留原证据）
+  - 需求：FR-06/FR-09/FR-12。验收场景：D11。依赖：T025。
+  - 完成条件：前置任一失败全回滚原状；旧版本在途提交 0 行；请求四则断言——同 ID 同参跨版本重试返原结果不重执行（已记录）、
+    同 ID 异参拒绝无状态变化（含已绑定请求的同 ID 更改目标）、异 ID 同参独立校验、过期拒绝报告预期与当前版本；未记录拒绝后的同 ID 补目标按独立候选执行（见 225 批准修订）；
+    显式目标被替换时授权全回滚（身份／位置／history／暂停均不变），不得改处置新暂停；
+    NULL 目标遇到已有或并发新增暂停时，已有暂停原样保留、必须处置则拒绝并要求重新明确授权；
+    保留分支成功时提交身份／位置／history、暂停原样保留、消费仍停止（暂停行仍在、零推进），
+    保留暂停后续可经针对该实例的人工解除＋现版本重验恢复（由 T015 锁定）；
+    裁决期间暂停变化（新增／替换／修订变化／消失）→ 回滚并报告状态变化，不处置；
+    缺目标拒绝后沿用旧 request_id 加目标重试 → 按独立候选请求完整重验执行（2026-09-13 批准修订：
+    拒绝无记录不绑定 ID，不再强制新 request_id；成功绑定后同 ID 改目标仍拒绝；目标/版本变化后再次请求按当前条件拒绝）；
+    H1→H2→H1 下旧授权按过期拒绝（可定位原记录，不虚构成功）；
+    提交未知以 DB 为准；暂停不可越权解除（无授权的删行/改行/清行即失败）；
+    陈旧实例条件删除新暂停实例影响 0 行且审计无该实例释放记录；
+    相同内容复现与同时间戳下观察版本引用可区分（seq 外键断言）；真库断言。
+  - 状态（2026-09-13）：CLOSED。证据：lane fix-10在deposit_auth_integration_test.go追加8个TestDepositAuthD11*（140-147；未知提交DB为准/并发同ID/回环旧授权过期/缺目标重定目标/保留暂停停消费/陈旧实例零行/内容复现时间戳区分/暂停翻转压力不变式）。首批-count=5共40次35过：唯一失败MissingTargetThenRetarget同断言5次，根因为规范冲突（tasks:225/quickstart D11/data-model:263-264的同ID异参拒绝 vs data-model:273未记录按未命中独立执行），实现按后者执行，lane未弱化断言未动实现；用户批准修订后（绑定仅由持久化记录确立）修订5文件约20处条文，测试改按独立候选成功断言并补规则断言（拒后无记录/绑定后改目标拒/条件变化按现条件拒），实现加无暂停+目标的事务外预检；T026 fold连带更新旧释放期望replay 12→10；新批次-count=5共40次40过；orchestrator独立重跑TestDepositAuth* 28过+全仓单元287过。失败日志保留（/tmp/opencode/t027/batch1.log）标注规范冲突及批准修订。测试落点经批准记于auth测试文件（同包helper复用），不视为偏离"按序执行"。
+- [x] T028 [US4] D11 授权子集测试（2）：历史回放/收缩边界/混合变更/多次切换嵌套（`internal/indexer/deposit_integration_test.go`，按序执行；本条按固定批次执行：每批次恰好 5 次并记录全部结果，任一次失败则该批次不通过，不追加运行凑成功；修复或明确诊断后的重跑另记批次并保留原证据）
+  - 需求：FR-05/FR-06/FR-07/I1/I3。验收场景：D6/D7/D11。依赖：T025，T026，T012。
+  - 完成条件：回放幂等无新增（已有观察保留原版本引用）；收缩历史保留、边界向前、无跳位；
+    混合双规则并存；回放未完成时二次转换重算收敛；嵌套回放中边界之后尚无观察的来源适用后续收缩；
+    H1→H2→H1 下旧消费提交被版本隔离守卫放弃并重读（禁打最新 seq 冒充）；
+    结构缺口判定（禁裁剪）；真库断言。
+  - 状态（2026-09-13）：CLOSED。证据：TestDepositAuthNestedReplay真库4子项（150-153；二次转换重算收敛v3 replay10历史链不断、无观察来源收缩后消费仅生成A行、B行静默、回环新行新seq+旧依据版本隔离拒零写+v3重读收敛21、资产历史低于起点判structural拒），落点经T027批准记于auth测试文件。固定批次：首批1次未解释偶发（lease脚手架即时won=false，新库新链，未触及004断言；日志~/.local/share/rtk/tee/1789300034_go_test.log保留为失败批次），隔离重跑5/5、新批次-count=5共25/25通过；orchestrator独立重跑TestDepositAuth* 28过。偶发未解释，按门禁保留为未解决事项（T020/T017全量时复核，不自动关闭）。未验证：T014+、完整验收。
+
+**Checkpoint**: 配置与历史的正确性由证明保证，而非运气；授权转换与回放见 T024–T028
+
+---
+
+## Phase 7: User Story 5 — 链暂停、来源失效与可观察（Priority: P2）
+
+**Goal**: 失效输入零生成；分层恢复可验收；并发单次有效；运维可观测
+
+**Independent Test**: 构造暂停与失效；解除上游暂停观察自动续；人工解除走重验门；双真 worker 竞争
+
+- [x] T014 [US5] 链视图复核 + `chain_view_changed` / `validation_failed` 暂停实现与测试（实现落入 `depositscanner.go`/`depositcommit.go`（T005/T006 已建，按序扩展）；测试落入 `internal/indexer/deposit_integration_test.go`）
+  - 需求：FR-12/I4。验收场景：D8（SC-06）。依赖：T006。
+  - 完成条件：引用块缺失/非 canonical/来源失效 → 不提交不推进 + 暂停行；
+    新建暂停行携带 `pause_id`（SEQUENCE 分配）+ `revision=1` + `version=<seq>` 标签；
+    `detail.class` 七分类正确；不回退进度不删历史；暂停重启后仍有效。真库断言。
+  - 状态（2026-09-13）：CLOSED。证据：depositscanner.go新增暂停证据映射+Table3原子条件专用暂停事务（lease裁决/首胜收敛/检查点证据门/version=<seq>戳，批回滚永不直写，3次有界重试）+ServeLoop三停止路径钩子（depositcommit.go零改动）。TestDepositPauseWriteAndStop真库6子项全过（结构缺口upstream_gap高10rev1版0零推进；链视图缺15行；非法topic0行validation_failed类内+版本0；冲突identity_conflict版1预存行完整；漂移零暂停行；重启二轮streamPauseError同实例）。  回归全仓单元287过。合并更新（累积原因段追加/revision+1/merge审计）不在本任务完成条件内，现由 T029 承接（2026-09-13 Q8 累积式裁决；T014 保持 CLOSED，其完成条件不含 merge；历史注记：此前记为无任务承接的规划缺口，现已消解）。未验证：T015+、完整验收。
+- [x] T015 [US5] 分层恢复验证：上游解除自动续 + 自身暂停按实例条件解除与重验门 + 需 006 时保持暂停（`internal/indexer/deposit_integration_test.go`，按序执行；本条按固定批次执行：每批次恰好 5 次并记录全部结果，任一次失败则该批次不通过，不追加运行凑成功；修复或明确诊断后的重跑另记批次并保留原证据）
+  - 需求：FR-12/I6，research R6。验收场景：D8（SC-06）。依赖：T014。
+  - 完成条件：上游行消失 + 链视图一致 + 覆盖完整 + 位置有效 → 自动从原位置继续，
+    且 004 从未清除上游行（有断言）；自身暂停按实例条件解除（`pause_id` + `revision` 匹配）并同事务写审计行，
+    审计失败则解除回滚；解除后重验任一失败 → 重新建行（新实例身份）保持暂停；
+    陈旧条件删除新实例影响 0 行且新行仍在（P1→P2 替换场景必测）；
+    原目标已解除但当前已有 P2 时再解除：查审计返原结果（原结果 + 原操作者），不重写、不触碰 P2、不归功本次调用者；
+    无独立解除请求身份时只返回该事实，不声称识别为同一次请求（操作者/原因/实例/修订相同亦不证明同一请求）；
+    保留暂停的跨版本解除：暂停打标版本与当前 seq 不一致时，仍可按实例＋修订条件解除＋同事务审计，
+    解除后按当前版本重验（版本标签不作为解除条件）；
+    解除动作本身零写入消费状态（解除≠授权）；旧分叉失效/需回退而 006 不可用 → 保持暂停且 `needs_006=true` 可查。
+    授权转换路径的暂停处置见 T025/T027，本条仅覆盖人工删除路径。
+  - 状态（2026-09-13）：CLOSED。证据：depositscanner.go新增ReleaseDepositPause（条件DELETE+同事务审计、零消费写入、审计版取锁内最新、无版本记0、操作者原因必填）+两SQL。TestDepositPauseLayeredRecovery真库7子项固定批次-count=5共40/40过（上游行解除自动续21且decoy不动无暂停行；手工解除审计release/操作者/原因/版0且零消费写入；解除后仍坏重建新实例再修补恢复21；陈旧解除0行且P2审计缺命中；重解除返原审计不重写不碰P2；跨版本暂停v1打标v3解除审计版3+回放收敛；needs_006三轮保持字节一致可查）。首轮1失败系测试遗漏解除P2步骤（实现照章停，测试 bug），修正后新批次。未验证：T016+、完整验收。
+- [x] T016 [US5] 暂停并发与原子条件测试（首暂停获胜 + 证据过期放弃 + 失权禁写过期暂停）（`internal/indexer/deposit_integration_test.go`，按序执行；本条按固定批次执行：每批次恰好 5 次并记录全部结果，任一次失败则该批次不通过，不追加运行凑成功；修复或明确诊断后的重跑另记批次并保留原证据）
+  - 需求：FR-09/FR-12，data-model Table 3 原子条件。验收场景：D8。依赖：T014。
+  - 完成条件：并发暂停恰一行；进度已变/证据消失/lease 失权 → 放弃且零写入；批回滚永不直写暂停行。
+  - 状态（2026-09-13）：CLOSED。证据：TestDepositPauseConcurrency真库4子项（8写并发恰一行rev1；检查点移动/首单元依据消失皆放弃零写；DB时钟过期后takeover持有、旧lease裁决失败零写；冲突批回滚零暂停行+loop路径恰一行chain_view_changed）。首轮1失败系测试脚手架误用（takeover前未过期，确定性诊断），改DB时钟置过期后新批次；与T015联合-count=5共65/65过。未验证：T017+、完整验收。
+- [x] T017 [US5] 双真 worker 竞争 + 旧 worker 延迟提交：真实 PostgreSQL 双实例一致性测试（含偶发有界重复）
+  - 需求：FR-08/FR-09，research R1/R2。验收场景：D9（SC-02/SC-03 并发部分）。依赖：T006。
+  - 完成条件：两个独立 pool + 独立 lease 句柄的真 worker 同抢同进度，有效推进恒为 1（`internal/indexer/deposit_integration_test.go`，按序执行）；
+    旧 token/过期进度提交 0 行；**显式要求：本条必须跨 worker 数据库断言，
+    `-race` 仅补充进程内竞争，不可替代本条**；因偶发失败原因未知，本条按固定批次执行：
+    每批次恰好 5 次并记录全部结果，任一次失败则该批次不通过，不追加运行凑成功；
+    修复或明确诊断后的重跑另记批次并保留原证据，**不允许用"重跑通过"掩盖失败**。
+  - 状态（2026-09-13）：CLOSED。证据：TestDepositDualWorkers真库3子项（190-192；双独立pool/lease句柄首单元竞速恰一次推进、跨pool断言、失败方三选一；旧token延迟提交fencing零写；stale依据重提version隔离零写）。单跑4/4，固定批次-count=5共20/20过。未验证：T018+、完整验收。
+- [x] T018 [US5] `coordinator.go` + `serve.go` 第三循环接线：三 serveLoop 并发 + 回归 + 退出 + 故障传播
+  - 需求：FR-08/FR-12，research R1。验收场景：D3 退出部分。依赖：T006，T016。
+  - 完成条件：`Coordinator` 唯一 Acquire 循环 + 唯一 Heartbeat 下并发跑三 loop，
+    header/log 行为不变（002/003 回归测试全绿）；应用 serve 路径启停 deposit 循环的集成断言
+    （沿用 `internal/app/serve_integration_test.go` 模式；仅断言启停与行为不变，不扩展其职责）；
+    任一失权/心跳丢失即全停重取（专项集成测试绿）；
+    终止信号下未提交零残留；失权/配置拒绝/不可重试错误按类别退出或停写。
+    本任务是唯一的既有文件行为触碰点，范围不得扩大；授权转换走特权 SQL 路径，不经过 serve 循环，不改变本条接线。
+  - 状态（2026-09-13）：CLOSED。证据：coordinator.go泛化serveStreams(N路)+RunTrio（RunPair原样委托，行为不变）；serve.go构造depositScanner（DepositConfig全映射）+SetResultObserver接m.ObserveDepositObservation+RunTrio适配闭包（lease直传，授权仍在环外）。TestRunTrio*单元3过（三路同轮/存款停止错扇出无重取/失权三路重取）；TestServeDepositLoopStartStop真Anvil+PG全链路过（004检查点行出现+header/log检查点推进+SIGINT干净退出0）；TestServeDepositConfigRefusalEndToEnd过（空白白名单非零+点名变量）。回归：单元290过、pair/trio 6过、既有serve集成5过。gauges（Next/State/Lag）零生产调用者，留T019。deposit env无条件必需（T002缺一拒绝启动哲学；影响无deposit既有部署，见此注）。未验证：T019、完整验收。
+- [x] T019 [US5] 可观察端到端：进度/滞后/状态/暂停缺口查询 + 脱敏审计（指标断言落入 `internal/metrics/metrics_test.go`（按序扩展）；端到端落入 `internal/indexer/deposit_integration_test.go`）
+  - 需求：FR-15。验收场景：SC-09（D1–D9 状态断言共用）、D11 转换审计。依赖：T003，T014，T025。
+  - 完成条件：运行/等待/重试/暂停/结构停止各态下进度、滞后、重试、暂停或缺口原因可查
+    （指标 + 诊断 SQL）；`transition_total` 计数与 history 版本链审计 SQL 可查（含 seq 排序、request_id 查询与观察↔版本关联查询）；
+    暂停实例审计 SQL 可查（释放/合并事件、实例全生命周期）；
+    解除结果判定查询可查（条件解除影响 0 行后按实例查审计：命中返原结果，未命中按陈旧处理）；
+    全量日志凭据零出现；金额仅十进制；无无限制原始数据转储（有审计测试）。
+  - 状态（2026-09-13）：CLOSED。证据：接线增量（scanner原子state/next/ok+DepositState/DepositProgress访问器+SetPauseObserver单次触发；serve depositObserver三采样点+暂停钩子；auth transition钩子ok/error/rejected分类包装）。TestDepositObservabilityEndToEnd真库过（10条契约诊断SQL原样执行断言：进度/暂停/三流lag/覆盖/地址/版本链/请求查/暂停审计/解除判定命中与未命中/观察版本join；transition钩子[ok rejected error]；暂停钩子恰1次；提交后状态0/1、停机3；金额十进制、日志文本单行、快照可解析）。StructuralStopState锁state=4、BackoffState锁state=2。metrics包契约断言本已齐全（5 states/next±/lag±/4 results/pause/3 transitions），未改动。回归：deposit集成176过、单元290过（1次serve端口偶发，隔离39/39，环境性，保留记录）。depositObserver算术由T018启停执行覆盖+访问器值已锁，未做LogScanner假体单测（CheckPoint需真eth客户端，记局限）。serve端口偶发原始证据已定位：日志 ~/.local/share/rtk/tee/1789304323_go_test.log，TestServeRejectsBadConfigBeforeListening/invalid_pg_dsn 与 invalid_rpc_url，逐字错误 `address 127.0.0.1:41924 still in use after config failure: listen tcp 127.0.0.1:41924: bind: address already in use`。  未验证：完整验收T020。
+
+- [x] T029 [US5] 暂停累积合并实现与测试：新持久原因段追加 + revision+1 + merge 审计（实现落入 `internal/indexer/depositscanner.go` 暂停写事务；测试落入 `internal/indexer/deposit_integration_test.go`）
+  - 需求：FR-12/I6，research R6/R11，data-model Table 3（2026-09-13 Q8 累积式 8 行为）。验收场景：D8（SC-06 部分）。依赖：T014。
+  - 完成条件：已暂停且新持久性原因锁内重验成立 MUST NOT 丢弃；保留 `pause_id`，新有效原因 `revision` +1，
+    各原因类型/范围/来源版本/证据全保留不覆盖；needs_006 按全体原因共同决定不降级、缺口信息不消失；
+    相同有效原因重复幂等（零写零审计）；仅暂停写事务、lease/版本/修订协议、原子失败全回滚；
+    授权仅保留/条件 DELETE；合并后旧修订解除/处置必拒；暂时等待/过期/失权不成因。
+    段编码：首段沿用 `<ev.detail> version=<S>`，新段 `\n+merged[rev=<R>] kind=<K> height=<H> version=<S> :: <ev.detail>`；
+    等价谓词按 (kind, height, core) 精确相等（version 不参与）；merge 审计 `action='merge'`、operator 固定
+    `system:pause-writer`、reason 携带 lease owner 实值（持锁上下文，禁外部指定）＋触发路径
+    （readCoveredUnit/parse/commit）＋配置版本＋合并原因；merge 成功不触发 pauseObserver、不动 pause_total。
+    真库断言至少覆盖：①首暂停+新增结构缺口两原因保留（两段+rev2+merge 审计 1 行）；②needs_006 合并后
+    普通/旧修订解除被拒、轻原因不降级；③重复投递幂等（rev/审计/observer 不变）；④合并后旧修订人工解除与
+    授权处置失配拒绝；⑤并发不同新原因不丢失（双路各一段）+旧基证据不合入；⑥merge 审计 INSERT 强制失败
+    全回滚；⑦WriteAndStop/LayeredRecovery/Concurrency/DualWorkers 及 auth 暂停相关回归。
+    时序敏感项固定批次恰 5 次并记录全部结果；失败按回归处理，不弱化既有断言。
+  - 状态（2026-09-13）：CLOSED。证据：规划同步Q8（spec+data-model:89/2b分支+research+plan）；
+    实现仅depositscanner.go暂停写事务（merge UPDATE+merge审计同事务，段编码/等价谓词/乐观revision守卫+有界重试，operator固定system:pause-writer，merge不触发observer；零migration、授权/释放零改动）。
+    TestDepositPauseMergeCumulative真库7子项全过（两原因保留/needs_006不降级/重复幂等/旧修订拒绝/并发不丢失+旧基不合入/审计失败回滚/已解决不合并）；
+    固定批次：merge 5/5（35子项）、LayeredRecovery/Concurrency/DualWorkers各5/5、auth暂停5项单次过，日志/tmp/opencode/t029/；
+    orchestrator独立复验：lint+全单元绿，indexer全包334过0失败。L1 operator由所有者定system:pause-writer。
+    端口偶发未触及、无新证据，保持未解决。
+
+**Checkpoint**: 暂停可解释、恢复可验收、并发由数据库保证、运维可观测
+
+---
+
+## Phase 8: Polish & Cross-Cutting Concerns
+
+**Purpose**: 全量验证、门禁复核、实现准入
+
+- [x] T020 全量验证：`make build` + `make lint` + `go test ./...` + `go test -tags integration ./...` 全绿
+  - 依赖：T005–T019，T024–T028。完成条件：四命令一次全绿；T010/T015/T016/T017/T027/T028 批次证据齐全；
+    未解释失败持续为未解决事项（后续成功批次不自动关闭；无新证据停跑并报告待诊断）；
+    D11 全部断言证据齐全（承接任务见 T015/T018/T025/T027/T028，不在本条复述）；失败按回归处理，不弱化断言；
+    否定性断言：观察表外无余额写路径、deposit 包外无 Pending 之外状态推进（grep 断言，承接 FR-13/14）。
+  - 状态（2026-09-13）：CLOSED。关闭依据为完成条件逐项满足（本次判定，非豁免）；历史未解决记录（端口偶发）依“持续为未解决事项”条款保留，不声称修复。
+    证据：终态四命令一次全绿——make build ✓；make lint ✓（gofmt+双tag vet；附带修 depositscanner.go 纯对齐，d3dbe3d 遗留，零语义）；
+    make test 全包 ok；make test-integration EXIT=0 八包全绿（app 22s/config/db 58s/eth/health 15s/indexer 314s/logx/metrics），日志 /tmp/opencode/t020/full_integration_final.log。
+    本批最小修正（先修后验）：depositauth.go 授权占位租约过期 1s→1h（容忍宿主机时钟回拨，lease 严格接管不动）+depositITLease !won 回读诊断；
+    暂停 B（同实例旧修订解除失配：手工 Release (false,nil)+零审计 / 授权 ErrAuthRejected+覆盖 RowsAffected!=1 分支）+C（两路径审计失败回滚，复用 depositFault 通道零生产改动）；
+    health 夹具补 deposit 三 env（T018 无条件必需的既有缺口，首轮全量暴露，非断言弱化）；新增 TestDepositWritePathConfinement（FR-13/14 否定性 grep 断言：amount 写仅 deposit_observations 一处、零 UPDATE/DELETE 观察表、pending 字面唯一、包外仅 metric 名）。
+    批次：timing batch A 15/15（NestedReplay+RetainedPause+SameInstanceOldRevision ×恰5次，/tmp/opencode/t020/timing_batch5.log）；
+    manual batch B 5/5（LayeredRecovery 含 2 新子项各 5 次，/tmp/opencode/t020/manual_batch5.log）；TestDepositAuth* 子集 15 集成+2 单元绿。
+    保留未解决项（持续有效，后续成功不自动关闭）：(1) serve 端口偶发：已定位测试与原始输出（TestServeRejectsBadConfigBeforeListening/invalid_pg_dsn 与 invalid_rpc_url；日志 ~/.local/share/rtk/tee/1789304323_go_test.log；逐字错误 `address 127.0.0.1:41924 still in use after config failure: listen tcp 127.0.0.1:41924: bind: address already in use`），占用者未知且未解释；无新证据停跑；缺失项：占用者身份、ss 快照、39-39重跑日志；ObservabilityE2E 本身不绑端口已排除；取证方案已记，不在 T020 内无目的重跑）。
+    (2) checkpoint.start_block 语义已决（2026-09-13 Q7 裁决：同步 S_new 为正确语义，spec/data-model/research 已同步，T025 偏差注记已关闭；此前“未决”记录保留为历史）。
+    (3) merge 曾未实现（data-model:89 与 :95-98 曾自相冲突，T014 旧开放项），现已由 T029 实现并验证（Q8 累积式；T029 CLOSED；此条保留为历史）。
+    (4) T028 lease 旧失败日志保留为历史（~/.local/share/rtk/tee/1789300034_go_test.log），本次已解释+修复+新批次，不追认关闭旧失败。
+    本批收口（T029契约复核+D1/D2修复）：复核报D1（缺口评估只读首段）/D2（次段kind未逐段处置）功能性缺陷，已修复为全段对称评估（lo/gapFrom取最小值、任一段未覆盖即点名拒绝；单段行为逐字节同义，现有auth测试全绿为证）；
+    补D3（合并后人工释放成功）/D4（合并后授权成功处置，ReplayFrom=10判别旧实现12）/多段次因未覆盖拒绝三断言；observability限制措辞4处（零新增日志）；
+    serve探针失败打印已捕获stderr（测试侧最小诊断，单跑13过、分支未触发符合预期）。
+    终态四命令一次全绿：build ✓、lint ✓、unit全包ok、integration EXIT=0八包全绿（app 19.8s/config/db 63s/eth/health 16.8s/indexer 357.6s/logx/metrics），日志/tmp/opencode/t020/full_integration_t020close.log。
+    固定批次：auth/pause 140过（恰5次）、TestDepositAuth 17/17（含新拒绝断言）、WriteAndStop 11；中途2次失败为测试审计读歧义（merge与release行同修订），已按action过滤精确修正、断言未弱化、原始日志保留（~/.local/share/rtk/tee/1789312990、1789313048_go_test.log）。
+    未执行：T022/T023；未关闭 003/004 T000-P；未推送/未合并。
+- [x] T021 实现前规划复核（静态一致性，不依赖任何实现与测试结果）
+  - 依赖：无（仅依赖 spec/plan/research/data-model/contracts/quickstart/tasks 文档）。
+    显式不依赖 T020——本任务在实现开始前即可关闭；关闭是本地实现准入条件之一（另一条件为 T000-L）。
+  - 完成条件：逐项核对 FR-01–16、I1–I6、SC-01–09、D1–D11（11 个验证场景）在 tasks 的覆盖（见下表）；
+    确认无循环依赖、无超出规格的设计、无需上游变更的假设落空；输出实现准入结论（通过 / 附条件通过）。
+    本任务只放行"开始本地实现"，不等同实现验收，更不等同生产就绪。
+  - 状态（2026-09-13）：CLOSED，通过（只放行开始本地实现）。证据：FR-01~16/I1~I6/SC-01~09/D1~D11/R1~R11 静态全覆盖、无环依赖（T021零依赖、T022→T020、T023→T022）、无超规格设计、无需上游变更假设落空；003 T020b内联CLOSED记录存在（003 tasks.md:215-222）按任务原文充分、缺acceptance.md不构成本轮门禁；后续测试未执行属后续任务未倒置；T000-P保持open。
+- [x] T022 本地范围验收（实现后；名称固定，不得与生产就绪混称）
+  - 依赖：T020（需全部本地测试证据）。完成条件：凭 Anvil/DB 播种测试证据逐项验收 D1–D11（11 个验证场景）与 SC；
+    输出本地验收结论 + 未解决项（T000-P open、上游 003 E1 open）；发现语义冲突先澄清，不私改规格。
+    通过仅表示"004 本地范围验收通过"，"生产接入就绪"需 T000-P 关闭后另行判定。
+  - 状态（2026-09-13）：CLOSED。结论：004 本地范围验收通过（记录见 acceptance.md）。
+    D1–D11/SC/FR 逐项凭 Anvil/DB播种/故障注入/serve接线/单测证据验收，批准项 P1–P6 覆盖；
+    复用 T020 四命令与固定批次有效结果，缺口仅补 G7 定点单跑（merged_row_manual_release 通过）与 G12 注释修正，未重跑全套件。
+    未解决项：T000-P open、上游 003 E1 open、serve 端口占用者未知（A 类：测试与原始输出已定位，未解释未修复，此后一切运行未复现）。
+    通过不等同生产接入就绪；LSP 曾报 depositauth.go 重声明，经 build＋vet 实证为陈旧误报（单声明 :1164），无破坏。
+- [ ] T023 提交 PR + 远端 CI 通过 + 合并（仓库流程门禁，由实现仓库执行，不在规划步骤执行）
+  - 依赖：T022（需本地范围验收结论）。完成条件：PR 发起 + 远端 CI 全绿 + 合并；
+    本任务只记录仓库执行动作，不复述本地验收，不将远端 CI 结果混入 T022；
+    生产就绪仍需 T000-P 关闭后另行判定。
+
+---
+
+## Dependencies & Execution Order
+
+- **Setup (T000-L/T000-P)**: T000-L 关闭后 T001–T020、T022、T024–T028 本地工作可推进；T000-P open 约束生产接入与部署，不阻塞本地实现。
+- **Foundational (T001–T004，T024)**: 全部完成 → 阻塞所有 US。T001/T002/T003/T004/T024 相互独立（不同文件；T024 仅依赖 T000-L），可并行。
+- **US1 (T005–T007)**: 依赖 Foundational；T006 依赖 T005；T007 依赖 T006。
+- **US2 (T008)**: 依赖 T006；与 US3–US5 可按文件分工并行（默认按优先级顺序执行）。
+- **US3 (T009–T010)**: 依赖 T006；T009/T010 同测试文件，按序执行。
+- **US4 (T011–T013，T025–T028)**: 依赖 T006（T011 另依赖 T002）；T013 依赖 T005；
+  T025 依赖 T024（选型结论）+ T006，依赖 T025 的 T026/T027/T028 在 T024 关闭前不得假定任一载体；
+  T026 依赖 T025；T027 依赖 T025；T028 依赖 T025/T026/T012。
+- **US5 (T014–T019，T029)**: 依赖 T006；T015/T016 依赖 T014；T018 依赖 T006/T016；T019 依赖 T003/T014/T025；T029 依赖 T014。
+- **Polish (T020–T023)**: T020 依赖所有实现任务（含 T024–T028、T029）；T021 独立于实现（可先行关闭）；T022 依赖 T020；T023 依赖 T022。
+- 依赖图无环：T021 零依赖；T022 仅 →T020；T023 仅 →T022；T024 仅 →T000-L；T025–T028 均不指向 Foundation/US1–US3；无反向边。
+
+## 覆盖矩阵（复核用）
+
+| FR/SC/不变量 | 任务 | 验收场景 |
+|-------|------|----------|
+| FR-01/02/03 | T004，T006，T007 | D1，D2 |
+| FR-04/05 | T002，T004，T008，T026 | D1，D2，D5，D6，D7 |
+| FR-06 | T002，T011，T024，T025，T027 | D5，D7，D11 |
+| FR-07 | T005，T012，T013，T026，T028 | D2，D5，D6，D7，D11 |
+| FR-08 | T006，T017，T018 | D1，D3，D9 |
+| FR-09 | T001，T006，T009，T010，T016，T017，T025，T027 | D3，D4，D8，D11 |
+| FR-10 | T006，T008，T009 | D2，D3 |
+| FR-11 | T001，T005，T006，T014 | D1，D8 |
+| FR-12 | T005，T014，T015，T016，T018，T025，T027 | D8，D11 |
+| FR-13/14 | T021（实现前范围门禁）+ T022（实现后验收） | — |
+| FR-15 | T003，T019，T025 | SC-09，D11 |
+| FR-16 | T021 | — |
+| I1 | T001，T006，T009，T026，T028 | D1，D3，D6，D7，D11 |
+| I2 | T001，T006，T010，T025 | D1，D3，D4，D11 |
+| I3 | T006，T012，T013，T026，T028 | D4，D6，D7，D11 |
+| I4 | T005，T014 | D1，D8 |
+| I5 | T002，T011 | D5 |
+| I6 | T006，T012，T015，T027 | D6，D7，D8，D11 |
+| SC-01–05 | T007–T010，T014 | D1–D4，D8 |
+| SC-06 | T012，T014，T015，T027 | D6，D8，D11 |
+| SC-07 | T011，T027，T028 | D5，D11 |
+| SC-08 | T012，T028 | D6，D7，D11 |
+| SC-09 | T019 | 全场景状态断言 |
+| D11 授权转换套件 | T024（选型），T025–T028，T018（接线无影响），T019（转换审计） | D11 |
+| 发布门禁（仓库流程） | T023 | — |
+
+## Notes
+
+- `[P]` 仅标记不同文件无依赖可并行；同文件（`internal/indexer/` 内）任务按顺序执行防冲突；
+  同测试文件任务按序执行。新文件落点：`depositauth.go`（T024 选型 + T025 实现 + T026 回放计算，
+  同文件按序）；`depositscanner.go`/`depositcommit.go`（T005/T006 已建，后续任务按序扩展）。
+- 载体选型门禁：T025/T027/T028 显式依赖 T024，在 T024 关闭前不得假定 SQL 事务函数或受控脚本任一选项；
+  T024 的符合性标准是 R11 全部语义条。
+- 版本与幂等铁律：版本身份 =（chain_id, version_seq），内容哈希禁作版本身份；
+  观察↔版本显式外键（回放保留原值），禁时间戳推导；消费捕获版本、提交时锁内验版本，
+  失配放弃重读（回环亦然），禁打最新 seq 冒充；
+  请求幂等按 request_id 先查 history：同 ID 同参返原结果（跨版本亦然；已记录），同 ID 异参拒绝（已记录；未记录失败不绑定 ID，同 ID 重用按独立候选完整重验），
+  异 ID 独立校验；过期拒绝报告预期与当前版本。
+- 暂停实例铁律：实例身份 =（chain_id, pause_id）且 pause_id 永不复用，同实例修订号单调递增；
+  解除必须匹配实例 + 修订并同事务写审计行，否则影响 0 行；审计行携带原因快照，活动行删除后仍可解释；
+  人工解除与授权处置遵守同一规则。
+- 授权目标铁律：expected_pause 双列同时提供或同时为空，同时为空表示不授权处置任何已有暂停（非通配），
+  不等于一律拒绝——证据在 scope 外可保留时提交身份／位置／history 且暂停原样保留（消费仍停），
+  证据在 scope 内已证解决而无目标时拒绝并要求重新明确授权；
+  提供目标时锁内必须匹配否则拒绝；无目标而必须处置已有暂停才能完成时拒绝并要求重新明确授权；
+  处置结果仍按锁内重验证出（派生），不得超出授权范围。
+- 解除结果铁律：条件解除影响 0 行后查审计定性——命中原释放记录即返回"该目标已解除"及原审计结果
+  （原结果、原操作者、原时间），不重写、不触碰新暂停、不归功本次调用者；
+  无独立解除请求身份时只返回该事实，不声称识别为同一次请求；
+  未命中即陈旧或目标不存在；人工路径无 request_id，"只返事实"即其全部语义。
+- 真库测试一律 `//go:build integration` + testcontainers，复用 002/003 helper；
+  Anvil 部署测试 token 产 Transfer；DB 播种只布置前置条件，不 mock 被测逻辑。
+- T017 必须双真 worker + 有界重复证据；`-race` 为附加项。
+- T000-P 未关闭前，任何"生产可用/生产就绪"表述不得出现；上游 003 E1 open 连带约束 004 生产就绪；
+  残余风险如实声明；禁用计数判定不等于完整性已解决（003 侧约束，004 不重复判定）。
+- 验收命名固定："004 本地范围验收" vs "生产接入就绪"，不得混称。

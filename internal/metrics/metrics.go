@@ -10,6 +10,8 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/collectors"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
+
+	"github.com/xtianxx/txharbor/internal/logx"
 )
 
 // Custom metric names (contracts/observability.md freezes the indexer and log
@@ -28,6 +30,13 @@ const (
 	LogStateMetricName          = "txharbor_log_state"
 	LogRPCMetricName            = "txharbor_log_rpc_total"
 	LogPauseMetricName          = "txharbor_log_pause_total"
+
+	DepositNextMetricName         = "txharbor_deposit_next"
+	DepositLagMetricName          = "txharbor_deposit_lag_blocks"
+	DepositStateMetricName        = "txharbor_deposit_state"
+	DepositObservationsMetricName = "txharbor_deposit_observations_total"
+	DepositPauseMetricName        = "txharbor_deposit_pause_total"
+	DepositTransitionMetricName   = "txharbor_deposit_transition_total"
 )
 
 // Metrics owns a private registry so multiple instances (tests, restarts of
@@ -44,7 +53,15 @@ type Metrics struct {
 	logState      *prometheus.GaugeVec
 	logRPC        *prometheus.CounterVec
 	logPause      *prometheus.CounterVec
-	handler       http.Handler
+
+	depositNext         *prometheus.GaugeVec
+	depositLag          *prometheus.GaugeVec
+	depositState        *prometheus.GaugeVec
+	depositObservations *prometheus.CounterVec
+	depositPause        *prometheus.CounterVec
+	depositTransition   *prometheus.CounterVec
+
+	handler http.Handler
 }
 
 // New builds the registry and the /metrics handler. ready is evaluated on
@@ -116,22 +133,59 @@ func New(ready func() bool) *Metrics {
 		Help: "Log pauses observed per chain; monotonic and independent of pause rows.",
 	}, []string{"chain"})
 
+	depositNext := prometheus.NewGaugeVec(prometheus.GaugeOpts{
+		Name: DepositNextMetricName,
+		Help: "Deposit scan next block per chain; absent while progress is empty.",
+	}, []string{"chain"})
+
+	depositLag := prometheus.NewGaugeVec(prometheus.GaugeOpts{
+		Name: DepositLagMetricName,
+		Help: "Deposit lag in blocks per chain; absent while either checkpoint is empty.",
+	}, []string{"chain"})
+
+	depositState := prometheus.NewGaugeVec(prometheus.GaugeOpts{
+		Name: DepositStateMetricName,
+		Help: "Deposit scanner state per chain: 0=running, 1=waiting for upstream coverage, 2=retrying, 3=paused, 4=structural gap halt.",
+	}, []string{"chain"})
+
+	depositObservations := prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: DepositObservationsMetricName,
+		Help: "Deposit processing results per chain; matched generates an observation, nomatch/zero/invalid do not.",
+	}, []string{"chain", "result"})
+
+	depositPause := prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: DepositPauseMetricName,
+		Help: "Deposit pauses observed per chain; monotonic and independent of pause rows.",
+	}, []string{"chain"})
+
+	depositTransition := prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: DepositTransitionMetricName,
+		Help: "Authorised deposit config transitions per chain; details live in deposit_config_history.",
+	}, []string{"chain", "result"})
+
 	registry.MustRegister(readyGauge, probeTotal,
 		indexerHeight, indexerState, indexerRPC, indexerPause,
-		logNext, logLag, logState, logRPC, logPause)
+		logNext, logLag, logState, logRPC, logPause,
+		depositNext, depositLag, depositState, depositObservations, depositPause, depositTransition)
 	return &Metrics{
-		registry:      registry,
-		probeTotal:    probeTotal,
-		indexerHeight: indexerHeight,
-		indexerState:  indexerState,
-		indexerRPC:    indexerRPC,
-		indexerPause:  indexerPause,
-		logNext:       logNext,
-		logLag:        logLag,
-		logState:      logState,
-		logRPC:        logRPC,
-		logPause:      logPause,
-		handler:       promhttp.HandlerFor(registry, promhttp.HandlerOpts{}),
+		registry:            registry,
+		probeTotal:          probeTotal,
+		indexerHeight:       indexerHeight,
+		indexerState:        indexerState,
+		indexerRPC:          indexerRPC,
+		indexerPause:        indexerPause,
+		logNext:             logNext,
+		logLag:              logLag,
+		logState:            logState,
+		logRPC:              logRPC,
+		logPause:            logPause,
+		depositNext:         depositNext,
+		depositLag:          depositLag,
+		depositState:        depositState,
+		depositObservations: depositObservations,
+		depositPause:        depositPause,
+		depositTransition:   depositTransition,
+		handler:             promhttp.HandlerFor(registry, promhttp.HandlerOpts{}),
 	}
 }
 
@@ -222,5 +276,85 @@ func (m *Metrics) ObserveLogRPC(kind string, ok bool) {
 func (m *Metrics) ObserveLogPause(chain int64) {
 	m.logPause.WithLabelValues(chainLabel(chain)).Inc()
 }
+
+// ObserveDepositNext records the next deposit block to process for chain.
+// ok=false means empty progress: the series is removed rather than zeroed.
+func (m *Metrics) ObserveDepositNext(chain int64, next uint64, ok bool) {
+	if !ok {
+		m.depositNext.DeleteLabelValues(chainLabel(chain))
+		return
+	}
+	m.depositNext.WithLabelValues(chainLabel(chain)).Set(float64(next))
+}
+
+// ObserveDepositLag records the deposit lag in blocks for chain. ok=false
+// means either the deposit or the 003 log checkpoint is empty: the series is
+// removed rather than zeroed.
+func (m *Metrics) ObserveDepositLag(chain int64, lag uint64, ok bool) {
+	if !ok {
+		m.depositLag.DeleteLabelValues(chainLabel(chain))
+		return
+	}
+	m.depositLag.WithLabelValues(chainLabel(chain)).Set(float64(lag))
+}
+
+// ObserveDepositState records the deposit scanner state for chain: 0 running,
+// 1 waiting for upstream coverage, 2 retrying, 3 paused, 4 structural gap
+// halt (contracts/observability.md). Pausing or halting must not flip readyz.
+func (m *Metrics) ObserveDepositState(chain int64, state int) {
+	m.depositState.WithLabelValues(chainLabel(chain)).Set(float64(state))
+}
+
+// ObserveDepositObservation counts one processed log by result:
+// matched|nomatch|zero|invalid (contracts/observability.md).
+func (m *Metrics) ObserveDepositObservation(chain int64, result string) {
+	m.depositObservations.WithLabelValues(chainLabel(chain), result).Inc()
+}
+
+// ObserveDepositPause counts one observed deposit pause for chain.
+func (m *Metrics) ObserveDepositPause(chain int64) {
+	m.depositPause.WithLabelValues(chainLabel(chain)).Inc()
+}
+
+// ObserveDepositTransition counts one authorised config transition by
+// result: ok|error|rejected (contracts/observability.md). Audit details live
+// in the deposit_config_history rows, not in this counter.
+func (m *Metrics) ObserveDepositTransition(chain int64, result string) {
+	m.depositTransition.WithLabelValues(chainLabel(chain), result).Inc()
+}
+
+// Deposit log events and their frozen structured field lists
+// (contracts/observability.md). The scanner (T005+) logs exactly these fields
+// per event; the T019 audit walks a captured record against this manifest and
+// DepositLogRedact.
+const (
+	DepositLogAdvance      = "advance"
+	DepositLogWait         = "wait"
+	DepositLogRetry        = "retry"
+	DepositLogGap          = "gap"
+	DepositLogPause        = "pause"
+	DepositLogRelease      = "release"
+	DepositLogConfigReject = "config_reject"
+	DepositLogTransition   = "transition"
+)
+
+// DepositLogFields is the frozen field list per deposit log event. Renaming a
+// field or an event here is an observability contract change.
+var DepositLogFields = map[string][]string{
+	DepositLogAdvance:      {"chain_id", "from_block", "to_block", "matched", "nomatch", "zero", "attempt"},
+	DepositLogWait:         {"chain_id", "next_block", "reason"},
+	DepositLogRetry:        {"chain_id", "from_block", "to_block", "kind", "attempt", "retry_in"},
+	DepositLogGap:          {"chain_id", "gap_from", "gap_to", "class", "cause", "config"},
+	DepositLogPause:        {"chain_id", "pause_id", "revision", "height", "kind", "detail"},
+	DepositLogRelease:      {"chain_id", "pause_id", "revision", "operator", "reason", "result"},
+	DepositLogConfigReject: {"chain_id", "reason", "detail"},
+	DepositLogTransition:   {"chain_id", "request_id", "operator", "old_config", "new_config", "replay_from", "result", "reason"},
+}
+
+// DepositLogRedact scrubs a deposit log value before it reaches slog
+// (SC-09): error and detail strings go through this hook, amounts are logged
+// as decimal strings only, and raw contract data is never dumped. It wraps
+// logx.Redact so the scanner (T005+) and the contract tests share one funnel.
+func DepositLogRedact(s string) string { return logx.Redact(s) }
 
 func chainLabel(chain int64) string { return strconv.FormatInt(chain, 10) }

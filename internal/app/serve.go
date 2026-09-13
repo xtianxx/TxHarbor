@@ -209,6 +209,36 @@ func Serve(ctx context.Context, d Deps) int {
 		pool.Close()
 		return fail("startup failed (log indexer): %s", logx.Redact(err.Error()))
 	}
+	// The deposit scanner consumes the indexed log stream (004): its frozen
+	// configuration identity is compared against the durable deposit rows
+	// when the loop starts, and a mismatch refuses to scan and exits
+	// non-zero, exactly like the 002/003 scanners above. Deposit
+	// authorization itself stays a privileged out-of-loop SQL operation.
+	depositScanner, err := indexer.NewDepositScanner(pool, indexer.DepositConfig{
+		ChainID:        chainID,
+		StartBlock:     cfg.DepositStartHeight,
+		Assets:         cfg.DepositContracts,
+		Watches:        cfg.DepositWatchAddresses,
+		ConfigHash:     cfg.DepositConfigHash,
+		BatchBlocks:    cfg.DepositBatchBlocks,
+		PollInterval:   cfg.IndexPollInterval,
+		RetryInitial:   cfg.IndexRetryInitial,
+		RetryMax:       cfg.IndexRetryMax,
+		LogContracts:   cfg.LogContracts,
+		LogConfigHash:  cfg.LogConfigHash,
+		LogStartHeight: cfg.LogStartHeight,
+	})
+	if err != nil {
+		ethClient.Close()
+		pool.Close()
+		return fail("startup failed (deposit indexer): %s", logx.Redact(err.Error()))
+	}
+	depositScanner.SetResultObserver(func(result string) {
+		m.ObserveDepositObservation(chainID, result)
+	})
+	depositScanner.SetPauseObserver(func() {
+		m.ObserveDepositPause(chainID)
+	})
 
 	srv := &http.Server{
 		Handler:           health.NewServer(agg, m.Handler()).Handler(),
@@ -226,6 +256,8 @@ func Serve(ctx context.Context, d Deps) int {
 	observer.observe()
 	logObserver := &logObserver{scanner: logScanner, header: scanner, m: m, chainID: chainID}
 	logObserver.observe()
+	depositObserver := &depositObserver{deposit: depositScanner, log: logScanner, m: m, chainID: chainID}
+	depositObserver.observe()
 
 	go runner.Run(runCtx)
 	serveErr := make(chan error, 1)
@@ -234,8 +266,13 @@ func Serve(ctx context.Context, d Deps) int {
 	indexerDone := make(chan struct{})
 	go func() {
 		// The coordinator owns the only acquisition loop and heartbeat and
-		// joins both serve loops before it returns (research R1).
-		indexerErr <- indexer.RunPair(runCtx, lease, scanner.ServeLoop, logScanner.ServeLoop)
+		// joins all three serve loops before it returns (research R1). The
+		// deposit loop adapts to the shared ServeFunc shape with the
+		// coordinator-held lease; authorization stays out of loop.
+		depositServe := func(loopCtx context.Context, checkLost func() error) error {
+			return depositScanner.ServeLoop(loopCtx, lease, checkLost)
+		}
+		indexerErr <- indexer.RunTrio(runCtx, lease, scanner.ServeLoop, logScanner.ServeLoop, depositServe)
 		close(indexerDone)
 	}()
 	fmt.Fprintf(stdout, "txharbor serve: listening on %s\n", listener.Addr())
@@ -261,6 +298,7 @@ serveLoop:
 		case err := <-indexerErr:
 			observer.observe()    // capture the terminal state before teardown
 			logObserver.observe() // both loops are joined by the coordinator
+			depositObserver.observe()
 			if err != nil && !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) {
 				fmt.Fprintf(stderr, "txharbor serve: indexer stopped: %s\n", logx.Redact(err.Error()))
 				exitCode = 1
@@ -269,6 +307,7 @@ serveLoop:
 		case <-metricTicker.C:
 			observer.observe()
 			logObserver.observe()
+			depositObserver.observe()
 		}
 	}
 	cancel() // stop probe loop and indexer before releasing resources
@@ -412,6 +451,36 @@ func (o *logObserver) observe() {
 		lag = height - done
 	}
 	o.m.ObserveLogLag(o.chainID, lag, true)
+}
+
+// depositObserver mirrors the deposit scanner's progress and loop condition
+// plus the log-vs-deposit lag into the metrics registry next to the header
+// and log observers; all three are sampled on the same ticker and once more
+// when the coordinator stops. The lag series is absent while either progress
+// is empty (contracts/observability.md). Pause events arrive through the
+// pause hook, not sampling.
+type depositObserver struct {
+	deposit *indexer.DepositScanner
+	log     *indexer.LogScanner
+	m       *metrics.Metrics
+	chainID int64
+}
+
+func (o *depositObserver) observe() {
+	next, ok := o.deposit.DepositProgress()
+	o.m.ObserveDepositNext(o.chainID, next, ok)
+	o.m.ObserveDepositState(o.chainID, o.deposit.DepositState())
+
+	logNext, logOK := o.log.Checkpoint()
+	if !ok || !logOK {
+		o.m.ObserveDepositLag(o.chainID, 0, false)
+		return
+	}
+	var lag uint64
+	if logNext > next {
+		lag = logNext - next
+	}
+	o.m.ObserveDepositLag(o.chainID, lag, true)
 }
 
 // runShutdown executes steps in order under one shared budget. Remaining
