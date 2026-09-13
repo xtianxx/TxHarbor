@@ -24,6 +24,7 @@ import (
 	"errors"
 	"fmt"
 	"math/big"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -34,6 +35,7 @@ import (
 
 	"github.com/xtianxx/txharbor/internal/config"
 	"github.com/xtianxx/txharbor/internal/eth"
+	"github.com/xtianxx/txharbor/internal/metrics"
 )
 
 // depositBlockHash builds the canonical hash for height n; depositTxHash a
@@ -1714,4 +1716,152 @@ WHERE o.chain_id = $1 AND h.config_hash = $2`, chainID, depositHash).Scan(&attri
 	if attributed != 2 {
 		t.Fatalf("observations attributed to version hash %s = %d, want 2", depositHash, attributed)
 	}
+}
+
+// TestDepositMixedIntervalZeroGeneration is T008 / quickstart D2 (SC-01,
+// FR-01/FR-03/FR-05): a mixed interval holding a transfer below every
+// effective height, a non-whitelisted asset, a non-monitored recipient and a
+// zero-value transfer generates exactly zero observations while the progress
+// advances over every one of them, including a legal empty tail unit that
+// advances to b+1. The four txharbor_deposit_observations_total result classes
+// are asserted on the real registry.
+//
+// Method, recorded as required: this test plants the upstream rows directly
+// (canonical chain_blocks + erc20_transfer_logs) as the "upstream already
+// committed" prerequisite state (research R9, quickstart D2). No Anvil is
+// started here; the real-Anvil path is T007's TestDepositAnvilFullStackPending.
+// Every planted row is a structurally valid Transfer, so the invalid class is
+// asserted at zero; its non-zero path is T004 unit scope plus T014.
+func TestDepositMixedIntervalZeroGeneration(t *testing.T) {
+	dsn := startIndexerPostgres(t)
+	ctx := context.Background()
+	pool := openIndexerPool(t, dsn)
+	defer pool.Close()
+
+	// Effective height 20 for both entries: the height-12 row is below every
+	// effective height while still inside [StartBlock, N_u-1]. BatchBlocks=5
+	// slices the interval into [10,14],[15,19],[20,24],[25,29]; the last unit
+	// is a legal empty interval advancing to b+1 = N_u.
+	cfg := depositITConfig(t, 88, testContractA)
+	cfg.Assets = []config.DepositEntry{{Address: testContractA, Effective: 20}}
+	cfg.Watches = []config.DepositEntry{{Address: depositWatchAddr, Effective: 20}}
+	cfg.BatchBlocks = 5
+
+	const (
+		first, last = uint64(10), uint64(29) // N_u = last + 1 = 30
+	)
+	depositSeedCanonical(t, ctx, pool, cfg.ChainID, first, last, true)
+	depositSeedUpstream(t, ctx, pool, cfg.ChainID, 0, cfg.LogConfigHash, last+1)
+
+	asset := common.HexToAddress(testContractA)
+	foreign := common.HexToAddress(testContractB)
+	watch := common.HexToAddress(depositWatchAddr)
+	other := common.HexToAddress("0x00000000000000000000000000000000000000b1")
+	sender := common.HexToAddress("0x00000000000000000000000000000000000000e1")
+
+	rows := []struct {
+		height    uint64
+		contract  common.Address
+		recipient common.Address
+		amount    *big.Int
+	}{
+		{12, asset, watch, big.NewInt(5)},   // below every effective height
+		{15, foreign, watch, big.NewInt(5)}, // asset not whitelisted
+		{18, asset, other, big.NewInt(5)},   // recipient not monitored
+		{22, asset, watch, big.NewInt(0)},   // zero value (all checks pass)
+	}
+	for _, row := range rows {
+		depositSeedTransferRow(t, ctx, pool, cfg.ChainID, row.height,
+			depositBlockHash(row.height), depositTxHash(row.height, 0), 0,
+			row.contract, sender, row.recipient, row.amount)
+	}
+
+	m := metrics.New(func() bool { return true })
+	sc := depositITScanner(t, pool, cfg)
+	sc.SetResultObserver(func(result string) { m.ObserveDepositObservation(cfg.ChainID, result) })
+
+	stop := depositRunLoop(t, ctx, sc, depositITLease(t, pool, cfg.ChainID))
+	waitUntil(t, time.Now().Add(60*time.Second), "mixed interval next_block 30", func() bool {
+		_, _, next, ok := depositCheckpointState(t, ctx, pool, cfg.ChainID)
+		return ok && next == last+1
+	})
+	time.Sleep(100 * time.Millisecond) // surface any erroneous extra advance
+	stop()
+
+	// Progress crossed every case exactly to the watermark: the final next is
+	// the empty tail unit's b+1, no overshoot and no skipped unit.
+	start, cfgHash, next, ok := depositCheckpointState(t, ctx, pool, cfg.ChainID)
+	if !ok || start != first || cfgHash != cfg.ConfigHash || next != last+1 {
+		t.Fatalf("checkpoint = (%d,%s,%d,%v), want (%d,%s,%d,true)",
+			start, cfgHash, next, ok, first, cfg.ConfigHash, last+1)
+	}
+	if n := depositCountRows(t, ctx, pool, "deposit_observations", cfg.ChainID); n != 0 {
+		t.Fatalf("observations = %d, want 0 (below-effective, non-whitelist, non-monitored and zero all generate nothing)", n)
+	}
+
+	// Source identities: no new rows, the planted ones unchanged, and the
+	// progress crossed every seeded height.
+	if n := logscanCountLogs(t, ctx, pool, cfg.ChainID); n != len(rows) {
+		t.Fatalf("erc20_transfer_logs = %d, want the %d planted rows (no new source rows)", n, len(rows))
+	}
+	for _, row := range rows {
+		if row.height >= next {
+			t.Fatalf("progress next=%d did not cross seeded height %d", next, row.height)
+		}
+		stored, found := logscanReadRowAt(t, ctx, pool, cfg.ChainID, row.height)
+		if !found || stored.txHash != depositTxHash(row.height, 0) ||
+			stored.blockHash != depositBlockHash(row.height) ||
+			stored.contract != strings.ToLower(row.contract.Hex()) {
+			t.Fatalf("source row at %d = %+v (found=%v), want tx %s contract %s",
+				row.height, stored, found, depositTxHash(row.height, 0), strings.ToLower(row.contract.Hex()))
+		}
+		var generated int
+		if err := pool.QueryRow(ctx, `
+SELECT count(*) FROM deposit_observations WHERE chain_id = $1 AND tx_hash = $2`,
+			cfg.ChainID, depositTxHash(row.height, 0)).Scan(&generated); err != nil {
+			t.Fatalf("count observations for height %d: %v", row.height, err)
+		}
+		if generated != 0 {
+			t.Fatalf("height %d generated %d observations, want 0", row.height, generated)
+		}
+	}
+
+	// Four-class counter: three valid non-matches (below-effective counts as
+	// nomatch), one zero, no match and no structurally invalid row.
+	for _, tc := range []struct {
+		result string
+		want   float64
+	}{
+		{"matched", 0}, {"nomatch", 3}, {"zero", 1}, {"invalid", 0},
+	} {
+		if got := depositResultCount(t, m, cfg.ChainID, tc.result); got != tc.want {
+			t.Fatalf("%s{result=%s} = %v, want %v", metrics.DepositObservationsMetricName, tc.result, got, tc.want)
+		}
+	}
+}
+
+// depositResultCount reads one txharbor_deposit_observations_total label set
+// from a real registry; an absent series reads as 0.
+func depositResultCount(t *testing.T, m *metrics.Metrics, chainID int64, result string) float64 {
+	t.Helper()
+	families, err := m.Gatherer().Gather()
+	if err != nil {
+		t.Fatalf("gather metrics: %v", err)
+	}
+	chain := strconv.FormatInt(chainID, 10)
+	for _, family := range families {
+		if family.GetName() != metrics.DepositObservationsMetricName {
+			continue
+		}
+		for _, metric := range family.GetMetric() {
+			labels := make(map[string]string, len(metric.GetLabel()))
+			for _, pair := range metric.GetLabel() {
+				labels[pair.GetName()] = pair.GetValue()
+			}
+			if labels["chain"] == chain && labels["result"] == result {
+				return metric.GetCounter().GetValue()
+			}
+		}
+	}
+	return 0
 }

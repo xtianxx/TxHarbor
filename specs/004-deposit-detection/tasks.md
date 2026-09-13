@@ -132,10 +132,11 @@ T000-L / T000-P 见上（本阶段即二者建档）。**Checkpoint**: 门禁状
 
 **Independent Test**: 预置混合区间，零观察生成，进度单调推进
 
-- [ ] T008 [US2] 非匹配与零值推进测试（`internal/indexer/deposit_integration_test.go`，与 T007 同文件，按序执行）
+- [x] T008 [US2] 非匹配与零值推进测试（`internal/indexer/deposit_integration_test.go`，与 T007 同文件，按序执行）
   - 需求：FR-01/FR-03/FR-05。验收场景：D2（SC-01）。依赖：T006。
   - 完成条件：非监控地址/非白名单资产/零值/低于任一生效高度逐项零生成且进度越过；
     合法空区间零生成并推进到 `b+1`；`observations_total{result}` 四分类计数正确。真库断言。
+  - 状态（2026-09-13）：CLOSED。证据：TestDepositMixedIntervalZeroGeneration真库实跑过（DB播种上游行，方法已声明；Anvil路径归T007）；低于生效高度/非白名单/非监控/零值逐项零生成且进度越过，空尾区间推进到b+1；来源行字节一致无新增；四分类 matched=0/nomatch=3/zero=1/invalid=0；最小修正：depositscanner结果观察钩子（nil-safe，T018前默认nil）。lane单跑+5/5批次+TestDeposit回归全过，orchestrator独立重跑通过。未验证：T009+、完整验收。
 
 **Checkpoint**: US1+US2：生成精确，不生成同样精确
 

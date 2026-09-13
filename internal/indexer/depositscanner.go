@@ -63,6 +63,11 @@ type DepositScanner struct {
 	// upstreamHash is recomputed from LogContracts at construction, never
 	// accepted as an opaque value (R5: the shared env is the whitelist truth).
 	upstreamHash string
+	// resultObserver, when non-nil, receives one call per processed source row
+	// result (contracts/observability.md: matched|nomatch|zero for a committed
+	// unit, invalid for a batch refused by the structural re-check). It keeps
+	// the scanner independent of the metrics registry; app wiring is T018.
+	resultObserver func(result string)
 }
 
 // NewDepositScanner validates the deposit configuration without any I/O. A
@@ -77,6 +82,22 @@ func NewDepositScanner(pool *pgxpool.Pool, cfg DepositConfig) (*DepositScanner, 
 		return nil, fmt.Errorf("deposit scanner: %w", err)
 	}
 	return &DepositScanner{pool: pool, cfg: cfg, upstreamHash: hash}, nil
+}
+
+// SetResultObserver wires the per-row result counter hook behind
+// txharbor_deposit_observations_total (contracts/observability.md). The
+// callback receives one of matched|nomatch|zero for every source row of a
+// committed unit, or invalid once for a batch refused before commit. A nil
+// observer (the default) disables counting; app wiring is T018.
+func (s *DepositScanner) SetResultObserver(observe func(result string)) {
+	s.resultObserver = observe
+}
+
+// observeResult forwards one processed-row result to the observer, if any.
+func (s *DepositScanner) observeResult(result string) {
+	if s.resultObserver != nil {
+		s.resultObserver(result)
+	}
 }
 
 // validateDepositConfig checks the deposit configuration and returns the
@@ -717,12 +738,25 @@ func (s *DepositScanner) ServeLoop(ctx context.Context, lease *Lease, checkLost 
 		if err != nil {
 			// A deterministic invalid row fails the whole batch; no unit is
 			// committed and the loop stops (T014 persists validation_failed).
+			// The refused row is the one invalid result for the counter.
+			s.observeResult("invalid")
 			return err
 		}
 
 		err = s.commitDepositUnit(ctx, lease, unit, batch, progress, a, b)
 		switch {
 		case err == nil:
+			// Only a committed unit is counted: rolled-back units are retried
+			// and counted once, on the attempt that makes them durable.
+			for i := 0; i < len(batch.matched); i++ {
+				s.observeResult("matched")
+			}
+			for i := 0; i < batch.zero; i++ {
+				s.observeResult("zero")
+			}
+			for i := 0; i < batch.nomatch; i++ {
+				s.observeResult("nomatch")
+			}
 			back.reset()
 		case errors.Is(err, errDepositVersionMismatch), errors.Is(err, errStaleState):
 			// The captured basis moved under us (version isolation or a
