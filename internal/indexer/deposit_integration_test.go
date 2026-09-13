@@ -12,6 +12,11 @@
 // same-hash loopback), captured-version attribution, conflict rollback,
 // one-sided corruption, canonical abort, empty-interval advance and the
 // uncertain-COMMIT recovery.
+//
+// T007 is the full-stack Anvil path (quickstart D1): real token transfers are
+// indexed by the real 002 header scan and 003 log scan, then consumed by the
+// 004 proof + commit directly (serve wiring is T018). No 004-side source rows
+// are seeded.
 package indexer
 
 import (
@@ -1435,4 +1440,278 @@ INSERT INTO deposit_pause (chain_id, height, kind, detail) VALUES ($1, 10, 'chai
 		}
 		assertAborted(t, 60)
 	})
+}
+
+// TestDepositAnvilFullStackPending is T007 / quickstart D1 (SC-01,
+// FR-01/FR-02/FR-11): real Anvil token transfers are indexed by the real 002
+// header scan and 003 log scan into chain_blocks and erc20_transfer_logs, then
+// the 004 scanner proves coverage over the freshly persisted rows and consumes
+// them into Pending observations. Every source row 004 reads was written by
+// the 003 scanner from real chain data; this test seeds no 004-side rows and
+// no erc20_transfer_logs.
+//
+// T018 is not implemented (serve wiring): the test composes the already-built
+// components directly — Scanner.Run wins the lease, then LogScanner.ServeLoop
+// and DepositScanner.ServeLoop share the same lease handle, exactly as one
+// process would after wiring. A pass proves the recognition chain end to end;
+// it does NOT prove that the production serve path registers the deposit loop.
+//
+// Environment: Anvil ghcr.io/foundry-rs/foundry:v1.8.1 with --chain-id 31337
+// (scanChainID) and PostgreSQL postgres:18.6-trixie (startIndexerPostgres).
+func TestDepositAnvilFullStackPending(t *testing.T) {
+	dsn := startIndexerPostgres(t)
+	ctx := context.Background()
+	pool := openIndexerPool(t, dsn)
+	defer pool.Close()
+
+	node := logscanStartAnvilNode(t)
+	client, err := eth.Dial(ctx, node.url, 5*time.Second)
+	if err != nil {
+		t.Fatalf("dial anvil client: %v", err)
+	}
+	defer client.Close()
+
+	const chainID = scanChainID // 31337, matching the Anvil chain id
+
+	// Real token contracts: anvil_setCode gives each address fallback bytecode
+	// that emits exactly one standard Transfer log (logscanEmitCode, no forge).
+	watchAddr := common.HexToAddress("0x00000000000000000000000000000000000000d1")
+	otherAddr := common.HexToAddress("0x00000000000000000000000000000000000000d2")
+	tokenA := common.HexToAddress("0x00000000000000000000000000000000000000a1")
+	tokenB := common.HexToAddress("0x00000000000000000000000000000000000000a2")
+	tokenNM := common.HexToAddress("0x00000000000000000000000000000000000000b1")
+
+	sender := node.accounts[0]
+	topics := [3]common.Hash{eth.TransferSig}
+	topics[1] = common.BytesToHash(sender.Bytes())
+	topics[2] = common.BytesToHash(watchAddr.Bytes())
+	node.setCode(t, tokenA, logscanEmitCode(topics, big.NewInt(1)))
+	node.setCode(t, tokenB, logscanEmitCode(topics, big.NewInt(2)))
+	topics[2] = common.BytesToHash(otherAddr.Bytes())
+	node.setCode(t, tokenNM, logscanEmitCode(topics, big.NewInt(3)))
+
+	// Two matching transfers (each exactly one Pending) and one non-matching
+	// transfer to an unwatched recipient (tracked by 003, zero observations),
+	// separated by mined empty intervals. Heights come from the receipts.
+	txA, heightA := node.sendTransferAt(t, tokenA)
+	node.mine(t, 1)
+	txB, heightB := node.sendTransferAt(t, tokenB)
+	node.mine(t, 2)
+	txNM, heightNM := node.sendTransferAt(t, tokenNM)
+	head := node.blockNumber(t)
+	if heightA >= heightB || heightB >= heightNM || head < heightNM {
+		t.Fatalf("anvil heights hA=%d hB=%d hNM=%d head=%d out of order", heightA, heightB, heightNM, head)
+	}
+
+	// Shared 003 whitelist identity: the log scanner persists it and 004
+	// recomputes it from the same contract list (R5).
+	tokens := []string{
+		strings.ToLower(tokenA.Hex()),
+		strings.ToLower(tokenB.Hex()),
+		strings.ToLower(tokenNM.Hex()),
+	}
+	logHash := depositUpstreamHash(t, tokens...)
+
+	// 002 indexes the real headers first; they are the log scanner's coverage.
+	// Scanner.Run acquires the lease itself, so the handle must not be
+	// pre-acquired; afterwards it holds the winning token for 003 and 004.
+	lease := newTestLease(t, pool, chainID, "anvil-004-t007", time.Minute, time.Second)
+	sc002, err := NewScanner(pool, client, lease, Config{
+		StartHeight: 0, RPCTimeout: 2 * time.Second, PollInterval: 25 * time.Millisecond,
+		RetryInitial: 25 * time.Millisecond, RetryMax: 250 * time.Millisecond,
+	}, logscanLogger())
+	if err != nil {
+		t.Fatalf("NewScanner(): %v", err)
+	}
+	runScanTo(t, sc002, head, 60*time.Second)
+
+	// 003 indexes the real Transfer logs into erc20_transfer_logs.
+	ls := logscanNewScanner(t, pool, client, client, lease, LogConfig{
+		StartBlock: 0, Contracts: tokens, ConfigHash: logHash, BatchBlocks: 2,
+	})
+	logscanServeTo(t, ctx, pool, chainID, ls, head+1, 60*time.Second)
+	logCP, ok := logscanReadCheckpoint(t, ctx, pool, chainID)
+	if !ok || logCP.start != 0 || logCP.hash != logHash || logCP.next != int64(head)+1 {
+		t.Fatalf("log checkpoint = %+v (ok=%v), want start=0 hash=%s next=%d", logCP, ok, logHash, head+1)
+	}
+
+	// 004: the shared lease handle drives the deposit loop directly (T018
+	// pending). BatchBlocks is far larger than the chain, so the single unit is
+	// a partial batch tail: b = min(a+BatchBlocks-1, N_u-1) = N_u-1.
+	const depositHash = "1111111111111111111111111111111111111111111111111111111111111111"
+	cfg := DepositConfig{
+		ChainID:    chainID,
+		StartBlock: 0,
+		Assets: []config.DepositEntry{
+			{Address: tokens[0], Effective: 0},
+			{Address: tokens[1], Effective: 0},
+			{Address: tokens[2], Effective: 0},
+		},
+		Watches:        []config.DepositEntry{{Address: strings.ToLower(watchAddr.Hex()), Effective: 0}},
+		ConfigHash:     depositHash,
+		BatchBlocks:    500,
+		PollInterval:   25 * time.Millisecond,
+		RetryInitial:   25 * time.Millisecond,
+		RetryMax:       250 * time.Millisecond,
+		LogContracts:   tokens,
+		LogConfigHash:  logHash,
+		LogStartHeight: 0,
+	}
+	if uint64(logCP.next) >= cfg.BatchBlocks {
+		t.Fatalf("chain coverage %d blocks is not smaller than the batch (%d); partial-tail path not exercised",
+			logCP.next, cfg.BatchBlocks)
+	}
+	sc004, err := NewDepositScanner(pool, cfg)
+	if err != nil {
+		t.Fatalf("NewDepositScanner(): %v", err)
+	}
+
+	stop := depositRunLoop(t, ctx, sc004, lease)
+	waitUntil(t, time.Now().Add(60*time.Second), "deposit checkpoint reaches the upstream watermark", func() bool {
+		_, _, next, ok := depositCheckpointState(t, ctx, pool, chainID)
+		return ok && next >= uint64(logCP.next)
+	})
+	time.Sleep(100 * time.Millisecond) // surface any erroneous extra advance
+	stop()
+
+	// Coverage advance: the whole partial batch tail is consumed to N_u.
+	start, cfgHash, next, ok := depositCheckpointState(t, ctx, pool, chainID)
+	if !ok || start != 0 || cfgHash != depositHash || next != uint64(logCP.next) {
+		t.Fatalf("deposit checkpoint = (%d,%s,%d,%v), want (0,%s,%d,true)", start, cfgHash, next, ok, depositHash, logCP.next)
+	}
+	if next != head+1 {
+		t.Fatalf("deposit next = %d, want exactly head+1 = %d (one partial-batch unit)", next, head+1)
+	}
+
+	// assertObservation pins one matching transfer's observation against the
+	// real chain: 003's stored row identity, the Anvil header hash, the
+	// canonical chain_blocks hash and every Table 1 field.
+	assertObservation := func(t *testing.T, txHash common.Hash, height uint64, amount *big.Int, token common.Address) {
+		t.Helper()
+		stored, ok := logscanReadRowAt(t, ctx, pool, chainID, height)
+		if !ok {
+			t.Fatalf("003 stored no log at height %d (tx %s)", height, txHash.Hex())
+		}
+		hdr, err := client.HeaderByNumber(ctx, new(big.Int).SetUint64(height))
+		if err != nil {
+			t.Fatalf("anvil header %d: %v", height, err)
+		}
+		wantBlockHash := hashHex(hdr.Hash())
+		wantTxHash := strings.ToLower(txHash.Hex())
+		if stored.blockHash != wantBlockHash || stored.txHash != wantTxHash || stored.logIndex != 0 {
+			t.Fatalf("003 row at %d = %s/%s/%d, want %s/%s/0",
+				height, stored.blockHash, stored.txHash, stored.logIndex, wantBlockHash, wantTxHash)
+		}
+		if wantData := common.BigToHash(amount).Hex(); stored.data != wantData {
+			t.Fatalf("003 data at %d = %s, want %s", height, stored.data, wantData)
+		}
+		var canonicalHash string
+		if err := pool.QueryRow(ctx, `
+SELECT hash FROM chain_blocks WHERE chain_id = $1 AND number = $2 AND canonical`,
+			chainID, int64(height)).Scan(&canonicalHash); err != nil {
+			t.Fatalf("canonical block %d: %v", height, err)
+		}
+		if canonicalHash != wantBlockHash {
+			t.Fatalf("chain_blocks[%d] = %s, want %s", height, canonicalHash, wantBlockHash)
+		}
+
+		var (
+			obsBlockHash, obsTxHash, obsContract, obsSender, obsRecipient, obsAmount, obsStatus string
+			obsBlockNumber, obsLogIndex, obsVersion                                             int64
+		)
+		err = pool.QueryRow(ctx, `
+SELECT block_hash, tx_hash, log_index, block_number, contract, sender, recipient, amount::text, status, version_seq
+FROM deposit_observations
+WHERE chain_id = $1 AND block_hash = $2 AND tx_hash = $3 AND log_index = $4`,
+			chainID, wantBlockHash, wantTxHash, stored.logIndex).
+			Scan(&obsBlockHash, &obsTxHash, &obsLogIndex, &obsBlockNumber, &obsContract,
+				&obsSender, &obsRecipient, &obsAmount, &obsStatus, &obsVersion)
+		if err != nil {
+			t.Fatalf("observation for tx %s: %v", wantTxHash, err)
+		}
+		wantContract := strings.ToLower(token.Hex())
+		wantSender := strings.ToLower(sender.Hex())
+		wantRecipient := strings.ToLower(watchAddr.Hex())
+		wantAmount := amount.String()
+		if obsBlockHash != wantBlockHash || obsTxHash != wantTxHash || obsLogIndex != stored.logIndex ||
+			obsBlockNumber != int64(height) || obsContract != wantContract ||
+			obsSender != wantSender || obsRecipient != wantRecipient ||
+			obsAmount != wantAmount || obsStatus != "pending" || obsVersion != 1 {
+			t.Fatalf("observation = %s/%s/%d number %d contract %s sender %s recipient %s amount %s status %s version %d; want %s/%s/%d/%d/%s/%s/%s/%s/pending/1",
+				obsBlockHash, obsTxHash, obsLogIndex, obsBlockNumber, obsContract, obsSender, obsRecipient,
+				obsAmount, obsStatus, obsVersion,
+				wantBlockHash, wantTxHash, stored.logIndex, height, wantContract, wantSender, wantRecipient, wantAmount)
+		}
+	}
+	assertObservation(t, txA, heightA, big.NewInt(1), tokenA)
+	assertObservation(t, txB, heightB, big.NewInt(2), tokenB)
+
+	// Exactly one observation per matching transfer, and none for the
+	// non-matching one; the non-match source row is durably present (tracked
+	// and advanced over, not missed).
+	if n := depositCountRows(t, ctx, pool, "deposit_observations", chainID); n != 2 {
+		t.Fatalf("observations = %d, want exactly 2 (one per matching transfer, zero for the non-match)", n)
+	}
+	for _, tx := range []common.Hash{txA, txB} {
+		var n int
+		if err := pool.QueryRow(ctx, `
+SELECT count(*) FROM deposit_observations WHERE chain_id = $1 AND tx_hash = $2`,
+			chainID, strings.ToLower(tx.Hex())).Scan(&n); err != nil {
+			t.Fatalf("count observations for %s: %v", tx.Hex(), err)
+		}
+		if n != 1 {
+			t.Fatalf("observations for matching tx %s = %d, want exactly 1", tx.Hex(), n)
+		}
+	}
+	storedNM, ok := logscanReadRowAt(t, ctx, pool, chainID, heightNM)
+	if !ok || storedNM.txHash != strings.ToLower(txNM.Hex()) {
+		t.Fatalf("003 row for the non-match tx missing at %d: %+v (ok=%v)", heightNM, storedNM, ok)
+	}
+	var nonMatched int
+	if err := pool.QueryRow(ctx, `
+SELECT count(*) FROM deposit_observations WHERE chain_id = $1 AND tx_hash = $2`,
+		chainID, strings.ToLower(txNM.Hex())).Scan(&nonMatched); err != nil {
+		t.Fatalf("count non-match observations: %v", err)
+	}
+	if nonMatched != 0 {
+		t.Fatalf("non-matching transfer produced %d observations, want 0", nonMatched)
+	}
+
+	// Version attribution: the first unit bootstrapped version_seq=1 with the
+	// full T002 snapshots, and every observation joins that version/hash.
+	var (
+		versionSeq, hStart, replayFrom         int64
+		historyHash, operator, assets, watches string
+		requestID                              *string
+	)
+	err = pool.QueryRow(ctx, `
+SELECT version_seq, config_hash, operator, request_id, start_block, replay_from, assets, watches
+FROM deposit_config_history WHERE chain_id = $1`, chainID).
+		Scan(&versionSeq, &historyHash, &operator, &requestID, &hStart, &replayFrom, &assets, &watches)
+	if err != nil {
+		t.Fatalf("read history row: %v", err)
+	}
+	if versionSeq != 1 || historyHash != depositHash || operator != "bootstrap" ||
+		requestID != nil || hStart != 0 || replayFrom != 0 {
+		t.Fatalf("history = seq %d hash %s operator %q request %v start %d replay %d, want v1/bootstrap/%s",
+			versionSeq, historyHash, operator, requestID, hStart, replayFrom, depositHash)
+	}
+	for _, tok := range tokens {
+		if !strings.Contains(assets, tok+":0") {
+			t.Fatalf("history assets snapshot %q misses %s:0", assets, tok)
+		}
+	}
+	if wantWatches := strings.ToLower(watchAddr.Hex()) + ":0"; watches != wantWatches {
+		t.Fatalf("history watches snapshot = %q, want %q", watches, wantWatches)
+	}
+	var attributed int
+	if err := pool.QueryRow(ctx, `
+SELECT count(*) FROM deposit_observations o
+JOIN deposit_config_history h ON h.chain_id = o.chain_id AND h.version_seq = o.version_seq
+WHERE o.chain_id = $1 AND h.config_hash = $2`, chainID, depositHash).Scan(&attributed); err != nil {
+		t.Fatalf("version attribution join: %v", err)
+	}
+	if attributed != 2 {
+		t.Fatalf("observations attributed to version hash %s = %d, want 2", depositHash, attributed)
+	}
 }

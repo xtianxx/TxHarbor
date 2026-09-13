@@ -116,10 +116,11 @@ T000-L / T000-P 见上（本阶段即二者建档）。**Checkpoint**: 门禁状
      行数核对（插入 + 已存在一致 + 合法零生成 = 去重身份数）；未知提交结果重读 DB 幂等继续；
      任何失败无部分提交。真库断言。
   - 状态（2026-09-13）：CLOSED。证据：depositcommit.go新建（513行）+scanner循环骨架按序扩展；全仓单元274过；集成TestDeposit 56过（含T005回归）+race附加过；首单元原子/bootstrap同事务/版本锁内重验/冲突排除version_seq/精确守卫/单侧损坏禁补建/行数核对/未知提交重读齐全。未验证：Anvil全栈归T007；durable暂停行与恢复归T014/T015；ServeLoop的*Lease注册包装归T018。记录：批次边界已修正为b=min(a+BatchBlocks-1,N_u-1)（上限语义，依据research R167；溢出/下溢有守卫），仅N_u<=a等待；V1–V6真库验证全过（orchestrator独立重跑三项新集成14过）；commitResultVisible经协议复核无误判窗口（lease串行+精确守卫+行数核对，见lane报告），不重构。
-- [ ] T007 [US1] Anvil 全栈集成测试：匹配生成 Pending（`internal/indexer/deposit_integration_test.go`）
+- [x] T007 [US1] Anvil 全栈集成测试：匹配生成 Pending（`internal/indexer/deposit_integration_test.go`）
   - 需求：FR-01/FR-02/FR-11。验收场景：D1（SC-01）。依赖：T006。
   - 完成条件：测试 token 转入监控地址 → 恰好一条 Pending，sender/recipient/amount/来源与区块身份一致；
     多条匹配各一条；真库。
+  - 状态（2026-09-13）：CLOSED。证据：TestDepositAnvilFullStackPending真Anvil(v1.8.1隔离链)+真PG(18.6)实跑过；2笔真实Transfer经002/003索引后各恰一条Pending（sender/recipient/1与2wei/来源与区块身份/版本与配置哈希逐项对链真值）；非匹配零生成但推进；BatchBlocks=500下完整尾部一次消费（next==N_u）；上游身份重算一致。lane实跑5.44s通过，orchestrator独立重跑通过。测试入口直连组件，不等于生产serve接入（T018开放）。未验证：T008+、完整验收。
 
 **Checkpoint**: US1 独立可跑：匹配生成 + 覆盖证明 + 原子推进成立
 
