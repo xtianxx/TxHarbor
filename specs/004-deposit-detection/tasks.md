@@ -186,12 +186,13 @@ T000-L / T000-P 见上（本阶段即二者建档）。**Checkpoint**: 门禁状
     结构缺口的身份采纳走授权转换（T025），本条不断言身份更新本身，只断言缺口分类与等待/停止行为；
     全程不跳位、不记无充值、不静默调起点/高度。真库断言。
   - 状态（2026-09-13）：CLOSED。证据：TestDepositGapRecoveryBehavior真库4子项全过（瞬态N_u=10<=a等待1s慢上游零推进零误判，补齐canonical+水位21+15块来源行后自动从原缺口恢复恰[10,20]→21、观察恰1/history恰1；E<S_u停structural/below_upstream_start，gap=10-24+原因+配置版本齐全行内断言，零检查点零观察；资产未索引停structural/asset_not_indexed，gap=10-20；300ms前后classifyUpstreamGap逐值相等无时间输入）。结构缺口身份采纳归T025，本条未断言。未验证：T013+、完整验收。
-- [ ] T013 [US4] 覆盖证明专项验证：checkpoint 高度永不单独作为完整证明（`internal/indexer/deposit_integration_test.go`，按序执行）
+- [x] T013 [US4] 覆盖证明专项验证：checkpoint 高度永不单独作为完整证明（`internal/indexer/deposit_integration_test.go`，按序执行）
   - 需求：FR-07/FR-11/I3。验收场景：D2/D5/D6/D8 交叉。依赖：T005，T006。
   - 完成条件：空区间（零行但 `N_u > b`）推进 vs 上游缺失（`N_u <= b`）停留的对照断言；
     新增资产（覆盖内外两种）、配置不一致、提交期间链状态变化（canonical 翻转）四场景下，
-    证明五要素（高度水位、链身份、上游起点、配置指纹+白名单、三暂停行、canonical、lease）缺一即停推。
-    真库断言。
+     证明五要素（高度水位、链身份、上游起点、配置指纹+白名单、三暂停行、canonical、lease）缺一即停推。
+     真库断言。
+  - 状态（2026-09-13）：CLOSED。证据：TestDepositCoverageProofElements真库4子项全过（空区间loop推进21零观察 vs N_u<=a停留无行对照；新资产生效12在单元内停structural/asset_not_indexed vs 生效25超b本单元照常提交21后fail-fast停，同错零检查点；deposit_pause行loop停*streamPauseError零写；纯外链覆盖本链等待零状态）。配置不一致引用T011四变体，提交期canonical翻转引用TestDepositCommitCanonicalRevertAborts，暂停三流read层/水位/起点引用既有测试，不重复。未验证：T025+、完整验收。
 - [ ] T025 [US4] 授权转换实现：身份更新/位置回放/暂停处置/审计原子提交 + 前置重验（`internal/indexer/depositauth.go`，与 T024 同文件按序扩展）
   - 需求：FR-06/FR-09/FR-12/I2，research R11，data-model 授权协议。验收场景：D7/D11。依赖：T024，T006。
   - 完成条件：同一 lease 锁下重验（身份仍旧 + 覆盖重证明 + canonical + 暂停处置条件），任一失败全回滚；

@@ -3038,3 +3038,138 @@ func TestDepositGapRecoveryBehavior(t *testing.T) {
 		}
 	})
 }
+
+// TestDepositCoverageProofElements is T013 (US4): the loop-level对照 the
+// read-level proof tests do not cover. An empty but covered interval advances
+// while a missing watermark stays; a new asset required inside the unit stops
+// while one effective beyond it stays covered; a pause row stops the loop;
+// foreign-chain-only coverage is never consumed. Config inconsistency is
+// locked by T011 (four restart variants) and the mid-commit canonical flip by
+// TestDepositCommitCanonicalRevertAborts — referenced, not duplicated.
+func TestDepositCoverageProofElements(t *testing.T) {
+	dsn := startIndexerPostgres(t)
+	pool := openIndexerPool(t, dsn)
+	defer pool.Close()
+	ctx := context.Background()
+
+	t.Run("empty_advances_vs_missing_waits", func(t *testing.T) {
+		// Covered but zero source rows: legal empty interval, advances to b+1.
+		const coveredID = 80
+		cfg := depositITConfig(t, coveredID, testContractA)
+		cfg.PollInterval = 20 * time.Millisecond
+		cfg.RetryInitial = 20 * time.Millisecond
+		cfg.RetryMax = 100 * time.Millisecond
+		depositSeedCanonical(t, ctx, pool, coveredID, 10, 20, true)
+		depositSeedUpstream(t, ctx, pool, coveredID, 0, cfg.LogConfigHash, 21)
+		stop := depositRunLoop(t, ctx, depositITScanner(t, pool, cfg), depositITLease(t, pool, coveredID))
+		waitUntil(t, time.Now().Add(10*time.Second), "empty interval next_block 21", func() bool {
+			_, _, next, ok := depositCheckpointState(t, ctx, pool, coveredID)
+			return ok && next == 21
+		})
+		time.Sleep(100 * time.Millisecond)
+		stop()
+		if _, _, next, _ := depositCheckpointState(t, ctx, pool, coveredID); next != 21 {
+			t.Fatalf("checkpoint next = %d, want 21 (empty interval must advance)", next)
+		}
+		if n := depositCountRows(t, ctx, pool, "deposit_observations", coveredID); n != 0 {
+			t.Fatalf("observations = %d, want 0 for the empty interval", n)
+		}
+		// Missing watermark at the same position: stays, no row, no advance.
+		const missingID = 81
+		cfgM := depositITConfig(t, missingID, testContractA)
+		cfgM.PollInterval = 20 * time.Millisecond
+		depositSeedUpstream(t, ctx, pool, missingID, 0, cfgM.LogConfigHash, 10)
+		stopM := depositRunLoop(t, ctx, depositITScanner(t, pool, cfgM), depositITLease(t, pool, missingID))
+		time.Sleep(300 * time.Millisecond)
+		if _, _, _, ok := depositCheckpointState(t, ctx, pool, missingID); ok {
+			t.Fatal("checkpoint row exists although N_u <= b (must stay, never treat missing as empty)")
+		}
+		stopM()
+	})
+
+	t.Run("new_asset_inside_vs_beyond_unit", func(t *testing.T) {
+		// Asset B is unknown to the upstream whitelist {A}. Effective 12 (at
+		// or below b=20) makes it required by this unit: structural stop.
+		const insideID = 82
+		cfg := depositITConfig(t, insideID, testContractA)
+		cfg.Assets = append(append([]config.DepositEntry(nil), cfg.Assets...),
+			config.DepositEntry{Address: testContractB, Effective: 12})
+		depositSeedCanonical(t, ctx, pool, insideID, 10, 20, true)
+		depositSeedUpstream(t, ctx, pool, insideID, 0, cfg.LogConfigHash, 21)
+		err := depositRunLoopOnce(t, depositITScanner(t, pool, cfg), depositITLease(t, pool, insideID))
+		var gap *depositGap
+		if !errors.As(err, &gap) || gap.class != depositGapStructural || gap.cause != gapCauseAssetNotIndexed {
+			t.Fatalf("ServeLoop() = %v, want structural asset_not_indexed gap", err)
+		}
+		if _, _, _, ok := depositCheckpointState(t, ctx, pool, insideID); ok {
+			t.Fatal("checkpoint row exists after the in-unit asset stop")
+		}
+		// Same unknown asset effective at 25, beyond b=20: the current unit
+		// stays covered and commits; the loop then stops fail-fast with the
+		// structural verdict instead of waiting past a position the upstream
+		// can never serve (structural fires before the transient wait).
+		const beyondID = 83
+		cfgB := depositITConfig(t, beyondID, testContractA)
+		cfgB.Assets = append(append([]config.DepositEntry(nil), cfgB.Assets...),
+			config.DepositEntry{Address: testContractB, Effective: 25})
+		depositSeedCanonical(t, ctx, pool, beyondID, 10, 20, true)
+		depositSeedUpstream(t, ctx, pool, beyondID, 0, cfgB.LogConfigHash, 21)
+		errB := depositRunLoopOnce(t, depositITScanner(t, pool, cfgB), depositITLease(t, pool, beyondID))
+		var gapB *depositGap
+		if !errors.As(errB, &gapB) || gapB.class != depositGapStructural || gapB.cause != gapCauseAssetNotIndexed {
+			t.Fatalf("ServeLoop() = %v, want structural asset_not_indexed fail-fast after the covered unit", errB)
+		}
+		if _, _, next, ok := depositCheckpointState(t, ctx, pool, beyondID); !ok || next != 21 {
+			t.Fatalf("checkpoint next = %d (ok=%v), want 21 (covered unit commits before the stop)", next, ok)
+		}
+		if n := depositCountRows(t, ctx, pool, "deposit_observations", beyondID); n != 0 {
+			t.Fatalf("observations = %d, want 0 (beyond-unit asset needs no row)", n)
+		}
+	})
+
+	t.Run("pause_row_stops_loop", func(t *testing.T) {
+		const chainID = 84
+		cfg := depositITConfig(t, chainID, testContractA)
+		depositSeedCanonical(t, ctx, pool, chainID, 10, 20, true)
+		depositSeedUpstream(t, ctx, pool, chainID, 0, cfg.LogConfigHash, 21)
+		if _, err := pool.Exec(ctx, `
+INSERT INTO deposit_pause (chain_id, height, kind, detail) VALUES ($1, 10, 'upstream_gap', 'test')`,
+			chainID); err != nil {
+			t.Fatalf("seed deposit_pause: %v", err)
+		}
+		err := depositRunLoopOnce(t, depositITScanner(t, pool, cfg), depositITLease(t, pool, chainID))
+		var paused *streamPauseError
+		if !errors.As(err, &paused) || paused.stream != "deposit_pause" {
+			t.Fatalf("ServeLoop() = %v (%T), want *streamPauseError for deposit_pause", err, err)
+		}
+		if _, _, _, ok := depositCheckpointState(t, ctx, pool, chainID); ok {
+			t.Fatal("checkpoint row created despite the pause stop")
+		}
+		if n := depositCountRows(t, ctx, pool, "deposit_observations", chainID); n != 0 {
+			t.Fatalf("observations = %d, want 0 under pause", n)
+		}
+	})
+
+	t.Run("foreign_chain_coverage_isolated", func(t *testing.T) {
+		const foreignID = 99
+		cfgF := depositITConfig(t, foreignID, testContractA)
+		depositSeedCanonical(t, ctx, pool, foreignID, 10, 20, true)
+		depositSeedUpstream(t, ctx, pool, foreignID, 0, cfgF.LogConfigHash, 21)
+		depositSeedTransferRow(t, ctx, pool, foreignID, 15, depositBlockHash(15), depositTxHash(15, 0), 0,
+			common.HexToAddress(testContractA), common.HexToAddress(testContractB), common.HexToAddress(depositWatchAddr), big.NewInt(1))
+		// This chain has no upstream row at all: the foreign coverage must
+		// not leak in, the loop waits with zero state.
+		const chainID = 85
+		cfg := depositITConfig(t, chainID, testContractA)
+		cfg.PollInterval = 20 * time.Millisecond
+		stop := depositRunLoop(t, ctx, depositITScanner(t, pool, cfg), depositITLease(t, pool, chainID))
+		time.Sleep(300 * time.Millisecond)
+		if _, _, _, ok := depositCheckpointState(t, ctx, pool, chainID); ok {
+			t.Fatal("checkpoint row exists without this chain's coverage (foreign rows must not leak)")
+		}
+		if n := depositCountRows(t, ctx, pool, "deposit_observations", chainID); n != 0 {
+			t.Fatalf("observations = %d, want 0 (chain identity)", n)
+		}
+		stop()
+	})
+}
