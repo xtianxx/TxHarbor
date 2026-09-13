@@ -231,3 +231,114 @@ func TestHeaderByNumberMalformedJSONIsInvalidResponse(t *testing.T) {
 		t.Fatalf("KindOf(%v) = %q, want %q", err, KindOf(err), KindInvalidResponse)
 	}
 }
+
+// TestTransferSigMatchesERC20 pins keccak256("Transfer(address,address,uint256)")
+// (003 FR-07): a silent change here would drop every real Transfer log. The
+// canonical topic0 is ...f523b3ef; specs/003-event-indexing/research.md quotes
+// ...f2883e6f, which is a typo in the spec, not a usable test vector.
+func TestTransferSigMatchesERC20(t *testing.T) {
+	const want = "ddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef"
+	if got := strings.TrimPrefix(TransferSig.Hex(), "0x"); got != want {
+		t.Fatalf("TransferSig = %s, want %s", got, want)
+	}
+}
+
+func TestFilterLogsSuccessReturnsLogs(t *testing.T) {
+	var method string
+	c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			Method string `json:"method"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&req)
+		method = req.Method
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = fmt.Fprintf(w, `{"jsonrpc":"2.0","id":1,"result":[{`+
+			`"address":"0x00000000000000000000000000000000000000aa",`+
+			`"topics":[%q],`+
+			`"data":"0x0000000000000000000000000000000000000000000000000000000000000001",`+
+			`"blockNumber":"0x10","transactionHash":"0x%s",`+
+			`"transactionIndex":"0x1","blockHash":"0x%s",`+
+			`"logIndex":"0x0","removed":false}]}`,
+			TransferSig.Hex(), strings.Repeat("11", 32), strings.Repeat("22", 32))
+	})
+
+	logs, err := c.FilterLogs(context.Background(), ethereum.FilterQuery{
+		FromBlock: big.NewInt(16), ToBlock: big.NewInt(16),
+	})
+	if err != nil {
+		t.Fatalf("FilterLogs() error = %v", err)
+	}
+	if len(logs) != 1 {
+		t.Fatalf("FilterLogs() returned %d logs, want 1", len(logs))
+	}
+	if logs[0].BlockNumber != 16 || len(logs[0].Topics) != 1 || logs[0].Topics[0] != TransferSig {
+		t.Fatalf("FilterLogs() log = %+v, want block 16 with Transfer topic", logs[0])
+	}
+	if method != "eth_getLogs" {
+		t.Fatalf("method = %q, want eth_getLogs", method)
+	}
+}
+
+func TestFilterLogsEmptyResultIsSuccess(t *testing.T) {
+	c := newTestClient(t, func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"jsonrpc":"2.0","id":1,"result":[]}`))
+	})
+	logs, err := c.FilterLogs(context.Background(), ethereum.FilterQuery{
+		FromBlock: big.NewInt(1), ToBlock: big.NewInt(1),
+	})
+	if err != nil {
+		t.Fatalf("FilterLogs() empty result error = %v, want nil", err)
+	}
+	if len(logs) != 0 {
+		t.Fatalf("FilterLogs() returned %d logs, want 0", len(logs))
+	}
+}
+
+func TestFilterLogsErrorClassification(t *testing.T) {
+	tests := []struct {
+		name    string
+		handler http.HandlerFunc
+		want    Kind
+	}{
+		{"http 429", func(w http.ResponseWriter, _ *http.Request) {
+			w.WriteHeader(http.StatusTooManyRequests)
+			_, _ = w.Write([]byte("rate limit exceeded"))
+		}, KindRateLimited},
+		{"http 413", func(w http.ResponseWriter, _ *http.Request) {
+			w.WriteHeader(http.StatusRequestEntityTooLarge)
+			_, _ = w.Write([]byte("query too wide"))
+		}, KindIncomplete},
+		{"rpc limit exceeded", func(w http.ResponseWriter, _ *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"jsonrpc":"2.0","id":1,"error":{"code":-32005,"message":"query returned more than 10000 results"}}`))
+		}, KindIncomplete},
+		{"http 500", func(w http.ResponseWriter, _ *http.Request) {
+			http.Error(w, "boom", http.StatusInternalServerError)
+		}, KindTransport},
+		{"malformed json", func(w http.ResponseWriter, _ *http.Request) {
+			_, _ = w.Write([]byte("not json"))
+		}, KindInvalidResponse},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			c := newTestClient(t, tt.handler)
+			_, err := c.FilterLogs(context.Background(), ethereum.FilterQuery{
+				FromBlock: big.NewInt(1), ToBlock: big.NewInt(2),
+			})
+			if err == nil {
+				t.Fatal("FilterLogs() expected error")
+			}
+			if got := KindOf(err); got != tt.want {
+				t.Fatalf("KindOf(%v) = %q, want %q", err, got, tt.want)
+			}
+			if tt.want != KindIncomplete && KindOf(err) == KindIncomplete {
+				t.Fatalf("KindOf(%v) = incomplete, must never treat this failure as incomplete", err)
+			}
+			var e *Error
+			if !errors.As(err, &e) || e.Op != "eth_getLogs" {
+				t.Fatalf("error = %v, want *Error with Op eth_getLogs", err)
+			}
+		})
+	}
+}

@@ -18,6 +18,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/ethereum/go-ethereum"
 	"github.com/ethereum/go-ethereum/core/types"
 
 	"github.com/xtianxx/txharbor/internal/config"
@@ -154,8 +155,10 @@ func Serve(ctx context.Context, d Deps) int {
 		Observe: m.ObserveProbe,
 	}
 
-	// 5b. Indexer: startup-unique lease owner plus the scanner. RPC outcomes
-	// feed only the indexer metrics; readiness stays dependency-probe driven.
+	// 5b. Indexer: startup-unique lease owner plus the header and log scanners,
+	// both behind one coordinator (a single acquisition loop and a single
+	// heartbeat, research R1). RPC outcomes feed only the indexer metrics;
+	// readiness stays dependency-probe driven.
 	if cfg.ChainID > math.MaxInt64 {
 		ethClient.Close()
 		pool.Close()
@@ -174,7 +177,8 @@ func Serve(ctx context.Context, d Deps) int {
 		pool.Close()
 		return fail("startup failed (indexer): %s", logx.Redact(err.Error()))
 	}
-	scanner, err := indexer.NewScanner(pool, indexerRPC{client: ethClient, m: m}, lease, indexer.Config{
+	headerRPC := indexerRPC{client: ethClient, m: m}
+	scanner, err := indexer.NewScanner(pool, headerRPC, lease, indexer.Config{
 		StartHeight:  cfg.StartHeight,
 		RPCTimeout:   cfg.IndexRPCTimeout,
 		PollInterval: cfg.IndexPollInterval,
@@ -185,6 +189,25 @@ func Serve(ctx context.Context, d Deps) int {
 		ethClient.Close()
 		pool.Close()
 		return fail("startup failed (indexer): %s", logx.Redact(err.Error()))
+	}
+	// The log scanner's frozen configuration identity (start block and
+	// whitelist hash) is compared against the durable log_checkpoint row when
+	// the loop starts: a mismatch refuses to scan and exits non-zero (FR-05).
+	logScanner, err := indexer.NewLogScanner(pool, headerRPC, logRPC{client: ethClient, m: m}, lease, indexer.LogConfig{
+		StartBlock:   cfg.LogStartHeight,
+		Contracts:    cfg.LogContracts,
+		ConfigHash:   cfg.LogConfigHash,
+		BatchBlocks:  cfg.LogBatchBlocks,
+		RPCTimeout:   cfg.IndexRPCTimeout,
+		PollInterval: cfg.IndexPollInterval,
+		RetryInitial: cfg.IndexRetryInitial,
+		RetryMax:     cfg.IndexRetryMax,
+		ResultLimit:  0, // count-based completeness verdict disabled until the provider annex (research R5)
+	}, slog.Default())
+	if err != nil {
+		ethClient.Close()
+		pool.Close()
+		return fail("startup failed (log indexer): %s", logx.Redact(err.Error()))
 	}
 
 	srv := &http.Server{
@@ -201,6 +224,8 @@ func Serve(ctx context.Context, d Deps) int {
 
 	observer := &indexerObserver{scanner: scanner, m: m, chainID: chainID}
 	observer.observe()
+	logObserver := &logObserver{scanner: logScanner, header: scanner, m: m, chainID: chainID}
+	logObserver.observe()
 
 	go runner.Run(runCtx)
 	serveErr := make(chan error, 1)
@@ -208,14 +233,16 @@ func Serve(ctx context.Context, d Deps) int {
 	indexerErr := make(chan error, 1)
 	indexerDone := make(chan struct{})
 	go func() {
-		indexerErr <- scanner.Run(runCtx)
+		// The coordinator owns the only acquisition loop and heartbeat and
+		// joins both serve loops before it returns (research R1).
+		indexerErr <- indexer.RunPair(runCtx, lease, scanner.ServeLoop, logScanner.ServeLoop)
 		close(indexerDone)
 	}()
 	fmt.Fprintf(stdout, "txharbor serve: listening on %s\n", listener.Addr())
 
-	// Mirror scanner snapshots into metrics for as long as serve runs. A
-	// scanner failure is terminal exactly like an HTTP server failure: record
-	// the terminal state, then shut down with a non-zero exit code.
+	// Mirror both scanners' snapshots into metrics for as long as serve runs.
+	// A scanner failure is terminal exactly like an HTTP server failure:
+	// record both terminal states, then shut down with a non-zero exit code.
 	metricTicker := time.NewTicker(indexerMetricInterval)
 	defer metricTicker.Stop()
 
@@ -232,7 +259,8 @@ serveLoop:
 			}
 			break serveLoop
 		case err := <-indexerErr:
-			observer.observe() // capture the terminal state before teardown
+			observer.observe()    // capture the terminal state before teardown
+			logObserver.observe() // both loops are joined by the coordinator
 			if err != nil && !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) {
 				fmt.Fprintf(stderr, "txharbor serve: indexer stopped: %s\n", logx.Redact(err.Error()))
 				exitCode = 1
@@ -240,6 +268,7 @@ serveLoop:
 			break serveLoop
 		case <-metricTicker.C:
 			observer.observe()
+			logObserver.observe()
 		}
 	}
 	cancel() // stop probe loop and indexer before releasing resources
@@ -303,6 +332,27 @@ func (r indexerRPC) observe(err error) {
 	r.m.ObserveIndexerRPC(string(kind), kind == eth.KindNotFound)
 }
 
+// logRPC decorates eth.Client.FilterLogs with txharbor_log_rpc_total
+// bookkeeping (contracts/observability.md). Successful calls carry no failure
+// class and are not counted; not-found is the wait polarity and is counted as
+// ok, every other classified failure as error.
+type logRPC struct {
+	client *eth.Client
+	m      *metrics.Metrics
+}
+
+func (r logRPC) FilterLogs(ctx context.Context, q ethereum.FilterQuery) ([]types.Log, error) {
+	logs, err := r.client.FilterLogs(ctx, q)
+	if err != nil {
+		kind := eth.KindOf(err)
+		if kind == "" {
+			kind = eth.KindInvalidResponse
+		}
+		r.m.ObserveLogRPC(string(kind), kind == eth.KindNotFound)
+	}
+	return logs, err
+}
+
 // indexerObserver mirrors the scanner's snapshot-only state and checkpoint
 // into the metrics registry: it is sampled on a ticker and once more when the
 // scanner stops. Pauses increment txharbor_indexer_pause_total on the
@@ -324,6 +374,44 @@ func (o *indexerObserver) observe() {
 	o.m.ObserveIndexerState(o.chainID, int(state))
 	height, _, ok := o.scanner.Checkpoint()
 	o.m.ObserveIndexerCheckpoint(o.chainID, height, ok)
+}
+
+// logObserver mirrors the log scanner's snapshot-only state, checkpoint and
+// lag into the metrics registry next to the header observer; both are sampled
+// on the same ticker and once more when the coordinator stops. Lag is 002's
+// checkpoint height minus (log next block - 1); the series is absent while
+// either checkpoint is empty (contracts/observability.md). Pauses increment
+// txharbor_log_pause_total on the transition into the paused state.
+type logObserver struct {
+	scanner *indexer.LogScanner
+	header  *indexer.Scanner
+	m       *metrics.Metrics
+	chainID int64
+	last    indexer.State
+	sampled bool
+}
+
+func (o *logObserver) observe() {
+	state := o.scanner.State()
+	if state == indexer.StatePaused && (!o.sampled || o.last != indexer.StatePaused) {
+		o.m.ObserveLogPause(o.chainID)
+	}
+	o.last, o.sampled = state, true
+	o.m.ObserveLogState(o.chainID, int(state))
+
+	next, logOK := o.scanner.Checkpoint()
+	o.m.ObserveLogCheckpointNext(o.chainID, next, logOK)
+	height, _, headerOK := o.header.Checkpoint()
+	if !logOK || !headerOK || next == 0 {
+		o.m.ObserveLogLag(o.chainID, 0, false)
+		return
+	}
+	done := next - 1
+	lag := uint64(0)
+	if height > done {
+		lag = height - done
+	}
+	o.m.ObserveLogLag(o.chainID, lag, true)
 }
 
 // runShutdown executes steps in order under one shared budget. Remaining

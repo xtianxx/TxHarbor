@@ -256,7 +256,8 @@ func (s *Scanner) gateChainID(ctx context.Context) error {
 }
 
 // serve holds the lease and drives the scan until a stop condition. It runs
-// the lease heartbeat for as long as it is active.
+// the lease heartbeat for as long as it is active; Run keeps this
+// self-contained path so 002 behavior stays locked by its own tests.
 func (s *Scanner) serve(ctx context.Context) error {
 	hbCtx, cancelHB := context.WithCancel(ctx)
 	defer cancelHB()
@@ -272,6 +273,17 @@ func (s *Scanner) serve(ctx context.Context) error {
 		default:
 			return nil
 		}
+	}
+	return s.ServeLoop(ctx, checkLost)
+}
+
+// ServeLoop is the mechanical split of the old serve body: it runs the scan
+// while the caller holds the lease and the heartbeat (the 003 coordinator owns
+// both, research R1). checkLost reports a lost lease and is consulted before
+// any write; nil means "never lost" for standalone callers.
+func (s *Scanner) ServeLoop(ctx context.Context, checkLost func() error) error {
+	if checkLost == nil {
+		checkLost = func() error { return nil }
 	}
 
 	// Startup: read durable state and freeze the start height (FR-03).

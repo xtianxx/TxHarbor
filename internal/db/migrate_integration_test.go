@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"context"
 	"database/sql"
+	"fmt"
 	"strings"
 	"testing"
 	"testing/fstest"
@@ -63,20 +64,28 @@ func TestMigrateUpStatusAndRepeatOnEmptyDatabase(t *testing.T) {
 	ctx := context.Background()
 	opts := testMigrateOptions(dsn)
 
+	// Derive every count from the embedded set so adding a migration never
+	// invalidates this test (003 added 000003).
+	files, err := MigrationFiles(Migrations)
+	if err != nil {
+		t.Fatalf("list embedded migrations: %v", err)
+	}
+	target := files[len(files)-1].Version
+
 	var out bytes.Buffer
 	if err := MigrateUp(ctx, opts, &out); err != nil {
 		t.Fatalf("first MigrateUp() error = %v", err)
 	}
-	if !strings.Contains(out.String(), "applied=2 skipped=0 pending=0") {
-		t.Fatalf("first MigrateUp() output = %q", out.String())
+	if want := fmt.Sprintf("applied=%d skipped=0 pending=0", len(files)); !strings.Contains(out.String(), want) {
+		t.Fatalf("first MigrateUp() output = %q, want %q", out.String(), want)
 	}
 
 	out.Reset()
 	if err := MigrateStatus(ctx, opts, &out); err != nil {
 		t.Fatalf("MigrateStatus() error = %v", err)
 	}
-	if !strings.Contains(out.String(), "current_version=2") || !strings.Contains(out.String(), "pending=none") {
-		t.Fatalf("MigrateStatus() output = %q", out.String())
+	if want := fmt.Sprintf("current_version=%d", target); !strings.Contains(out.String(), want) || !strings.Contains(out.String(), "pending=none") {
+		t.Fatalf("MigrateStatus() output = %q, want %q and pending=none", out.String(), want)
 	}
 
 	if _, err := CheckCompatibility(ctx, opts); err != nil {
@@ -87,20 +96,20 @@ func TestMigrateUpStatusAndRepeatOnEmptyDatabase(t *testing.T) {
 	if err := MigrateUp(ctx, opts, &out); err != nil {
 		t.Fatalf("second MigrateUp() error = %v", err)
 	}
-	if !strings.Contains(out.String(), "applied=0 skipped=2 pending=0") {
-		t.Fatalf("second MigrateUp() output = %q", out.String())
+	if want := fmt.Sprintf("applied=0 skipped=%d pending=0", len(files)); !strings.Contains(out.String(), want) {
+		t.Fatalf("second MigrateUp() output = %q, want %q", out.String(), want)
 	}
 
 	// Exactly one applied row per version: no duplicate application.
 	sqlDB := openTestSQL(t, dsn)
-	for _, v := range []int64{1, 2} {
+	for _, f := range files {
 		var rows int
 		if err := sqlDB.QueryRowContext(ctx,
-			"SELECT count(*) FROM goose_db_version WHERE version_id = $1 AND is_applied", v).Scan(&rows); err != nil {
+			"SELECT count(*) FROM goose_db_version WHERE version_id = $1 AND is_applied", f.Version).Scan(&rows); err != nil {
 			t.Fatalf("count version rows: %v", err)
 		}
 		if rows != 1 {
-			t.Fatalf("goose_db_version rows for version %d = %d, want 1", v, rows)
+			t.Fatalf("goose_db_version rows for version %d = %d, want 1", f.Version, rows)
 		}
 	}
 }
