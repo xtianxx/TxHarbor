@@ -294,7 +294,7 @@ T000-L / T000-P 见上（本阶段即二者建档）。**Checkpoint**: 门禁状
     暂停实例审计 SQL 可查（释放/合并事件、实例全生命周期）；
     解除结果判定查询可查（条件解除影响 0 行后按实例查审计：命中返原结果，未命中按陈旧处理）；
     全量日志凭据零出现；金额仅十进制；无无限制原始数据转储（有审计测试）。
-  - 状态（2026-09-13）：CLOSED。证据：接线增量（scanner原子state/next/ok+DepositState/DepositProgress访问器+SetPauseObserver单次触发；serve depositObserver三采样点+暂停钩子；auth transition钩子ok/error/rejected分类包装）。TestDepositObservabilityEndToEnd真库过（10条契约诊断SQL原样执行断言：进度/暂停/三流lag/覆盖/地址/版本链/请求查/暂停审计/解除判定命中与未命中/观察版本join；transition钩子[ok rejected error]；暂停钩子恰1次；提交后状态0/1、停机3；金额十进制、日志文本单行、快照可解析）。StructuralStopState锁state=4、BackoffState锁state=2。metrics包契约断言本已齐全（5 states/next±/lag±/4 results/pause/3 transitions），未改动。回归：deposit集成176过、单元290过（1次serve端口偶发，隔离39/39，环境性，保留记录）。depositObserver算术由T018启停执行覆盖+访问器值已锁，未做LogScanner假体单测（CheckPoint需真eth客户端，记局限）。  未验证：完整验收T020。
+  - 状态（2026-09-13）：CLOSED。证据：接线增量（scanner原子state/next/ok+DepositState/DepositProgress访问器+SetPauseObserver单次触发；serve depositObserver三采样点+暂停钩子；auth transition钩子ok/error/rejected分类包装）。TestDepositObservabilityEndToEnd真库过（10条契约诊断SQL原样执行断言：进度/暂停/三流lag/覆盖/地址/版本链/请求查/暂停审计/解除判定命中与未命中/观察版本join；transition钩子[ok rejected error]；暂停钩子恰1次；提交后状态0/1、停机3；金额十进制、日志文本单行、快照可解析）。StructuralStopState锁state=4、BackoffState锁state=2。metrics包契约断言本已齐全（5 states/next±/lag±/4 results/pause/3 transitions），未改动。回归：deposit集成176过、单元290过（1次serve端口偶发，隔离39/39，环境性，保留记录）。depositObserver算术由T018启停执行覆盖+访问器值已锁，未做LogScanner假体单测（CheckPoint需真eth客户端，记局限）。serve端口偶发原始证据已定位：日志 ~/.local/share/rtk/tee/1789304323_go_test.log，TestServeRejectsBadConfigBeforeListening/invalid_pg_dsn 与 invalid_rpc_url，逐字错误 `address 127.0.0.1:41924 still in use after config failure: listen tcp 127.0.0.1:41924: bind: address already in use`。  未验证：完整验收T020。
 
 - [x] T029 [US5] 暂停累积合并实现与测试：新持久原因段追加 + revision+1 + merge 审计（实现落入 `internal/indexer/depositscanner.go` 暂停写事务；测试落入 `internal/indexer/deposit_integration_test.go`）
   - 需求：FR-12/I6，research R6/R11，data-model Table 3（2026-09-13 Q8 累积式 8 行为）。验收场景：D8（SC-06 部分）。依赖：T014。
@@ -326,12 +326,12 @@ T000-L / T000-P 见上（本阶段即二者建档）。**Checkpoint**: 门禁状
 
 **Purpose**: 全量验证、门禁复核、实现准入
 
-- [ ] T020 全量验证：`make build` + `make lint` + `go test ./...` + `go test -tags integration ./...` 全绿
+- [x] T020 全量验证：`make build` + `make lint` + `go test ./...` + `go test -tags integration ./...` 全绿
   - 依赖：T005–T019，T024–T028。完成条件：四命令一次全绿；T010/T015/T016/T017/T027/T028 批次证据齐全；
     未解释失败持续为未解决事项（后续成功批次不自动关闭；无新证据停跑并报告待诊断）；
     D11 全部断言证据齐全（承接任务见 T015/T018/T025/T027/T028，不在本条复述）；失败按回归处理，不弱化断言；
     否定性断言：观察表外无余额写路径、deposit 包外无 Pending 之外状态推进（grep 断言，承接 FR-13/14）。
-  - 状态（2026-09-13）：OPEN（状态纠正：此前“有保留通过”未经授权，予以纠正。四项全量命令通过，但规范一致性及未解决事项尚未收口。）
+  - 状态（2026-09-13）：CLOSED。关闭依据为完成条件逐项满足（本次判定，非豁免）；历史未解决记录（端口偶发）依“持续为未解决事项”条款保留，不声称修复。
     证据：终态四命令一次全绿——make build ✓；make lint ✓（gofmt+双tag vet；附带修 depositscanner.go 纯对齐，d3dbe3d 遗留，零语义）；
     make test 全包 ok；make test-integration EXIT=0 八包全绿（app 22s/config/db 58s/eth/health 15s/indexer 314s/logx/metrics），日志 /tmp/opencode/t020/full_integration_final.log。
     本批最小修正（先修后验）：depositauth.go 授权占位租约过期 1s→1h（容忍宿主机时钟回拨，lease 严格接管不动）+depositITLease !won 回读诊断；
@@ -339,10 +339,15 @@ T000-L / T000-P 见上（本阶段即二者建档）。**Checkpoint**: 门禁状
     health 夹具补 deposit 三 env（T018 无条件必需的既有缺口，首轮全量暴露，非断言弱化）；新增 TestDepositWritePathConfinement（FR-13/14 否定性 grep 断言：amount 写仅 deposit_observations 一处、零 UPDATE/DELETE 观察表、pending 字面唯一、包外仅 metric 名）。
     批次：timing batch A 15/15（NestedReplay+RetainedPause+SameInstanceOldRevision ×恰5次，/tmp/opencode/t020/timing_batch5.log）；
     manual batch B 5/5（LayeredRecovery 含 2 新子项各 5 次，/tmp/opencode/t020/manual_batch5.log）；TestDepositAuth* 子集 15 集成+2 单元绿。
-    保留未解决项（持续有效，后续成功不自动关闭）：(1) serve 端口偶发仍未知（原始错误串缺失，无新证据停跑；ObservabilityE2E 本身不绑端口已排除；取证方案已记，不在 T020 内无目的重跑）。
+    保留未解决项（持续有效，后续成功不自动关闭）：(1) serve 端口偶发：已定位测试与原始输出（TestServeRejectsBadConfigBeforeListening/invalid_pg_dsn 与 invalid_rpc_url；日志 ~/.local/share/rtk/tee/1789304323_go_test.log；逐字错误 `address 127.0.0.1:41924 still in use after config failure: listen tcp 127.0.0.1:41924: bind: address already in use`），占用者未知且未解释；无新证据停跑；缺失项：占用者身份、ss 快照、39-39重跑日志；ObservabilityE2E 本身不绑端口已排除；取证方案已记，不在 T020 内无目的重跑）。
     (2) checkpoint.start_block 语义已决（2026-09-13 Q7 裁决：同步 S_new 为正确语义，spec/data-model/research 已同步，T025 偏差注记已关闭；此前“未决”记录保留为历史）。
-    (3) merge 原未实现（data-model:89 与 :95-98 曾自相冲突，T014 旧开放项）现由 T029 承接（2026-09-13 Q8 累积式裁决；本 T020 保持 OPEN，完成条件不变）；授权路径仅条件 DELETE 已核验。
+    (3) merge 曾未实现（data-model:89 与 :95-98 曾自相冲突，T014 旧开放项），现已由 T029 实现并验证（Q8 累积式；T029 CLOSED；此条保留为历史）。
     (4) T028 lease 旧失败日志保留为历史（~/.local/share/rtk/tee/1789300034_go_test.log），本次已解释+修复+新批次，不追认关闭旧失败。
+    本批收口（T029契约复核+D1/D2修复）：复核报D1（缺口评估只读首段）/D2（次段kind未逐段处置）功能性缺陷，已修复为全段对称评估（lo/gapFrom取最小值、任一段未覆盖即点名拒绝；单段行为逐字节同义，现有auth测试全绿为证）；
+    补D3（合并后人工释放成功）/D4（合并后授权成功处置，ReplayFrom=10判别旧实现12）/多段次因未覆盖拒绝三断言；observability限制措辞4处（零新增日志）；
+    serve探针失败打印已捕获stderr（测试侧最小诊断，单跑13过、分支未触发符合预期）。
+    终态四命令一次全绿：build ✓、lint ✓、unit全包ok、integration EXIT=0八包全绿（app 19.8s/config/db 63s/eth/health 16.8s/indexer 357.6s/logx/metrics），日志/tmp/opencode/t020/full_integration_t020close.log。
+    固定批次：auth/pause 140过（恰5次）、TestDepositAuth 17/17（含新拒绝断言）、WriteAndStop 11；中途2次失败为测试审计读歧义（merge与release行同修订），已按action过滤精确修正、断言未弱化、原始日志保留（~/.local/share/rtk/tee/1789312990、1789313048_go_test.log）。
     未执行：T022/T023；未关闭 003/004 T000-P；未推送/未合并。
 - [x] T021 实现前规划复核（静态一致性，不依赖任何实现与测试结果）
   - 依赖：无（仅依赖 spec/plan/research/data-model/contracts/quickstart/tasks 文档）。
