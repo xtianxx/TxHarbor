@@ -1480,11 +1480,12 @@ INSERT INTO deposit_pause (chain_id, height, kind, detail) VALUES ($1, 10, 'chai
 // the 003 scanner from real chain data; this test seeds no 004-side rows and
 // no erc20_transfer_logs.
 //
-// T018 is not implemented (serve wiring): the test composes the already-built
-// components directly — Scanner.Run wins the lease, then LogScanner.ServeLoop
-// and DepositScanner.ServeLoop share the same lease handle, exactly as one
-// process would after wiring. A pass proves the recognition chain end to end;
-// it does NOT prove that the production serve path registers the deposit loop.
+// Serve-wiring note (T018 CLOSED): production registers the deposit loop via
+// RunTrio (proven by TestServeDepositLoopStartStop in the app package); this
+// test composes the already-built components directly — Scanner.Run wins the
+// lease, then LogScanner.ServeLoop and DepositScanner.ServeLoop share the same
+// lease handle, exactly as one process does after wiring. A pass proves the
+// recognition chain end to end.
 //
 // Environment: Anvil ghcr.io/foundry-rs/foundry:v1.8.1 with --chain-id 31337
 // (scanChainID) and PostgreSQL postgres:18.6-trixie (startIndexerPostgres).
