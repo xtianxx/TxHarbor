@@ -79,9 +79,9 @@ specs/003-event-indexing/
 internal/
 ├── config/config.go        # 新增 LOG_START_HEIGHT/LOG_CONTRACTS/LOG_BATCH_BLOCKS + 校验；Summary 脱敏沿用
 ├── eth/client.go           # 新增 FilterLogs 封装 + KindIncomplete 分类
-├── indexer/                # 新增：logscanner 循环、whitelist/config_hash、validate、commit（短事务，复用 lease 协议）
+├── indexer/                # 新增：coordinator（单获取循环+单心跳）、logscanner 循环、whitelist/config_hash、validate、commit（短事务，复用 lease 协议）；Scanner.serve 仅机械拆分出 serveLoop（行为不变）
 ├── metrics/metrics.go      # 新增 5 个 log_* 指标
-└── app/serve.go            # 接线 log-scanner 启停：与 header scanner 共享同一 Lease 句柄 + 同一心跳（沿用 runCtx/ShutdownTimeout，两流并存）
+└── app/serve.go            # 改走 coordinator 并发运行 header/log 双 serveLoop（沿用 runCtx/ShutdownTimeout；Scanner.Run 保留供 002 测试）
 migrations/000003_event_indexing.sql  # 新增 3 表
 ```
 
@@ -91,8 +91,8 @@ eth/config/metrics 均为原位扩展，不搭新抽象层）。
 ## 关键流程（状态转换总览）
 
 ```
-启动 → CheckChainID 门禁 → 解析白名单/计算 config_hash → 取 lease（获胜/旁观）→
-配置比较（行存在且 start/config 任一不同即拒绝退出）→ 循环：
+启动 → CheckChainID 门禁 → 解析白名单/计算 config_hash → Coordinator 取 lease（获胜/旁观）→
+配置比较（行存在且 start/config 任一不同即拒绝退出）→ 胜出期间并发运行双 serveLoop（单心跳保活）：
   定上界(min(请求末端, 002 checkpoint) + 连续 canonical 验证) →
   FilterLogs(RPC, 超时) → 逐条 8 项校验 → 复核末端块身份 →
   短事务[确保 lease 行 → FOR UPDATE 取协调锁 →
@@ -109,8 +109,10 @@ eth/config/metrics 均为原位扩展，不搭新抽象层）。
 - 3 条澄清逐条落实：A1→FR-05/R3（编码、比较、原子初始化）；A2→FR-16/R1（独立行 + 双暂停裁决 + 服从链级暂停）；
   A3→FR-12/R4（`KindIncomplete`、丢弃缩批、单块停推、未知按失败）。
 - FR-01–FR-19 全部映射到 data-model/research 对应节；11 验收场景全部映射到 quickstart 验证表（见下节覆盖矩阵）。
-- 未发现 spec 冲突；**本次 plan 核对未改变任何已确定的业务语义**（暂停 kind 由 `log_conflict` 并入 `validation_failed` + `detail.class` 属设计层命名，不在规格锁定范围内；`log_checkpoint` 无外键、lease 共享句柄、暂停原子条件均为规格已锁行为的落实），无需规格修订。如 tasks/实现阶段发现冲突，将显式报告。
-- E1 按规格要求保持 open：它是实现及生产接入的门禁，不阻塞任务拆解；计数达上限判定默认禁用（禁用 ≠ 已解决，残余风险如实声明）；不虚构 provider 映射，不将生产 provider 标为可用。
+- 未发现 spec 冲突；**本次 plan 核对未改变任何已确定的业务语义**（暂停 kind 由 `log_conflict` 并入 `validation_failed` + `detail.class` 属设计层命名，不在规格锁定范围内；`log_checkpoint` 无外键、coordinator 单获取循环、暂停原子条件均为规格已锁行为的落实），无需规格修订。如 tasks/实现阶段发现冲突，将显式报告。
+- E1 双轨：T000-L（本地前置）关闭 + T020a 通过 → 可开始本地范围实现；T000-P（生产）保持 open，
+  门禁生产接入与部署。计数达上限判定默认禁用（禁用 ≠ 已解决，残余风险如实声明）；不虚构 provider 映射，
+  不将生产 provider 标为可用；验收命名区分"本地范围验收"与"生产接入就绪"。
 
 ## 需求与验收覆盖（FR/SC → 设计 → 验证）
 
