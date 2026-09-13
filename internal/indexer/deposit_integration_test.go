@@ -4731,6 +4731,58 @@ func TestDepositPauseMergeCumulative(t *testing.T) {
 		}
 	})
 
+	t.Run("merged_row_manual_release", func(t *testing.T) {
+		const chainID = 210
+		cfg := depositMergeConfig(t, chainID)
+		progress := depositMergeSeedChain(t, ctx, pool, chainID, cfg, 21)
+		sc := depositITScanner(t, pool, cfg)
+		lease := depositITLease(t, pool, chainID)
+
+		ev1 := depositMergeGapEvidence(cfg, 10, 14)
+		ev2 := depositMergeGapEvidence(cfg, 16, 18)
+		if !sc.tryPersistPause(ctx, lease, ev1, progress, depositPauseViaReadCoveredUnit) ||
+			!sc.tryPersistPause(ctx, lease, ev2, progress, depositPauseViaParse) {
+			t.Fatal("seed insert+merge asked for a retry")
+		}
+		row, ok := depositReadPause(t, ctx, pool, chainID)
+		if !ok || row.rev != 2 {
+			t.Fatalf("merged pause = %+v (ok=%v), want rev2", row, ok)
+		}
+
+		// Once every cause is resolved the merged instance releases through
+		// the manual path: one conditional DELETE, one release audit row
+		// carrying the full merged detail (D3, T029).
+		released, err := sc.ReleaseDepositPause(ctx, lease, row.id, row.rev, "operator-m", "merged cause repaired")
+		if err != nil || !released {
+			t.Fatalf("release = (%v,%v), want (true,nil)", released, err)
+		}
+		if _, ok := depositReadPause(t, ctx, pool, chainID); ok {
+			t.Fatal("merged pause row still present after release")
+		}
+		// The merge row shares (pause_id, revision=2): read the release audit
+		// by its action.
+		wantAudit := depositAuthAudit{
+			action: "release", operator: "operator-m", reason: "merged cause repaired",
+			versionSeq: 1, kind: "upstream_gap", height: 10, detail: row.detail,
+		}
+		var releaseAudit depositAuthAudit
+		if err := pool.QueryRow(ctx, `
+SELECT action, operator, reason, version_seq, kind, height, detail
+FROM deposit_pause_audit
+WHERE chain_id = $1 AND pause_id = $2 AND revision = $3 AND action = 'release'`,
+			chainID, row.id, row.rev).
+			Scan(&releaseAudit.action, &releaseAudit.operator, &releaseAudit.reason,
+				&releaseAudit.versionSeq, &releaseAudit.kind, &releaseAudit.height, &releaseAudit.detail); err != nil {
+			t.Fatalf("read release audit: %v", err)
+		}
+		if releaseAudit != wantAudit {
+			t.Fatalf("release audit = %+v, want %+v", releaseAudit, wantAudit)
+		}
+		if n := depositCountRows(t, ctx, pool, "deposit_pause_audit", chainID); n != 2 {
+			t.Fatalf("pause audit rows = %d, want exactly 2 (the merge row and the release row)", n)
+		}
+	})
+
 	t.Run("duplicate_delivery_idempotent", func(t *testing.T) {
 		const chainID = 204
 		cfg := depositMergeConfig(t, chainID)

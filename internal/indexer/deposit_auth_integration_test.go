@@ -479,9 +479,12 @@ func TestDepositAuthRefusals(t *testing.T) {
 // transaction: an explicit matching target releases the resolved instance with
 // its audit row and records the target in the history row; a needs_006 pause
 // is retained under a targetless request (targets are refused); a resolved
-// in-scope pause without a target is refused as must-dispose; and a target
-// that no longer matches the live instance is refused. Each refusal leaves the
-// pause row and every other durable trace untouched.
+// in-scope pause without a target is refused as must-dispose; a target
+// that no longer matches the live instance is refused; a fully resolved merged
+// instance disposes through its explicit target folding the minimum segment
+// start; a merged instance whose later cause is still uncovered refuses even a
+// matching target, naming the offending segment's range. Each refusal leaves
+// the pause row and every other durable trace untouched.
 func TestDepositAuthPauseDispositions(t *testing.T) {
 	dsn := startIndexerPostgres(t)
 	pool := openIndexerPool(t, dsn)
@@ -623,6 +626,130 @@ func TestDepositAuthPauseDispositions(t *testing.T) {
 			t.Fatalf("replaced-target error = %v, want ErrAuthRejected naming the replaced target", err)
 		}
 		depositAuthAssertUnchanged(t, ctx, pool, chainID, before)
+	})
+
+	t.Run("merged_all_causes_resolved_disposed", func(t *testing.T) {
+		const chainID = 125
+		cfg := depositMergeConfig(t, chainID)
+		progress := depositMergeSeedChain(t, ctx, pool, chainID, cfg, 21)
+		sc := depositITScanner(t, pool, cfg)
+		lease := depositITLease(t, pool, chainID)
+
+		// The first cause is not the minimum: gap 16-18 lands first, gap
+		// 10-14 merges second. Both are resolved at N_u=21.
+		ev1 := depositMergeGapEvidence(cfg, 16, 18)
+		ev2 := depositMergeGapEvidence(cfg, 10, 14)
+		if !sc.tryPersistPause(ctx, lease, ev1, progress, depositPauseViaReadCoveredUnit) ||
+			!sc.tryPersistPause(ctx, lease, ev2, progress, depositPauseViaParse) {
+			t.Fatal("seed insert+merge asked for a retry")
+		}
+		pause, ok := depositAuthReadPause(t, ctx, pool, chainID)
+		if !ok || pause.rev != 2 || !strings.Contains(pause.detail, "\n+merged[rev=2]") {
+			t.Fatalf("merged pause = %+v (ok=%v), want rev2 with one merged segment", pause, ok)
+		}
+
+		withB := depositAuthSnapshot(depositAuthLine(testContractA, 10), depositAuthLine(testContractB, 12))
+		watches := depositAuthLine(depositWatchAddr, 10)
+		h2 := depositAuthHash(t, 10, withB, watches)
+		req := depositAuthBaseReq(t, chainID, "auth-merged-dispose", 1)
+		req.NewConfigHash, req.NewStartBlock, req.NewAssets, req.NewWatches = h2, 10, withB, watches
+		req.ExpectedPauseID, req.ExpectedPauseRevision = &pause.id, &pause.rev
+
+		res, err := AuthorizeDepositConfig(ctx, pool, req)
+		if err != nil {
+			t.Fatalf("merged disposition: %v", err)
+		}
+		// Replay folds to the minimum resolved gap start (10), not the first
+		// cause's 16: every segment decides (D4, T029).
+		if want := (DepositAuthResult{VersionSeq: 2, ReplayFrom: 10, Pause: DepositPauseReleased}); res != want {
+			t.Fatalf("result = %+v, want %+v", res, want)
+		}
+		if _, ok := depositAuthReadPause(t, ctx, pool, chainID); ok {
+			t.Fatal("merged pause row still present after the disposition")
+		}
+		if got := depositAuthReadHistory(t, ctx, pool, chainID, 2); got.replay != 10 ||
+			got.expectedPauseID != strconv.FormatInt(pause.id, 10) ||
+			got.expectedPauseRevision != strconv.FormatInt(pause.rev, 10) {
+			t.Fatalf("history v2 = %+v, want replay 10 and the captured target", got)
+		}
+		wantAudit := depositAuthAudit{
+			action: "release", operator: "operator-1", reason: "test authorization",
+			versionSeq: 2, kind: "upstream_gap", height: 16, detail: pause.detail,
+		}
+		// The merge row shares (pause_id, revision=2): read the terminal audit
+		// by its release action.
+		var releaseAudit depositAuthAudit
+		if err := pool.QueryRow(ctx, `
+SELECT action, operator, reason, version_seq, kind, height, detail
+FROM deposit_pause_audit
+WHERE chain_id = $1 AND pause_id = $2 AND revision = $3 AND action = 'release'`,
+			chainID, pause.id, pause.rev).
+			Scan(&releaseAudit.action, &releaseAudit.operator, &releaseAudit.reason,
+				&releaseAudit.versionSeq, &releaseAudit.kind, &releaseAudit.height, &releaseAudit.detail); err != nil {
+			t.Fatalf("read release audit: %v", err)
+		}
+		if releaseAudit != wantAudit {
+			t.Fatalf("release audit = %+v, want %+v", releaseAudit, wantAudit)
+		}
+		if n := depositCountRows(t, ctx, pool, "deposit_pause_audit", chainID); n != 2 {
+			t.Fatalf("pause audit rows = %d, want exactly 2 (the merge row and the release row)", n)
+		}
+	})
+
+	t.Run("merged_second_cause_uncovered_refused", func(t *testing.T) {
+		const chainID = 126
+		cfg := depositMergeConfig(t, chainID)
+		// N_u=19 covers the first cause's gap [10,14] but still straddles the
+		// merged second cause's gap [16,20]: every segment decides, so even a
+		// matching explicit target must not dispose the row.
+		progress := depositMergeSeedChain(t, ctx, pool, chainID, cfg, 19)
+		sc := depositITScanner(t, pool, cfg)
+		lease := depositITLease(t, pool, chainID)
+
+		ev1 := depositMergeGapEvidence(cfg, 10, 14)
+		ev2 := depositMergeGapEvidence(cfg, 16, 20)
+		if !sc.tryPersistPause(ctx, lease, ev1, progress, depositPauseViaReadCoveredUnit) ||
+			!sc.tryPersistPause(ctx, lease, ev2, progress, depositPauseViaParse) {
+			t.Fatal("seed insert+merge asked for a retry")
+		}
+		pause, ok := depositAuthReadPause(t, ctx, pool, chainID)
+		wantDetail := ev1.detail + " version=1" +
+			fmt.Sprintf("\n+merged[rev=2] kind=upstream_gap height=16 version=1 :: %s", ev2.detail)
+		if !ok || pause.rev != 2 || pause.kind != "upstream_gap" || pause.height != 10 || pause.detail != wantDetail {
+			t.Fatalf("merged pause = %+v (ok=%v), want rev2 keeping the covered first cause at height 10 with %q", pause, ok, wantDetail)
+		}
+		if n := depositCountRows(t, ctx, pool, "deposit_pause_audit", chainID); n != 1 {
+			t.Fatalf("pause audit rows after the merge = %d, want exactly 1", n)
+		}
+		mergeAudit := depositAuthReadAudit(t, ctx, pool, chainID, pause.id, pause.rev)
+
+		withB := depositAuthSnapshot(depositAuthLine(testContractA, 10), depositAuthLine(testContractB, 12))
+		watches := depositAuthLine(depositWatchAddr, 10)
+		h2 := depositAuthHash(t, 10, withB, watches)
+		req := depositAuthBaseReq(t, chainID, "auth-merged-second-uncovered", 1)
+		req.NewConfigHash, req.NewStartBlock, req.NewAssets, req.NewWatches = h2, 10, withB, watches
+		req.ExpectedPauseID, req.ExpectedPauseRevision = &pause.id, &pause.rev
+		before := depositAuthStateOf(t, ctx, pool, chainID)
+
+		_, err := AuthorizeDepositConfig(ctx, pool, req)
+		if !errors.Is(err, ErrAuthRejected) ||
+			!strings.Contains(err.Error(), "gap 16-20 is still uncovered (N_u=19)") {
+			t.Fatalf("uncovered second cause error = %v, want ErrAuthRejected naming the merged segment's gap 16-20 and N_u=19", err)
+		}
+		if strings.Contains(err.Error(), "gap 10-14") {
+			t.Fatalf("uncovered second cause error = %v, want the refusal attributed to the second segment, not the covered first", err)
+		}
+		depositAuthAssertUnchanged(t, ctx, pool, chainID, before)
+		after, ok := depositAuthReadPause(t, ctx, pool, chainID)
+		if !ok || after != pause {
+			t.Fatalf("merged pause row = %+v (ok=%v), want untouched %+v", after, ok, pause)
+		}
+		if got := depositAuthReadAudit(t, ctx, pool, chainID, pause.id, pause.rev); got != mergeAudit {
+			t.Fatalf("merge audit = %+v, want untouched %+v", got, mergeAudit)
+		}
+		if n := depositCountRows(t, ctx, pool, "deposit_pause_audit", chainID); n != 1 {
+			t.Fatalf("pause audit rows = %d, want still exactly 1 (the merge row)", n)
+		}
 	})
 }
 

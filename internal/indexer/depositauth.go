@@ -916,25 +916,36 @@ func decideAuthPause(ctx context.Context, q depositQuerier, req DepositAuthReque
 		}
 		return &authPauseBasis{pause: pause, lo: replay}, nil
 	}
+	// Every cause decides: the first cause lives in the kind/height columns,
+	// each later cause in a +merged segment (T029). A multi-cause row is only
+	// resolved when every gap segment is covered; the fold takes the minimum
+	// resolved gap start across all segments.
 	lo := replay
-	switch kind {
-	case "upstream_gap":
-		from, to, ok := parseGapRange(detail)
-		if !ok {
-			return nil, fmt.Errorf("deposit auth: %w: pause %d gap evidence %q cannot be assessed; refusing",
-				ErrAuthRejected, id, detail)
+	var gapFrom *uint64
+	for _, seg := range pauseSegments(kind, uint64(height), detail) {
+		switch seg.kind {
+		case "upstream_gap":
+			from, to, ok := parseGapRange(seg.core)
+			if !ok {
+				return nil, fmt.Errorf("deposit auth: %w: pause %d gap evidence %q cannot be assessed; refusing",
+					ErrAuthRejected, id, seg.core)
+			}
+			if from < lo {
+				lo = from
+			}
+			if gapFrom == nil || from < *gapFrom {
+				gf := from
+				gapFrom = &gf
+			}
+			if up.nextBlock <= to {
+				return nil, fmt.Errorf("deposit auth: %w: pause %d gap %d-%d is still uncovered (N_u=%d)",
+					ErrAuthRejected, id, from, to, up.nextBlock)
+			}
+		case "chain_view_changed", "validation_failed":
+		default:
+			return nil, fmt.Errorf("deposit auth: %w: pause %d has unexpected kind %q; refusing",
+				ErrAuthRejected, id, seg.kind)
 		}
-		if from < lo {
-			lo = from
-		}
-		if up.nextBlock <= to {
-			return nil, fmt.Errorf("deposit auth: %w: pause %d gap %d-%d is still uncovered (N_u=%d)",
-				ErrAuthRejected, id, from, to, up.nextBlock)
-		}
-	case "chain_view_changed", "validation_failed":
-	default:
-		return nil, fmt.Errorf("deposit auth: %w: pause %d has unexpected kind %q; refusing",
-			ErrAuthRejected, id, kind)
 	}
 	if err := authReproveRange(ctx, q, req.ChainID, lo, progress.nextBlock-1); err != nil {
 		return nil, fmt.Errorf("deposit auth: %w: pause %d evidence not resolved: %v",
@@ -951,14 +962,7 @@ func decideAuthPause(ctx context.Context, q depositQuerier, req DepositAuthReque
 		return nil, fmt.Errorf("deposit auth: %w: pause target (%d,%d) replaced live (%d,%d); refusing",
 			ErrAuthRejected, *req.ExpectedPauseID, *req.ExpectedPauseRevision, id, rev)
 	}
-	basis := &authPauseBasis{pause: pause, dispose: true, lo: lo}
-	if kind == "upstream_gap" {
-		if from, _, ok := parseGapRange(detail); ok {
-			gf := from
-			basis.gapFrom = &gf
-		}
-	}
-	return basis, nil
+	return &authPauseBasis{pause: pause, dispose: true, lo: lo, gapFrom: gapFrom}, nil
 }
 
 // authReproveRange re-proves [lo, hi] (empty when lo > hi): every height

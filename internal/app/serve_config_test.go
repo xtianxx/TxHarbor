@@ -88,7 +88,7 @@ func TestServeRejectsBadConfigBeforeListening(t *testing.T) {
 			// No listener may be left behind on the configured address.
 			ln, err := net.Listen("tcp", addr)
 			if err != nil {
-				t.Fatalf("address %s still in use after config failure: %v", addr, err)
+				t.Fatalf("address %s still in use after config failure: %v; stderr=%s", addr, err, stderr.String())
 			}
 			ln.Close()
 		})
