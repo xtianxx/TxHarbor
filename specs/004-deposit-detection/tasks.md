@@ -365,10 +365,15 @@ T000-L / T000-P 见上（本阶段即二者建档）。**Checkpoint**: 门禁状
     复用 T020 四命令与固定批次有效结果，缺口仅补 G7 定点单跑（merged_row_manual_release 通过）与 G12 注释修正，未重跑全套件。
     未解决项：T000-P open、上游 003 E1 open、serve 端口占用者未知（A 类：测试与原始输出已定位，未解释未修复，此后一切运行未复现）。
     通过不等同生产接入就绪；LSP 曾报 depositauth.go 重声明，经 build＋vet 实证为陈旧误报（单声明 :1164），无破坏。
-- [ ] T023 提交 PR + 远端 CI 通过 + 合并（仓库流程门禁，由实现仓库执行，不在规划步骤执行）
+- [x] T023 提交 PR + 远端 CI 通过 + 合并（仓库流程门禁，由实现仓库执行，不在规划步骤执行）
   - 依赖：T022（需本地范围验收结论）。完成条件：PR 发起 + 远端 CI 全绿 + 合并；
     本任务只记录仓库执行动作，不复述本地验收，不将远端 CI 结果混入 T022；
     生产就绪仍需 T000-P 关闭后另行判定。
+  - 状态（2026-09-13）：CLOSED。证据：PR https://github.com/xtianxx/TxHarbor/pull/6（004-deposit-detection → main）；
+    远端 CI 首轮 run 34767663323 integration 失败（health TestReadyzFlips…Anvil 重启换链→log 扫描暂停→serve 退出→readyz 未恢复；003 时代既有竞速，非本 PR 引入；日志 /tmp/opencode/t023/ci-integration-failed.log），
+    单次重跑同 job 后四检查全绿（lint/build/unit+race/integration；失败轮保留记录，不追认关闭）；
+    保护实测：4 必需检查＋strict、0 审批、无管理员豁免、无绕过；合并 fd45e8b（--merge 先例方式，2026-09-13T16:20:17Z）。
+    生产就绪仍需 T000-P 关闭后另行判定；003/004 T000-P 保持 open。
 
 ---
 
