@@ -3516,3 +3516,478 @@ func isStreamPause(err error) bool {
 	var paused *streamPauseError
 	return errors.As(err, &paused)
 }
+
+// TestDepositPauseLayeredRecovery is T015 (US5) with a fixed batch (exactly 5
+// runs, all recorded; any failure fails the batch): upstream-pause auto
+// resume without 004 ever clearing an upstream row, manual instance release
+// with a same-transaction audit and zero consumer writes, release-then-still
+// broken rebuilds with a new instance identity, stale release fenced to zero
+// rows with audit-lookup定性, re-release returning the original audit facts
+// without rewriting, cross-version release audited at the current version,
+// and a needs_006 pause holding across runs. Manual release is covered by
+// ReleaseDepositPause; re-verification after release is the loop itself.
+func TestDepositPauseLayeredRecovery(t *testing.T) {
+	dsn := startIndexerPostgres(t)
+	pool := openIndexerPool(t, dsn)
+	defer pool.Close()
+	ctx := context.Background()
+
+	t.Run("upstream_auto_resumes", func(t *testing.T) {
+		const chainID = 170
+		cfg := depositITConfig(t, chainID, testContractA)
+		cfg.PollInterval = 20 * time.Millisecond
+		cfg.RetryInitial = 20 * time.Millisecond
+		cfg.RetryMax = 100 * time.Millisecond
+		depositSeedCanonical(t, ctx, pool, chainID, 10, 20, true)
+		depositSeedUpstream(t, ctx, pool, chainID, 0, cfg.LogConfigHash, 21)
+		depositSeedTransferRow(t, ctx, pool, chainID, 12, depositBlockHash(12), depositTxHash(12, 0), 0,
+			common.HexToAddress(testContractA), common.HexToAddress(testContractB), common.HexToAddress(depositWatchAddr), big.NewInt(1))
+		if _, err := pool.Exec(ctx, `
+INSERT INTO log_pause (chain_id, height, kind, detail) VALUES ($1, 10, 'chain_view_changed', 'test')`, chainID); err != nil {
+			t.Fatalf("seed log_pause: %v", err)
+		}
+		const decoy = 999
+		if _, err := pool.Exec(ctx, `
+INSERT INTO log_pause (chain_id, height, kind, detail) VALUES ($1, 10, 'chain_view_changed', 'decoy')`, decoy); err != nil {
+			t.Fatalf("seed decoy log_pause: %v", err)
+		}
+		lease := depositITLease(t, pool, chainID)
+		if err := depositRunLoopOnce(t, depositITScanner(t, pool, cfg), lease); !isStreamPause(err) {
+			t.Fatalf("first run = %v, want *streamPauseError (upstream pause obeyed)", err)
+		}
+		if _, _, _, ok := depositCheckpointState(t, ctx, pool, chainID); ok {
+			t.Fatal("checkpoint row created while paused")
+		}
+		// The upstream lifts its own row (004 never writes log_pause); the
+		// next run continues from the original position with no 004-side
+		// release step.
+		if _, err := pool.Exec(ctx, `DELETE FROM log_pause WHERE chain_id = $1`, chainID); err != nil {
+			t.Fatalf("lift upstream pause: %v", err)
+		}
+		stop := depositRunLoop(t, ctx, depositITScanner(t, pool, cfg), lease)
+		waitUntil(t, time.Now().Add(10*time.Second), "post-pause next_block 21", func() bool {
+			_, _, next, ok := depositCheckpointState(t, ctx, pool, chainID)
+			return ok && next == 21
+		})
+		time.Sleep(100 * time.Millisecond)
+		stop()
+		if n := depositCountRows(t, ctx, pool, "deposit_observations", chainID); n != 1 {
+			t.Fatalf("observations = %d, want 1 after auto-resume", n)
+		}
+		var detail string
+		if err := pool.QueryRow(ctx, `SELECT detail FROM log_pause WHERE chain_id = $1`, decoy).Scan(&detail); err != nil || detail != "decoy" {
+			t.Fatalf("decoy log_pause = (%q,%v), want untouched 'decoy'", detail, err)
+		}
+		if n := depositCountRows(t, ctx, pool, "deposit_pause", chainID); n != 0 {
+			t.Fatalf("deposit_pause rows = %d, want 0 (upstream waits never persist)", n)
+		}
+	})
+
+	t.Run("manual_release_with_audit", func(t *testing.T) {
+		const chainID = 171
+		cfg := depositITConfig(t, chainID, testContractA)
+		depositSeedCanonical(t, ctx, pool, chainID, 10, 14, true)
+		depositSeedCanonical(t, ctx, pool, chainID, 16, 20, true)
+		depositSeedUpstream(t, ctx, pool, chainID, 0, cfg.LogConfigHash, 21)
+		lease := depositITLease(t, pool, chainID)
+		sc := depositITScanner(t, pool, cfg)
+		if err := depositRunLoopOnce(t, sc, lease); !isChainView(err) {
+			t.Fatalf("first run = %v, want a chain-view stop", err)
+		}
+		row, ok := depositReadPause(t, ctx, pool, chainID)
+		if !ok {
+			t.Fatal("no pause row after the stop")
+		}
+		released, err := sc.ReleaseDepositPause(ctx, lease, row.id, row.rev, "operator-r", "manual recovery")
+		if err != nil || !released {
+			t.Fatalf("release = (%v,%v), want (true,nil)", released, err)
+		}
+		if _, ok := depositReadPause(t, ctx, pool, chainID); ok {
+			t.Fatal("pause row still present after release")
+		}
+		var action, operator, reason string
+		var version int64
+		if err := pool.QueryRow(ctx, `
+SELECT action, operator, reason, version_seq FROM deposit_pause_audit
+WHERE chain_id = $1 AND pause_id = $2 AND revision = $3`, chainID, row.id, row.rev).
+			Scan(&action, &operator, &reason, &version); err != nil {
+			t.Fatalf("read release audit: %v", err)
+		}
+		if action != "release" || operator != "operator-r" || reason != "manual recovery" || version != 0 {
+			t.Fatalf("audit = (%s,%s,%s,%d), want (release,operator-r,manual recovery,0 pre-bootstrap)", action, operator, reason, version)
+		}
+		// Release writes no consumer state.
+		if _, _, _, ok := depositCheckpointState(t, ctx, pool, chainID); ok {
+			t.Fatal("checkpoint row created by a release (release is not authorization)")
+		}
+		if n := depositCountRows(t, ctx, pool, "deposit_config_history", chainID); n != 0 {
+			t.Fatalf("history rows = %d, want 0 after a pure release", n)
+		}
+	})
+
+	t.Run("release_then_reverify_fails_rebuilds", func(t *testing.T) {
+		const chainID = 172
+		cfg := depositITConfig(t, chainID, testContractA)
+		cfg.PollInterval = 20 * time.Millisecond
+		cfg.RetryInitial = 20 * time.Millisecond
+		cfg.RetryMax = 100 * time.Millisecond
+		depositSeedCanonical(t, ctx, pool, chainID, 10, 14, true)
+		depositSeedCanonical(t, ctx, pool, chainID, 16, 20, true)
+		depositSeedUpstream(t, ctx, pool, chainID, 0, cfg.LogConfigHash, 21)
+		lease := depositITLease(t, pool, chainID)
+		sc := depositITScanner(t, pool, cfg)
+		if err := depositRunLoopOnce(t, sc, lease); !isChainView(err) {
+			t.Fatalf("first run = %v, want a chain-view stop", err)
+		}
+		p1, ok := depositReadPause(t, ctx, pool, chainID)
+		if !ok {
+			t.Fatal("no pause row after the first stop")
+		}
+		if released, err := sc.ReleaseDepositPause(ctx, lease, p1.id, p1.rev, "op", "why"); err != nil || !released {
+			t.Fatalf("release = (%v,%v), want (true,nil)", released, err)
+		}
+		// The evidence is still broken: the loop rebuilds with a NEW
+		// instance identity and stays stopped.
+		if err := depositRunLoopOnce(t, depositITScanner(t, pool, cfg), lease); !isChainView(err) {
+			t.Fatalf("second run = %v, want a chain-view stop again", err)
+		}
+		p2, ok := depositReadPause(t, ctx, pool, chainID)
+		if !ok {
+			t.Fatal("no rebuilt pause row")
+		}
+		if p2.id == p1.id {
+			t.Fatalf("rebuilt pause id = %d, want a new instance (sequence never reused)", p2.id)
+		}
+		if p2.rev != 1 {
+			t.Fatalf("rebuilt pause rev = %d, want 1", p2.rev)
+		}
+		// Repair the evidence and release the rebuilt instance: the loop
+		// recovers from the original position.
+		depositSeedCanonical(t, ctx, pool, chainID, 15, 15, true)
+		if released, err := sc.ReleaseDepositPause(ctx, lease, p2.id, p2.rev, "op", "repaired"); err != nil || !released {
+			t.Fatalf("release P2 = (%v,%v), want (true,nil)", released, err)
+		}
+		stop := depositRunLoop(t, ctx, depositITScanner(t, pool, cfg), lease)
+		waitUntil(t, time.Now().Add(10*time.Second), "repaired next_block 21", func() bool {
+			_, _, next, ok := depositCheckpointState(t, ctx, pool, chainID)
+			return ok && next == 21
+		})
+		time.Sleep(100 * time.Millisecond)
+		stop()
+	})
+
+	t.Run("stale_release_zero_rows", func(t *testing.T) {
+		const chainID = 173
+		cfg := depositITConfig(t, chainID, testContractA)
+		depositSeedCanonical(t, ctx, pool, chainID, 10, 14, true)
+		depositSeedCanonical(t, ctx, pool, chainID, 16, 20, true)
+		depositSeedUpstream(t, ctx, pool, chainID, 0, cfg.LogConfigHash, 21)
+		lease := depositITLease(t, pool, chainID)
+		sc := depositITScanner(t, pool, cfg)
+		if err := depositRunLoopOnce(t, sc, lease); !isChainView(err) {
+			t.Fatalf("first run = %v, want a chain-view stop", err)
+		}
+		p1, _ := depositReadPause(t, ctx, pool, chainID)
+		if released, err := sc.ReleaseDepositPause(ctx, lease, p1.id, p1.rev, "op", "why"); err != nil || !released {
+			t.Fatalf("release P1 = (%v,%v), want (true,nil)", released, err)
+		}
+		p2id, p2rev := depositAuthSeedPause(t, ctx, pool, chainID, "upstream_gap", "class=structural gap=10-14 cause=below_upstream_start config=x", 10)
+		if p2id == p1.id {
+			t.Fatalf("P2 id = %d, want a never-reused identity", p2id)
+		}
+		before := depositAuthStateOf(t, ctx, pool, chainID)
+		released, err := sc.ReleaseDepositPause(ctx, lease, p1.id, p1.rev, "op-late", "stale")
+		if err != nil || released {
+			t.Fatalf("stale release = (%v,%v), want (false,nil) with zero rows", released, err)
+		}
+		var one int
+		if err := pool.QueryRow(ctx, `
+SELECT 1 FROM deposit_pause_audit WHERE chain_id = $1 AND pause_id = $2 AND action = 'release'`,
+			chainID, p2id).Scan(&one); !errors.Is(err, pgx.ErrNoRows) {
+			t.Fatalf("P2 audit lookup = %v, want a miss (stale定性, no release record)", err)
+		}
+		live, ok := depositReadPause(t, ctx, pool, chainID)
+		if !ok || live.id != p2id || live.rev != p2rev {
+			t.Fatalf("live pause = %+v (ok=%v), want untouched P2 (%d,%d)", live, ok, p2id, p2rev)
+		}
+		if after := depositAuthStateOf(t, ctx, pool, chainID); after.history != before.history || after.obs != before.obs {
+			t.Fatalf("state changed by the stale release: %+v -> %+v", before, after)
+		}
+	})
+
+	t.Run("rerelease_returns_original_facts", func(t *testing.T) {
+		const chainID = 174
+		cfg := depositITConfig(t, chainID, testContractA)
+		depositSeedCanonical(t, ctx, pool, chainID, 10, 14, true)
+		depositSeedCanonical(t, ctx, pool, chainID, 16, 20, true)
+		depositSeedUpstream(t, ctx, pool, chainID, 0, cfg.LogConfigHash, 21)
+		lease := depositITLease(t, pool, chainID)
+		sc := depositITScanner(t, pool, cfg)
+		if err := depositRunLoopOnce(t, sc, lease); !isChainView(err) {
+			t.Fatalf("first run = %v, want a chain-view stop", err)
+		}
+		p1, _ := depositReadPause(t, ctx, pool, chainID)
+		if released, err := sc.ReleaseDepositPause(ctx, lease, p1.id, p1.rev, "operator-a", "reason-a"); err != nil || !released {
+			t.Fatalf("release P1 = (%v,%v), want (true,nil)", released, err)
+		}
+		p2id, _ := depositAuthSeedPause(t, ctx, pool, chainID, "upstream_gap", "gap-test", 10)
+		// Releasing the old identity again: zero rows, and the audit lookup
+		// returns the ORIGINAL facts without rewriting or touching P2.
+		released, err := sc.ReleaseDepositPause(ctx, lease, p1.id, p1.rev, "operator-b", "reason-b")
+		if err != nil || released {
+			t.Fatalf("re-release = (%v,%v), want (false,nil)", released, err)
+		}
+		var operator, reason string
+		var at time.Time
+		if err := pool.QueryRow(ctx, `
+SELECT operator, reason, at FROM deposit_pause_audit
+WHERE chain_id = $1 AND pause_id = $2 AND revision = $3`, chainID, p1.id, p1.rev).
+			Scan(&operator, &reason, &at); err != nil {
+			t.Fatalf("original audit lookup: %v", err)
+		}
+		if operator != "operator-a" || reason != "reason-a" {
+			t.Fatalf("audit facts = (%s,%s), want the original (operator-a,reason-a), not the late caller", operator, reason)
+		}
+		var releases int
+		if err := pool.QueryRow(ctx, `
+SELECT count(*) FROM deposit_pause_audit WHERE chain_id = $1 AND pause_id = $2 AND action = 'release'`,
+			chainID, p1.id).Scan(&releases); err != nil || releases != 1 {
+			t.Fatalf("release rows for P1 = (%d,%v), want exactly 1 (no rewrite)", releases, err)
+		}
+		live, _ := depositReadPause(t, ctx, pool, chainID)
+		if live.id != p2id {
+			t.Fatalf("live pause = %+v, want untouched P2 (%d)", live, p2id)
+		}
+	})
+
+	t.Run("cross_version_release", func(t *testing.T) {
+		const chainID = 175
+		h1 := depositAuthHash(t, 10, depositAuthLine(testContractA, 10), depositAuthLine(depositWatchAddr, 10))
+		cfg := depositITConfig(t, chainID, testContractA, testContractB)
+		cfg.PollInterval = 20 * time.Millisecond
+		cfg.RetryInitial = 20 * time.Millisecond
+		cfg.RetryMax = 100 * time.Millisecond
+		cfg.ConfigHash = h1
+		depositSeedCanonical(t, ctx, pool, chainID, 10, 20, true)
+		depositSeedUpstream(t, ctx, pool, chainID, 0, cfg.LogConfigHash, 21)
+		depositSeedTransferRow(t, ctx, pool, chainID, 15, depositBlockHash(15), depositTxHash(15, 0), 0,
+			common.HexToAddress(testContractA), common.HexToAddress(testContractB), common.HexToAddress(depositWatchAddr), big.NewInt(1))
+		lease := depositITLease(t, pool, chainID)
+		stop := depositRunLoop(t, ctx, depositITScanner(t, pool, cfg), lease)
+		waitUntil(t, time.Now().Add(10*time.Second), "cross-version next_block 21", func() bool {
+			_, _, next, ok := depositCheckpointState(t, ctx, pool, chainID)
+			return ok && next == 21
+		})
+		time.Sleep(100 * time.Millisecond)
+		stop()
+		// A retained needs_006 pause tagged at version 1 survives two
+		// authorizations, then releases by instance at the current version 3.
+		pid, prev := depositAuthSeedPause(t, ctx, pool, chainID, "upstream_gap",
+			"class=structural gap=10-14 cause=below_upstream_start config="+h1+" needs_006=true version=1", 10)
+		watches := depositAuthLine(depositWatchAddr, 10)
+		withB := depositAuthSnapshot(depositAuthLine(testContractA, 10), depositAuthLine(testContractB, 10))
+		add := depositAuthBaseReq(t, chainID, "xv-add", 1)
+		add.NewConfigHash, add.NewStartBlock, add.NewAssets, add.NewWatches =
+			depositAuthHash(t, 10, withB, watches), 10, withB, watches
+		if _, err := AuthorizeDepositConfig(ctx, pool, add); err != nil {
+			t.Fatalf("auth v2: %v", err)
+		}
+		postponed := depositAuthSnapshot(depositAuthLine(testContractA, 15))
+		adv := depositAuthBaseReq(t, chainID, "xv-postpone", 2)
+		adv.NewConfigHash, adv.NewStartBlock, adv.NewAssets, adv.NewWatches =
+			depositAuthHash(t, 10, postponed, watches), 10, postponed, watches
+		if _, err := AuthorizeDepositConfig(ctx, pool, adv); err != nil {
+			t.Fatalf("auth v3: %v", err)
+		}
+		live, ok := depositReadPause(t, ctx, pool, chainID)
+		if !ok || live.id != pid || live.rev != prev {
+			t.Fatalf("retained pause = %+v (ok=%v), want untouched (%d,%d)", live, ok, pid, prev)
+		}
+		sc := depositITScanner(t, pool, cfg)
+		released, err := sc.ReleaseDepositPause(ctx, lease, pid, prev, "operator-xv", "recovered")
+		if err != nil || !released {
+			t.Fatalf("cross-version release = (%v,%v), want (true,nil)", released, err)
+		}
+		var version int64
+		if err := pool.QueryRow(ctx, `
+SELECT version_seq FROM deposit_pause_audit WHERE chain_id = $1 AND pause_id = $2 AND revision = $3`,
+			chainID, pid, prev).Scan(&version); err != nil || version != 3 {
+			t.Fatalf("release audit version = (%d,%v), want 3 (locked current, tag was 1)", version, err)
+		}
+		// Re-verification under the current version replays convergently.
+		cfg3 := cfg
+		cfg3.Assets = []config.DepositEntry{{Address: testContractA, Effective: 15}}
+		cfg3.ConfigHash = adv.NewConfigHash
+		stop3 := depositRunLoop(t, ctx, depositITScanner(t, pool, cfg3), lease)
+		waitUntil(t, time.Now().Add(10*time.Second), "cross-version replay next_block 21", func() bool {
+			_, _, next, ok := depositCheckpointState(t, ctx, pool, chainID)
+			return ok && next == 21
+		})
+		time.Sleep(100 * time.Millisecond)
+		stop3()
+		if n := depositCountRows(t, ctx, pool, "deposit_observations", chainID); n != 1 {
+			t.Fatalf("observations = %d, want 1 converged at version 1", n)
+		}
+		var kept int64
+		if err := pool.QueryRow(ctx, `SELECT version_seq FROM deposit_observations WHERE chain_id = $1`,
+			chainID).Scan(&kept); err != nil || kept != 1 {
+			t.Fatalf("observation version = (%d,%v), want 1 kept", kept, err)
+		}
+	})
+
+	t.Run("needs_006_holds_pause", func(t *testing.T) {
+		const chainID = 176
+		cfg := depositITConfig(t, chainID, testContractA)
+		depositSeedCanonical(t, ctx, pool, chainID, 10, 20, true)
+		depositSeedUpstream(t, ctx, pool, chainID, 0, cfg.LogConfigHash, 21)
+		detail := "class=structural gap=10-14 cause=below_upstream_start config=" + cfg.ConfigHash + " needs_006=true version=0"
+		pid, prev := depositAuthSeedPause(t, ctx, pool, chainID, "upstream_gap", detail, 10)
+		lease := depositITLease(t, pool, chainID)
+		for i := 0; i < 3; i++ {
+			if err := depositRunLoopOnce(t, depositITScanner(t, pool, cfg), lease); !isStreamPause(err) {
+				t.Fatalf("run %d = %v, want *streamPauseError (needs_006 holds)", i, err)
+			}
+		}
+		live, ok := depositReadPause(t, ctx, pool, chainID)
+		if !ok || live.id != pid || live.rev != prev || live.detail != detail {
+			t.Fatalf("pause = %+v (ok=%v), want byte-identical hold %q", live, ok, detail)
+		}
+		var held int
+		if err := pool.QueryRow(ctx, `SELECT count(*) FROM deposit_pause WHERE chain_id = $1 AND detail LIKE '%needs_006=true%'`,
+			chainID).Scan(&held); err != nil || held != 1 {
+			t.Fatalf("needs_006 rows = (%d,%v), want 1 queryable", held, err)
+		}
+		if _, _, _, ok := depositCheckpointState(t, ctx, pool, chainID); ok {
+			t.Fatal("checkpoint row created while needs_006 holds")
+		}
+	})
+}
+
+// TestDepositPauseConcurrency is T016 (US5) with a fixed batch (exactly 5
+// runs, all recorded; any failure fails the batch): concurrent pause writers
+// converge on exactly one row (first wins), moved progress, vanished
+// first-unit state and a dispossessed lease all abandon with zero writes, and
+// a rolled-back batch transaction itself never writes a pause row (the single
+// row always comes from the Table 3 pause transaction).
+func TestDepositPauseConcurrency(t *testing.T) {
+	dsn := startIndexerPostgres(t)
+	pool := openIndexerPool(t, dsn)
+	defer pool.Close()
+	ctx := context.Background()
+
+	pauseEvidence := &pauseEvidence{kind: "upstream_gap", height: 10,
+		detail: "class=structural gap=10-14 cause=below_upstream_start config=x"}
+
+	t.Run("concurrent_first_wins_one_row", func(t *testing.T) {
+		const chainID = 180
+		cfg := depositITConfig(t, chainID, testContractA)
+		sc := depositITScanner(t, pool, cfg)
+		lease := depositITLease(t, pool, chainID)
+		const writers = 8
+		var wg sync.WaitGroup
+		for i := 0; i < writers; i++ {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				// First-unit basis (nil progress): all writers race the same
+				// empty state; only the outcome converges, never the row.
+				sc.tryPersistPause(ctx, lease, pauseEvidence, nil)
+			}()
+		}
+		wg.Wait()
+		row, ok := depositReadPause(t, ctx, pool, chainID)
+		if !ok {
+			t.Fatal("no pause row after the concurrent race")
+		}
+		if row.rev != 1 || row.kind != "upstream_gap" || row.height != 10 {
+			t.Fatalf("pause = %+v, want a single first-wins row", row)
+		}
+		if n := depositCountRows(t, ctx, pool, "deposit_pause", chainID); n != 1 {
+			t.Fatalf("pause rows = %d, want exactly 1", n)
+		}
+	})
+
+	t.Run("moved_progress_abandons", func(t *testing.T) {
+		const chainID = 181
+		cfg := depositITConfig(t, chainID, testContractA)
+		depositSeedCheckpoint(t, ctx, pool, chainID, 10, cfg.ConfigHash, 15)
+		depositSeedHistory(t, ctx, pool, chainID, 1, 10, cfg.ConfigHash)
+		sc := depositITScanner(t, pool, cfg)
+		lease := depositITLease(t, pool, chainID)
+		stale := &depositProgress{startBlock: 10, configHash: cfg.ConfigHash, nextBlock: 10, versionSeq: 1}
+		if !sc.tryPersistPause(ctx, lease, pauseEvidence, stale) {
+			t.Fatal("tryPersistPause asked for a retry on converged evidence")
+		}
+		if _, ok := depositReadPause(t, ctx, pool, chainID); ok {
+			t.Fatal("pause row written on moved progress (evidence expired)")
+		}
+		// First-unit basis against existing progress is equally stale.
+		if !sc.tryPersistPause(ctx, lease, pauseEvidence, nil) {
+			t.Fatal("tryPersistPause asked for a retry on vanished empty basis")
+		}
+		if _, ok := depositReadPause(t, ctx, pool, chainID); ok {
+			t.Fatal("pause row written on a vanished empty basis")
+		}
+	})
+
+	t.Run("dispossessed_lease_abandons", func(t *testing.T) {
+		const chainID = 182
+		cfg := depositITConfig(t, chainID, testContractA)
+		sc := depositITScanner(t, pool, cfg)
+		staleLease := depositITLease(t, pool, chainID)
+		// Expire the first lease on the DB clock so the takeover wins
+		// deterministically (no sleep guessing).
+		if _, err := pool.Exec(ctx, `UPDATE indexer_lease SET expires_at = now() - make_interval(secs => 1) WHERE chain_id = $1`, chainID); err != nil {
+			t.Fatalf("expire first lease: %v", err)
+		}
+		takeover := newTestLease(t, pool, chainID, "takeover-owner", time.Minute, 10*time.Second)
+		won, _, err := takeover.Acquire(context.Background())
+		if err != nil || !won {
+			t.Fatalf("takeover Acquire() = (%v,%v), want a win", won, err)
+		}
+		if !sc.tryPersistPause(ctx, staleLease, pauseEvidence, nil) {
+			t.Fatal("tryPersistPause asked for a retry on a lost lease")
+		}
+		if _, ok := depositReadPause(t, ctx, pool, chainID); ok {
+			t.Fatal("pause row written by a dispossessed lease")
+		}
+	})
+
+	t.Run("batch_rollback_writes_no_pause", func(t *testing.T) {
+		const chainID = 183
+		cfg := depositITConfig(t, chainID, testContractA)
+		depositSeedCanonical(t, ctx, pool, chainID, 10, 20, true)
+		depositSeedUpstream(t, ctx, pool, chainID, 0, cfg.LogConfigHash, 21)
+		depositSeedCheckpoint(t, ctx, pool, chainID, 10, cfg.ConfigHash, 10)
+		depositSeedHistory(t, ctx, pool, chainID, 1, 10, cfg.ConfigHash)
+		depositSeedTransferRow(t, ctx, pool, chainID, 15, depositBlockHash(15), depositTxHash(15, 0), 0,
+			common.HexToAddress(testContractA), common.HexToAddress(testContractB), common.HexToAddress(depositWatchAddr), big.NewInt(1))
+		sc := depositITScanner(t, pool, cfg)
+		lease := depositITLease(t, pool, chainID)
+		unit, batch, captured := depositITPrepareUnit(t, ctx, sc, 10, 20)
+		if _, err := pool.Exec(ctx, `UPDATE chain_blocks SET canonical = FALSE WHERE chain_id = $1 AND number = 15`, chainID); err != nil {
+			t.Fatalf("flip canonical: %v", err)
+		}
+		// The batch transaction itself rolls back with zero pause writes.
+		if err := sc.commitDepositUnit(ctx, lease, unit, batch, captured, 10, 20); !isChainView(err) {
+			t.Fatalf("commit = %v, want a chain-view abort", err)
+		}
+		if _, ok := depositReadPause(t, ctx, pool, chainID); ok {
+			t.Fatal("pause row written by the rolled-back batch transaction")
+		}
+		if n := depositCountRows(t, ctx, pool, "deposit_observations", chainID); n != 0 {
+			t.Fatalf("observations = %d, want 0 after the rollback", n)
+		}
+		// The loop path persists exactly one row from the pause transaction.
+		if err := depositRunLoopOnce(t, depositITScanner(t, pool, cfg), lease); !isChainView(err) {
+			t.Fatalf("loop = %v, want a chain-view stop", err)
+		}
+		row, ok := depositReadPause(t, ctx, pool, chainID)
+		if !ok || row.kind != "chain_view_changed" || row.rev != 1 {
+			t.Fatalf("pause = %+v (ok=%v), want the single pause-transaction row", row, ok)
+		}
+		if n := depositCountRows(t, ctx, pool, "deposit_pause", chainID); n != 1 {
+			t.Fatalf("pause rows = %d, want exactly 1", n)
+		}
+	})
+}

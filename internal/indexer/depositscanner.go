@@ -564,6 +564,20 @@ ORDER BY block_number, log_index`
 INSERT INTO deposit_pause (chain_id, height, kind, detail)
 VALUES ($1, $2, $3, $4)
 ON CONFLICT (chain_id) DO NOTHING`
+
+	// deleteDepositPauseSQL removes one pause instance by identity + revision
+	// (Table 3a manual release and old-instance fencing alike) and returns
+	// the row content for the same-transaction audit row.
+	deleteDepositPauseSQL = `
+DELETE FROM deposit_pause WHERE chain_id = $1 AND pause_id = $2 AND revision = $3
+RETURNING kind, height, detail`
+
+	// insertReleasePauseAuditSQL records a manual release with the operator,
+	// reason, instance, applicable revision and locked current version.
+	insertReleasePauseAuditSQL = `
+INSERT INTO deposit_pause_audit
+    (chain_id, pause_id, revision, action, operator, reason, version_seq, kind, height, detail)
+VALUES ($1, $2, $3, 'release', $4, $5, $6, $7, $8, $9)`
 )
 
 // Deposit loop defaults, used when the matching DepositConfig knob is zero.
@@ -683,6 +697,79 @@ func pauseEvidenceForStop(err error, a, b uint64) *pauseEvidence {
 				conflict.identity, a, b)}
 	}
 	return nil
+}
+
+// ReleaseDepositPause removes one pause instance by identity + revision with
+// its audit row in the same transaction (Table 3a manual path). It writes no
+// consumer state — checkpoint, history and observations are untouched
+// (release is not authorization) — and performs no evidence re-verification
+// itself: callers re-verify after release and rebuild on failure (the loop
+// does this through the T014 writer).
+//
+// Outcome: (true, nil) deleted exactly one row and audited it; (false, nil)
+// zero rows — the instance is gone or revised, so callers定性 via the audit
+// table (T019) and must not touch the live instance; (*, err) on lease loss,
+// audit failure (rollback) or DB errors. Operator and reason are required
+// audit fields. The audit version is the locked current latest seq, or 0 when
+// no version exists yet (pre-bootstrap pause).
+func (s *DepositScanner) ReleaseDepositPause(ctx context.Context, lease *Lease, pauseID, revision int64, operator, reason string) (bool, error) {
+	if lease == nil {
+		return false, errors.New("deposit release: nil lease")
+	}
+	if operator == "" || reason == "" {
+		return false, errors.New("deposit release: operator and reason are required audit fields")
+	}
+	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{})
+	if err != nil {
+		return false, fmt.Errorf("begin deposit release transaction: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }() // no-op after COMMIT
+	if _, err := tx.Exec(ctx, writeGuard); err != nil {
+		return false, fmt.Errorf("deposit release transaction statement guard: %w", err)
+	}
+	if _, err := tx.Exec(ctx, ensureLeaseSQL, s.cfg.ChainID, lease.ownerID, lease.Token(), lease.ttl.Seconds()); err != nil {
+		return false, fmt.Errorf("ensure release coordination row: %w", err)
+	}
+	var (
+		owner string
+		token int64
+		valid bool
+	)
+	if err := tx.QueryRow(ctx, lockCoordSQL, s.cfg.ChainID).Scan(&owner, &token, &valid); err != nil {
+		return false, fmt.Errorf("lock release coordination row: %w", err)
+	}
+	var one int
+	if err := tx.QueryRow(ctx, leaseVerdictSQL, s.cfg.ChainID, lease.ownerID, lease.Token()).Scan(&one); errors.Is(err, pgx.ErrNoRows) {
+		return false, fmt.Errorf("%w: release owner/fencing/expiry verdict failed", ErrLeaseLost)
+	} else if err != nil {
+		return false, fmt.Errorf("release lease verdict: %w", err)
+	}
+	var (
+		kind, detail string
+		height       int64
+	)
+	err = tx.QueryRow(ctx, deleteDepositPauseSQL, s.cfg.ChainID, pauseID, revision).Scan(&kind, &height, &detail)
+	switch {
+	case err == nil:
+	case errors.Is(err, pgx.ErrNoRows):
+		return false, nil
+	default:
+		return false, fmt.Errorf("delete deposit pause row: %w", err)
+	}
+	var seq int64
+	if err := tx.QueryRow(ctx, readAuthLatestHistorySQL, s.cfg.ChainID).Scan(&seq, new(int64), new(string), new(string), new(string)); errors.Is(err, pgx.ErrNoRows) {
+		seq = 0
+	} else if err != nil {
+		return false, fmt.Errorf("release read latest version: %w", err)
+	}
+	if _, err := tx.Exec(ctx, insertReleasePauseAuditSQL,
+		s.cfg.ChainID, pauseID, revision, operator, reason, seq, kind, height, detail); err != nil {
+		return false, fmt.Errorf("insert release pause audit: %w", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return false, fmt.Errorf("commit deposit release: %w", err)
+	}
+	return true, nil
 }
 
 // persistDepositPause writes the pause row for a durable stop in a dedicated

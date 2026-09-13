@@ -253,7 +253,7 @@ T000-L / T000-P 见上（本阶段即二者建档）。**Checkpoint**: 门禁状
     新建暂停行携带 `pause_id`（SEQUENCE 分配）+ `revision=1` + `version=<seq>` 标签；
     `detail.class` 七分类正确；不回退进度不删历史；暂停重启后仍有效。真库断言。
   - 状态（2026-09-13）：CLOSED。证据：depositscanner.go新增暂停证据映射+Table3原子条件专用暂停事务（lease裁决/首胜收敛/检查点证据门/version=<seq>戳，批回滚永不直写，3次有界重试）+ServeLoop三停止路径钩子（depositcommit.go零改动）。TestDepositPauseWriteAndStop真库6子项全过（结构缺口upstream_gap高10rev1版0零推进；链视图缺15行；非法topic0行validation_failed类内+版本0；冲突identity_conflict版1预存行完整；漂移零暂停行；重启二轮streamPauseError同实例）。回归全仓单元287过。合并更新（revision+1/merge审计）无任务断言，记为开放项。未验证：T015+、完整验收。
-- [ ] T015 [US5] 分层恢复验证：上游解除自动续 + 自身暂停按实例条件解除与重验门 + 需 006 时保持暂停（`internal/indexer/deposit_integration_test.go`，按序执行；本条按固定批次执行：每批次恰好 5 次并记录全部结果，任一次失败则该批次不通过，不追加运行凑成功；修复或明确诊断后的重跑另记批次并保留原证据）
+- [x] T015 [US5] 分层恢复验证：上游解除自动续 + 自身暂停按实例条件解除与重验门 + 需 006 时保持暂停（`internal/indexer/deposit_integration_test.go`，按序执行；本条按固定批次执行：每批次恰好 5 次并记录全部结果，任一次失败则该批次不通过，不追加运行凑成功；修复或明确诊断后的重跑另记批次并保留原证据）
   - 需求：FR-12/I6，research R6。验收场景：D8（SC-06）。依赖：T014。
   - 完成条件：上游行消失 + 链视图一致 + 覆盖完整 + 位置有效 → 自动从原位置继续，
     且 004 从未清除上游行（有断言）；自身暂停按实例条件解除（`pause_id` + `revision` 匹配）并同事务写审计行，
@@ -265,9 +265,11 @@ T000-L / T000-P 见上（本阶段即二者建档）。**Checkpoint**: 门禁状
     解除后按当前版本重验（版本标签不作为解除条件）；
     解除动作本身零写入消费状态（解除≠授权）；旧分叉失效/需回退而 006 不可用 → 保持暂停且 `needs_006=true` 可查。
     授权转换路径的暂停处置见 T025/T027，本条仅覆盖人工删除路径。
-- [ ] T016 [US5] 暂停并发与原子条件测试（首暂停获胜 + 证据过期放弃 + 失权禁写过期暂停）（`internal/indexer/deposit_integration_test.go`，按序执行；本条按固定批次执行：每批次恰好 5 次并记录全部结果，任一次失败则该批次不通过，不追加运行凑成功；修复或明确诊断后的重跑另记批次并保留原证据）
+  - 状态（2026-09-13）：CLOSED。证据：depositscanner.go新增ReleaseDepositPause（条件DELETE+同事务审计、零消费写入、审计版取锁内最新、无版本记0、操作者原因必填）+两SQL。TestDepositPauseLayeredRecovery真库7子项固定批次-count=5共40/40过（上游行解除自动续21且decoy不动无暂停行；手工解除审计release/操作者/原因/版0且零消费写入；解除后仍坏重建新实例再修补恢复21；陈旧解除0行且P2审计缺命中；重解除返原审计不重写不碰P2；跨版本暂停v1打标v3解除审计版3+回放收敛；needs_006三轮保持字节一致可查）。首轮1失败系测试遗漏解除P2步骤（实现照章停，测试 bug），修正后新批次。未验证：T016+、完整验收。
+- [x] T016 [US5] 暂停并发与原子条件测试（首暂停获胜 + 证据过期放弃 + 失权禁写过期暂停）（`internal/indexer/deposit_integration_test.go`，按序执行；本条按固定批次执行：每批次恰好 5 次并记录全部结果，任一次失败则该批次不通过，不追加运行凑成功；修复或明确诊断后的重跑另记批次并保留原证据）
   - 需求：FR-09/FR-12，data-model Table 3 原子条件。验收场景：D8。依赖：T014。
   - 完成条件：并发暂停恰一行；进度已变/证据消失/lease 失权 → 放弃且零写入；批回滚永不直写暂停行。
+  - 状态（2026-09-13）：CLOSED。证据：TestDepositPauseConcurrency真库4子项（8写并发恰一行rev1；检查点移动/首单元依据消失皆放弃零写；DB时钟过期后takeover持有、旧lease裁决失败零写；冲突批回滚零暂停行+loop路径恰一行chain_view_changed）。首轮1失败系测试脚手架误用（takeover前未过期，确定性诊断），改DB时钟置过期后新批次；与T015联合-count=5共65/65过。未验证：T017+、完整验收。
 - [ ] T017 [US5] 双真 worker 竞争 + 旧 worker 延迟提交：真实 PostgreSQL 双实例一致性测试（含偶发有界重复）
   - 需求：FR-08/FR-09，research R1/R2。验收场景：D9（SC-02/SC-03 并发部分）。依赖：T006。
   - 完成条件：两个独立 pool + 独立 lease 句柄的真 worker 同抢同进度，有效推进恒为 1（`internal/indexer/deposit_integration_test.go`，按序执行）；
