@@ -252,7 +252,7 @@ T000-L / T000-P 见上（本阶段即二者建档）。**Checkpoint**: 门禁状
   - 完成条件：引用块缺失/非 canonical/来源失效 → 不提交不推进 + 暂停行；
     新建暂停行携带 `pause_id`（SEQUENCE 分配）+ `revision=1` + `version=<seq>` 标签；
     `detail.class` 七分类正确；不回退进度不删历史；暂停重启后仍有效。真库断言。
-  - 状态（2026-09-13）：CLOSED。证据：depositscanner.go新增暂停证据映射+Table3原子条件专用暂停事务（lease裁决/首胜收敛/检查点证据门/version=<seq>戳，批回滚永不直写，3次有界重试）+ServeLoop三停止路径钩子（depositcommit.go零改动）。TestDepositPauseWriteAndStop真库6子项全过（结构缺口upstream_gap高10rev1版0零推进；链视图缺15行；非法topic0行validation_failed类内+版本0；冲突identity_conflict版1预存行完整；漂移零暂停行；重启二轮streamPauseError同实例）。回归全仓单元287过。合并更新（revision+1/merge审计）无任务断言，记为开放项。（补充注记 2026-09-13：data-model:89 的 merge 行为无任何任务承接，属规划缺口而非 T014 完成条件缺失；:89 与 :95-98 首胜条文冲突待裁决。）未验证：T015+、完整验收。
+  - 状态（2026-09-13）：CLOSED。证据：depositscanner.go新增暂停证据映射+Table3原子条件专用暂停事务（lease裁决/首胜收敛/检查点证据门/version=<seq>戳，批回滚永不直写，3次有界重试）+ServeLoop三停止路径钩子（depositcommit.go零改动）。TestDepositPauseWriteAndStop真库6子项全过（结构缺口upstream_gap高10rev1版0零推进；链视图缺15行；非法topic0行validation_failed类内+版本0；冲突identity_conflict版1预存行完整；漂移零暂停行；重启二轮streamPauseError同实例）。  回归全仓单元287过。合并更新（累积原因段追加/revision+1/merge审计）不在本任务完成条件内，现由 T029 承接（2026-09-13 Q8 累积式裁决；T014 保持 CLOSED，其完成条件不含 merge；历史注记：此前记为无任务承接的规划缺口，现已消解）。未验证：T015+、完整验收。
 - [x] T015 [US5] 分层恢复验证：上游解除自动续 + 自身暂停按实例条件解除与重验门 + 需 006 时保持暂停（`internal/indexer/deposit_integration_test.go`，按序执行；本条按固定批次执行：每批次恰好 5 次并记录全部结果，任一次失败则该批次不通过，不追加运行凑成功；修复或明确诊断后的重跑另记批次并保留原证据）
   - 需求：FR-12/I6，research R6。验收场景：D8（SC-06）。依赖：T014。
   - 完成条件：上游行消失 + 链视图一致 + 覆盖完整 + 位置有效 → 自动从原位置继续，
@@ -294,7 +294,29 @@ T000-L / T000-P 见上（本阶段即二者建档）。**Checkpoint**: 门禁状
     暂停实例审计 SQL 可查（释放/合并事件、实例全生命周期）；
     解除结果判定查询可查（条件解除影响 0 行后按实例查审计：命中返原结果，未命中按陈旧处理）；
     全量日志凭据零出现；金额仅十进制；无无限制原始数据转储（有审计测试）。
-  - 状态（2026-09-13）：CLOSED。证据：接线增量（scanner原子state/next/ok+DepositState/DepositProgress访问器+SetPauseObserver单次触发；serve depositObserver三采样点+暂停钩子；auth transition钩子ok/error/rejected分类包装）。TestDepositObservabilityEndToEnd真库过（10条契约诊断SQL原样执行断言：进度/暂停/三流lag/覆盖/地址/版本链/请求查/暂停审计/解除判定命中与未命中/观察版本join；transition钩子[ok rejected error]；暂停钩子恰1次；提交后状态0/1、停机3；金额十进制、日志文本单行、快照可解析）。StructuralStopState锁state=4、BackoffState锁state=2。metrics包契约断言本已齐全（5 states/next±/lag±/4 results/pause/3 transitions），未改动。回归：deposit集成176过、单元290过（1次serve端口偶发，隔离39/39，环境性，保留记录）。depositObserver算术由T018启停执行覆盖+访问器值已锁，未做LogScanner假体单测（CheckPoint需真eth客户端，记局限）。未验证：完整验收T020。
+  - 状态（2026-09-13）：CLOSED。证据：接线增量（scanner原子state/next/ok+DepositState/DepositProgress访问器+SetPauseObserver单次触发；serve depositObserver三采样点+暂停钩子；auth transition钩子ok/error/rejected分类包装）。TestDepositObservabilityEndToEnd真库过（10条契约诊断SQL原样执行断言：进度/暂停/三流lag/覆盖/地址/版本链/请求查/暂停审计/解除判定命中与未命中/观察版本join；transition钩子[ok rejected error]；暂停钩子恰1次；提交后状态0/1、停机3；金额十进制、日志文本单行、快照可解析）。StructuralStopState锁state=4、BackoffState锁state=2。metrics包契约断言本已齐全（5 states/next±/lag±/4 results/pause/3 transitions），未改动。回归：deposit集成176过、单元290过（1次serve端口偶发，隔离39/39，环境性，保留记录）。depositObserver算术由T018启停执行覆盖+访问器值已锁，未做LogScanner假体单测（CheckPoint需真eth客户端，记局限）。  未验证：完整验收T020。
+
+- [x] T029 [US5] 暂停累积合并实现与测试：新持久原因段追加 + revision+1 + merge 审计（实现落入 `internal/indexer/depositscanner.go` 暂停写事务；测试落入 `internal/indexer/deposit_integration_test.go`）
+  - 需求：FR-12/I6，research R6/R11，data-model Table 3（2026-09-13 Q8 累积式 8 行为）。验收场景：D8（SC-06 部分）。依赖：T014。
+  - 完成条件：已暂停且新持久性原因锁内重验成立 MUST NOT 丢弃；保留 `pause_id`，新有效原因 `revision` +1，
+    各原因类型/范围/来源版本/证据全保留不覆盖；needs_006 按全体原因共同决定不降级、缺口信息不消失；
+    相同有效原因重复幂等（零写零审计）；仅暂停写事务、lease/版本/修订协议、原子失败全回滚；
+    授权仅保留/条件 DELETE；合并后旧修订解除/处置必拒；暂时等待/过期/失权不成因。
+    段编码：首段沿用 `<ev.detail> version=<S>`，新段 `\n+merged[rev=<R>] kind=<K> height=<H> version=<S> :: <ev.detail>`；
+    等价谓词按 (kind, height, core) 精确相等（version 不参与）；merge 审计 `action='merge'`、operator 固定
+    `system:pause-writer`、reason 携带 lease owner 实值（持锁上下文，禁外部指定）＋触发路径
+    （readCoveredUnit/parse/commit）＋配置版本＋合并原因；merge 成功不触发 pauseObserver、不动 pause_total。
+    真库断言至少覆盖：①首暂停+新增结构缺口两原因保留（两段+rev2+merge 审计 1 行）；②needs_006 合并后
+    普通/旧修订解除被拒、轻原因不降级；③重复投递幂等（rev/审计/observer 不变）；④合并后旧修订人工解除与
+    授权处置失配拒绝；⑤并发不同新原因不丢失（双路各一段）+旧基证据不合入；⑥merge 审计 INSERT 强制失败
+    全回滚；⑦WriteAndStop/LayeredRecovery/Concurrency/DualWorkers 及 auth 暂停相关回归。
+    时序敏感项固定批次恰 5 次并记录全部结果；失败按回归处理，不弱化既有断言。
+  - 状态（2026-09-13）：CLOSED。证据：规划同步Q8（spec+data-model:89/2b分支+research+plan）；
+    实现仅depositscanner.go暂停写事务（merge UPDATE+merge审计同事务，段编码/等价谓词/乐观revision守卫+有界重试，operator固定system:pause-writer，merge不触发observer；零migration、授权/释放零改动）。
+    TestDepositPauseMergeCumulative真库7子项全过（两原因保留/needs_006不降级/重复幂等/旧修订拒绝/并发不丢失+旧基不合入/审计失败回滚/已解决不合并）；
+    固定批次：merge 5/5（35子项）、LayeredRecovery/Concurrency/DualWorkers各5/5、auth暂停5项单次过，日志/tmp/opencode/t029/；
+    orchestrator独立复验：lint+全单元绿，indexer全包334过0失败。L1 operator由所有者定system:pause-writer。
+    端口偶发未触及、无新证据，保持未解决。
 
 **Checkpoint**: 暂停可解释、恢复可验收、并发由数据库保证、运维可观测
 
@@ -319,7 +341,7 @@ T000-L / T000-P 见上（本阶段即二者建档）。**Checkpoint**: 门禁状
     manual batch B 5/5（LayeredRecovery 含 2 新子项各 5 次，/tmp/opencode/t020/manual_batch5.log）；TestDepositAuth* 子集 15 集成+2 单元绿。
     保留未解决项（持续有效，后续成功不自动关闭）：(1) serve 端口偶发仍未知（原始错误串缺失，无新证据停跑；ObservabilityE2E 本身不绑端口已排除；取证方案已记，不在 T020 内无目的重跑）。
     (2) checkpoint.start_block 语义已决（2026-09-13 Q7 裁决：同步 S_new 为正确语义，spec/data-model/research 已同步，T025 偏差注记已关闭；此前“未决”记录保留为历史）。
-    (3) merge 未实现（data-model:89 与 :95-98 自相冲突，T014 已记开放项）；生产零 UPDATE/零 MERGE 暂停、授权路径仅条件 DELETE 已核验。
+    (3) merge 原未实现（data-model:89 与 :95-98 曾自相冲突，T014 旧开放项）现由 T029 承接（2026-09-13 Q8 累积式裁决；本 T020 保持 OPEN，完成条件不变）；授权路径仅条件 DELETE 已核验。
     (4) T028 lease 旧失败日志保留为历史（~/.local/share/rtk/tee/1789300034_go_test.log），本次已解释+修复+新批次，不追认关闭旧失败。
     未执行：T022/T023；未关闭 003/004 T000-P；未推送/未合并。
 - [x] T021 实现前规划复核（静态一致性，不依赖任何实现与测试结果）
@@ -350,8 +372,8 @@ T000-L / T000-P 见上（本阶段即二者建档）。**Checkpoint**: 门禁状
 - **US4 (T011–T013，T025–T028)**: 依赖 T006（T011 另依赖 T002）；T013 依赖 T005；
   T025 依赖 T024（选型结论）+ T006，依赖 T025 的 T026/T027/T028 在 T024 关闭前不得假定任一载体；
   T026 依赖 T025；T027 依赖 T025；T028 依赖 T025/T026/T012。
-- **US5 (T014–T019)**: 依赖 T006；T015/T016 依赖 T014；T018 依赖 T006/T016；T019 依赖 T003/T014/T025。
-- **Polish (T020–T023)**: T020 依赖所有实现任务（含 T024–T028）；T021 独立于实现（可先行关闭）；T022 依赖 T020；T023 依赖 T022。
+- **US5 (T014–T019，T029)**: 依赖 T006；T015/T016 依赖 T014；T018 依赖 T006/T016；T019 依赖 T003/T014/T025；T029 依赖 T014。
+- **Polish (T020–T023)**: T020 依赖所有实现任务（含 T024–T028、T029）；T021 独立于实现（可先行关闭）；T022 依赖 T020；T023 依赖 T022。
 - 依赖图无环：T021 零依赖；T022 仅 →T020；T023 仅 →T022；T024 仅 →T000-L；T025–T028 均不指向 Foundation/US1–US3；无反向边。
 
 ## 覆盖矩阵（复核用）

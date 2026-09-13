@@ -147,7 +147,8 @@ Coordinator 取 lease（获胜/旁观）→ 配置比较（行存在且 start/co
   目标绑定与解除结果判定轮：expected_pause 双空或双非空（非通配）、锁内目标匹配、解除查审计定性
   已同步 data-model Table 3–5、research R6/R11、contracts 审计查询、quickstart D8、tasks（T001/T015/T019/T025/T027/Notes）。
   保留分支与完整性前检轮：expected_pause 双空保留执行分支（必须处置定义、锁内一致不扩大授权、
-  保留后消费仍停、保留暂停走实例人工解除无死路）、授权路径 DELETE-only（合并更新专属暂停写事务）、
+  保留后消费仍停、保留暂停走实例人工解除无死路）、授权路径 DELETE-only（累积合并专属暂停写事务 T029/Q8，
+  授权事务禁用）、
   消费提交与授权裁决的完整性前检（损坏态定义、bootstrap 与已记录结果只读返回保留）
   已同步 data-model 授权/写事务协议、research R11、plan 关键流程、tasks（T015/T025/T027/Notes）、
   quickstart D8/D11。
