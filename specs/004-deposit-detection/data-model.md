@@ -38,7 +38,7 @@
 | Column | Type | Constraints | Notes |
 |--------|------|-------------|-------|
 | chain_id | BIGINT | PK，`CHECK (> 0)` | 单链单行，与 003 进度行相互独立 |
-| start_block | BIGINT | `NOT NULL CHECK (>= 0)` | 首单元确立的起点，建行后冻结 |
+| start_block | BIGINT | `NOT NULL CHECK (>= 0)` | 当前已授权配置的全局起点，授权事务原子更新 |
 | config_hash | CHAR(64) | `NOT NULL CHECK (config_hash ~ '^[0-9a-f]{64}$')` | 充值配置身份（R3 编码） |
 | next_block | BIGINT | `NOT NULL CHECK (>= 0)` | 下一待处理高度（块粒度） |
 | updated_at | TIMESTAMPTZ | `NOT NULL DEFAULT now()` | 诊断用 |
@@ -308,8 +308,10 @@
      expected_pause_id, expected_pause_revision, …)`（审计字段齐全，缺任一即 `ROLLBACK`；
      相同内容复现即新行新 seq，禁与旧行合并；
      并发重复请求在此以 `UNIQUE (chain_id, request_id)` 冲突失败 → 回滚后走步骤 1 重查，命中即返原结果）；
-   - `UPDATE deposit_checkpoint SET config_hash=H′, next_block=replay_from, updated_at=now()
-     WHERE chain_id=$c AND start_block=$S AND config_hash=$H AND next_block=$a`，
+   - `UPDATE deposit_checkpoint SET start_block=S_new, config_hash=H′, next_block=replay_from, updated_at=now()
+     WHERE chain_id=$c AND start_block=$S AND config_hash=$H AND next_block=$a`
+     （S_new 为新配置全局起点，起点列随授权与身份原子更新；首版及历次起点由 Table 4 不可变保留；
+     next_block 仍按回放 min/收缩规则，不跳过区间），
      `RowsAffected != 1` → 过期，拒绝；
    - 暂停处置：按步骤 3 结论执行——已解决行按实例 + 修订条件 `DELETE`（审计行同事务），
      或原样保留（不读写暂停行；history 行 expected_pause 记 NULL，

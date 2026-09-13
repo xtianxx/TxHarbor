@@ -235,6 +235,9 @@ by recomputing 003's `config_hash` from the shared env (R5).
     缺审计字段即回滚——审计不是附带日志，是提交有效性的一部分。
     版本身份为 `(chain_id, version_seq)`（本链递增，授权事务内取 max+1），内容哈希禁作版本身份；
     相同内容复现即新行新 seq。
+  - start 列动作：授权事务同步执行 `UPDATE deposit_checkpoint SET start_block=S_new`（S_new 为本次新配置的全局起点），
+    与身份 H→H′、位置 next→replay_from、history 行及审计同事务原子提交；next_block 仍严格遵循回放 min/收缩规则
+    （不跳过处理区间），首版及历次起点由 history 不可变保留，未经授权漂移仍拒绝（2026-09-13 Q7 裁决）。
   - 前置重验（授权不绕过）：链视图一致、上游覆盖完整（对回放区间重做 `N_u` 证明，**禁以记新哈希冒充覆盖修复**）、
     位置有效、适用暂停解除条件；任一失败 → 回滚且保持原暂停/位置/身份。
   - 在途隔离：授权事务与消费提交/暂停变更走同一 `indexer_lease` 锁互斥；切换前已提交的行有效（历史保留）；

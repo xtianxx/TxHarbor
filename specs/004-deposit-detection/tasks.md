@@ -206,7 +206,7 @@ T000-L / T000-P 见上（本阶段即二者建档）。**Checkpoint**: 门禁状
     请求幂等按 request_id 先查 history：同 ID 同参返回已记录结果（即使已进入更晚版本），同 ID 异参明确拒绝（已记录；未记录失败不绑定，见 T027 绑定规则），
     异 ID 即使同参亦独立校验；expected_old_seq 等于当前最新 seq 否则过期拒绝；过期拒绝报告预期与当前版本；
     提交成功即生效；切换前已提交有效；跳过 owner/token 检查但操作员身份入审计；空授权（H′==H）拒绝。真库断言。
-  - 状态（2026-09-13）：CLOSED。证据：depositauth.go受控SQL脚本实现（BEGIN→过期占位lease行→FOR UPDATE锁→锁内重验→原子提交；步骤1完整性分流+request_id四则只读返回，H'重算/replay min/过期/空变更/上游绑定/缺口可行/暂停依据，步骤3锁内重验，步骤4 history+checkpoint精确守卫+条件DELETE+审计同事务，未知提交以DB为准，并发request_id冲突回滚重查）。单测4过（R3向量/快照解析/回放min/缺口解析）；集成TestDepositAuth 3顶层+9子项全过（lane 3轮，orchestrator独立重跑14过）：H1→H2(v2/replay12/retained)+旧依据提交版本隔离拒零写+v3后跨版本回读v2、同ID异参拒、异ID过期/空变更独立裁决、显式目标释放+审计、needs_006无目标保留/有目标拒、可处置无目标拒、目标替换拒、无源版本拒、双侧单侧损坏态，每拒皆快照零变化。偏差（待确认）：checkpoint UPDATE同步 SET start_block=S_new，spec步骤4文本仅列config_hash/next_block；不跟随则Table2两侧一致 invariant 破坏（T011锁定的readProgress语义），改动最小可 revert。回放缺口起点候选与收缩边界归T026。未验证：T026+、完整验收。
+  - 状态（2026-09-13）：CLOSED。证据：depositauth.go受控SQL脚本实现（BEGIN→过期占位lease行→FOR UPDATE锁→锁内重验→原子提交；步骤1完整性分流+request_id四则只读返回，H'重算/replay min/过期/空变更/上游绑定/缺口可行/暂停依据，步骤3锁内重验，步骤4 history+checkpoint精确守卫+条件DELETE+审计同事务，未知提交以DB为准，并发request_id冲突回滚重查）。单测4过（R3向量/快照解析/回放min/缺口解析）；集成TestDepositAuth 3顶层+9子项全过（lane 3轮，orchestrator独立重跑14过）：H1→H2(v2/replay12/retained)+旧依据提交版本隔离拒零写+v3后跨版本回读v2、同ID异参拒、异ID过期/空变更独立裁决、显式目标释放+审计、needs_006无目标保留/有目标拒、可处置无目标拒、目标替换拒、无源版本拒、双侧单侧损坏态，每拒皆快照零变化。偏差（已澄清，2026-09-13 裁决）：同步 SET start_block=S_new 为正确语义，偏差关闭（起点列与身份在授权事务内原子更新，首版及历次起点由 history 不可变保留；next_block 仍按回放 min/收缩规则，不跳过区间）；实现 depositauth.go:522-525 已与裁决一致，无需改动。回放缺口起点候选与收缩边界归T026。未验证：T026+、完整验收。
 - [x] T026 [US4] 历史回放与收缩边界实现：最小值规则/收缩向前/混合双规则/history 快照读写（`internal/indexer/depositscanner.go`/`depositcommit.go` 按序扩展 + `depositauth.go` 回放计算）
   - 需求：FR-05/FR-06/FR-07/I1/I3，research R5/R11。验收场景：D6/D7/D11。依赖：T025。
   - 完成条件：组合有效起点 max 规则 + replay min 规则 + 上游起点仅检查（禁抬高裁剪）；
@@ -252,7 +252,7 @@ T000-L / T000-P 见上（本阶段即二者建档）。**Checkpoint**: 门禁状
   - 完成条件：引用块缺失/非 canonical/来源失效 → 不提交不推进 + 暂停行；
     新建暂停行携带 `pause_id`（SEQUENCE 分配）+ `revision=1` + `version=<seq>` 标签；
     `detail.class` 七分类正确；不回退进度不删历史；暂停重启后仍有效。真库断言。
-  - 状态（2026-09-13）：CLOSED。证据：depositscanner.go新增暂停证据映射+Table3原子条件专用暂停事务（lease裁决/首胜收敛/检查点证据门/version=<seq>戳，批回滚永不直写，3次有界重试）+ServeLoop三停止路径钩子（depositcommit.go零改动）。TestDepositPauseWriteAndStop真库6子项全过（结构缺口upstream_gap高10rev1版0零推进；链视图缺15行；非法topic0行validation_failed类内+版本0；冲突identity_conflict版1预存行完整；漂移零暂停行；重启二轮streamPauseError同实例）。回归全仓单元287过。合并更新（revision+1/merge审计）无任务断言，记为开放项。未验证：T015+、完整验收。
+  - 状态（2026-09-13）：CLOSED。证据：depositscanner.go新增暂停证据映射+Table3原子条件专用暂停事务（lease裁决/首胜收敛/检查点证据门/version=<seq>戳，批回滚永不直写，3次有界重试）+ServeLoop三停止路径钩子（depositcommit.go零改动）。TestDepositPauseWriteAndStop真库6子项全过（结构缺口upstream_gap高10rev1版0零推进；链视图缺15行；非法topic0行validation_failed类内+版本0；冲突identity_conflict版1预存行完整；漂移零暂停行；重启二轮streamPauseError同实例）。回归全仓单元287过。合并更新（revision+1/merge审计）无任务断言，记为开放项。（补充注记 2026-09-13：data-model:89 的 merge 行为无任何任务承接，属规划缺口而非 T014 完成条件缺失；:89 与 :95-98 首胜条文冲突待裁决。）未验证：T015+、完整验收。
 - [x] T015 [US5] 分层恢复验证：上游解除自动续 + 自身暂停按实例条件解除与重验门 + 需 006 时保持暂停（`internal/indexer/deposit_integration_test.go`，按序执行；本条按固定批次执行：每批次恰好 5 次并记录全部结果，任一次失败则该批次不通过，不追加运行凑成功；修复或明确诊断后的重跑另记批次并保留原证据）
   - 需求：FR-12/I6，research R6。验收场景：D8（SC-06）。依赖：T014。
   - 完成条件：上游行消失 + 链视图一致 + 覆盖完整 + 位置有效 → 自动从原位置继续，
@@ -304,12 +304,12 @@ T000-L / T000-P 见上（本阶段即二者建档）。**Checkpoint**: 门禁状
 
 **Purpose**: 全量验证、门禁复核、实现准入
 
-- [x] T020 全量验证：`make build` + `make lint` + `go test ./...` + `go test -tags integration ./...` 全绿
+- [ ] T020 全量验证：`make build` + `make lint` + `go test ./...` + `go test -tags integration ./...` 全绿
   - 依赖：T005–T019，T024–T028。完成条件：四命令一次全绿；T010/T015/T016/T017/T027/T028 批次证据齐全；
     未解释失败持续为未解决事项（后续成功批次不自动关闭；无新证据停跑并报告待诊断）；
     D11 全部断言证据齐全（承接任务见 T015/T018/T025/T027/T028，不在本条复述）；失败按回归处理，不弱化断言；
     否定性断言：观察表外无余额写路径、deposit 包外无 Pending 之外状态推进（grep 断言，承接 FR-13/14）。
-  - 状态（2026-09-13）：CLOSED，有保留通过（保留项见下，不等于无保留通过）。
+  - 状态（2026-09-13）：OPEN（状态纠正：此前“有保留通过”未经授权，予以纠正。四项全量命令通过，但规范一致性及未解决事项尚未收口。）
     证据：终态四命令一次全绿——make build ✓；make lint ✓（gofmt+双tag vet；附带修 depositscanner.go 纯对齐，d3dbe3d 遗留，零语义）；
     make test 全包 ok；make test-integration EXIT=0 八包全绿（app 22s/config/db 58s/eth/health 15s/indexer 314s/logx/metrics），日志 /tmp/opencode/t020/full_integration_final.log。
     本批最小修正（先修后验）：depositauth.go 授权占位租约过期 1s→1h（容忍宿主机时钟回拨，lease 严格接管不动）+depositITLease !won 回读诊断；
@@ -318,7 +318,7 @@ T000-L / T000-P 见上（本阶段即二者建档）。**Checkpoint**: 门禁状
     批次：timing batch A 15/15（NestedReplay+RetainedPause+SameInstanceOldRevision ×恰5次，/tmp/opencode/t020/timing_batch5.log）；
     manual batch B 5/5（LayeredRecovery 含 2 新子项各 5 次，/tmp/opencode/t020/manual_batch5.log）；TestDepositAuth* 子集 15 集成+2 单元绿。
     保留未解决项（持续有效，后续成功不自动关闭）：(1) serve 端口偶发仍未知（原始错误串缺失，无新证据停跑；ObservabilityE2E 本身不绑端口已排除；取证方案已记，不在 T020 内无目的重跑）。
-    (2) checkpoint.start_block 语义未决 Q1–Q3（data-model:41 冻结+:311-312 不写 start vs :55 两侧一致+:306 新 history 写 S_new+:87 CHECK+消费守卫；实现取同步 S_new 自洽且测试锁定，规范内冲突未决；T025 偏差注记保持 open；T022 须先澄清，不私改规格）。
+    (2) checkpoint.start_block 语义已决（2026-09-13 Q7 裁决：同步 S_new 为正确语义，spec/data-model/research 已同步，T025 偏差注记已关闭；此前“未决”记录保留为历史）。
     (3) merge 未实现（data-model:89 与 :95-98 自相冲突，T014 已记开放项）；生产零 UPDATE/零 MERGE 暂停、授权路径仅条件 DELETE 已核验。
     (4) T028 lease 旧失败日志保留为历史（~/.local/share/rtk/tee/1789300034_go_test.log），本次已解释+修复+新批次，不追认关闭旧失败。
     未执行：T022/T023；未关闭 003/004 T000-P；未推送/未合并。
