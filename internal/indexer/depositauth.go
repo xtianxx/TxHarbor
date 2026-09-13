@@ -854,6 +854,12 @@ func decideAuthPause(ctx context.Context, q depositQuerier, req DepositAuthReque
 	switch {
 	case err == nil:
 	case errors.Is(err, pgx.ErrNoRows):
+		// No live pause: an explicit target matches nothing (conditions
+		// changed or never existed) — refuse before any transaction.
+		if req.ExpectedPauseID != nil {
+			return nil, fmt.Errorf("deposit auth: %w: pause target (%d,%d) matches no live pause row; refusing",
+				ErrAuthRejected, *req.ExpectedPauseID, *req.ExpectedPauseRevision)
+		}
 		return &authPauseBasis{lo: replay}, nil
 	default:
 		return nil, fmt.Errorf("auth read deposit pause: %w", err)

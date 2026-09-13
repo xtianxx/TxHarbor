@@ -117,13 +117,13 @@ Coordinator 取 lease（获胜/旁观）→ 配置比较（行存在且 start/co
   INSERT 观察 + 冲突内容比对 + 行数核对 + 推进 next=b+1] → commit
   可重试错 → state=2 退避 ｜ 确定性解析失败（含身份冲突）→ validation_failed 暂停 ｜
   链视图变 → chain_view_changed 暂停 ｜ 失权/配置拒绝 → 停写停服 ｜
-  授权转换（特权 SQL，DB 操作员）：按 request_id 查 history 定性（同参返原结果/异参拒绝/独立校验；
+  授权转换（特权 SQL，DB 操作员）：按 request_id 查 history 定性（已记录请求的同参返原结果/异参拒绝/独立校验，未记录失败不绑定 ID；
   损坏态下已记录结果仍只读返回，新执行拒绝）→
   解析新配置 → 算 H′/replay_from → 缺口分类 → 同 lease 锁下重验（含完整性：两侧同有＋行内与最新 history
   关联一致；预期 version_seq 一致、身份仍旧 + 覆盖重证明 + canonical + 暂停处置条件；
   调用方 expected_pause 非空必须与锁内行一致，否则按目标替换拒绝；
-  双空表示不授权处置任何已有暂停：证据在本 scope 内已证解决（必须处置）则缺目标拒绝，
-  调用方须以新 request_id 重新明确授权；证据在 scope 外（可保留）则提交身份/位置/history、
+   双空表示不授权处置任何已有暂停：证据在本 scope 内已证解决（必须处置）则缺目标拒绝，
+   调用方读取实例后重新明确授权（2026-09-13 批准修订：拒绝无记录不绑定 ID，同 ID 补目标按独立候选完整重验）；证据在 scope 外（可保留）则提交身份/位置/history、
   暂停原样保留、消费仍停；锁内暂停状态与依据不一致→回滚报告状态变化，不扩大授权）→
   原子提交[history 行（新 seq + request_id + 审计） + 身份 H→H′ + next→replay_from + 暂停处置
   （匹配目标条件 DELETE，或原样保留；禁 UPDATE／合并）] → 按新身份继续；
@@ -141,7 +141,7 @@ Coordinator 取 lease（获胜/旁观）→ 配置比较（行存在且 start/co
   FR-07/R5（最小值回放规则 + 上游起点仅检查 + 混合双规则）、data-model Table 3–5 + 授权/回放协议、
   请求身份（意图参数比对、request_id 持久化）与暂停实例身份（不可复用 pause_id + 修订 + 同事务审计）已同步 research R11、contracts 审计查询、quickstart D8/D11、tasks（T001/T006/T015/T019/T025/T027/T028/Notes）。
   contracts 审计字段与 transition 计数、quickstart D5/D7/D11；tasks 首轮同步已完成（首轮当时E2保持开放待复核，保留；2026-09-13最终：E2经定向修正与静态复验闭合，见spec 244-245。）
-  请求幂等与版本隔离强化轮：request_id 身份（同参返原/异参拒绝/异 ID 独立）与 seq 隔离
+  请求幂等与版本隔离强化轮：request_id 身份（已记录请求的同参返原/异参拒绝/异 ID 独立；未记录失败不绑定）与 seq 隔离
   （消费捕获+提交核验、授权验预期 seq、暂停锁内重估）已同步 research R11、data-model 协议、
   contracts 审计查询、quickstart D11、tasks（T001/T006/T019/T025/T027/T028/Notes）。
   目标绑定与解除结果判定轮：expected_pause 双空或双非空（非通配）、锁内目标匹配、解除查审计定性
@@ -151,7 +151,7 @@ Coordinator 取 lease（获胜/旁观）→ 配置比较（行存在且 start/co
   消费提交与授权裁决的完整性前检（损坏态定义、bootstrap 与已记录结果只读返回保留）
   已同步 data-model 授权/写事务协议、research R11、plan 关键流程、tasks（T015/T025/T027/Notes）、
   quickstart D8/D11。
-  请求幂等与版本隔离强化轮：request_id 身份（同参返原/异参拒绝/异 ID 独立）与 seq 隔离
+  请求幂等与版本隔离强化轮：request_id 身份（已记录请求的同参返原/异参拒绝/异 ID 独立；未记录失败不绑定）与 seq 隔离
   （消费捕获+提交核验、授权验预期 seq、暂停锁内重估）已同步 research R11、data-model 协议、
   contracts 审计查询、quickstart D11、tasks（T001/T006/T019/T025/T027/T028/Notes）。
 - FR-01–FR-16 全部映射到 data-model/research 对应节；验收矩阵 10 项 + D11 全部映射到 quickstart 验证表

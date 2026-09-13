@@ -26,11 +26,15 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+
+	"github.com/xtianxx/txharbor/internal/config"
 )
 
 // --- helpers ----------------------------------------------------------------
@@ -499,7 +503,9 @@ func TestDepositAuthPauseDispositions(t *testing.T) {
 		if err != nil {
 			t.Fatalf("release authorization: %v", err)
 		}
-		if want := (DepositAuthResult{VersionSeq: 2, ReplayFrom: 12, Pause: DepositPauseReleased}); res != want {
+		// Replay folds to the resolved gap start (T026): combos alone give
+		// 12, but gap=10-11 was never consumed.
+		if want := (DepositAuthResult{VersionSeq: 2, ReplayFrom: 10, Pause: DepositPauseReleased}); res != want {
 			t.Fatalf("result = %+v, want %+v", res, want)
 		}
 		if _, ok := depositAuthReadPause(t, ctx, pool, chainID); ok {
@@ -515,15 +521,15 @@ func TestDepositAuthPauseDispositions(t *testing.T) {
 		}
 		want2 := depositAuthHistory{
 			seq: 2, prevSeq: "1", hash: h2, start: 10, assets: h2Assets, watches: watches,
-			replay: 12, operator: "operator-1", reason: "test authorization",
+			replay: 10, operator: "operator-1", reason: "test authorization",
 			requestID:       "auth-release",
 			expectedPauseID: strconv.FormatInt(pauseID, 10), expectedPauseRevision: strconv.FormatInt(pauseRev, 10),
 		}
 		if got := depositAuthReadHistory(t, ctx, pool, chainID, 2); got != want2 {
 			t.Fatalf("history v2 = %+v, want %+v", got, want2)
 		}
-		if start, hash, next, ok := depositCheckpointState(t, ctx, pool, chainID); !ok || start != 10 || hash != h2 || next != 12 {
-			t.Fatalf("checkpoint = (%d,%s,%d,%v), want (10,%s,12,true)", start, hash, next, ok, h2)
+		if start, hash, next, ok := depositCheckpointState(t, ctx, pool, chainID); !ok || start != 10 || hash != h2 || next != 10 {
+			t.Fatalf("checkpoint = (%d,%s,%d,%v), want (10,%s,10,true)", start, hash, next, ok, h2)
 		}
 		if n := depositCountRows(t, ctx, pool, "deposit_pause_audit", chainID); n != 1 {
 			t.Fatalf("pause audit rows = %d, want exactly 1", n)
@@ -775,4 +781,637 @@ WHERE chain_id = $1 AND block_number = $2`, chainID, int64(block)).Scan(&amount,
 		}
 		depositAuthAssertUnchanged(t, ctx, pool, chainID, before)
 	})
+}
+
+// --- T027 D11 authorization subset (1): failure, idempotency, unknown -------
+
+// depositAuthD11H2 derives the standard second identity of the D11 scenarios:
+// the H1 snapshots plus testContractB at effective 12, so replay_from is 12
+// against a position of 16.
+func depositAuthD11H2(t *testing.T, watches string) (h2, assets string) {
+	t.Helper()
+	assets = depositAuthSnapshot(depositAuthLine(testContractA, 10), depositAuthLine(testContractB, 12))
+	return depositAuthHash(t, 10, assets, watches), assets
+}
+
+// depositAuthD11Req builds a request for the standard H2 change.
+func depositAuthD11Req(t *testing.T, chainID int64, requestID string, oldSeq int64, hash, assets, watches string) DepositAuthRequest {
+	t.Helper()
+	req := depositAuthBaseReq(t, chainID, requestID, oldSeq)
+	req.NewConfigHash, req.NewStartBlock, req.NewAssets, req.NewWatches = hash, 10, assets, watches
+	return req
+}
+
+// depositAuthD11Invariants asserts the global invariants that must hold after
+// any authorization outcome: checkpoint and latest history agree; the version
+// chain is contiguous with correct prev_seq links; every authorization row
+// carries a complete audit set; every pause audit row resolves to an existing
+// version; releases are unique per instance+revision; and any live pause row is
+// a valid instance. Stress tests assert only these, never a specific outcome.
+func depositAuthD11Invariants(t *testing.T, ctx context.Context, pool *pgxpool.Pool, chainID int64) {
+	t.Helper()
+	if _, _, err := readAuthProgress(ctx, pool, chainID); err != nil {
+		t.Fatalf("checkpoint/latest-history integrity broken: %v", err)
+	}
+	var chainBreaks, auditGaps, dangling, duplicateReleases int
+	if err := pool.QueryRow(ctx, `
+SELECT
+  (SELECT count(*) FROM deposit_config_history h
+   WHERE h.chain_id = $1 AND ((h.version_seq = 1 AND h.prev_seq IS NOT NULL)
+       OR (h.version_seq > 1 AND h.prev_seq IS DISTINCT FROM h.version_seq - 1))),
+  (SELECT count(*) FROM deposit_config_history h
+   WHERE h.chain_id = $1 AND h.request_id IS NOT NULL
+     AND (h.operator = '' OR h.reason = '')),
+  (SELECT count(*) FROM deposit_pause_audit a
+   LEFT JOIN deposit_config_history h ON h.chain_id = a.chain_id AND h.version_seq = a.version_seq
+   WHERE a.chain_id = $1 AND (h.version_seq IS NULL OR a.version_seq < 1)),
+  (SELECT count(*) FROM (
+     SELECT pause_id, revision FROM deposit_pause_audit
+     WHERE chain_id = $1 AND action = 'release'
+     GROUP BY pause_id, revision HAVING count(*) > 1) d)`, chainID).
+		Scan(&chainBreaks, &auditGaps, &dangling, &duplicateReleases); err != nil {
+		t.Fatalf("invariant query: %v", err)
+	}
+	if chainBreaks != 0 || auditGaps != 0 || dangling != 0 || duplicateReleases != 0 {
+		t.Fatalf("invariants broken: chain breaks %d, auth audit gaps %d, dangling pause audits %d, duplicate releases %d",
+			chainBreaks, auditGaps, dangling, duplicateReleases)
+	}
+	if pause, ok := depositAuthReadPause(t, ctx, pool, chainID); ok {
+		switch pause.kind {
+		case "upstream_gap", "chain_view_changed", "validation_failed":
+		default:
+			t.Fatalf("live pause kind %q is not a valid class", pause.kind)
+		}
+		if pause.id <= 0 || pause.rev < 1 || pause.height < 0 {
+			t.Fatalf("live pause row invalid: %+v", pause)
+		}
+	}
+	var rows, maxSeq int64
+	if err := pool.QueryRow(ctx,
+		`SELECT count(*), COALESCE(max(version_seq), 0) FROM deposit_config_history WHERE chain_id = $1`,
+		chainID).Scan(&rows, &maxSeq); err != nil {
+		t.Fatalf("version count: %v", err)
+	}
+	if rows != maxSeq {
+		t.Fatalf("version rows = %d, max seq = %d (the chain must be contiguous from 1)", rows, maxSeq)
+	}
+}
+
+// TestDepositAuthD11UnknownCommitResolvesByDB: the COMMIT reply is dropped
+// after PostgreSQL accepted it; the transaction resolves the unknown outcome
+// from the database, reports the one committed version as recorded, and never
+// double-advances. A same-request retry reads the same record.
+func TestDepositAuthD11UnknownCommitResolvesByDB(t *testing.T) {
+	dsn := startIndexerPostgres(t)
+	ctx := context.Background()
+	pool := openIndexerPool(t, dsn)
+	defer pool.Close()
+
+	const chainID = 140
+	_, _, watches := depositAuthSeedChain(t, ctx, pool, chainID, 16)
+	h2, assets := depositAuthD11H2(t, watches)
+	// The request id must not contain the SQL-trigger marker: the fault
+	// wrapper sees bound parameter bytes too, and a "commit" inside the value
+	// would arm the drop on a read instead of the COMMIT statement.
+	req := depositAuthD11Req(t, chainID, "d11-unknown-reply", 1, h2, assets, watches)
+
+	fault := newDepositFault()
+	faultPool := depositOpenFaultPool(t, dsn, fault)
+	fault.armSQL(depositFaultCommit, true, false)
+
+	res, err := AuthorizeDepositConfig(ctx, faultPool, req)
+	if err != nil {
+		t.Fatalf("authorize with the COMMIT reply dropped = %v, want the recorded result read from the DB", err)
+	}
+	if got := fault.fires.Load(); got != 1 {
+		t.Fatalf("COMMIT drops = %d, want exactly 1 (a retry would double-commit)", got)
+	}
+	if want := (DepositAuthResult{VersionSeq: 2, ReplayFrom: 12, Pause: DepositPauseRetained, Recorded: true}); res != want {
+		t.Fatalf("result = %+v, want %+v", res, want)
+	}
+	start, hash, next, ok := depositCheckpointState(t, ctx, pool, chainID)
+	if !ok || start != 10 || hash != h2 || next != 12 {
+		t.Fatalf("checkpoint = (%d,%s,%d,%v), want (10,%s,12,true): exactly one advance", start, hash, next, ok, h2)
+	}
+	if n := depositCountRows(t, ctx, pool, "deposit_config_history", chainID); n != 2 {
+		t.Fatalf("history rows = %d, want 2 (a single committed version)", n)
+	}
+
+	// The retry is a recorded read-back and changes nothing.
+	before := depositAuthStateOf(t, ctx, pool, chainID)
+	res2, err := AuthorizeDepositConfig(ctx, pool, req)
+	if err != nil {
+		t.Fatalf("same-request retry: %v", err)
+	}
+	if !res2.Recorded || res2.VersionSeq != 2 || res2.ReplayFrom != 12 {
+		t.Fatalf("retry result = %+v, want recorded v2/replay 12", res2)
+	}
+	depositAuthAssertUnchanged(t, ctx, pool, chainID, before)
+}
+
+// TestDepositAuthD11ConcurrentDuplicateRequestID: two concurrent calls with
+// the same request identity settle to exactly one executed version. The
+// chain-wide lease lock serializes the transactions, so the loser either reads
+// the recorded row back (classified after the winner committed) or reports the
+// documented basis-moved expiry; both variants are accepted and must agree on
+// the derived values with the winner.
+func TestDepositAuthD11ConcurrentDuplicateRequestID(t *testing.T) {
+	dsn := startIndexerPostgres(t)
+	ctx := context.Background()
+	pool := openIndexerPool(t, dsn)
+	defer pool.Close()
+
+	const chainID = 141
+	_, _, watches := depositAuthSeedChain(t, ctx, pool, chainID, 16)
+	h2, assets := depositAuthD11H2(t, watches)
+	req := depositAuthD11Req(t, chainID, "d11-concurrent", 1, h2, assets, watches)
+
+	type outcome struct {
+		res DepositAuthResult
+		err error
+	}
+	outcomes := make([]outcome, 2)
+	start := make(chan struct{})
+	var wg sync.WaitGroup
+	for i := range outcomes {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			<-start
+			res, err := AuthorizeDepositConfig(ctx, pool, req)
+			outcomes[i] = outcome{res: res, err: err}
+		}(i)
+	}
+	close(start)
+	wg.Wait()
+
+	wantExecuted := DepositAuthResult{VersionSeq: 2, ReplayFrom: 12, Pause: DepositPauseRetained}
+	wantRecorded := wantExecuted
+	wantRecorded.Recorded = true
+	executed, recorded, expired := 0, 0, 0
+	for i, o := range outcomes {
+		switch {
+		case o.err == nil && o.res == wantExecuted:
+			executed++
+		case o.err == nil && o.res == wantRecorded:
+			recorded++
+		case o.err != nil && errors.Is(o.err, ErrAuthExpired):
+			expired++
+			if !strings.Contains(o.err.Error(), "expected version_seq 1") {
+				t.Fatalf("outcome %d expiry = %v, want it to name the expected version 1", i, o.err)
+			}
+		default:
+			t.Fatalf("outcome %d = (%+v, %v), want the executed, recorded or expired verdict", i, o.res, o.err)
+		}
+	}
+	if executed != 1 || recorded+expired != 1 {
+		t.Fatalf("outcomes = executed %d recorded %d expired %d, want exactly one executed and one converging duplicate",
+			executed, recorded, expired)
+	}
+	if start, hash, next, ok := depositCheckpointState(t, ctx, pool, chainID); !ok || start != 10 || hash != h2 || next != 12 {
+		t.Fatalf("checkpoint = (%d,%s,%d,%v), want (10,%s,12,true)", start, hash, next, ok, h2)
+	}
+	if n := depositCountRows(t, ctx, pool, "deposit_config_history", chainID); n != 2 {
+		t.Fatalf("history rows = %d, want 2 (the duplicate never executes twice)", n)
+	}
+	if n := depositCountRows(t, ctx, pool, "deposit_observations", chainID); n != 0 {
+		t.Fatalf("observations = %d, want 0", n)
+	}
+
+	// A joined same-request retry always reads the recorded result.
+	before := depositAuthStateOf(t, ctx, pool, chainID)
+	res, err := AuthorizeDepositConfig(ctx, pool, req)
+	if err != nil || res != wantRecorded {
+		t.Fatalf("joined retry = (%+v, %v), want %+v", res, err, wantRecorded)
+	}
+	depositAuthAssertUnchanged(t, ctx, pool, chainID, before)
+}
+
+// TestDepositAuthD11LoopbackOldAuthExpired: H1->H2 by req-A, then a new
+// authorization back to the H1 content under a new request id creates v3
+// (same content hash as v1, distinct seq). A new-id request carrying the old
+// expected_old_seq=1 expires reporting 1 vs 3, while req-A still reads its v2
+// record back across versions.
+func TestDepositAuthD11LoopbackOldAuthExpired(t *testing.T) {
+	dsn := startIndexerPostgres(t)
+	ctx := context.Background()
+	pool := openIndexerPool(t, dsn)
+	defer pool.Close()
+
+	const chainID = 142
+	h1, h1Assets, watches := depositAuthSeedChain(t, ctx, pool, chainID, 16)
+	h2, h2Assets := depositAuthD11H2(t, watches)
+
+	reqA := depositAuthD11Req(t, chainID, "d11-loopback-a", 1, h2, h2Assets, watches)
+	resA, err := AuthorizeDepositConfig(ctx, pool, reqA)
+	if err != nil {
+		t.Fatalf("authorize H2: %v", err)
+	}
+	if want := (DepositAuthResult{VersionSeq: 2, ReplayFrom: 12, Pause: DepositPauseRetained}); resA != want {
+		t.Fatalf("H2 result = %+v, want %+v", resA, want)
+	}
+
+	// The loopback: the H1 content returns under a brand-new request id and a
+	// new seq (content hash repetition never reuses a version identity).
+	reqB := depositAuthD11Req(t, chainID, "d11-loopback-b", 2, h1, h1Assets, watches)
+	resB, err := AuthorizeDepositConfig(ctx, pool, reqB)
+	if err != nil {
+		t.Fatalf("authorize loopback H1: %v", err)
+	}
+	if want := (DepositAuthResult{VersionSeq: 3, ReplayFrom: 12, Pause: DepositPauseRetained}); resB != want {
+		t.Fatalf("loopback result = %+v, want %+v", resB, want)
+	}
+	got3 := depositAuthReadHistory(t, ctx, pool, chainID, 3)
+	if got3.hash != h1 || got3.prevSeq != "2" || got3.replay != 12 || got3.requestID != "d11-loopback-b" {
+		t.Fatalf("history v3 = %+v, want the H1 hash on seq 3 with prev 2 and replay 12", got3)
+	}
+	if _, hash, next, _ := depositCheckpointState(t, ctx, pool, chainID); hash != h1 || next != 12 {
+		t.Fatalf("checkpoint = (%s,%d), want (%s,12)", hash, next, h1)
+	}
+
+	// A different id based on the old seq 1 is expired, reporting both.
+	reqStale := depositAuthD11Req(t, chainID, "d11-loopback-stale", 1, h2, h2Assets, watches)
+	before := depositAuthStateOf(t, ctx, pool, chainID)
+	_, err = AuthorizeDepositConfig(ctx, pool, reqStale)
+	if !errors.Is(err, ErrAuthExpired) || !strings.Contains(err.Error(), "expected version_seq 1") ||
+		!strings.Contains(err.Error(), "latest is 3") {
+		t.Fatalf("old-seq request = %v, want ErrAuthExpired reporting expected 1 and current 3", err)
+	}
+	depositAuthAssertUnchanged(t, ctx, pool, chainID, before)
+
+	// The original request still reads its v2 record back, not a new execution.
+	resA2, err := AuthorizeDepositConfig(ctx, pool, reqA)
+	if err != nil {
+		t.Fatalf("req-A read-back: %v", err)
+	}
+	if want := (DepositAuthResult{VersionSeq: 2, ReplayFrom: 12, Pause: DepositPauseRetained, Recorded: true}); resA2 != want {
+		t.Fatalf("req-A read-back = %+v, want %+v", resA2, want)
+	}
+	depositAuthAssertUnchanged(t, ctx, pool, chainID, before)
+}
+
+// TestDepositAuthD11MissingTargetThenRetarget: a resolvable pause without an
+// explicit target is refused as must-dispose and binds nothing (no record, no
+// side effects); reusing that request id with a target is an independent
+// candidate that succeeds after full re-verification (2026-09-13 approved
+// revision); once bound, the same id with a changed intent is refused; a new
+// id with the now-stale target is refused per the current conditions.
+func TestDepositAuthD11MissingTargetThenRetarget(t *testing.T) {
+	dsn := startIndexerPostgres(t)
+	ctx := context.Background()
+	pool := openIndexerPool(t, dsn)
+	defer pool.Close()
+
+	const chainID = 143
+	_, _, watches := depositAuthSeedChain(t, ctx, pool, chainID, 16)
+	pauseID, pauseRev := depositAuthSeedPause(t, ctx, pool, chainID, "chain_view_changed", "class=chain_view_changed version=1", 12)
+	h2, assets := depositAuthD11H2(t, watches)
+	req := depositAuthD11Req(t, chainID, "d11-retarget", 1, h2, assets, watches)
+
+	before := depositAuthStateOf(t, ctx, pool, chainID)
+	_, err := AuthorizeDepositConfig(ctx, pool, req)
+	if !errors.Is(err, ErrAuthRejected) || !strings.Contains(err.Error(), "must be disposed") {
+		t.Fatalf("no-target request = %v, want ErrAuthRejected naming the required disposal", err)
+	}
+	depositAuthAssertUnchanged(t, ctx, pool, chainID, before)
+
+	// The refusal bound nothing: the id classifies as a miss (rule: explicit
+	// failure without a persisted record leaves the id unbound).
+	if hit, _, err := classifyAuthRequest(ctx, pool, req); err != nil || hit != nil {
+		t.Fatalf("classify refused id = (%v,%v), want a clean miss with no record", hit, err)
+	}
+
+	// Same id, now with a target: an independent candidate that succeeds
+	// after full re-verification, with audit and target consistent.
+	reqTarget := req
+	reqTarget.ExpectedPauseID, reqTarget.ExpectedPauseRevision = &pauseID, &pauseRev
+	res, err := AuthorizeDepositConfig(ctx, pool, reqTarget)
+	if err != nil {
+		t.Fatalf("same-id retarget: %v, want success as an independent candidate", err)
+	}
+	if want := (DepositAuthResult{VersionSeq: 2, ReplayFrom: 12, Pause: DepositPauseReleased}); res != want {
+		t.Fatalf("retarget result = %+v, want %+v", res, want)
+	}
+	if _, ok := depositAuthReadPause(t, ctx, pool, chainID); ok {
+		t.Fatal("pause row still present after the release")
+	}
+	if audit := depositAuthReadAudit(t, ctx, pool, chainID, pauseID, pauseRev); audit.action != "release" || audit.versionSeq != 2 {
+		t.Fatalf("release audit = %+v, want release at version 2", audit)
+	}
+	if start, hash, next, ok := depositCheckpointState(t, ctx, pool, chainID); !ok || start != 10 || hash != h2 || next != 12 {
+		t.Fatalf("checkpoint = (%d,%s,%d,%v), want (10,%s,12,true)", start, hash, next, ok, h2)
+	}
+	if got := depositAuthReadHistory(t, ctx, pool, chainID, 2); got.expectedPauseID != strconv.FormatInt(pauseID, 10) ||
+		got.expectedPauseRevision != strconv.FormatInt(pauseRev, 10) {
+		t.Fatalf("history v2 targets = (%s,%s), want (%d,%d)", got.expectedPauseID, got.expectedPauseRevision, pauseID, pauseRev)
+	}
+	released := depositAuthStateOf(t, ctx, pool, chainID)
+
+	// Once bound, the same id with a changed intent (target dropped) is
+	// refused against the record, with no state change.
+	_, err = AuthorizeDepositConfig(ctx, pool, req)
+	if !errors.Is(err, ErrAuthRejected) || !strings.Contains(err.Error(), "different intent") {
+		t.Fatalf("bound-id changed intent = %v, want ErrAuthRejected for the different intent", err)
+	}
+	depositAuthAssertUnchanged(t, ctx, pool, chainID, released)
+
+	// Conditions changed (pause gone): a new id with the stale target is
+	// refused per the current conditions, not executed by default. The new
+	// identity H3 keeps the request past the empty-change gate so the pause
+	// adjudication is what refuses.
+	w3 := "0x00000000000000000000000000000000000000d3"
+	h3Watches := depositAuthSnapshot(watches, depositAuthLine(w3, 10))
+	h3 := depositAuthHash(t, 10, assets, h3Watches)
+	reqStale := depositAuthD11Req(t, chainID, "d11-retarget-stale", 2, h3, assets, h3Watches)
+	reqStale.ExpectedPauseID, reqStale.ExpectedPauseRevision = &pauseID, &pauseRev
+	_, err = AuthorizeDepositConfig(ctx, pool, reqStale)
+	if !errors.Is(err, ErrAuthRejected) || !strings.Contains(err.Error(), "no live pause") {
+		t.Fatalf("stale-target request = %v, want ErrAuthRejected naming the missing live pause", err)
+	}
+	depositAuthAssertUnchanged(t, ctx, pool, chainID, released)
+}
+
+// TestDepositAuthD11RetainedPauseStopsConsumer: after a needs_006 pause is
+// retained under a targetless authorization (identity/position/history
+// committed), the consumer running the new configuration with a live lease
+// still stops on the pause row with *streamPauseError and zero advance, so the
+// retention really keeps consumption stopped.
+func TestDepositAuthD11RetainedPauseStopsConsumer(t *testing.T) {
+	dsn := startIndexerPostgres(t)
+	ctx := context.Background()
+	pool := openIndexerPool(t, dsn)
+	defer pool.Close()
+
+	const chainID = 144
+	_, _, watches := depositAuthSeedChain(t, ctx, pool, chainID, 16)
+	pauseID, pauseRev := depositAuthSeedPause(t, ctx, pool, chainID, "chain_view_changed",
+		"class=chain_view_changed needs_006=true version=1", 12)
+	h2, assets := depositAuthD11H2(t, watches)
+	req := depositAuthD11Req(t, chainID, "d11-retain-consumer", 1, h2, assets, watches)
+	res, err := AuthorizeDepositConfig(ctx, pool, req)
+	if err != nil {
+		t.Fatalf("retain authorization: %v", err)
+	}
+	if want := (DepositAuthResult{VersionSeq: 2, ReplayFrom: 12, Pause: DepositPauseRetained}); res != want {
+		t.Fatalf("result = %+v, want %+v", res, want)
+	}
+	if live, ok := depositAuthReadPause(t, ctx, pool, chainID); !ok || live.id != pauseID || live.rev != pauseRev {
+		t.Fatalf("pause row = %+v (ok=%v), want the retained (%d,%d)", live, ok, pauseID, pauseRev)
+	}
+
+	// One lease object drives the consumer under the new configuration.
+	cfg := depositITConfig(t, chainID, testContractA, testContractB)
+	cfg.Assets = []config.DepositEntry{
+		{Address: testContractA, Effective: 10},
+		{Address: testContractB, Effective: 12},
+	}
+	cfg.ConfigHash = h2
+	sc := depositITScanner(t, pool, cfg)
+	lease := depositITLease(t, pool, chainID)
+	err = depositRunLoopOnce(t, sc, lease)
+	var paused *streamPauseError
+	if !errors.As(err, &paused) || paused.stream != "deposit_pause" {
+		t.Fatalf("ServeLoop() = %v (%T), want *streamPauseError for deposit_pause", err, err)
+	}
+	if start, hash, next, ok := depositCheckpointState(t, ctx, pool, chainID); !ok || start != 10 || hash != h2 || next != 12 {
+		t.Fatalf("checkpoint moved by the stopped consumer: (%d,%s,%d,%v)", start, hash, next, ok)
+	}
+	if n := depositCountRows(t, ctx, pool, "deposit_observations", chainID); n != 0 {
+		t.Fatalf("observations = %d, want 0 while the pause is retained", n)
+	}
+}
+
+// TestDepositAuthD11StaleInstanceDeleteZeroRows: after P1 is released by an
+// authorization, P2 arrives with a fresh instance identity. A releaser still
+// carrying P1's (id, revision) hits zero rows on the conditional DELETE, writes
+// no audit row, fabricates no release for P2 and leaves P2 intact: staleness is
+// reported by the audit lookup, never by deleting the wrong instance.
+func TestDepositAuthD11StaleInstanceDeleteZeroRows(t *testing.T) {
+	dsn := startIndexerPostgres(t)
+	ctx := context.Background()
+	pool := openIndexerPool(t, dsn)
+	defer pool.Close()
+
+	const chainID = 145
+	_, _, watches := depositAuthSeedChain(t, ctx, pool, chainID, 16)
+	p1, p1rev := depositAuthSeedPause(t, ctx, pool, chainID, "chain_view_changed", "class=chain_view_changed version=1", 12)
+	h2, assets := depositAuthD11H2(t, watches)
+	req := depositAuthD11Req(t, chainID, "d11-stale-p1", 1, h2, assets, watches)
+	req.ExpectedPauseID, req.ExpectedPauseRevision = &p1, &p1rev
+	res, err := AuthorizeDepositConfig(ctx, pool, req)
+	if err != nil {
+		t.Fatalf("release P1: %v", err)
+	}
+	if res.Pause != DepositPauseReleased {
+		t.Fatalf("release result = %+v, want released", res)
+	}
+	if _, ok := depositAuthReadPause(t, ctx, pool, chainID); ok {
+		t.Fatal("P1 still present after its release")
+	}
+
+	// A new pause instance P2 arrives after P1's release.
+	p2, p2rev := depositAuthSeedPause(t, ctx, pool, chainID, "chain_view_changed", "class=chain_view_changed version=2", 12)
+	live, ok := depositAuthReadPause(t, ctx, pool, chainID)
+	if !ok || live.id != p2 || live.rev != p2rev {
+		t.Fatalf("live pause = %+v (ok=%v), want P2 (%d,%d)", live, ok, p2, p2rev)
+	}
+	before := depositAuthStateOf(t, ctx, pool, chainID)
+
+	// The stale releaser uses P1's identity: zero rows, no audit fabrication.
+	tag, err := pool.Exec(ctx, deleteAuthPauseSQL, chainID, p1, p1rev)
+	if err != nil {
+		t.Fatalf("stale conditional DELETE: %v", err)
+	}
+	if n := tag.RowsAffected(); n != 0 {
+		t.Fatalf("stale conditional DELETE affected %d rows, want 0", n)
+	}
+	after, ok := depositAuthReadPause(t, ctx, pool, chainID)
+	if !ok || after != live {
+		t.Fatalf("P2 = %+v (ok=%v), want it untouched (%+v)", after, ok, live)
+	}
+	var p2Releases int
+	if err := pool.QueryRow(ctx, `
+SELECT count(*) FROM deposit_pause_audit WHERE chain_id = $1 AND pause_id = $2 AND action = 'release'`,
+		chainID, p2).Scan(&p2Releases); err != nil {
+		t.Fatalf("read P2 release audits: %v", err)
+	}
+	if p2Releases != 0 {
+		t.Fatalf("release audit rows for P2 = %d, want 0 (staleness must be reported, not fabricated)", p2Releases)
+	}
+	depositAuthAssertUnchanged(t, ctx, pool, chainID, before)
+}
+
+// TestDepositAuthD11SameContentReplayAndTimestamp: two observations with the
+// same content (contract/sender/recipient/amount) and the same fixed
+// observed_at timestamp, but different source identities, exist under two
+// different configuration versions; each row resolves through its own
+// version_seq foreign key to the matching history identity, so the version
+// reference — not the timestamp — distinguishes them.
+func TestDepositAuthD11SameContentReplayAndTimestamp(t *testing.T) {
+	dsn := startIndexerPostgres(t)
+	ctx := context.Background()
+	pool := openIndexerPool(t, dsn)
+	defer pool.Close()
+
+	const chainID = 146
+	h1, _, watches := depositAuthSeedChain(t, ctx, pool, chainID, 16)
+	h2, assets := depositAuthD11H2(t, watches)
+	req := depositAuthD11Req(t, chainID, "d11-content-version", 1, h2, assets, watches)
+	if _, err := AuthorizeDepositConfig(ctx, pool, req); err != nil {
+		t.Fatalf("authorize H2: %v", err)
+	}
+
+	observedAt := time.Date(2026, 1, 2, 3, 4, 5, 123456000, time.UTC)
+	seed := func(block uint64, versionSeq int64) {
+		t.Helper()
+		if _, err := pool.Exec(ctx, `
+INSERT INTO deposit_observations
+    (chain_id, block_hash, tx_hash, log_index, block_number, contract, sender, recipient, amount, status, version_seq, observed_at)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 'pending', $10, $11)`,
+			chainID, depositBlockHash(block), depositTxHash(block, 0), 0, int64(block),
+			testContractA, testContractB, depositWatchAddr, "5", versionSeq, observedAt); err != nil {
+			t.Fatalf("seed observation at block %d: %v", block, err)
+		}
+	}
+	seed(12, 1)
+	seed(13, 2)
+
+	// Identical content and identical timestamp across both rows.
+	var sameContent int
+	if err := pool.QueryRow(ctx, `
+SELECT count(*) FROM deposit_observations
+WHERE chain_id = $1 AND contract = $2 AND sender = $3 AND recipient = $4 AND amount = 5 AND observed_at = $5`,
+		chainID, testContractA, testContractB, depositWatchAddr, observedAt).Scan(&sameContent); err != nil {
+		t.Fatalf("read same-content rows: %v", err)
+	}
+	if sameContent != 2 {
+		t.Fatalf("same-content same-timestamp rows = %d, want 2", sameContent)
+	}
+
+	// Each row joins its own version_seq to the version that produced it.
+	for _, tc := range []struct {
+		block   uint64
+		hash    string
+		version int64
+	}{
+		{12, h1, 1},
+		{13, h2, 2},
+	} {
+		var hash string
+		var version int64
+		if err := pool.QueryRow(ctx, `
+SELECT h.config_hash, o.version_seq
+FROM deposit_observations o
+JOIN deposit_config_history h ON h.chain_id = o.chain_id AND h.version_seq = o.version_seq
+WHERE o.chain_id = $1 AND o.block_number = $2`, chainID, int64(tc.block)).Scan(&hash, &version); err != nil {
+			t.Fatalf("resolve observation at block %d: %v", tc.block, err)
+		}
+		if hash != tc.hash || version != tc.version {
+			t.Fatalf("observation at block %d = (version %d, hash %s), want (%d, %s)", tc.block, version, hash, tc.version, tc.hash)
+		}
+	}
+	var distinctVersions int
+	if err := pool.QueryRow(ctx,
+		`SELECT count(DISTINCT version_seq) FROM deposit_observations WHERE chain_id = $1`, chainID).Scan(&distinctVersions); err != nil {
+		t.Fatalf("distinct version references: %v", err)
+	}
+	if distinctVersions != 2 {
+		t.Fatalf("distinct observation version references = %d, want 2 (seq, never the timestamp, is the discriminator)", distinctVersions)
+	}
+}
+
+// TestDepositAuthD11PauseFlipStressInvariants: ten sequential authorizations
+// with a fresh explicit target run against a concurrent revision flipper.
+// Individual outcomes are recorded, never asserted; after every attempt only
+// the global invariants must hold: checkpoint <-> latest-history agreement,
+// a contiguous version chain with correct prev_seq, complete audit fields on
+// authorization rows, pause audit rows resolving to real versions, unique
+// releases per instance, and a valid live pause row.
+func TestDepositAuthD11PauseFlipStressInvariants(t *testing.T) {
+	dsn := startIndexerPostgres(t)
+	ctx := context.Background()
+	pool := openIndexerPool(t, dsn)
+	defer pool.Close()
+
+	const chainID = 147
+	_, _, watches := depositAuthSeedChain(t, ctx, pool, chainID, 16)
+	w2 := depositAuthLine("0x00000000000000000000000000000000000000d2", 14)
+	assets := depositAuthLine(testContractA, 10)
+	watchesWithW2 := depositAuthSnapshot(w2, watches)
+	hWithout := depositAuthHash(t, 10, assets, watches)
+	hWith := depositAuthHash(t, 10, assets, watchesWithW2)
+
+	// The flipper bumps the live instance revision continuously; it never
+	// touches the version ledger, so any refusal it causes is a pause-race
+	// refusal, never a basis expiry.
+	flipCtx, cancelFlip := context.WithCancel(ctx)
+	defer cancelFlip()
+	var flips atomic.Int32
+	flipDone := make(chan struct{})
+	go func() {
+		defer close(flipDone)
+		ticker := time.NewTicker(100 * time.Millisecond)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-flipCtx.Done():
+				return
+			case <-ticker.C:
+				tag, err := pool.Exec(flipCtx,
+					`UPDATE deposit_pause SET revision = revision + 1 WHERE chain_id = $1`, chainID)
+				if err == nil {
+					flips.Add(int32(tag.RowsAffected()))
+				}
+			}
+		}
+	}()
+
+	outcomes := map[string]int{}
+	for i := 0; i < 10; i++ {
+		progress, latest, err := readAuthProgress(ctx, pool, chainID)
+		if err != nil {
+			t.Fatalf("attempt %d basis read: %v", i, err)
+		}
+		// Always pick the identity the chain is not currently on, so the
+		// attempt can never be an empty change.
+		hash, ws := hWith, watchesWithW2
+		if progress.configHash == hWith {
+			hash, ws = hWithout, watches
+		}
+		if _, ok := depositAuthReadPause(t, ctx, pool, chainID); !ok {
+			depositAuthSeedPause(t, ctx, pool, chainID, "chain_view_changed", "class=chain_view_changed version=1", 14)
+		}
+		live, ok := depositAuthReadPause(t, ctx, pool, chainID)
+		if !ok {
+			t.Fatalf("attempt %d: no live pause to target", i)
+		}
+		req := depositAuthD11Req(t, chainID, fmt.Sprintf("d11-stress-%d", i), latest.versionSeq, hash, assets, ws)
+		req.ExpectedPauseID, req.ExpectedPauseRevision = &live.id, &live.rev
+
+		res, err := AuthorizeDepositConfig(ctx, pool, req)
+		switch {
+		case err == nil:
+			outcomes["executed"]++
+			if res.Pause == DepositPauseReleased {
+				outcomes["released"]++
+			}
+			t.Logf("attempt %d executed v%d replay %d pause %s", i, res.VersionSeq, res.ReplayFrom, res.Pause)
+		case errors.Is(err, ErrAuthRejected):
+			outcomes["rejected"]++
+			t.Logf("attempt %d rejected: %v", i, err)
+		case errors.Is(err, ErrAuthExpired):
+			outcomes["expired"]++
+			t.Logf("attempt %d expired: %v", i, err)
+		default:
+			t.Fatalf("attempt %d: unexpected error %v", i, err)
+		}
+		depositAuthD11Invariants(t, ctx, pool, chainID)
+	}
+	cancelFlip()
+	<-flipDone
+	t.Logf("pause-flip stress outcomes: %v (pause revision flips observed: %d)", outcomes, flips.Load())
+	if outcomes["executed"]+outcomes["rejected"]+outcomes["expired"] != 10 {
+		t.Fatalf("outcomes = %v, want all 10 attempts classified", outcomes)
+	}
+	depositAuthD11Invariants(t, ctx, pool, chainID)
 }
