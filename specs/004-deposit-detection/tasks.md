@@ -278,7 +278,7 @@ T000-L / T000-P 见上（本阶段即二者建档）。**Checkpoint**: 门禁状
     每批次恰好 5 次并记录全部结果，任一次失败则该批次不通过，不追加运行凑成功；
     修复或明确诊断后的重跑另记批次并保留原证据，**不允许用"重跑通过"掩盖失败**。
   - 状态（2026-09-13）：CLOSED。证据：TestDepositDualWorkers真库3子项（190-192；双独立pool/lease句柄首单元竞速恰一次推进、跨pool断言、失败方三选一；旧token延迟提交fencing零写；stale依据重提version隔离零写）。单跑4/4，固定批次-count=5共20/20过。未验证：T018+、完整验收。
-- [ ] T018 [US5] `coordinator.go` + `serve.go` 第三循环接线：三 serveLoop 并发 + 回归 + 退出 + 故障传播
+- [x] T018 [US5] `coordinator.go` + `serve.go` 第三循环接线：三 serveLoop 并发 + 回归 + 退出 + 故障传播
   - 需求：FR-08/FR-12，research R1。验收场景：D3 退出部分。依赖：T006，T016。
   - 完成条件：`Coordinator` 唯一 Acquire 循环 + 唯一 Heartbeat 下并发跑三 loop，
     header/log 行为不变（002/003 回归测试全绿）；应用 serve 路径启停 deposit 循环的集成断言
@@ -286,6 +286,7 @@ T000-L / T000-P 见上（本阶段即二者建档）。**Checkpoint**: 门禁状
     任一失权/心跳丢失即全停重取（专项集成测试绿）；
     终止信号下未提交零残留；失权/配置拒绝/不可重试错误按类别退出或停写。
     本任务是唯一的既有文件行为触碰点，范围不得扩大；授权转换走特权 SQL 路径，不经过 serve 循环，不改变本条接线。
+  - 状态（2026-09-13）：CLOSED。证据：coordinator.go泛化serveStreams(N路)+RunTrio（RunPair原样委托，行为不变）；serve.go构造depositScanner（DepositConfig全映射）+SetResultObserver接m.ObserveDepositObservation+RunTrio适配闭包（lease直传，授权仍在环外）。TestRunTrio*单元3过（三路同轮/存款停止错扇出无重取/失权三路重取）；TestServeDepositLoopStartStop真Anvil+PG全链路过（004检查点行出现+header/log检查点推进+SIGINT干净退出0）；TestServeDepositConfigRefusalEndToEnd过（空白白名单非零+点名变量）。回归：单元290过、pair/trio 6过、既有serve集成5过。gauges（Next/State/Lag）零生产调用者，留T019。deposit env无条件必需（T002缺一拒绝启动哲学；影响无deposit既有部署，见此注）。未验证：T019、完整验收。
 - [ ] T019 [US5] 可观察端到端：进度/滞后/状态/暂停缺口查询 + 脱敏审计（指标断言落入 `internal/metrics/metrics_test.go`（按序扩展）；端到端落入 `internal/indexer/deposit_integration_test.go`）
   - 需求：FR-15。验收场景：SC-09（D1–D9 状态断言共用）、D11 转换审计。依赖：T003，T014，T025。
   - 完成条件：运行/等待/重试/暂停/结构停止各态下进度、滞后、重试、暂停或缺口原因可查

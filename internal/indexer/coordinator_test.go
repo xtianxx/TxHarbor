@@ -189,9 +189,149 @@ func TestRunPairHeartbeatLossStopsBothAndReacquires(t *testing.T) {
 	}
 }
 
-// TestRunPairStopErrorStopsBothWithoutReacquire covers the terminal polarity: a
-// durable pause/configuration refusal stops the peer and is returned as-is, so
-// serve exits non-zero exactly like a 002 scanner failure.
+// TestRunTrioRunsAllThreeLoops covers the 004 wiring: the deposit loop joins
+// the same acquisition round and heartbeat as header/log, and a clean
+// shutdown joins all three with nil.
+func TestRunTrioRunsAllThreeLoops(t *testing.T) {
+	lease := &fakeLease{}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	var calls [3]atomic.Int32
+	mkServe := func(i int) ServeFunc {
+		return func(c context.Context, checkLost func() error) error {
+			calls[i].Add(1)
+			<-c.Done()
+			return nil
+		}
+	}
+
+	done := make(chan error, 1)
+	go func() { done <- RunTrio(ctx, lease, mkServe(0), mkServe(1), mkServe(2)) }()
+
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if calls[0].Load() == 1 && calls[1].Load() == 1 && calls[2].Load() == 1 {
+			break
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	for i := range calls {
+		if calls[i].Load() != 1 {
+			t.Fatalf("loop %d calls = %d, want exactly 1 in the shared round", i, calls[i].Load())
+		}
+	}
+
+	cancel()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("RunTrio() = %v, want nil on shutdown", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("RunTrio did not stop on context cancellation")
+	}
+	if got := lease.acquisitions(); got != 1 {
+		t.Fatalf("acquisitions = %d, want 1", got)
+	}
+}
+
+// TestRunTrioDepositStopErrorStopsPeers covers the terminal polarity with
+// three loops: the deposit loop's stop error cancels header/log and is
+// returned as-is without re-acquisition.
+func TestRunTrioDepositStopErrorStopsPeers(t *testing.T) {
+	lease := &fakeLease{}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	var peersStopped [2]atomic.Bool
+	started := make(chan struct{})
+	var startOnce sync.Once
+	headerServe := func(c context.Context, checkLost func() error) error {
+		startOnce.Do(func() { close(started) })
+		<-c.Done()
+		peersStopped[0].Store(true)
+		return nil
+	}
+	logServe := func(c context.Context, checkLost func() error) error {
+		<-c.Done()
+		peersStopped[1].Store(true)
+		return nil
+	}
+	depositServe := func(c context.Context, checkLost func() error) error {
+		<-started
+		return fmt.Errorf("deposit config changed: %w", errStaleState)
+	}
+
+	done := make(chan error, 1)
+	go func() { done <- RunTrio(ctx, lease, headerServe, logServe, depositServe) }()
+
+	select {
+	case err := <-done:
+		if !errors.Is(err, errStaleState) {
+			t.Fatalf("RunTrio() = %v, want the deposit stop error", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("RunTrio did not return the deposit stop error")
+	}
+	for i := range peersStopped {
+		if !peersStopped[i].Load() {
+			t.Fatalf("peer loop %d was not stopped by the deposit terminal error", i)
+		}
+	}
+	if got := lease.acquisitions(); got != 1 {
+		t.Fatalf("acquisitions = %d, want 1 (no retry after a stop error)", got)
+	}
+}
+
+// TestRunTrioLeaseLossReacquiresThreeLoops covers the loss polarity with
+// three loops: a peer's ErrLeaseLost cancels the round and the next round
+// runs all three loops again.
+func TestRunTrioLeaseLossReacquiresThreeLoops(t *testing.T) {
+	lease := &fakeLease{}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	var calls [3]atomic.Int32
+	reacquired := make(chan struct{})
+	var reacquireOnce sync.Once
+	mkServe := func(i int, lose bool) ServeFunc {
+		return func(c context.Context, checkLost func() error) error {
+			if calls[i].Add(1) == 1 {
+				if lose {
+					return fmt.Errorf("%w: write verdict", ErrLeaseLost)
+				}
+				<-c.Done()
+				return nil
+			}
+			if calls[0].Load() >= 2 && calls[1].Load() >= 2 && calls[2].Load() >= 2 {
+				reacquireOnce.Do(func() { close(reacquired) })
+			}
+			<-c.Done()
+			return nil
+		}
+	}
+
+	done := make(chan error, 1)
+	go func() {
+		done <- RunTrio(ctx, lease, mkServe(0, false), mkServe(1, true), mkServe(2, false))
+	}()
+
+	waitFor(t, reacquired, "re-acquisition of all three loops after ErrLeaseLost")
+	if got := lease.acquisitions(); got != 2 {
+		t.Fatalf("acquisitions = %d, want 2", got)
+	}
+
+	cancel()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("RunTrio() = %v, want nil on shutdown", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("RunTrio did not stop on context cancellation")
+	}
+}
 func TestRunPairStopErrorStopsBothWithoutReacquire(t *testing.T) {
 	lease := &fakeLease{}
 	ctx, cancel := context.WithCancel(context.Background())

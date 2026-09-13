@@ -209,6 +209,33 @@ func Serve(ctx context.Context, d Deps) int {
 		pool.Close()
 		return fail("startup failed (log indexer): %s", logx.Redact(err.Error()))
 	}
+	// The deposit scanner consumes the indexed log stream (004): its frozen
+	// configuration identity is compared against the durable deposit rows
+	// when the loop starts, and a mismatch refuses to scan and exits
+	// non-zero, exactly like the 002/003 scanners above. Deposit
+	// authorization itself stays a privileged out-of-loop SQL operation.
+	depositScanner, err := indexer.NewDepositScanner(pool, indexer.DepositConfig{
+		ChainID:        chainID,
+		StartBlock:     cfg.DepositStartHeight,
+		Assets:         cfg.DepositContracts,
+		Watches:        cfg.DepositWatchAddresses,
+		ConfigHash:     cfg.DepositConfigHash,
+		BatchBlocks:    cfg.DepositBatchBlocks,
+		PollInterval:   cfg.IndexPollInterval,
+		RetryInitial:   cfg.IndexRetryInitial,
+		RetryMax:       cfg.IndexRetryMax,
+		LogContracts:   cfg.LogContracts,
+		LogConfigHash:  cfg.LogConfigHash,
+		LogStartHeight: cfg.LogStartHeight,
+	})
+	if err != nil {
+		ethClient.Close()
+		pool.Close()
+		return fail("startup failed (deposit indexer): %s", logx.Redact(err.Error()))
+	}
+	depositScanner.SetResultObserver(func(result string) {
+		m.ObserveDepositObservation(chainID, result)
+	})
 
 	srv := &http.Server{
 		Handler:           health.NewServer(agg, m.Handler()).Handler(),
@@ -234,8 +261,13 @@ func Serve(ctx context.Context, d Deps) int {
 	indexerDone := make(chan struct{})
 	go func() {
 		// The coordinator owns the only acquisition loop and heartbeat and
-		// joins both serve loops before it returns (research R1).
-		indexerErr <- indexer.RunPair(runCtx, lease, scanner.ServeLoop, logScanner.ServeLoop)
+		// joins all three serve loops before it returns (research R1). The
+		// deposit loop adapts to the shared ServeFunc shape with the
+		// coordinator-held lease; authorization stays out of loop.
+		depositServe := func(loopCtx context.Context, checkLost func() error) error {
+			return depositScanner.ServeLoop(loopCtx, lease, checkLost)
+		}
+		indexerErr <- indexer.RunTrio(runCtx, lease, scanner.ServeLoop, logScanner.ServeLoop, depositServe)
 		close(indexerDone)
 	}()
 	fmt.Fprintf(stdout, "txharbor serve: listening on %s\n", listener.Addr())

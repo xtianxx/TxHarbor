@@ -41,11 +41,27 @@ type leaseSession interface {
 // exits non-zero exactly like a 002 scanner failure. A cancelled ctx exits
 // cleanly with nil.
 func RunPair(ctx context.Context, lease leaseSession, headerServe, logServe ServeFunc) error {
+	return runStreams(ctx, lease, []ServeFunc{headerServe, logServe})
+}
+
+// RunTrio is the three-stream service (004 deposit detection): one lease
+// acquisition loop and one heartbeat drive the header, log and deposit serve
+// loops concurrently. Loss and terminal polarities match RunPair; the deposit
+// loop joins the same cancellation fan-out, so any loop's stop error or lease
+// loss stops all three before any further write.
+func RunTrio(ctx context.Context, lease leaseSession, headerServe, logServe, depositServe ServeFunc) error {
+	return runStreams(ctx, lease, []ServeFunc{headerServe, logServe, depositServe})
+}
+
+// runStreams is the shared acquisition loop behind RunPair/RunTrio.
+func runStreams(ctx context.Context, lease leaseSession, serves []ServeFunc) error {
 	if lease == nil {
 		return errors.New("indexer coordinator: nil lease")
 	}
-	if headerServe == nil || logServe == nil {
-		return errors.New("indexer coordinator: both serve functions are required")
+	for _, serve := range serves {
+		if serve == nil {
+			return errors.New("indexer coordinator: all serve functions are required")
+		}
 	}
 	for {
 		if ctx.Err() != nil {
@@ -72,7 +88,7 @@ func RunPair(ctx context.Context, lease leaseSession, headerServe, logServe Serv
 		}
 
 		slog.Info("lease acquired", "fencing_token", token)
-		err = servePair(ctx, lease, headerServe, logServe)
+		err = serveStreams(ctx, lease, serves)
 		if ctx.Err() != nil {
 			return nil
 		}
@@ -87,10 +103,10 @@ func RunPair(ctx context.Context, lease leaseSession, headerServe, logServe Serv
 	}
 }
 
-// servePair runs both loops under one heartbeat. It returns nil when the loops
+// serveStreams runs every loop under one heartbeat. It returns nil when the loops
 // stopped because ctx was cancelled, ErrLeaseLost when the heartbeat or a loop
 // reported the lease gone, and the first stop error otherwise.
-func servePair(ctx context.Context, lease leaseSession, headerServe, logServe ServeFunc) error {
+func serveStreams(ctx context.Context, lease leaseSession, serves []ServeFunc) error {
 	pairCtx, cancelPair := context.WithCancel(ctx)
 	defer cancelPair()
 	hbCtx, cancelHB := context.WithCancel(pairCtx)
@@ -108,7 +124,7 @@ func servePair(ctx context.Context, lease leaseSession, headerServe, logServe Se
 		mu.Lock()
 		hbErr = err
 		mu.Unlock()
-		cancelPair() // unconfirmed lease: stop both loops before any write
+		cancelPair() // unconfirmed lease: stop all loops before any write
 	}()
 
 	checkLost := func() error {
@@ -120,15 +136,16 @@ func servePair(ctx context.Context, lease leaseSession, headerServe, logServe Se
 		return fmt.Errorf("%w: %v", ErrLeaseLost, hbErr)
 	}
 
-	errs := make(chan error, 2)
-	go func() { errs <- headerServe(pairCtx, checkLost) }()
-	go func() { errs <- logServe(pairCtx, checkLost) }()
+	errs := make(chan error, len(serves))
+	for _, serve := range serves {
+		go func() { errs <- serve(pairCtx, checkLost) }()
+	}
 
 	var (
 		firstErr error
 		lost     bool
 	)
-	for i := 0; i < 2; i++ {
+	for range serves {
 		err := <-errs
 		switch {
 		case err == nil:

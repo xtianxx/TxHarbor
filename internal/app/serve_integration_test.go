@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/testcontainers/testcontainers-go"
 	"github.com/testcontainers/testcontainers-go/modules/postgres"
 	"github.com/testcontainers/testcontainers-go/wait"
@@ -224,4 +225,114 @@ func freeAddr(t *testing.T) string {
 	addr := ln.Addr().String()
 	ln.Close()
 	return addr
+}
+
+// TestServeDepositLoopStartStop is T018 (US5): the serve path starts the
+// deposit loop next to header/log under one coordinator (a deposit checkpoint
+// row appears once the real 002/003 pipeline covers genesis), header/log
+// checkpoints still advance, and a termination signal shuts everything down
+// with exit code 0 and no partial deposit state.
+func TestServeDepositLoopStartStop(t *testing.T) {
+	testcontainers.SkipIfProviderIsNotHealthy(t)
+	ctx := context.Background()
+	pgCtr := startPostgresContainer(t)
+	anvilCtr := startAnvilContainer(t)
+	dsn := postgresDSN(t, pgCtr)
+	rpcURL := anvilURL(t, anvilCtr)
+
+	if err := db.MigrateUp(ctx, db.MigrateOptions{DSN: dsn, LockTimeout: 5 * time.Second, ConnectTimeout: 5 * time.Second}, io.Discard); err != nil {
+		t.Fatalf("migrate up: %v", err)
+	}
+
+	const asset = "0x1111111111111111111111111111111111111111"
+	const watch = "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	signals := make(chan os.Signal, 1)
+	done := make(chan int, 1)
+	go func() {
+		done <- Serve(ctx, Deps{
+			Getenv: envGetter(map[string]string{
+				"TXHARBOR_PG_DSN":                  dsn,
+				"TXHARBOR_RPC_URL":                 rpcURL,
+				"TXHARBOR_CHAIN_ID":                "31337",
+				"TXHARBOR_START_HEIGHT":            "0",
+				"TXHARBOR_LOG_START_HEIGHT":        "0",
+				"TXHARBOR_LOG_CONTRACTS":           asset,
+				"TXHARBOR_DEPOSIT_START_HEIGHT":    "0",
+				"TXHARBOR_DEPOSIT_CONTRACTS":       asset + ":0",
+				"TXHARBOR_DEPOSIT_WATCH_ADDRESSES": watch + ":0",
+				"TXHARBOR_HTTP_ADDR":               freeAddr(t),
+			}),
+			Signals: signals,
+		})
+	}()
+
+	// The deposit loop is live once its checkpoint row appears; header/log
+	// must advance alongside it (behavior unchanged).
+	conn, err := pgx.Connect(ctx, dsn)
+	if err != nil {
+		t.Fatalf("connect for assertions: %v", err)
+	}
+	defer conn.Close(ctx)
+	deadline := time.Now().Add(120 * time.Second)
+	depositOK := false
+	for time.Now().Before(deadline) {
+		var start, next int64
+		err := conn.QueryRow(ctx, `SELECT start_block, next_block FROM deposit_checkpoint WHERE chain_id = 31337`).Scan(&start, &next)
+		if err == nil && start == 0 && next >= 1 {
+			depositOK = true
+			break
+		}
+		time.Sleep(500 * time.Millisecond)
+	}
+	if !depositOK {
+		t.Fatal("deposit checkpoint never appeared: the deposit loop did not start under serve")
+	}
+	// Header/log behavior is unchanged: both checkpoints advance alongside.
+	var logNext int64
+	if err := conn.QueryRow(ctx, `SELECT next_block FROM log_checkpoint WHERE chain_id = 31337`).Scan(&logNext); err != nil || logNext < 1 {
+		t.Fatalf("log checkpoint next = (%d,%v), want >= 1", logNext, err)
+	}
+	var headerRows int
+	if err := conn.QueryRow(ctx, `SELECT count(*) FROM indexer_checkpoint WHERE chain_id = 31337`).Scan(&headerRows); err != nil || headerRows < 1 {
+		t.Fatalf("header checkpoint rows = (%d,%v), want >= 1", headerRows, err)
+	}
+
+	signals <- os.Interrupt
+	select {
+	case code := <-done:
+		if code != 0 {
+			t.Fatalf("Serve() exit code = %d, want 0 on clean shutdown", code)
+		}
+	case <-time.After(30 * time.Second):
+		t.Fatal("Serve did not shut down after the termination signal")
+	}
+}
+
+// TestServeDepositConfigRefusalEndToEnd is T018 exit-polarity: a blank deposit
+// whitelist refuses startup with a non-zero exit naming the variable.
+func TestServeDepositConfigRefusalEndToEnd(t *testing.T) {
+	addr := freeAddr(t)
+	env := map[string]string{
+		"TXHARBOR_PG_DSN":                  "postgres://txharbor:txharbor@127.0.0.1:5432/txharbor?sslmode=disable",
+		"TXHARBOR_RPC_URL":                 "http://127.0.0.1:8545",
+		"TXHARBOR_CHAIN_ID":                "31337",
+		"TXHARBOR_START_HEIGHT":            "0",
+		"TXHARBOR_LOG_START_HEIGHT":        "0",
+		"TXHARBOR_LOG_CONTRACTS":           "0x1111111111111111111111111111111111111111",
+		"TXHARBOR_DEPOSIT_START_HEIGHT":    "0",
+		"TXHARBOR_DEPOSIT_WATCH_ADDRESSES": "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:0",
+		"TXHARBOR_HTTP_ADDR":               addr,
+	}
+	var stderr bytes.Buffer
+	code := Serve(context.Background(), Deps{
+		Getenv:  envGetter(env),
+		Stderr:  &stderr,
+		Signals: make(chan os.Signal),
+	})
+	if code == 0 {
+		t.Fatal("Serve() exit code = 0, want non-zero for a blank deposit whitelist")
+	}
+	if !strings.Contains(stderr.String(), "TXHARBOR_DEPOSIT_CONTRACTS") {
+		t.Fatalf("stderr does not name TXHARBOR_DEPOSIT_CONTRACTS: %s", stderr.String())
+	}
 }
