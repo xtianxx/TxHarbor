@@ -3991,3 +3991,145 @@ func TestDepositPauseConcurrency(t *testing.T) {
 		}
 	})
 }
+
+// TestDepositDualWorkers is T017 (US5) with a fixed batch (exactly 5 runs,
+// all recorded; any failure fails the batch): two genuine workers (separate
+// pools, separate lease handles) race the same first unit and exactly one
+// effective advance lands; a dispossessed worker's delayed commit and a stale
+// basis resubmission both write zero rows. Final state is always asserted
+// across workers (reads through the other pool), never by -race alone.
+func TestDepositDualWorkers(t *testing.T) {
+	dsn := startIndexerPostgres(t)
+	poolA := openIndexerPool(t, dsn)
+	defer poolA.Close()
+	poolB := openIndexerPool(t, dsn)
+	defer poolB.Close()
+	ctx := context.Background()
+
+	// seedFirstUnit plants the covered first unit (canonical 10..20, upstream
+	// next 21 over {A}, one matched transfer at 15) on the given pool.
+	// seedFirstUnit plants the covered first unit (canonical 10..20, upstream
+	// next 21 over {A}, one matched transfer at 15) on the given pool.
+	seedFirstUnit := func(t *testing.T, pool *pgxpool.Pool, chainID int64) {
+		t.Helper()
+		depositSeedCanonical(t, ctx, pool, chainID, 10, 20, true)
+		depositSeedUpstream(t, ctx, pool, chainID, 0, depositUpstreamHash(t, testContractA), 21)
+		depositSeedTransferRow(t, ctx, pool, chainID, 15, depositBlockHash(15), depositTxHash(15, 0), 0,
+			common.HexToAddress(testContractA), common.HexToAddress(testContractB), common.HexToAddress(depositWatchAddr), big.NewInt(1))
+	}
+	// depositUpstreamHash is keyed by the whitelist alone; the scanner config
+	// carries the same hash for LogContracts {A}.
+	_ = seedFirstUnit
+
+	t.Run("concurrent_first_unit_exactly_once", func(t *testing.T) {
+		const chainID = 190
+		seedFirstUnit(t, poolA, chainID)
+		cfgA := depositITConfig(t, chainID, testContractA)
+		cfgB := depositITConfig(t, chainID, testContractA)
+		scA := depositITScanner(t, poolA, cfgA)
+		scB := depositITScanner(t, poolB, cfgB)
+		leaseA := depositITLease(t, poolA, chainID)
+		leaseB, err := NewLease(poolB, chainID, Params{OwnerID: "worker-b", TTL: time.Minute, Heartbeat: 10 * time.Second})
+		if err != nil {
+			t.Fatalf("NewLease(worker-b): %v", err)
+		}
+		unitA, batchA, capturedA := depositITPrepareUnit(t, ctx, scA, 10, 20)
+		unitB, batchB, capturedB := depositITPrepareUnit(t, ctx, scB, 10, 20)
+		gate := make(chan struct{})
+		var wg sync.WaitGroup
+		errs := make([]error, 2)
+		wg.Add(2)
+		go func() {
+			defer wg.Done()
+			<-gate
+			errs[0] = scA.commitDepositUnit(ctx, leaseA, unitA, batchA, capturedA, 10, 20)
+		}()
+		go func() {
+			defer wg.Done()
+			<-gate
+			// Worker B never acquired: it races only with what it captured.
+			// Either it wins the bootstrap or it loses with zero writes.
+			errs[1] = scB.commitDepositUnit(ctx, leaseB, unitB, batchB, capturedB, 10, 20)
+		}()
+		close(gate)
+		wg.Wait()
+		// Exactly one worker advanced; the loser wrote nothing. Reads go
+		// through the other pool (cross-worker database assertions).
+		wins := 0
+		for i, err := range errs {
+			if err == nil {
+				wins++
+				continue
+			}
+			if !errors.Is(err, ErrLeaseLost) && !errors.Is(err, errStaleState) &&
+				!errors.Is(err, errDepositVersionMismatch) {
+				t.Fatalf("worker %d error = %v, want nil or a fenced/stale refusal", i, err)
+			}
+		}
+		if wins != 1 {
+			t.Fatalf("winners = %d (%v), want exactly 1", wins, errs)
+		}
+		if _, _, next, ok := depositCheckpointState(t, ctx, poolB, chainID); !ok || next != 21 {
+			t.Fatalf("checkpoint via poolB = %d (ok=%v), want exactly 21", next, ok)
+		}
+		if n := depositCountRows(t, ctx, poolB, "deposit_observations", chainID); n != 1 {
+			t.Fatalf("observations via poolB = %d, want exactly 1", n)
+		}
+		if n := depositCountRows(t, ctx, poolA, "deposit_config_history", chainID); n != 1 {
+			t.Fatalf("history rows via poolA = %d, want exactly the bootstrap row", n)
+		}
+	})
+
+	t.Run("delayed_commit_fenced", func(t *testing.T) {
+		const chainID = 191
+		seedFirstUnit(t, poolA, chainID)
+		cfg := depositITConfig(t, chainID, testContractA)
+		scA := depositITScanner(t, poolA, cfg)
+		scB := depositITScanner(t, poolB, cfg)
+		leaseA := depositITLease(t, poolA, chainID)
+		unitA, batchA, capturedA := depositITPrepareUnit(t, ctx, scA, 10, 20)
+		// Worker B takes over while A holds a prepared unit, then commits.
+		if _, err := poolA.Exec(ctx, `UPDATE indexer_lease SET expires_at = now() - make_interval(secs => 1) WHERE chain_id = $1`, chainID); err != nil {
+			t.Fatalf("expire worker A: %v", err)
+		}
+		leaseB := depositITLease(t, poolB, chainID)
+		unitB, batchB, capturedB := depositITPrepareUnit(t, ctx, scB, 10, 20)
+		if err := scB.commitDepositUnit(ctx, leaseB, unitB, batchB, capturedB, 10, 20); err != nil {
+			t.Fatalf("worker B commit: %v", err)
+		}
+		// A's delayed commit presents an old token against B's row: fenced
+		// with zero writes.
+		if err := scA.commitDepositUnit(ctx, leaseA, unitA, batchA, capturedA, 10, 20); !errors.Is(err, ErrLeaseLost) {
+			t.Fatalf("delayed commit = %v, want ErrLeaseLost", err)
+		}
+		if _, _, next, ok := depositCheckpointState(t, ctx, poolB, chainID); !ok || next != 21 {
+			t.Fatalf("checkpoint via poolB = %d (ok=%v), want 21 from worker B only", next, ok)
+		}
+		if n := depositCountRows(t, ctx, poolB, "deposit_observations", chainID); n != 1 {
+			t.Fatalf("observations via poolB = %d, want 1", n)
+		}
+	})
+
+	t.Run("stale_basis_resubmission", func(t *testing.T) {
+		const chainID = 192
+		seedFirstUnit(t, poolA, chainID)
+		cfg := depositITConfig(t, chainID, testContractA)
+		sc := depositITScanner(t, poolA, cfg)
+		lease := depositITLease(t, poolA, chainID)
+		unit, batch, captured := depositITPrepareUnit(t, ctx, sc, 10, 20)
+		if err := sc.commitDepositUnit(ctx, lease, unit, batch, captured, 10, 20); err != nil {
+			t.Fatalf("first commit: %v", err)
+		}
+		// The same prepared triple resubmitted against moved progress is
+		// refused by version isolation with zero new writes.
+		if err := sc.commitDepositUnit(ctx, lease, unit, batch, captured, 10, 20); !errors.Is(err, errDepositVersionMismatch) {
+			t.Fatalf("resubmission = %v, want errDepositVersionMismatch", err)
+		}
+		if n := depositCountRows(t, ctx, poolB, "deposit_observations", chainID); n != 1 {
+			t.Fatalf("observations via poolB = %d, want 1", n)
+		}
+		if n := depositCountRows(t, ctx, poolB, "deposit_config_history", chainID); n != 1 {
+			t.Fatalf("history via poolB = %d, want 1", n)
+		}
+	})
+}

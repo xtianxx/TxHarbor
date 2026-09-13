@@ -270,13 +270,14 @@ T000-L / T000-P 见上（本阶段即二者建档）。**Checkpoint**: 门禁状
   - 需求：FR-09/FR-12，data-model Table 3 原子条件。验收场景：D8。依赖：T014。
   - 完成条件：并发暂停恰一行；进度已变/证据消失/lease 失权 → 放弃且零写入；批回滚永不直写暂停行。
   - 状态（2026-09-13）：CLOSED。证据：TestDepositPauseConcurrency真库4子项（8写并发恰一行rev1；检查点移动/首单元依据消失皆放弃零写；DB时钟过期后takeover持有、旧lease裁决失败零写；冲突批回滚零暂停行+loop路径恰一行chain_view_changed）。首轮1失败系测试脚手架误用（takeover前未过期，确定性诊断），改DB时钟置过期后新批次；与T015联合-count=5共65/65过。未验证：T017+、完整验收。
-- [ ] T017 [US5] 双真 worker 竞争 + 旧 worker 延迟提交：真实 PostgreSQL 双实例一致性测试（含偶发有界重复）
+- [x] T017 [US5] 双真 worker 竞争 + 旧 worker 延迟提交：真实 PostgreSQL 双实例一致性测试（含偶发有界重复）
   - 需求：FR-08/FR-09，research R1/R2。验收场景：D9（SC-02/SC-03 并发部分）。依赖：T006。
   - 完成条件：两个独立 pool + 独立 lease 句柄的真 worker 同抢同进度，有效推进恒为 1（`internal/indexer/deposit_integration_test.go`，按序执行）；
     旧 token/过期进度提交 0 行；**显式要求：本条必须跨 worker 数据库断言，
     `-race` 仅补充进程内竞争，不可替代本条**；因偶发失败原因未知，本条按固定批次执行：
     每批次恰好 5 次并记录全部结果，任一次失败则该批次不通过，不追加运行凑成功；
     修复或明确诊断后的重跑另记批次并保留原证据，**不允许用"重跑通过"掩盖失败**。
+  - 状态（2026-09-13）：CLOSED。证据：TestDepositDualWorkers真库3子项（190-192；双独立pool/lease句柄首单元竞速恰一次推进、跨pool断言、失败方三选一；旧token延迟提交fencing零写；stale依据重提version隔离零写）。单跑4/4，固定批次-count=5共20/20过。未验证：T018+、完整验收。
 - [ ] T018 [US5] `coordinator.go` + `serve.go` 第三循环接线：三 serveLoop 并发 + 回归 + 退出 + 故障传播
   - 需求：FR-08/FR-12，research R1。验收场景：D3 退出部分。依赖：T006，T016。
   - 完成条件：`Coordinator` 唯一 Acquire 循环 + 唯一 Heartbeat 下并发跑三 loop，
