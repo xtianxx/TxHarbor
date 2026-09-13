@@ -719,6 +719,13 @@ func (s *DepositScanner) ServeLoop(ctx context.Context, lease *Lease, checkLost 
 
 		unit, err := s.readCoveredUnit(ctx, s.pool, a, b)
 		if err != nil {
+			// A cancellation is a shutdown, never a coverage verdict: a
+			// context error surfacing from an in-flight read must not be
+			// reported as a durable stop (the loop returns nil on ctx
+			// cancellation).
+			if ctx.Err() != nil {
+				return nil
+			}
 			var gap *depositGap
 			if errors.As(err, &gap) && gap.class == depositGapTransient {
 				// The freshly read watermark still covers nothing at a: wait

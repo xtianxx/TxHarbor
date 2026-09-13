@@ -17,15 +17,27 @@
 // indexed by the real 002 header scan and 003 log scan, then consumed by the
 // 004 proof + commit directly (serve wiring is T018). No 004-side source rows
 // are seeded.
+//
+// T009 extends the file with the idempotent-replay and identity-conflict
+// ladder (fully duplicate convergence proven on row content, per-field
+// conflict whole-batch failures). T010 extends it with deterministic
+// connection-level fault injection over a real PostgreSQL session (crash
+// after the unit queries, mid-transaction failure, lost COMMIT reply, the
+// committed/not-committed verdict pair and bounded-backoff transient database
+// errors, each followed by a restart from the durable progress).
 package indexer
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
 	"math/big"
+	"net"
 	"strconv"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -1864,4 +1876,734 @@ func depositResultCount(t *testing.T, m *metrics.Metrics, chainID int64, result 
 		}
 	}
 	return 0
+}
+
+// --- T009: idempotent replay and identity-conflict comparison ----------------
+
+// depositObservationRow is one full deposit_observations snapshot: the source
+// identity plus every content and association column the write protocol
+// compares. It is comparable, so a whole-row equality assertion covers
+// "content, status and version association unchanged".
+type depositObservationRow struct {
+	blockHash   string
+	txHash      string
+	logIndex    int64
+	blockNumber int64
+	contract    string
+	sender      string
+	recipient   string
+	amount      string
+	status      string
+	versionSeq  int64
+}
+
+// depositSeedObservationRow plants one full observation row; the caller
+// controls every field, block_number and version_seq included.
+func depositSeedObservationRow(t *testing.T, ctx context.Context, pool *pgxpool.Pool, chainID int64, row depositObservationRow) {
+	t.Helper()
+	if _, err := pool.Exec(ctx, `
+INSERT INTO deposit_observations
+    (chain_id, block_hash, tx_hash, log_index, block_number, contract, sender, recipient, amount, status, version_seq)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)`,
+		chainID, row.blockHash, row.txHash, row.logIndex, row.blockNumber,
+		row.contract, row.sender, row.recipient, row.amount, row.status, row.versionSeq); err != nil {
+		t.Fatalf("seed deposit_observations %s/%s/%d: %v", row.blockHash, row.txHash, row.logIndex, err)
+	}
+}
+
+// depositReadObservation reads one full observation row snapshot; ok=false
+// means no row.
+func depositReadObservation(t *testing.T, ctx context.Context, pool *pgxpool.Pool, chainID int64,
+	blockHash, txHash string, logIndex uint64) (depositObservationRow, bool) {
+	t.Helper()
+	var row depositObservationRow
+	err := pool.QueryRow(ctx, `
+SELECT block_hash, tx_hash, log_index, block_number, contract, sender, recipient, amount::text, status, version_seq
+FROM deposit_observations
+WHERE chain_id = $1 AND block_hash = $2 AND tx_hash = $3 AND log_index = $4`,
+		chainID, blockHash, txHash, int64(logIndex)).
+		Scan(&row.blockHash, &row.txHash, &row.logIndex, &row.blockNumber, &row.contract,
+			&row.sender, &row.recipient, &row.amount, &row.status, &row.versionSeq)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return row, false
+	}
+	if err != nil {
+		t.Fatalf("read deposit_observations %s/%s/%d: %v", blockHash, txHash, logIndex, err)
+	}
+	return row, true
+}
+
+// TestDepositCommitReplayFullyDuplicateConverges: T009 / SC-02, FR-09/I1. A
+// unit whose every matched identity is already stored with identical content
+// is replayed under a newer captured version and must converge with zero new
+// rows: the durable row count is unchanged and each row's content, status and
+// original version association are byte-identical (a replay never rewrites or
+// re-versions an existing observation). Convergence is asserted on row
+// content, not merely on the absence of a unique-constraint error.
+func TestDepositCommitReplayFullyDuplicateConverges(t *testing.T) {
+	dsn := startIndexerPostgres(t)
+	pool := openIndexerPool(t, dsn)
+	defer pool.Close()
+	ctx := context.Background()
+
+	const chainID = 89
+	cfg := depositITConfig(t, chainID, testContractA)
+	depositSeedCanonical(t, ctx, pool, chainID, 10, 20, true)
+	depositSeedUpstream(t, ctx, pool, chainID, 0, cfg.LogConfigHash, 21)
+	depositSeedHistory(t, ctx, pool, chainID, 1, 10, cfg.ConfigHash)
+	depositSeedHistoryVersion(t, ctx, pool, chainID, 2, 1, 10, cfg.ConfigHash, "req-2")
+	depositSeedCheckpoint(t, ctx, pool, chainID, 10, cfg.ConfigHash, 10)
+	// Both identities were generated under version 1 and are replayed under
+	// the captured version 2: the replay must converge without touching them.
+	for _, h := range []uint64{15, 16} {
+		depositSeedTransferRow(t, ctx, pool, chainID, h, depositBlockHash(h), depositTxHash(h, 0), 0,
+			common.HexToAddress(testContractA), common.HexToAddress(testContractB),
+			common.HexToAddress(depositWatchAddr), big.NewInt(int64(h-14)))
+		depositSeedObservationRow(t, ctx, pool, chainID, depositObservationRow{
+			blockHash: depositBlockHash(h), txHash: depositTxHash(h, 0), logIndex: 0,
+			blockNumber: int64(h), contract: testContractA, sender: testContractB,
+			recipient: depositWatchAddr, amount: strconv.FormatUint(h-14, 10),
+			status: "pending", versionSeq: 1,
+		})
+	}
+
+	before := make([]depositObservationRow, 0, 2)
+	for _, h := range []uint64{15, 16} {
+		row, ok := depositReadObservation(t, ctx, pool, chainID, depositBlockHash(h), depositTxHash(h, 0), 0)
+		if !ok {
+			t.Fatalf("precondition: observation at height %d missing", h)
+		}
+		before = append(before, row)
+	}
+
+	sc := depositITScanner(t, pool, cfg)
+	lease := depositITLease(t, pool, chainID)
+	unit, batch, captured := depositITPrepareUnit(t, ctx, sc, 10, 20)
+	if captured == nil || captured.versionSeq != 2 {
+		t.Fatalf("captured = %+v, want version_seq 2", captured)
+	}
+	if len(batch.matched) != 2 {
+		t.Fatalf("matched = %d, want 2", len(batch.matched))
+	}
+	if err := sc.commitDepositUnit(ctx, lease, unit, batch, captured, 10, 20); err != nil {
+		t.Fatalf("replay commit: %v", err)
+	}
+
+	if n := depositCountRows(t, ctx, pool, "deposit_observations", chainID); n != 2 {
+		t.Fatalf("observations = %d, want 2 (a fully duplicate replay inserts zero rows)", n)
+	}
+	if n := depositCountRows(t, ctx, pool, "deposit_config_history", chainID); n != 2 {
+		t.Fatalf("history rows = %d, want 2 (the replay must not create versions)", n)
+	}
+	for i, h := range []uint64{15, 16} {
+		after, ok := depositReadObservation(t, ctx, pool, chainID, depositBlockHash(h), depositTxHash(h, 0), 0)
+		if !ok {
+			t.Fatalf("observation at height %d disappeared", h)
+		}
+		if after != before[i] {
+			t.Fatalf("replayed row at height %d changed: %+v -> %+v", h, before[i], after)
+		}
+		if after.versionSeq != 1 {
+			t.Fatalf("row at height %d version_seq = %d, want the original 1 (never the commit-time latest)",
+				h, after.versionSeq)
+		}
+	}
+	if _, _, next, _ := depositCheckpointState(t, ctx, pool, chainID); next != 21 {
+		t.Fatalf("checkpoint next = %d, want exactly 21", next)
+	}
+}
+
+// TestDepositCommitFieldConflictFailsWholeBatch: T009 / SC-05, FR-10/I1. For
+// every representable content field of an existing observation identity, a
+// stored value that differs from the parsed source row fails the whole batch
+// with identity_conflict: the progress stays put, the new identity inserted
+// earlier in the same transaction is rolled back, the stored row is never
+// overwritten and no pause row is written (conflicts are never ignored via
+// ON CONFLICT DO NOTHING).
+//
+// status is single-valued ('pending') by 004's own CHECK, so a differing
+// status row cannot exist in 004; the equal-status branch is asserted by
+// TestDepositCommitReplayFullyDuplicateConverges.
+func TestDepositCommitFieldConflictFailsWholeBatch(t *testing.T) {
+	dsn := startIndexerPostgres(t)
+	pool := openIndexerPool(t, dsn)
+	defer pool.Close()
+	ctx := context.Background()
+
+	altSender := strings.ToLower(common.HexToAddress("0x00000000000000000000000000000000000000c1").Hex())
+	altRecipient := strings.ToLower(common.HexToAddress("0x00000000000000000000000000000000000000c2").Hex())
+
+	cases := []struct {
+		name   string
+		mutate func(*depositObservationRow)
+	}{
+		{"contract", func(r *depositObservationRow) {
+			r.contract = strings.ToLower(common.HexToAddress(testContractB).Hex())
+		}},
+		{"block_number", func(r *depositObservationRow) { r.blockNumber = 14 }},
+		{"sender", func(r *depositObservationRow) { r.sender = altSender }},
+		{"recipient", func(r *depositObservationRow) { r.recipient = altRecipient }},
+		{"amount", func(r *depositObservationRow) { r.amount = "2" }},
+	}
+	for i, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			chainID := int64(90 + i)
+			cfg := depositITConfig(t, chainID, testContractA)
+			depositSeedCanonical(t, ctx, pool, chainID, 10, 20, true)
+			depositSeedUpstream(t, ctx, pool, chainID, 0, cfg.LogConfigHash, 21)
+			depositSeedHistory(t, ctx, pool, chainID, 1, 10, cfg.ConfigHash)
+			depositSeedCheckpoint(t, ctx, pool, chainID, 10, cfg.ConfigHash, 10)
+			// Identity I at height 15 conflicts with the stored row; identity J
+			// at height 14 is new and sorts first, so a partial batch would
+			// leave J behind.
+			depositSeedTransferRow(t, ctx, pool, chainID, 15, depositBlockHash(15), depositTxHash(15, 0), 0,
+				common.HexToAddress(testContractA), common.HexToAddress(testContractB),
+				common.HexToAddress(depositWatchAddr), big.NewInt(1))
+			depositSeedTransferRow(t, ctx, pool, chainID, 14, depositBlockHash(14), depositTxHash(14, 0), 0,
+				common.HexToAddress(testContractA), common.HexToAddress(testContractB),
+				common.HexToAddress(depositWatchAddr), big.NewInt(3))
+
+			conflicting := depositObservationRow{
+				blockHash: depositBlockHash(15), txHash: depositTxHash(15, 0), logIndex: 0,
+				blockNumber: 15, contract: testContractA, sender: testContractB,
+				recipient: depositWatchAddr, amount: "1", status: "pending", versionSeq: 1,
+			}
+			tc.mutate(&conflicting)
+			depositSeedObservationRow(t, ctx, pool, chainID, conflicting)
+			planted, ok := depositReadObservation(t, ctx, pool, chainID, depositBlockHash(15), depositTxHash(15, 0), 0)
+			if !ok {
+				t.Fatal("precondition: conflicting observation missing")
+			}
+
+			sc := depositITScanner(t, pool, cfg)
+			lease := depositITLease(t, pool, chainID)
+			unit, batch, captured := depositITPrepareUnit(t, ctx, sc, 10, 20)
+			if len(batch.matched) != 2 {
+				t.Fatalf("matched = %d, want 2", len(batch.matched))
+			}
+			err := sc.commitDepositUnit(ctx, lease, unit, batch, captured, 10, 20)
+			var conflict *depositIdentityConflictError
+			if !errors.As(err, &conflict) {
+				t.Fatalf("commit = %v (%T), want *depositIdentityConflictError", err, err)
+			}
+			if want := depositBlockHash(15) + "/" + depositTxHash(15, 0) + "/0"; conflict.identity != want {
+				t.Fatalf("conflict identity = %s, want %s", conflict.identity, want)
+			}
+
+			// Whole batch failed: J rolled back, the stored row untouched and
+			// the progress unchanged.
+			if n := depositCountRows(t, ctx, pool, "deposit_observations", chainID); n != 1 {
+				t.Fatalf("observations = %d, want 1 (the new identity J must roll back)", n)
+			}
+			if _, found := depositReadObservation(t, ctx, pool, chainID, depositBlockHash(14), depositTxHash(14, 0), 0); found {
+				t.Fatal("new identity J committed despite the whole-batch conflict failure")
+			}
+			after, ok := depositReadObservation(t, ctx, pool, chainID, depositBlockHash(15), depositTxHash(15, 0), 0)
+			if !ok {
+				t.Fatal("stored conflicting observation disappeared")
+			}
+			if after != planted {
+				t.Fatalf("conflicting row was modified: %+v -> %+v", planted, after)
+			}
+			if _, _, next, _ := depositCheckpointState(t, ctx, pool, chainID); next != 10 {
+				t.Fatalf("checkpoint next = %d, want 10 (a failed batch must not advance)", next)
+			}
+			if n := depositCountRows(t, ctx, pool, "deposit_config_history", chainID); n != 1 {
+				t.Fatalf("history rows = %d, want 1", n)
+			}
+			if n := depositCountRows(t, ctx, pool, "deposit_pause", chainID); n != 0 {
+				t.Fatalf("deposit_pause rows = %d, want 0 (the commit writes no pause row; T014 owns persistence)", n)
+			}
+		})
+	}
+}
+
+// --- T010: crash recovery and uncertain-commit verdicts ----------------------
+
+// Fault-injection triggers, matched against the SQL text pgx writes to the
+// connection. The markers name the exact protocol points:
+const (
+	// depositFaultAfterReads is the first statement of the commit transaction:
+	// once it is written every unit query has completed, so a connection death
+	// here is the deterministic "process exits after the queries, before any
+	// write" state.
+	depositFaultAfterReads = "SET LOCAL statement_timeout"
+	// depositFaultMidTransaction is the progress UPDATE of an advancing unit,
+	// written after the observations: failing there must roll them all back
+	// (no partial commit). The first unit's INSERT checkpoint path is covered
+	// by depositFaultAfterReads.
+	depositFaultMidTransaction = "UPDATE deposit_checkpoint"
+	// depositFaultCommit is the COMMIT statement itself (the reply-lost and
+	// never-reached cases).
+	depositFaultCommit = "commit"
+)
+
+// Deposit-fault verdicts returned by depositFault.match.
+const (
+	depositFaultNone = iota
+	depositFaultDropReply
+	depositFaultFailWrite
+)
+
+// depositFault injects deterministic faults into every connection of a fault
+// pool, through a real dial wrapper (never by simulating return values). A SQL
+// trigger matches a client write containing marker: dropReply forwards the
+// statement and closes the connection before the reply can be read (the
+// statement lands, the worker observes a connection error: the process-exit /
+// uncertain-commit state); failWrite closes before forwarding (the statement
+// never lands: a mid-transaction connection failure). sticky makes every
+// matching write fire so a worker that must stay dead cannot slip a commit
+// through while the test stops it. failDials fails every dial while set
+// (transient database unavailability). fired closes on the first trigger so
+// tests synchronize on the fault itself, never on sleeps.
+type depositFault struct {
+	marker    string
+	dropReply bool
+	sticky    bool
+	armed     atomic.Bool
+	fires     atomic.Int32
+	dialFails atomic.Bool
+	dialTries atomic.Int32
+	fired     chan struct{}
+	once      sync.Once
+}
+
+func newDepositFault() *depositFault { return &depositFault{fired: make(chan struct{})} }
+
+// armSQL arms a SQL-text trigger.
+func (f *depositFault) armSQL(marker string, dropReply, sticky bool) {
+	f.marker = marker
+	f.dropReply = dropReply
+	f.sticky = sticky
+	f.armed.Store(true)
+}
+
+func (f *depositFault) disarm() { f.armed.Store(false) }
+
+// match classifies one client write and records the trigger.
+func (f *depositFault) match(b []byte) int {
+	if !f.armed.Load() || f.marker == "" || !bytes.Contains(b, []byte(f.marker)) {
+		return depositFaultNone
+	}
+	if !f.sticky && !f.armed.CompareAndSwap(true, false) {
+		return depositFaultNone
+	}
+	f.fires.Add(1)
+	f.once.Do(func() { close(f.fired) })
+	if f.dropReply {
+		return depositFaultDropReply
+	}
+	return depositFaultFailWrite
+}
+
+// waitFired blocks until the trigger fires at least once.
+func (f *depositFault) waitFired(t *testing.T, what string) {
+	t.Helper()
+	select {
+	case <-f.fired:
+	case <-time.After(15 * time.Second):
+		t.Fatalf("timed out waiting for the injected fault: %s", what)
+	}
+}
+
+type depositFaultConn struct {
+	net.Conn
+	f *depositFault
+}
+
+func (c *depositFaultConn) Write(b []byte) (int, error) {
+	switch c.f.match(b) {
+	case depositFaultFailWrite:
+		_ = c.Conn.Close()
+		return 0, fmt.Errorf("injected connection failure at %q", c.f.marker)
+	case depositFaultDropReply:
+		n, err := c.Conn.Write(b)
+		_ = c.Conn.Close() // reply lost; a forwarded COMMIT still lands
+		return n, err
+	default:
+		return c.Conn.Write(b)
+	}
+}
+
+// depositOpenFaultPool dials every connection through the injected fault. The
+// pool stays lazy (MinConns 0) so no connection exists until the worker asks
+// for one; the test's own pool (seeding and durable assertions) is separate
+// and never faulted.
+func depositOpenFaultPool(t *testing.T, dsn string, f *depositFault) *pgxpool.Pool {
+	t.Helper()
+	cfg, err := pgxpool.ParseConfig(dsn)
+	if err != nil {
+		t.Fatalf("parse dsn for fault pool: %v", err)
+	}
+	cfg.MaxConns = 8
+	cfg.MinConns = 0
+	cfg.MaxConnLifetime = time.Hour
+	cfg.MaxConnIdleTime = 30 * time.Minute
+	cfg.ConnConfig.DialFunc = func(ctx context.Context, network, addr string) (net.Conn, error) {
+		if f.dialFails.Load() {
+			f.dialTries.Add(1)
+			return nil, errors.New("injected dial failure")
+		}
+		c, err := (&net.Dialer{}).DialContext(ctx, network, addr)
+		if err != nil {
+			return nil, err
+		}
+		return &depositFaultConn{Conn: c, f: f}, nil
+	}
+	pool, err := pgxpool.NewWithConfig(context.Background(), cfg)
+	if err != nil {
+		t.Fatalf("create fault pool: %v", err)
+	}
+	t.Cleanup(pool.Close)
+	return pool
+}
+
+// depositITOwnedLease acquires a lease under a caller-chosen owner and test
+// cadence; the win is required.
+func depositITOwnedLease(t *testing.T, pool *pgxpool.Pool, chainID int64, owner string, ttl, heartbeat time.Duration) *Lease {
+	t.Helper()
+	l := newTestLease(t, pool, chainID, owner, ttl, heartbeat)
+	won, token, err := l.Acquire(context.Background())
+	if err != nil || !won {
+		t.Fatalf("lease Acquire(%s) = (won=%v token=%d err=%v), want win", owner, won, token, err)
+	}
+	return l
+}
+
+// depositWaitLeaseExpired waits on the database clock until the chain's
+// coordination row is expired (the crashed worker's lease), so a restarted
+// owner can acquire it deterministically.
+func depositWaitLeaseExpired(t *testing.T, ctx context.Context, pool *pgxpool.Pool, chainID int64) {
+	t.Helper()
+	waitUntil(t, time.Now().Add(15*time.Second), "the crashed worker's lease to expire (DB clock)", func() bool {
+		var expired bool
+		if err := pool.QueryRow(ctx, `SELECT expires_at < now() FROM indexer_lease WHERE chain_id = $1`, chainID).Scan(&expired); err != nil {
+			return false
+		}
+		return expired
+	})
+}
+
+// depositAssertCommittedOnce asserts the post-recovery durable state of one
+// two-row unit: checkpoint exactly [10,21), two observations (one per matched
+// source row, no missed and no duplicate detection), each with its source
+// fields and original version association, and exactly one history row.
+func depositAssertCommittedOnce(t *testing.T, ctx context.Context, pool *pgxpool.Pool, chainID int64, cfg DepositConfig) {
+	t.Helper()
+	start, hash, next, ok := depositCheckpointState(t, ctx, pool, chainID)
+	if !ok || start != 10 || hash != cfg.ConfigHash || next != 21 {
+		t.Fatalf("checkpoint = (%d,%s,%d,%v), want (10,%s,21,true)", start, hash, next, ok, cfg.ConfigHash)
+	}
+	if n := depositCountRows(t, ctx, pool, "deposit_observations", chainID); n != 2 {
+		t.Fatalf("observations = %d, want exactly 2 (no missed and no duplicated detection)", n)
+	}
+	for _, h := range []uint64{14, 15} {
+		row, found := depositReadObservation(t, ctx, pool, chainID, depositBlockHash(h), depositTxHash(h, 0), 0)
+		if !found {
+			t.Fatalf("observation for the source row at height %d is missing (missed detection)", h)
+		}
+		want := depositObservationRow{
+			blockHash: depositBlockHash(h), txHash: depositTxHash(h, 0), logIndex: 0,
+			blockNumber: int64(h), contract: testContractA, sender: testContractB,
+			recipient: depositWatchAddr, amount: strconv.FormatUint(h-13, 10),
+			status: "pending", versionSeq: 1,
+		}
+		if row != want {
+			t.Fatalf("observation at height %d = %+v, want %+v", h, row, want)
+		}
+	}
+	if n := depositCountRows(t, ctx, pool, "deposit_config_history", chainID); n != 1 {
+		t.Fatalf("history rows = %d, want exactly 1 bootstrap row", n)
+	}
+}
+
+// TestDepositCrashRecoveryInjectedFaults: T010 / D3+D4 (SC-03/SC-04,
+// FR-09/I2, research R9). Three deterministic connection-level faults are
+// injected into real PostgreSQL sessions through a dial wrapper and the worker
+// is stopped (process exit). A restarted worker with a fresh lease owner
+// acquires after the dead worker's lease expires on the DB clock and continues
+// from the durable progress: every phase asserts zero missed, zero duplicated
+// and zero partial commits. No fault is simulated by return values and no step
+// is sequenced by sleeps; the tests synchronize on the injected trigger and on
+// durable state.
+func TestDepositCrashRecoveryInjectedFaults(t *testing.T) {
+	dsn := startIndexerPostgres(t)
+	ctx := context.Background()
+	pool := openIndexerPool(t, dsn)
+	defer pool.Close()
+
+	const leaseTTL = time.Second
+	const leaseHeartbeat = 250 * time.Millisecond
+
+	seed := func(t *testing.T, chainID int64) DepositConfig {
+		t.Helper()
+		cfg := depositITConfig(t, chainID, testContractA)
+		cfg.PollInterval = 10 * time.Millisecond
+		cfg.RetryInitial = 10 * time.Millisecond
+		cfg.RetryMax = 50 * time.Millisecond
+		depositSeedCanonical(t, ctx, pool, chainID, 10, 20, true)
+		depositSeedUpstream(t, ctx, pool, chainID, 0, cfg.LogConfigHash, 21)
+		for _, h := range []uint64{14, 15} {
+			depositSeedTransferRow(t, ctx, pool, chainID, h, depositBlockHash(h), depositTxHash(h, 0), 0,
+				common.HexToAddress(testContractA), common.HexToAddress(testContractB),
+				common.HexToAddress(depositWatchAddr), big.NewInt(int64(h-13)))
+		}
+		return cfg
+	}
+	assertZeroFootprint := func(t *testing.T, chainID int64) {
+		t.Helper()
+		if _, _, _, ok := depositCheckpointState(t, ctx, pool, chainID); ok {
+			t.Fatal("crashed worker created a checkpoint row")
+		}
+		if n := depositCountRows(t, ctx, pool, "deposit_observations", chainID); n != 0 {
+			t.Fatalf("observations = %d, want 0 (no partial commit)", n)
+		}
+		if n := depositCountRows(t, ctx, pool, "deposit_config_history", chainID); n != 0 {
+			t.Fatalf("history rows = %d, want 0 (no partial commit)", n)
+		}
+	}
+	// restart waits for the dead worker's lease to expire on the DB clock,
+	// acquires a fresh owner and runs a fresh scanner; the durable progress is
+	// re-read from the database, never from pre-crash memory.
+	restart := func(t *testing.T, chainID int64, cfg DepositConfig, owner string) func() {
+		t.Helper()
+		depositWaitLeaseExpired(t, ctx, pool, chainID)
+		lease := depositITOwnedLease(t, pool, chainID, owner, leaseTTL, leaseHeartbeat)
+		sc := depositITScanner(t, pool, cfg)
+		return depositRunLoop(t, ctx, sc, lease)
+	}
+	waitRecovered := func(t *testing.T, chainID int64) {
+		t.Helper()
+		waitUntil(t, time.Now().Add(10*time.Second), "restarted worker reaches next_block 21", func() bool {
+			_, _, next, ok := depositCheckpointState(t, ctx, pool, chainID)
+			return ok && next == 21
+		})
+	}
+
+	t.Run("query_then_exit", func(t *testing.T) {
+		const chainID = 100
+		cfg := seed(t, chainID)
+		fault := newDepositFault()
+		faultPool := depositOpenFaultPool(t, dsn, fault)
+		lease := depositITOwnedLease(t, pool, chainID, "crashed-100", leaseTTL, leaseHeartbeat)
+		sc := depositITScanner(t, faultPool, cfg)
+
+		// Every unit query has completed once the commit transaction opens;
+		// killing the connection at its first statement is the deterministic
+		// "process exits after the queries" state. sticky keeps the stopped
+		// worker from slipping any write through before the test cancels it.
+		fault.armSQL(depositFaultAfterReads, true, true)
+		stop := depositRunLoop(t, ctx, sc, lease)
+		fault.waitFired(t, "connection death after the unit queries")
+		stop()
+		fault.disarm()
+		assertZeroFootprint(t, chainID)
+
+		stop2 := restart(t, chainID, cfg, "restarted-100")
+		waitRecovered(t, chainID)
+		stop2()
+		depositAssertCommittedOnce(t, ctx, pool, chainID, cfg)
+	})
+
+	t.Run("mid_transaction_failure", func(t *testing.T) {
+		const chainID = 101
+		cfg := seed(t, chainID)
+		// An advancing unit (checkpoint/history already exist) so the commit
+		// reaches the progress UPDATE after inserting the observations; the
+		// first unit's INSERT checkpoint path is covered by query_then_exit.
+		depositSeedHistory(t, ctx, pool, chainID, 1, 10, cfg.ConfigHash)
+		depositSeedCheckpoint(t, ctx, pool, chainID, 10, cfg.ConfigHash, 10)
+		fault := newDepositFault()
+		faultPool := depositOpenFaultPool(t, dsn, fault)
+		lease := depositITOwnedLease(t, pool, chainID, "crashed-101", leaseTTL, leaseHeartbeat)
+		sc := depositITScanner(t, faultPool, cfg)
+
+		// The attempt has already inserted both observations when the progress
+		// UPDATE dies: closing the connection mid-transaction must roll them
+		// all back, with the progress untouched.
+		fault.armSQL(depositFaultMidTransaction, false, true)
+		stop := depositRunLoop(t, ctx, sc, lease)
+		fault.waitFired(t, "connection death at the progress UPDATE")
+		stop()
+		fault.disarm()
+		if _, _, next, ok := depositCheckpointState(t, ctx, pool, chainID); !ok || next != 10 {
+			t.Fatalf("checkpoint next = %d (ok=%v), want 10 (no partial advance)", next, ok)
+		}
+		if n := depositCountRows(t, ctx, pool, "deposit_observations", chainID); n != 0 {
+			t.Fatalf("observations = %d, want 0 (mid-transaction failure must roll the inserts back)", n)
+		}
+		if n := depositCountRows(t, ctx, pool, "deposit_config_history", chainID); n != 1 {
+			t.Fatalf("history rows = %d, want the seeded 1 (no partial commit)", n)
+		}
+
+		stop2 := restart(t, chainID, cfg, "restarted-101")
+		waitRecovered(t, chainID)
+		stop2()
+		depositAssertCommittedOnce(t, ctx, pool, chainID, cfg)
+	})
+
+	t.Run("commit_reply_lost", func(t *testing.T) {
+		const chainID = 102
+		cfg := seed(t, chainID)
+		fault := newDepositFault()
+		faultPool := depositOpenFaultPool(t, dsn, fault)
+		lease := depositITOwnedLease(t, pool, chainID, "crashed-102", leaseTTL, leaseHeartbeat)
+		sc := depositITScanner(t, faultPool, cfg)
+
+		// One drop, not sticky: the server accepts the COMMIT, the client
+		// never reads the reply. The commit's re-read must resolve the unit as
+		// committed; no retry may generate a second time.
+		fault.armSQL(depositFaultCommit, true, false)
+		stop := depositRunLoop(t, ctx, sc, lease)
+		fault.waitFired(t, "COMMIT reply loss")
+		waitRecovered(t, chainID)
+		stop()
+		if got := fault.fires.Load(); got != 1 {
+			t.Fatalf("commit drops = %d, want exactly 1 (a second commit attempt would be a duplicate)", got)
+		}
+		depositAssertCommittedOnce(t, ctx, pool, chainID, cfg)
+	})
+
+	t.Run("transient_db_error_bounded_backoff", func(t *testing.T) {
+		const chainID = 103
+		cfg := seed(t, chainID)
+		fault := newDepositFault()
+		faultPool := depositOpenFaultPool(t, dsn, fault)
+		lease := depositITOwnedLease(t, pool, chainID, "transient-103", time.Minute, 10*time.Second)
+		sc := depositITScanner(t, faultPool, cfg)
+
+		// Every dial fails until the gate opens: the loop must retry with
+		// bounded backoff and advance nothing while the database is
+		// unreachable.
+		fault.dialFails.Store(true)
+		stop := depositRunLoop(t, ctx, sc, lease)
+		waitUntil(t, time.Now().Add(10*time.Second), "at least 3 failed database dials", func() bool {
+			return fault.dialTries.Load() >= 3
+		})
+		if _, _, _, ok := depositCheckpointState(t, ctx, pool, chainID); ok {
+			t.Fatal("checkpoint created while every DB dial was failing")
+		}
+		if n := depositCountRows(t, ctx, pool, "deposit_observations", chainID); n != 0 {
+			t.Fatalf("observations = %d, want 0 while every DB dial was failing", n)
+		}
+		fault.dialFails.Store(false)
+		waitRecovered(t, chainID)
+		stop()
+		if got := fault.dialTries.Load(); got < 3 {
+			t.Fatalf("failed dials = %d, want at least 3 (bounded retry kept dialing before recovery)", got)
+		}
+		depositAssertCommittedOnce(t, ctx, pool, chainID, cfg)
+	})
+}
+
+// TestDepositCommitUnknownOutcomeVerdicts: T010 dedicated assertion pair. The
+// two possible truths behind an unknown COMMIT must be distinguished by
+// re-reading the database, never by interpreting the connection error:
+//
+//   - reply lost after the statement landed: the re-read proves b+1 durable,
+//     so the commit resolves as committed (nil) exactly once;
+//   - the COMMIT never reached PostgreSQL: the re-read proves the progress
+//     unchanged, so the commit reports an explicit unknown-outcome error (a
+//     connection error is not proof of rollback) and a retry on a healthy
+//     session converges exactly once.
+func TestDepositCommitUnknownOutcomeVerdicts(t *testing.T) {
+	dsn := startIndexerPostgres(t)
+	ctx := context.Background()
+	pool := openIndexerPool(t, dsn)
+	defer pool.Close()
+
+	seed := func(t *testing.T, chainID int64) DepositConfig {
+		t.Helper()
+		cfg := depositITConfig(t, chainID, testContractA)
+		depositSeedCanonical(t, ctx, pool, chainID, 10, 20, true)
+		depositSeedUpstream(t, ctx, pool, chainID, 0, cfg.LogConfigHash, 21)
+		depositSeedTransferRow(t, ctx, pool, chainID, 15, depositBlockHash(15), depositTxHash(15, 0), 0,
+			common.HexToAddress(testContractA), common.HexToAddress(testContractB),
+			common.HexToAddress(depositWatchAddr), big.NewInt(1))
+		return cfg
+	}
+
+	t.Run("reply_lost_but_committed", func(t *testing.T) {
+		const chainID = 104
+		cfg := seed(t, chainID)
+		fault := newDepositFault()
+		faultPool := depositOpenFaultPool(t, dsn, fault)
+		sc := depositITScanner(t, faultPool, cfg)
+		lease := depositITLease(t, pool, chainID)
+		unit, batch, captured := depositITPrepareUnit(t, ctx, sc, 10, 20)
+
+		fault.armSQL(depositFaultCommit, true, false)
+		err := sc.commitDepositUnit(ctx, lease, unit, batch, captured, 10, 20)
+		if err != nil {
+			t.Fatalf("commit = %v, want nil (the re-read must accept the landed COMMIT)", err)
+		}
+		if got := fault.fires.Load(); got != 1 {
+			t.Fatalf("commit drops = %d, want exactly 1", got)
+		}
+		if _, _, next, ok := depositCheckpointState(t, ctx, pool, chainID); !ok || next != 21 {
+			t.Fatalf("checkpoint next = %d (ok=%v), want 21 durable", next, ok)
+		}
+		if n := depositCountRows(t, ctx, pool, "deposit_observations", chainID); n != 1 {
+			t.Fatalf("observations = %d, want exactly 1 (an uncertain outcome must not duplicate)", n)
+		}
+		// The pre-commit basis (empty progress) is stale now: a replay is
+		// refused by the version/progress adjudication, so no path can
+		// generate a second time.
+		unit2, batch2, _ := depositITPrepareUnit(t, ctx, sc, 10, 20)
+		err = sc.commitDepositUnit(ctx, lease, unit2, batch2, captured, 10, 20)
+		if !errors.Is(err, errDepositVersionMismatch) {
+			t.Fatalf("stale replay = %v, want errDepositVersionMismatch", err)
+		}
+		if n := depositCountRows(t, ctx, pool, "deposit_observations", chainID); n != 1 {
+			t.Fatalf("observations = %d after the stale replay, want 1", n)
+		}
+	})
+
+	t.Run("commit_never_reached_db", func(t *testing.T) {
+		const chainID = 105
+		cfg := seed(t, chainID)
+		fault := newDepositFault()
+		faultPool := depositOpenFaultPool(t, dsn, fault)
+		sc := depositITScanner(t, faultPool, cfg)
+		lease := depositITLease(t, pool, chainID)
+		unit, batch, captured := depositITPrepareUnit(t, ctx, sc, 10, 20)
+
+		// Close before forwarding: PostgreSQL never sees the COMMIT and the
+		// open transaction rolls back. The client error alone must not be
+		// treated as success, and must not be assumed to be a rollback either:
+		// the verdict comes from the durable re-read.
+		fault.armSQL(depositFaultCommit, false, false)
+		err := sc.commitDepositUnit(ctx, lease, unit, batch, captured, 10, 20)
+		if err == nil {
+			t.Fatal("commit = nil, want an explicit unknown-outcome error (a connection error is not proof of rollback)")
+		}
+		if got := fault.fires.Load(); got != 1 {
+			t.Fatalf("commit failures = %d, want exactly 1", got)
+		}
+		if _, _, _, ok := depositCheckpointState(t, ctx, pool, chainID); ok {
+			t.Fatal("checkpoint row exists although the COMMIT never reached PostgreSQL")
+		}
+		if n := depositCountRows(t, ctx, pool, "deposit_observations", chainID); n != 0 {
+			t.Fatalf("observations = %d, want 0 (rolled back, no partial commit)", n)
+		}
+		if n := depositCountRows(t, ctx, pool, "deposit_config_history", chainID); n != 0 {
+			t.Fatalf("history rows = %d, want 0 (rolled back, no partial commit)", n)
+		}
+
+		// Retry on a healthy session: exactly one generation, progress b+1.
+		sc2 := depositITScanner(t, pool, cfg)
+		unit2, batch2, captured2 := depositITPrepareUnit(t, ctx, sc2, 10, 20)
+		if captured2 != nil {
+			t.Fatalf("captured = %+v, want empty progress (nothing committed)", captured2)
+		}
+		if err := sc2.commitDepositUnit(ctx, lease, unit2, batch2, captured2, 10, 20); err != nil {
+			t.Fatalf("retry commit: %v", err)
+		}
+		if _, _, next, ok := depositCheckpointState(t, ctx, pool, chainID); !ok || next != 21 {
+			t.Fatalf("checkpoint next = %d (ok=%v), want 21 after the retry", next, ok)
+		}
+		if n := depositCountRows(t, ctx, pool, "deposit_observations", chainID); n != 1 {
+			t.Fatalf("observations = %d, want exactly 1 after the retry", n)
+		}
+	})
 }
