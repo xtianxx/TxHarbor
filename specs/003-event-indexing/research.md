@@ -97,8 +97,8 @@ E1 (provider 限制与截断语义) remains an explicit pre-implementation condi
   输入 `erc20-transfer:v1\n0x1111…1111\n0x2222…2222`（各 40 位）→
   `b4eeddb97cb6ab1ba66eb8bb97e43b3f11b466de859f10bf30497ebd2e9cef7f`。
   T002 实现必须复现该向量；大小写/顺序/重复变体收敛同一向量，增删地址则变化。
-- **V3 — Transfer 事件签名**：`0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df2883e6f`
-  为以太坊标准常量；T003/T011 必须在代码中断言（`Keccak256("Transfer(address,address,uint256)")`），不得手写魔法字符串无断言。
+- **V3 — Transfer 事件签名**：`0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef`
+  为以太坊标准常量（已由 `crypto.Keccak256Hash` 单测反向确认；此前误写尾 `f2883e6f`，2026-09-13 修正）；T003/T011 必须在代码中断言（`Keccak256("Transfer(address,address,uint256)")`），不得手写魔法字符串无断言。
 - **V4 — 仓库 provider 现状**：`compose.yaml` 固定 `ghcr.io/foundry-rs/foundry:v1.8.1` Anvil（chain-id 31337），
   `.env.example` 的 `TXHARBOR_RPC_URL` 指向本地 Anvil；全仓库无任何生产/托管 provider 选型记录。
   Anvil 的 `eth_getLogs` 上限与分页行为标记为**未知**：测试体量保持小且可控，未知错误一律按失败处理，

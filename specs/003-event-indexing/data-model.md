@@ -81,7 +81,7 @@
    - 逐行 `INSERT INTO erc20_transfer_logs … ON CONFLICT (chain_id, block_hash, tx_hash, log_index) DO NOTHING`；
    - 冲突内容比对：对本批每一身份重读已存行 `(contract, block_number, topic0/1/2, data)` 逐字节比较；任一不一致 → `ROLLBACK`，随后另起 `validation_failed(detail.class=identity_conflict)` 暂停事务（见 Table 3 原子条件）。内存中的"我刚取到什么"永不作为正确性依据；
    - 行数核对：本批去重后身份数必须等于实际插入+已存在一致行数（防止静默丢行）；
-   - `UPDATE log_checkpoint SET next_block=$b+1, updated_at=now() WHERE chain_id=$c AND next_block=$a`（首区间为 `INSERT (chain_id, start_block=$a, config_hash=$H, next_block=$b+1)`），`RowsAffected != 1` → `errStaleState`，拒绝；
+   - `UPDATE log_checkpoint SET next_block=$b+1, updated_at=now() WHERE chain_id=$c AND start_block=$S AND config_hash=$H AND next_block=$a`（首区间为 `INSERT (chain_id, start_block=$a, config_hash=$H, next_block=$b+1)`），`RowsAffected != 1` → `errStaleState`，拒绝；
    - `COMMIT`。影响 0 行 / 裁决失败 = 前提不成立，调用方必须停推并重读状态，不得按成功处理。
 - 暂停事务（`chain_view_changed` / `validation_failed` / `range_incomplete`）：同样先锁协调行 → 按 Table 3 原子条件复核（lease 归属 + 暂停行仍无 + 进度仍为 `(S,H,a)` + 分歧证据仍成立；任一不成立即放弃、`ROLLBACK`）→ `INSERT INTO log_pause … ON CONFLICT (chain_id) DO NOTHING` → `COMMIT`。与推进事务互斥：暂停提交后获锁的推进事务必见暂停行而被拒绝。
 - 不确定提交恢复：重连后 `SELECT log_checkpoint` + 重走步骤 4，以数据库为准、幂等继续（FR-16/OQ2）。

@@ -4,13 +4,18 @@
 package config
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"net"
 	"net/url"
+	"sort"
 	"strconv"
+	"strings"
 	"time"
 
+	"github.com/ethereum/go-ethereum/common"
 	"github.com/jackc/pgx/v5"
 
 	"github.com/xtianxx/txharbor/internal/logx"
@@ -33,6 +38,9 @@ const (
 	EnvIndexPollInterval  = "TXHARBOR_INDEX_POLL_INTERVAL"
 	EnvIndexRetryInitial  = "TXHARBOR_INDEX_RETRY_INITIAL"
 	EnvIndexRetryMax      = "TXHARBOR_INDEX_RETRY_MAX"
+	EnvLogStartHeight     = "TXHARBOR_LOG_START_HEIGHT"
+	EnvLogContracts       = "TXHARBOR_LOG_CONTRACTS"
+	EnvLogBatchBlocks     = "TXHARBOR_LOG_BATCH_BLOCKS"
 )
 
 // Defaults from data-model §1. Acceptance runs use these values (FR-013).
@@ -47,6 +55,16 @@ const (
 	DefaultIndexPollInterval  = 1 * time.Second
 	DefaultIndexRetryInitial  = 200 * time.Millisecond
 	DefaultIndexRetryMax      = 30 * time.Second
+
+	// DefaultLogBatchBlocks bounds one log scan interval (research R6: Anvil
+	// local sensitivity vs round-trip cost; production values are re-checked
+	// against the provider annex without changing history semantics).
+	DefaultLogBatchBlocks = uint64(500)
+
+	// logConfigVersion prefixes the config identity encoding (clarification
+	// A1). The version is part of the hashed input so future encodings never
+	// collide with this one.
+	logConfigVersion = "erc20-transfer:v1"
 
 	// probeBudget is the hard ceiling for interval+timeout so that an
 	// outage is observed/recovered well inside the 10s acceptance bound.
@@ -69,6 +87,12 @@ type Config struct {
 	IndexPollInterval  time.Duration
 	IndexRetryInitial  time.Duration
 	IndexRetryMax      time.Duration
+	// Log scanning (003-event-indexing): independent start bound, normalized
+	// whitelist, its config identity, and the per-interval block cap.
+	LogStartHeight uint64
+	LogContracts   []string
+	LogConfigHash  string
+	LogBatchBlocks uint64
 }
 
 // Getenv looks up an environment variable (os.LookupEnv compatible).
@@ -124,6 +148,33 @@ func Load(getenv Getenv) (*Config, error) {
 		c.StartHeight = h
 	}
 
+	if raw, err := require(getenv, EnvLogStartHeight); err != nil {
+		errs = append(errs, err)
+	} else if h, err := parseStartHeight(raw); err != nil {
+		errs = append(errs, invalid(EnvLogStartHeight, "%v", err))
+	} else {
+		c.LogStartHeight = h
+	}
+
+	if raw, err := require(getenv, EnvLogContracts); err != nil {
+		errs = append(errs, err)
+	} else if contracts, hash, err := NormalizeWhitelist(raw); err != nil {
+		errs = append(errs, invalid(EnvLogContracts, "%v", err))
+	} else {
+		c.LogContracts = contracts
+		c.LogConfigHash = hash
+	}
+
+	c.LogBatchBlocks = DefaultLogBatchBlocks
+	if raw, ok := getenv(EnvLogBatchBlocks); ok && raw != "" {
+		n, err := strconv.ParseUint(raw, 10, 64)
+		if err != nil || n == 0 {
+			errs = append(errs, invalid(EnvLogBatchBlocks, "%q is not a positive decimal integer", raw))
+		} else {
+			c.LogBatchBlocks = n
+		}
+	}
+
 	if raw, ok := getenv(EnvHTTPAddr); ok && raw != "" {
 		if err := validateHTTPAddr(raw); err != nil {
 			errs = append(errs, invalid(EnvHTTPAddr, "%v", err))
@@ -159,11 +210,45 @@ func Load(getenv Getenv) (*Config, error) {
 // one startup echo line (FR-003).
 func (c *Config) Summary() string {
 	return fmt.Sprintf(
-		"pg=%s rpc=%s chain_id=%d start_height=%d http_addr=%s startup_timeout=%s probe_interval=%s probe_timeout=%s shutdown_timeout=%s migrate_lock_timeout=%s index_rpc_timeout=%s index_poll_interval=%s index_retry_initial=%s index_retry_max=%s",
+		"pg=%s rpc=%s chain_id=%d start_height=%d http_addr=%s startup_timeout=%s probe_interval=%s probe_timeout=%s shutdown_timeout=%s migrate_lock_timeout=%s index_rpc_timeout=%s index_poll_interval=%s index_retry_initial=%s index_retry_max=%s log_start_height=%d log_contracts=%d log_config_hash=%s log_batch_blocks=%d",
 		logx.Redact(c.PGDSN), logx.Redact(c.RPCURL), c.ChainID, c.StartHeight, c.HTTPAddr,
 		c.StartupTimeout, c.ProbeInterval, c.ProbeTimeout, c.ShutdownTimeout, c.MigrateLockTimeout,
 		c.IndexRPCTimeout, c.IndexPollInterval, c.IndexRetryInitial, c.IndexRetryMax,
+		c.LogStartHeight, len(c.LogContracts), c.LogConfigHash, c.LogBatchBlocks,
 	)
+}
+
+// NormalizeWhitelist validates a comma-separated allowlist of EVM contract
+// addresses and returns the canonical form: lowercase 0x-prefixed hex, sorted
+// and deduplicated, plus the versioned config identity
+// SHA-256("erc20-transfer:v1\n" + join("\n")) as lowercase hex
+// (spec clarification A1, research R3). A blank allowlist is a configuration
+// error and never degrades into a full-chain query (FR-04).
+func NormalizeWhitelist(raw string) ([]string, string, error) {
+	parts := strings.Split(raw, ",")
+	seen := make(map[string]struct{}, len(parts))
+	out := make([]string, 0, len(parts))
+	for _, p := range parts {
+		p = strings.TrimSpace(p)
+		if p == "" {
+			return nil, "", errors.New("allowlist contains a blank entry")
+		}
+		if !common.IsHexAddress(p) {
+			return nil, "", fmt.Errorf("%q is not a 20-byte EVM address", p)
+		}
+		norm := strings.ToLower(p)
+		if _, dup := seen[norm]; dup {
+			continue
+		}
+		seen[norm] = struct{}{}
+		out = append(out, norm)
+	}
+	if len(out) == 0 {
+		return nil, "", errors.New("allowlist is empty")
+	}
+	sort.Strings(out)
+	sum := sha256.Sum256([]byte(logConfigVersion + "\n" + strings.Join(out, "\n")))
+	return out, hex.EncodeToString(sum[:]), nil
 }
 
 func require(getenv Getenv, name string) (string, error) {

@@ -15,6 +15,7 @@ import (
 
 	"github.com/ethereum/go-ethereum"
 	"github.com/ethereum/go-ethereum/core/types"
+	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/ethereum/go-ethereum/ethclient"
 	gethrpc "github.com/ethereum/go-ethereum/rpc"
 )
@@ -35,7 +36,16 @@ const (
 	// KindRateLimited means the endpoint throttled the request: retryable
 	// with backoff (R4, FR-09).
 	KindRateLimited Kind = "rate-limited"
+	// KindIncomplete means the log query cannot be confirmed complete:
+	// range/result/response-size errors, explicit truncated/partial markers,
+	// or unfinished pagination. Callers must shrink the interval and retry
+	// from the same height, never treat it as an empty result (003 FR-12).
+	KindIncomplete Kind = "incomplete"
 )
+
+// TransferSig is keccak256("Transfer(address,address,uint256)"), the
+// ERC-20 Transfer event signature (003 FR-07). Asserted by unit test.
+var TransferSig = crypto.Keccak256Hash([]byte("Transfer(address,address,uint256)"))
 
 // Error is a classified chain client error.
 type Error struct {
@@ -129,6 +139,42 @@ func (c *Client) HeaderByNumber(ctx context.Context, number *big.Int) (*types.He
 		return nil, &Error{Kind: KindNotFound, Op: "eth_getBlockByNumber", Err: ethereum.NotFound}
 	}
 	return header, nil
+}
+
+// FilterLogs returns the logs matching q via a single eth_getLogs call. An
+// empty result is a legitimate success (a log-free interval advances
+// normally); only transport/timeout/rate-limit/incomplete/invalid outcomes
+// are errors. Callers must never treat any error as an empty result.
+func (c *Client) FilterLogs(ctx context.Context, q ethereum.FilterQuery) ([]types.Log, error) {
+	logs, err := c.client.FilterLogs(ctx, q)
+	if err != nil {
+		return nil, &Error{Kind: classifyLogFilter(err, ctx), Op: "eth_getLogs", Err: err}
+	}
+	return logs, nil
+}
+
+// limitExceededCode is the de-facto JSON-RPC "limit exceeded" code returned by
+// several hosted providers for over-wide log queries. It is the only
+// code-based incomplete signal until the T000-P provider annex confirms or
+// extends the mapping for the selected production provider; unknown errors
+// are never classified as incomplete.
+const limitExceededCode = -32005
+
+func classifyLogFilter(err error, ctx context.Context) Kind {
+	var httpErr gethrpc.HTTPError
+	if errors.As(err, &httpErr) {
+		if httpErr.StatusCode == http.StatusTooManyRequests {
+			return KindRateLimited
+		}
+		if httpErr.StatusCode == http.StatusRequestEntityTooLarge {
+			return KindIncomplete
+		}
+	}
+	var rpcErr gethrpc.Error
+	if errors.As(err, &rpcErr) && rpcErr.ErrorCode() == limitExceededCode {
+		return KindIncomplete
+	}
+	return classify(err, ctx)
 }
 
 func classify(err error, ctx context.Context) Kind {

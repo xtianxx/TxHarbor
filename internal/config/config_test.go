@@ -15,10 +15,12 @@ func fakeEnv(m map[string]string) Getenv {
 
 func baseEnv() map[string]string {
 	return map[string]string{
-		EnvPGDSN:       "postgres://txharbor:sup3rs3cret@127.0.0.1:5432/txharbor?sslmode=disable",
-		EnvRPCURL:      "http://127.0.0.1:8545",
-		EnvChainID:     "31337",
-		EnvStartHeight: "0",
+		EnvPGDSN:          "postgres://txharbor:sup3rs3cret@127.0.0.1:5432/txharbor?sslmode=disable",
+		EnvRPCURL:         "http://127.0.0.1:8545",
+		EnvChainID:        "31337",
+		EnvStartHeight:    "0",
+		EnvLogStartHeight: "0",
+		EnvLogContracts:   "0x1111111111111111111111111111111111111111",
 	}
 }
 
@@ -63,6 +65,18 @@ func TestLoadDefaults(t *testing.T) {
 	if cfg.StartHeight != 0 {
 		t.Errorf("StartHeight = %d, want 0 (genesis is legal)", cfg.StartHeight)
 	}
+	if cfg.LogStartHeight != 0 {
+		t.Errorf("LogStartHeight = %d, want 0", cfg.LogStartHeight)
+	}
+	if len(cfg.LogContracts) != 1 || cfg.LogContracts[0] != "0x1111111111111111111111111111111111111111" {
+		t.Errorf("LogContracts = %v, want single normalized address", cfg.LogContracts)
+	}
+	if len(cfg.LogConfigHash) != 64 {
+		t.Errorf("LogConfigHash = %q, want 64 lowercase hex", cfg.LogConfigHash)
+	}
+	if cfg.LogBatchBlocks != DefaultLogBatchBlocks {
+		t.Errorf("LogBatchBlocks = %d, want default %d", cfg.LogBatchBlocks, DefaultLogBatchBlocks)
+	}
 }
 
 func TestLoadCustomValues(t *testing.T) {
@@ -93,7 +107,7 @@ func TestLoadCustomValues(t *testing.T) {
 }
 
 func TestLoadMissingRequiredNamesVariable(t *testing.T) {
-	for _, name := range []string{EnvPGDSN, EnvRPCURL, EnvChainID, EnvStartHeight} {
+	for _, name := range []string{EnvPGDSN, EnvRPCURL, EnvChainID, EnvStartHeight, EnvLogStartHeight, EnvLogContracts} {
 		t.Run(name, func(t *testing.T) {
 			env := baseEnv()
 			delete(env, name)
@@ -113,7 +127,7 @@ func TestLoadMissingAllReportsEveryVariable(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error for empty environment")
 	}
-	for _, name := range []string{EnvPGDSN, EnvRPCURL, EnvChainID, EnvStartHeight} {
+	for _, name := range []string{EnvPGDSN, EnvRPCURL, EnvChainID, EnvStartHeight, EnvLogStartHeight, EnvLogContracts} {
 		if !strings.Contains(err.Error(), name) {
 			t.Errorf("error %q does not name %s", err, name)
 		}
@@ -201,5 +215,95 @@ func TestSummaryRedactsCredentials(t *testing.T) {
 	}
 	if !strings.Contains(summary, "rpc.example.com") {
 		t.Fatalf("summary lost non-sensitive RPC context: %s", summary)
+	}
+}
+
+func TestNormalizeWhitelistStandardVector(t *testing.T) {
+	contracts, hash, err := NormalizeWhitelist(
+		"0x1111111111111111111111111111111111111111,0x2222222222222222222222222222222222222222")
+	if err != nil {
+		t.Fatalf("NormalizeWhitelist() error = %v", err)
+	}
+	want := []string{
+		"0x1111111111111111111111111111111111111111",
+		"0x2222222222222222222222222222222222222222",
+	}
+	if len(contracts) != len(want) {
+		t.Fatalf("contracts = %v, want %v", contracts, want)
+	}
+	for i := range want {
+		if contracts[i] != want[i] {
+			t.Fatalf("contracts = %v, want %v", contracts, want)
+		}
+	}
+	// Research R9 V2 vector (sha256sum-verified, no trailing newline).
+	const wantHash = "b4eeddb97cb6ab1ba66eb8bb97e43b3f11b466de859f10bf30497ebd2e9cef7f"
+	if hash != wantHash {
+		t.Fatalf("hash = %q, want %q", hash, wantHash)
+	}
+}
+
+func TestNormalizeWhitelistConvergesCaseOrderDupes(t *testing.T) {
+	base := "0x1111111111111111111111111111111111111111,0x2222222222222222222222222222222222222222"
+	_, baseHash, err := NormalizeWhitelist(base)
+	if err != nil {
+		t.Fatalf("NormalizeWhitelist() error = %v", err)
+	}
+	variants := []string{
+		"0x2222222222222222222222222222222222222222,0x1111111111111111111111111111111111111111",
+		"0x1111111111111111111111111111111111111111, 0x2222222222222222222222222222222222222222 ,0x1111111111111111111111111111111111111111",
+		"0xABcDEF1234567890abcDEF1234567890ABCdEF12,0x1111111111111111111111111111111111111111,0x2222222222222222222222222222222222222222,0xabcdef1234567890abcdef1234567890abcdef12",
+	}
+	// First two variants must converge to the base identity; the third adds an
+	// address and must differ.
+	for i, v := range variants {
+		contracts, hash, err := NormalizeWhitelist(v)
+		if err != nil {
+			t.Fatalf("variant %d: error = %v", i, err)
+		}
+		if i < 2 {
+			if hash != baseHash {
+				t.Fatalf("variant %d: hash = %q, want base %q", i, hash, baseHash)
+			}
+		} else {
+			if hash == baseHash {
+				t.Fatalf("variant %d: added address must change identity", i)
+			}
+			if len(contracts) != 3 || contracts[2] != "0xabcdef1234567890abcdef1234567890abcdef12" {
+				t.Fatalf("variant %d: contracts = %v", i, contracts)
+			}
+		}
+	}
+}
+
+func TestNormalizeWhitelistRejects(t *testing.T) {
+	for _, raw := range []string{
+		"",
+		"   ",
+		"0x1111111111111111111111111111111111111111,,0x2222222222222222222222222222222222222222",
+		"not-an-address",
+		"0x1234",
+	} {
+		if _, _, err := NormalizeWhitelist(raw); err == nil {
+			t.Fatalf("NormalizeWhitelist(%q): expected error", raw)
+		}
+	}
+}
+
+func TestLoadLogBatchBlocks(t *testing.T) {
+	env := baseEnv()
+	env[EnvLogBatchBlocks] = "100"
+	cfg, err := Load(fakeEnv(env))
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if cfg.LogBatchBlocks != 100 {
+		t.Fatalf("LogBatchBlocks = %d, want 100", cfg.LogBatchBlocks)
+	}
+	for _, raw := range []string{"0", "-5", "abc"} {
+		env[EnvLogBatchBlocks] = raw
+		if _, err := Load(fakeEnv(env)); err == nil {
+			t.Fatalf("Load() with batch %q: expected error", raw)
+		}
 	}
 }

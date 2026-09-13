@@ -15,6 +15,11 @@ func TestRegistryExposesOnlyFoundationMetrics(t *testing.T) {
 	m.ObserveIndexerCheckpoint(31337, 1, true)
 	m.ObserveIndexerRPC("timeout", false)
 	m.ObserveIndexerPause(31337)
+	m.ObserveLogState(31337, 0)
+	m.ObserveLogCheckpointNext(31337, 1, true)
+	m.ObserveLogLag(31337, 0, true)
+	m.ObserveLogRPC("incomplete", false)
+	m.ObserveLogPause(31337)
 
 	families, err := m.Gatherer().Gather()
 	if err != nil {
@@ -25,7 +30,9 @@ func TestRegistryExposesOnlyFoundationMetrics(t *testing.T) {
 		switch name {
 		case ReadyMetricName, ProbeMetricName,
 			IndexerCheckpointMetricName, IndexerStateMetricName,
-			IndexerRPCMetricName, IndexerPauseMetricName:
+			IndexerRPCMetricName, IndexerPauseMetricName,
+			LogCheckpointNextMetricName, LogLagMetricName,
+			LogStateMetricName, LogRPCMetricName, LogPauseMetricName:
 			return true
 		}
 		return strings.HasPrefix(name, "go_") || strings.HasPrefix(name, "process_")
@@ -162,6 +169,50 @@ func TestIndexerMetricsContract(t *testing.T) {
 	m.ObserveIndexerPause(31337)
 	if got := gatherCounters(t, m, IndexerPauseMetricName)["chain=31337"]; got != 2 {
 		t.Fatalf("%s = %v, want 2", IndexerPauseMetricName, got)
+	}
+}
+
+// TestLogMetricsContract covers the 003 observability contract: log state,
+// next-block series absent while progress is empty, lag absent when either
+// checkpoint is empty, RPC outcome kinds and a monotonic pause counter.
+func TestLogMetricsContract(t *testing.T) {
+	m := New(func() bool { return true })
+
+	m.ObserveLogState(31337, 3)
+	if got := gatherGauge(t, m, LogStateMetricName); got != 3 {
+		t.Fatalf("%s = %v, want 3", LogStateMetricName, got)
+	}
+
+	m.ObserveLogCheckpointNext(31337, 100, true)
+	if got := gatherGauge(t, m, LogCheckpointNextMetricName); got != 100 {
+		t.Fatalf("%s = %v, want 100", LogCheckpointNextMetricName, got)
+	}
+	m.ObserveLogCheckpointNext(31337, 100, false)
+	if got := familyLen(t, m, LogCheckpointNextMetricName); got != 0 {
+		t.Fatalf("empty progress exposed %d %s series, want 0", got, LogCheckpointNextMetricName)
+	}
+
+	m.ObserveLogLag(31337, 7, true)
+	if got := gatherGauge(t, m, LogLagMetricName); got != 7 {
+		t.Fatalf("%s = %v, want 7", LogLagMetricName, got)
+	}
+	m.ObserveLogLag(31337, 7, false)
+	if got := familyLen(t, m, LogLagMetricName); got != 0 {
+		t.Fatalf("empty checkpoint exposed %d %s series, want 0", got, LogLagMetricName)
+	}
+
+	m.ObserveLogRPC("incomplete", false)
+	m.ObserveLogRPC("incomplete", false)
+	m.ObserveLogRPC("not-found", true)
+	rpc := gatherCounters(t, m, LogRPCMetricName)
+	if rpc["kind=incomplete,result=error"] != 2 || rpc["kind=not-found,result=ok"] != 1 {
+		t.Fatalf("%s = %v", LogRPCMetricName, rpc)
+	}
+
+	m.ObserveLogPause(31337)
+	m.ObserveLogPause(31337)
+	if got := gatherCounters(t, m, LogPauseMetricName)["chain=31337"]; got != 2 {
+		t.Fatalf("%s = %v, want 2", LogPauseMetricName, got)
 	}
 }
 
