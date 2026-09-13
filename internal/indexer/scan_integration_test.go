@@ -145,8 +145,9 @@ func runScanTo(t *testing.T, sc *Scanner, want uint64, timeout time.Duration) {
 
 // seedScanTo deterministically commits heights [S,N] through the real write
 // protocol (lease Acquire + commitBlock loop, no Run loop, hence no overshoot
-// race). It returns the resulting checkpoint height (always N).
-func seedScanTo(t *testing.T, ctx context.Context, pool *pgxpool.Pool, chain *scriptChain, owner string, S, N uint64) uint64 {
+// race). It returns the winning lease, its scanner (whose fencing token
+// matches durable truth), and the resulting checkpoint height (always N).
+func seedScanTo(t *testing.T, ctx context.Context, pool *pgxpool.Pool, chain *scriptChain, owner string, S, N uint64) (*Lease, *Scanner, uint64) {
 	t.Helper()
 	lease := newTestLease(t, pool, scanChainID, owner, 3*time.Second, time.Second)
 	won, _, err := lease.Acquire(ctx)
@@ -181,7 +182,7 @@ func seedScanTo(t *testing.T, ctx context.Context, pool *pgxpool.Pool, chain *sc
 			t.Fatalf("seed commit %d: %v", w.n, err)
 		}
 	}
-	return N
+	return lease, sc, N
 }
 
 func scanBlockCount(t *testing.T, ctx context.Context, pool *pgxpool.Pool, from, to uint64) int {
@@ -498,19 +499,23 @@ func TestScanUncertainCommitIdempotent(t *testing.T) {
 	pool := openIndexerPool(t, dsn)
 	defer pool.Close()
 	chain := newScriptChain(31337, 30, 0xA8)
-	_, sc := newScanScanner(t, pool, chain, "scan-a", 4)
-	runScanTo(t, sc, 4, 15*time.Second)
-	// Anchor on the actual checkpoint: the run above may commit several
-	// blocks past the observed target before observing cancel. The chain is
-	// long on purpose so next/continue targets always exist.
+	// Deterministic setup: seed exactly [4,4] through the real write protocol.
+	// No Run loop runs here, so there is no cancel-observation overshoot and
+	// next is pinned to 5 by construction (the old runScanTo setup raced with
+	// scanner speed against the fixed chain length). The returned scanner's
+	// lease token matches durable truth, so the racy pair below exercises the
+	// real fencing path.
+	_, seedSC, _ := seedScanTo(t, ctx, pool, chain, "scan-a", 4, 4)
+	// Anchor on the actual checkpoint and pin the deterministic base: any
+	// deviation means the seeding itself regressed.
 	base, ok := readCoordCheckpoint(t, ctx, pool, scanChainID)
 	if !ok {
-		t.Fatal("no checkpoint after first run")
+		t.Fatal("no checkpoint after seeding")
+	}
+	if uint64(base.height) != 4 || uint64(base.startHeight) != 4 {
+		t.Fatalf("seeded checkpoint = %+v, want height 4 start 4", base)
 	}
 	next := uint64(base.height) + 1
-	if next+5 > 30 {
-		t.Fatalf("overshoot to %d leaves no headroom, widen the chain", next)
-	}
 	hn := hashHex(chain.heads[next].Hash())
 	// Parent comes from durable truth, not from a second chain read.
 	var wg sync.WaitGroup
@@ -519,7 +524,7 @@ func TestScanUncertainCommitIdempotent(t *testing.T) {
 		wg.Add(1)
 		go func(i int) {
 			defer wg.Done()
-			errs[i] = sc.commitBlock(ctx, blockWrite{number: next, hash: hn, parent: base.hash})
+			errs[i] = seedSC.commitBlock(ctx, blockWrite{number: next, hash: hn, parent: base.hash})
 		}(i)
 	}
 	wg.Wait()
@@ -535,9 +540,11 @@ func TestScanUncertainCommitIdempotent(t *testing.T) {
 	if !ok || uint64(cp.height) != next || cp.hash != hn || uint64(cp.startHeight) != 4 {
 		t.Fatalf("checkpoint = %+v, want (%d,%s,4)", cp, next, hn)
 	}
-	// Idempotent continuation proves no skip/double after doubt; the target
-	// stays well below the tip regardless of first-run overshoot.
-	runScanTo(t, sc, next+5, 30*time.Second)
+	// Idempotent continuation proves no skip/double after doubt; next+5 stays
+	// far below the tip by construction, so the Run loop cannot outrun the
+	// chain. A fresh owner models the restart after the uncertain commit.
+	_, sc2 := newScanScanner(t, pool, chain, "scan-b", 4)
+	runScanTo(t, sc2, next+5, 30*time.Second)
 	assertScanGapFree(t, ctx, pool, 4, next+5)
 	assertScanSingleRecord(t, ctx, pool, 4, next+5)
 }
