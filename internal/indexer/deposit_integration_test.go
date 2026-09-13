@@ -4372,7 +4372,7 @@ func TestDepositPauseConcurrency(t *testing.T) {
 				defer wg.Done()
 				// First-unit basis (nil progress): all writers race the same
 				// empty state; only the outcome converges, never the row.
-				sc.tryPersistPause(ctx, lease, pauseEvidence, nil)
+				sc.tryPersistPause(ctx, lease, pauseEvidence, nil, depositPauseViaReadCoveredUnit)
 			}()
 		}
 		wg.Wait()
@@ -4396,14 +4396,14 @@ func TestDepositPauseConcurrency(t *testing.T) {
 		sc := depositITScanner(t, pool, cfg)
 		lease := depositITLease(t, pool, chainID)
 		stale := &depositProgress{startBlock: 10, configHash: cfg.ConfigHash, nextBlock: 10, versionSeq: 1}
-		if !sc.tryPersistPause(ctx, lease, pauseEvidence, stale) {
+		if !sc.tryPersistPause(ctx, lease, pauseEvidence, stale, depositPauseViaReadCoveredUnit) {
 			t.Fatal("tryPersistPause asked for a retry on converged evidence")
 		}
 		if _, ok := depositReadPause(t, ctx, pool, chainID); ok {
 			t.Fatal("pause row written on moved progress (evidence expired)")
 		}
 		// First-unit basis against existing progress is equally stale.
-		if !sc.tryPersistPause(ctx, lease, pauseEvidence, nil) {
+		if !sc.tryPersistPause(ctx, lease, pauseEvidence, nil, depositPauseViaReadCoveredUnit) {
 			t.Fatal("tryPersistPause asked for a retry on vanished empty basis")
 		}
 		if _, ok := depositReadPause(t, ctx, pool, chainID); ok {
@@ -4426,7 +4426,7 @@ func TestDepositPauseConcurrency(t *testing.T) {
 		if err != nil || !won {
 			t.Fatalf("takeover Acquire() = (%v,%v), want a win", won, err)
 		}
-		if !sc.tryPersistPause(ctx, staleLease, pauseEvidence, nil) {
+		if !sc.tryPersistPause(ctx, staleLease, pauseEvidence, nil, depositPauseViaReadCoveredUnit) {
 			t.Fatal("tryPersistPause asked for a retry on a lost lease")
 		}
 		if _, ok := depositReadPause(t, ctx, pool, chainID); ok {
@@ -4611,6 +4611,371 @@ func TestDepositDualWorkers(t *testing.T) {
 		}
 		if n := depositCountRows(t, ctx, poolB, "deposit_config_history", chainID); n != 1 {
 			t.Fatalf("history via poolB = %d, want 1", n)
+		}
+	})
+}
+
+// --- T029 cumulative pause merge (2026-09-13 Q8) ------------------------------
+
+// contractCAddr is an asset the T029 merge fixtures configure but the upstream
+// whitelist never indexed: structural asset_not_indexed gaps are built from it.
+const contractCAddr = "0x00000000000000000000000000000000000000c3"
+
+// depositMergeConfig is the T029 scanner shape: the asset set includes
+// contractCAddr while the upstream whitelist is [testContractA, testContractB].
+func depositMergeConfig(t *testing.T, chainID int64) DepositConfig {
+	t.Helper()
+	cfg := depositITConfig(t, chainID, testContractA, testContractB)
+	cfg.Assets = []config.DepositEntry{
+		{Address: testContractA, Effective: 10},
+		{Address: testContractB, Effective: 12},
+		{Address: contractCAddr, Effective: 10},
+	}
+	return cfg
+}
+
+// depositMergeSeedChain plants the T029 basis: canonical [10,next-1], the
+// upstream row over the whitelist, the checkpoint and the bootstrap history
+// row; it returns the captured progress.
+func depositMergeSeedChain(t *testing.T, ctx context.Context, pool *pgxpool.Pool,
+	chainID int64, cfg DepositConfig, next uint64) *depositProgress {
+	t.Helper()
+	depositSeedCanonical(t, ctx, pool, chainID, 10, next-1, true)
+	depositSeedUpstream(t, ctx, pool, chainID, 0, cfg.LogConfigHash, next)
+	depositSeedCheckpoint(t, ctx, pool, chainID, 10, cfg.ConfigHash, next)
+	depositSeedHistory(t, ctx, pool, chainID, 1, 10, cfg.ConfigHash)
+	progress, _, err := readAuthProgress(ctx, pool, chainID)
+	if err != nil || progress == nil {
+		t.Fatalf("read merge basis: progress=%+v err=%v", progress, err)
+	}
+	return progress
+}
+
+// depositMergeGapEvidence builds one verifiable structural asset_not_indexed
+// gap cause.
+func depositMergeGapEvidence(cfg DepositConfig, from, to uint64) *pauseEvidence {
+	return &pauseEvidence{kind: "upstream_gap", height: from,
+		detail: fmt.Sprintf("class=structural gap=%d-%d cause=asset_not_indexed config=%s",
+			from, to, cfg.ConfigHash)}
+}
+
+// depositMergeViewEvidence builds one verifiable absent-block chain-view cause.
+func depositMergeViewEvidence(height uint64) *pauseEvidence {
+	return &pauseEvidence{kind: "chain_view_changed", height: height,
+		detail: fmt.Sprintf("class=chain_view_changed height=%d expected= actual=", height)}
+}
+
+// TestDepositPauseMergeCumulative is T029 (2026-09-13 Q8 cumulative merge):
+// two causes are retained as segments with revision+1 and one merge audit row,
+// duplicate deliveries converge with zero writes, needs_006 holds across a
+// later light cause, old revisions are dead fences, concurrent distinct causes
+// both land, old-basis evidence is never merged, and a failed merge audit rolls
+// the whole transaction back. Real PostgreSQL only.
+func TestDepositPauseMergeCumulative(t *testing.T) {
+	dsn := startIndexerPostgres(t)
+	pool := openIndexerPool(t, dsn)
+	defer pool.Close()
+	ctx := context.Background()
+
+	t.Run("two_causes_retained", func(t *testing.T) {
+		const chainID = 203
+		cfg := depositMergeConfig(t, chainID)
+		progress := depositMergeSeedChain(t, ctx, pool, chainID, cfg, 21)
+		sc := depositITScanner(t, pool, cfg)
+		lease := depositITLease(t, pool, chainID)
+		pauses := 0
+		sc.SetPauseObserver(func() { pauses++ })
+
+		ev1 := depositMergeGapEvidence(cfg, 10, 14)
+		ev2 := depositMergeGapEvidence(cfg, 16, 18)
+		if !sc.tryPersistPause(ctx, lease, ev1, progress, depositPauseViaReadCoveredUnit) {
+			t.Fatal("first pause insertion asked for a retry")
+		}
+		row, ok := depositReadPause(t, ctx, pool, chainID)
+		want1 := ev1.detail + " version=1"
+		if !ok || row.rev != 1 || row.kind != "upstream_gap" || row.height != 10 || row.detail != want1 {
+			t.Fatalf("first pause = %+v (ok=%v), want rev1 upstream_gap@10 with %q", row, ok, want1)
+		}
+		if n := depositCountRows(t, ctx, pool, "deposit_pause_audit", chainID); n != 0 {
+			t.Fatalf("audit rows after the insert = %d, want 0", n)
+		}
+		if pauses != 1 {
+			t.Fatalf("pause observer = %d after the insert, want 1", pauses)
+		}
+
+		if !sc.tryPersistPause(ctx, lease, ev2, progress, depositPauseViaParse) {
+			t.Fatal("cumulative merge asked for a retry")
+		}
+		row, ok = depositReadPause(t, ctx, pool, chainID)
+		segment := fmt.Sprintf("\n+merged[rev=2] kind=upstream_gap height=16 version=1 :: %s", ev2.detail)
+		if !ok || row.rev != 2 || row.kind != "upstream_gap" || row.height != 10 {
+			t.Fatalf("merged pause = %+v (ok=%v), want rev2 keeping the first cause's kind/height", row, ok)
+		}
+		if row.detail != want1+segment {
+			t.Fatalf("merged detail = %q, want %q", row.detail, want1+segment)
+		}
+		if n := strings.Count(row.detail, "\n+merged["); n != 1 {
+			t.Fatalf("merged segment count = %d, want 1", n)
+		}
+		audit := depositAuthReadAudit(t, ctx, pool, chainID, row.id, 2)
+		wantReason := fmt.Sprintf("merge 1→2 +upstream_gap h=16 version=1 owner=deposit-it-%d via=parse", chainID)
+		if audit.action != "merge" || audit.operator != "system:pause-writer" || audit.reason != wantReason ||
+			audit.versionSeq != 1 || audit.kind != "upstream_gap" || audit.height != 16 || audit.detail != segment {
+			t.Fatalf("merge audit = %+v, want action merge, operator system:pause-writer, reason %q, v1, cause and segment", audit, wantReason)
+		}
+		if n := depositCountRows(t, ctx, pool, "deposit_pause_audit", chainID); n != 1 {
+			t.Fatalf("audit rows = %d, want exactly 1", n)
+		}
+		if pauses != 1 {
+			t.Fatalf("pause observer = %d after the merge, want it unchanged at 1 (Q8/L4)", pauses)
+		}
+	})
+
+	t.Run("duplicate_delivery_idempotent", func(t *testing.T) {
+		const chainID = 204
+		cfg := depositMergeConfig(t, chainID)
+		progress := depositMergeSeedChain(t, ctx, pool, chainID, cfg, 21)
+		sc := depositITScanner(t, pool, cfg)
+		lease := depositITLease(t, pool, chainID)
+		pauses := 0
+		sc.SetPauseObserver(func() { pauses++ })
+
+		ev1 := depositMergeGapEvidence(cfg, 10, 14)
+		ev2 := depositMergeGapEvidence(cfg, 16, 18)
+		if !sc.tryPersistPause(ctx, lease, ev1, progress, depositPauseViaReadCoveredUnit) ||
+			!sc.tryPersistPause(ctx, lease, ev2, progress, depositPauseViaParse) {
+			t.Fatal("seed insert+merge asked for a retry")
+		}
+		merged, ok := depositReadPause(t, ctx, pool, chainID)
+		if !ok || merged.rev != 2 {
+			t.Fatalf("seeded merge = %+v (ok=%v), want rev2", merged, ok)
+		}
+		// Re-deliver both causes twice: zero write, zero audit, observer fixed.
+		for i := 0; i < 2; i++ {
+			if !sc.tryPersistPause(ctx, lease, ev1, progress, depositPauseViaReadCoveredUnit) ||
+				!sc.tryPersistPause(ctx, lease, ev2, progress, depositPauseViaCommit) {
+				t.Fatalf("re-delivery %d asked for a retry", i)
+			}
+		}
+		after, ok := depositReadPause(t, ctx, pool, chainID)
+		if !ok || after.rev != 2 || after.detail != merged.detail {
+			t.Fatalf("idempotent pause = %+v (ok=%v), want byte-identical rev2 %q", after, ok, merged.detail)
+		}
+		if n := depositCountRows(t, ctx, pool, "deposit_pause_audit", chainID); n != 1 {
+			t.Fatalf("audit rows = %d, want the single merge row", n)
+		}
+		if pauses != 1 {
+			t.Fatalf("pause observer = %d after duplicates, want 1", pauses)
+		}
+	})
+
+	t.Run("needs_006_holds_after_merge", func(t *testing.T) {
+		const chainID = 205
+		cfg := depositMergeConfig(t, chainID)
+		progress := depositMergeSeedChain(t, ctx, pool, chainID, cfg, 21)
+		sc := depositITScanner(t, pool, cfg)
+		lease := depositITLease(t, pool, chainID)
+
+		// The first cause carries needs_006 (the already-paused state).
+		pauseID, pauseRev := depositAuthSeedPause(t, ctx, pool, chainID, "chain_view_changed",
+			"class=chain_view_changed needs_006=true version=1", 12)
+		// A light, verifiable cause merges on top; it must not downgrade the hold.
+		ev := depositMergeViewEvidence(21)
+		if !sc.tryPersistPause(ctx, lease, ev, progress, depositPauseViaCommit) {
+			t.Fatal("needs_006 merge asked for a retry")
+		}
+		row, ok := depositReadPause(t, ctx, pool, chainID)
+		if !ok || row.id != pauseID || row.rev != pauseRev+1 || !strings.Contains(row.detail, "needs_006=true") ||
+			!strings.Contains(row.detail, " :: "+ev.detail) {
+			t.Fatalf("merged pause = %+v (ok=%v), want needs_006 retained with the light cause", row, ok)
+		}
+
+		// The whole detail is scanned: a target disposition is refused.
+		watches := depositAuthLine(depositWatchAddr, 10)
+		h2, assets := depositAuthD11H2(t, watches)
+		req := depositAuthD11Req(t, chainID, "merge-needs006", 1, h2, assets, watches)
+		req.ExpectedPauseID, req.ExpectedPauseRevision = &row.id, &row.rev
+		before := depositAuthStateOf(t, ctx, pool, chainID)
+		_, err := AuthorizeDepositConfig(ctx, pool, req)
+		if !errors.Is(err, ErrAuthRejected) || !strings.Contains(err.Error(), "needs 006") {
+			t.Fatalf("auth disposition = %v, want ErrAuthRejected naming the 006 requirement", err)
+		}
+		depositAuthAssertUnchanged(t, ctx, pool, chainID, before)
+
+		// The pre-merge revision is a dead fence on the manual path.
+		released, err := sc.ReleaseDepositPause(ctx, lease, pauseID, pauseRev, "op-stale", "old revision")
+		if err != nil || released {
+			t.Fatalf("old-revision release = (%v,%v), want (false,nil)", released, err)
+		}
+		if n := depositCountRows(t, ctx, pool, "deposit_pause_audit", chainID); n != 1 {
+			t.Fatalf("pause audit rows = %d, want only the merge row", n)
+		}
+		live, ok := depositReadPause(t, ctx, pool, chainID)
+		if !ok || live.id != pauseID || live.rev != row.rev || live.detail != row.detail {
+			t.Fatalf("pause after the stale release = %+v (ok=%v), want the merged row intact", live, ok)
+		}
+	})
+
+	t.Run("old_revision_fenced", func(t *testing.T) {
+		const chainID = 206
+		cfg := depositMergeConfig(t, chainID)
+		progress := depositMergeSeedChain(t, ctx, pool, chainID, cfg, 21)
+		sc := depositITScanner(t, pool, cfg)
+		lease := depositITLease(t, pool, chainID)
+		ev1 := depositMergeGapEvidence(cfg, 10, 14)
+		ev2 := depositMergeGapEvidence(cfg, 16, 18)
+		if !sc.tryPersistPause(ctx, lease, ev1, progress, depositPauseViaReadCoveredUnit) ||
+			!sc.tryPersistPause(ctx, lease, ev2, progress, depositPauseViaParse) {
+			t.Fatal("seed insert+merge asked for a retry")
+		}
+		row, ok := depositReadPause(t, ctx, pool, chainID)
+		if !ok || row.rev != 2 {
+			t.Fatalf("seeded merge = %+v (ok=%v), want rev2", row, ok)
+		}
+		before := depositAuthStateOf(t, ctx, pool, chainID)
+
+		// Manual release with the pre-merge revision: zero rows, no audit.
+		released, err := sc.ReleaseDepositPause(ctx, lease, row.id, 1, "op-oldrev", "stale revision")
+		if err != nil || released {
+			t.Fatalf("old-revision release = (%v,%v), want (false,nil)", released, err)
+		}
+		depositAuthAssertUnchanged(t, ctx, pool, chainID, before)
+
+		// Authorization disposition with the pre-merge revision: refused.
+		watches := depositAuthLine(depositWatchAddr, 10)
+		h2, assets := depositAuthD11H2(t, watches)
+		req := depositAuthD11Req(t, chainID, "merge-oldrev", 1, h2, assets, watches)
+		oldRev := int64(1)
+		req.ExpectedPauseID, req.ExpectedPauseRevision = &row.id, &oldRev
+		_, err = AuthorizeDepositConfig(ctx, pool, req)
+		if !errors.Is(err, ErrAuthRejected) || !strings.Contains(err.Error(), "replaced live") {
+			t.Fatalf("old-revision disposition = %v, want ErrAuthRejected naming the replaced live target", err)
+		}
+		depositAuthAssertUnchanged(t, ctx, pool, chainID, before)
+	})
+
+	t.Run("concurrent_causes_both_kept", func(t *testing.T) {
+		const chainID = 207
+		cfg := depositMergeConfig(t, chainID)
+		progress := depositMergeSeedChain(t, ctx, pool, chainID, cfg, 21)
+		sc := depositITScanner(t, pool, cfg)
+		lease := depositITLease(t, pool, chainID)
+
+		ev0 := depositMergeGapEvidence(cfg, 10, 14)
+		if !sc.tryPersistPause(ctx, lease, ev0, progress, depositPauseViaReadCoveredUnit) {
+			t.Fatal("first cause asked for a retry")
+		}
+		evA := depositMergeGapEvidence(cfg, 12, 14)
+		evB := depositMergeViewEvidence(21)
+		writer := func(ev *pauseEvidence, via string) {
+			for i := 0; i < 4; i++ {
+				if sc.tryPersistPause(ctx, lease, ev, progress, via) {
+					return
+				}
+			}
+			t.Errorf("merge writer for %s did not converge", ev.kind)
+		}
+		var wg sync.WaitGroup
+		wg.Add(2)
+		go func() { defer wg.Done(); writer(evA, depositPauseViaParse) }()
+		go func() { defer wg.Done(); writer(evB, depositPauseViaCommit) }()
+		wg.Wait()
+
+		row, ok := depositReadPause(t, ctx, pool, chainID)
+		if !ok || row.rev != 3 {
+			t.Fatalf("raced pause = %+v (ok=%v), want rev3 (insert + two merges)", row, ok)
+		}
+		if n := strings.Count(row.detail, "\n+merged["); n != 2 {
+			t.Fatalf("merged segment count = %d, want 2 (no lost cause): %q", n, row.detail)
+		}
+		for _, ev := range []*pauseEvidence{evA, evB} {
+			if !strings.Contains(row.detail, " :: "+ev.detail) {
+				t.Fatalf("merged detail misses cause %q: %q", ev.detail, row.detail)
+			}
+		}
+		if n := depositCountRows(t, ctx, pool, "deposit_pause_audit", chainID); n != 2 {
+			t.Fatalf("merge audit rows = %d, want 2", n)
+		}
+
+		// Old-basis evidence is never merged (Q8 rule 8): a stale captured
+		// basis abandons without touching the live row.
+		stale := &depositProgress{startBlock: 10, configHash: cfg.ConfigHash, nextBlock: 99, versionSeq: 1}
+		before := depositAuthStateOf(t, ctx, pool, chainID)
+		if !sc.tryPersistPause(ctx, lease, depositMergeGapEvidence(cfg, 18, 20), stale, depositPauseViaCommit) {
+			t.Fatal("stale-basis merge asked for a retry")
+		}
+		depositAuthAssertUnchanged(t, ctx, pool, chainID, before)
+	})
+
+	t.Run("merge_audit_failure_rolls_back", func(t *testing.T) {
+		const chainID = 208
+		cfg := depositMergeConfig(t, chainID)
+		cfg.RetryInitial = 5 * time.Millisecond
+		cfg.RetryMax = 20 * time.Millisecond
+		progress := depositMergeSeedChain(t, ctx, pool, chainID, cfg, 21)
+		sc := depositITScanner(t, pool, cfg)
+		lease := depositITLease(t, pool, chainID)
+		ev0 := depositMergeGapEvidence(cfg, 10, 14)
+		ev1 := depositMergeGapEvidence(cfg, 16, 18)
+		if !sc.tryPersistPause(ctx, lease, ev0, progress, depositPauseViaReadCoveredUnit) {
+			t.Fatal("first cause asked for a retry")
+		}
+		before, ok := depositReadPause(t, ctx, pool, chainID)
+		if !ok || before.rev != 1 {
+			t.Fatalf("first pause = %+v (ok=%v), want rev1", before, ok)
+		}
+
+		fault := newDepositFault()
+		faultPool := depositOpenFaultPool(t, dsn, fault)
+		fault.armSQL(depositFaultPauseAudit, false, true) // sticky: every retry fails
+		faultSc := depositITScanner(t, faultPool, cfg)
+		pauses := 0
+		faultSc.SetPauseObserver(func() { pauses++ })
+		faultSc.persistDepositPause(ctx, lease, ev1, progress, depositPauseViaCommit)
+
+		after, ok := depositReadPause(t, ctx, pool, chainID)
+		if !ok || after != before {
+			t.Fatalf("pause changed by the failed merge: %+v -> %+v", before, after)
+		}
+		if n := depositCountRows(t, ctx, pool, "deposit_pause_audit", chainID); n != 0 {
+			t.Fatalf("audit rows after the failed merge = %d, want 0", n)
+		}
+		if got := fault.fires.Load(); got < 1 {
+			t.Fatalf("audit fault fires = %d, want at least 1", got)
+		}
+		if pauses != 0 {
+			t.Fatalf("pause observer = %d for a failed merge, want 0", pauses)
+		}
+	})
+
+	t.Run("resolved_evidence_not_merged", func(t *testing.T) {
+		const chainID = 209
+		cfg := depositMergeConfig(t, chainID)
+		progress := depositMergeSeedChain(t, ctx, pool, chainID, cfg, 21)
+		sc := depositITScanner(t, pool, cfg)
+		lease := depositITLease(t, pool, chainID)
+
+		// First cause: the canonical row at 21 is missing.
+		ev := depositMergeViewEvidence(21)
+		if !sc.tryPersistPause(ctx, lease, ev, progress, depositPauseViaReadCoveredUnit) {
+			t.Fatal("first pause insertion asked for a retry")
+		}
+		first, ok := depositReadPause(t, ctx, pool, chainID)
+		if !ok || first.rev != 1 {
+			t.Fatalf("first pause = %+v (ok=%v), want rev1", first, ok)
+		}
+		// The divergence resolves: canonical 21 appears, so the cause no
+		// longer reproduces and MUST NOT merge.
+		depositSeedCanonical(t, ctx, pool, chainID, 21, 21, true)
+		if !sc.tryPersistPause(ctx, lease, ev, progress, depositPauseViaCommit) {
+			t.Fatal("resolved evidence asked for a retry")
+		}
+		after, ok := depositReadPause(t, ctx, pool, chainID)
+		if !ok || after != first {
+			t.Fatalf("pause changed by resolved evidence: %+v -> %+v", first, after)
+		}
+		if n := depositCountRows(t, ctx, pool, "deposit_pause_audit", chainID); n != 0 {
+			t.Fatalf("audit rows = %d, want 0 for a resolved cause", n)
 		}
 	})
 }

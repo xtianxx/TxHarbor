@@ -15,6 +15,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -603,6 +604,15 @@ INSERT INTO deposit_pause (chain_id, height, kind, detail)
 VALUES ($1, $2, $3, $4)
 ON CONFLICT (chain_id) DO NOTHING`
 
+	// mergeDepositPauseSQL appends one cumulative cause segment and advances
+	// the revision under the optimistic (chain_id, pause_id, revision) guard
+	// (T029, 2026-09-13 Q8). The kind/height columns stay the first cause:
+	// only the multi-segment detail grows.
+	mergeDepositPauseSQL = `
+UPDATE deposit_pause
+SET detail = $4, revision = revision + 1
+WHERE chain_id = $1 AND pause_id = $2 AND revision = $3`
+
 	// deleteDepositPauseSQL removes one pause instance by identity + revision
 	// (Table 3a manual release and old-instance fencing alike) and returns
 	// the row content for the same-transaction audit row.
@@ -610,12 +620,41 @@ ON CONFLICT (chain_id) DO NOTHING`
 DELETE FROM deposit_pause WHERE chain_id = $1 AND pause_id = $2 AND revision = $3
 RETURNING kind, height, detail`
 
+	// readPauseSourceRowSQL is the T029 under-lock point read of one source
+	// row for deterministic parse-failure reproduction.
+	readPauseSourceRowSQL = `
+SELECT block_number, block_hash, tx_hash, log_index, contract, topic0, topic1, topic2, data
+FROM erc20_transfer_logs
+WHERE chain_id = $1 AND block_number = $2 AND log_index = $3`
+
+	// readPauseSourceRowByIdentitySQL is the same point read for
+	// identity_conflict evidence (the evidence carries the identity).
+	readPauseSourceRowByIdentitySQL = `
+SELECT block_number, block_hash, tx_hash, log_index, contract, topic0, topic1, topic2, data
+FROM erc20_transfer_logs
+WHERE chain_id = $1 AND block_hash = $2 AND tx_hash = $3 AND log_index = $4`
+
+	// readPauseObservationSQL is the stored observation snapshot the re-parsed
+	// source row is compared against for identity_conflict reproduction.
+	readPauseObservationSQL = `
+SELECT contract, block_number, sender, recipient, amount::text, status
+FROM deposit_observations
+WHERE chain_id = $1 AND block_hash = $2 AND tx_hash = $3 AND log_index = $4`
+
 	// insertReleasePauseAuditSQL records a manual release with the operator,
 	// reason, instance, applicable revision and locked current version.
 	insertReleasePauseAuditSQL = `
 INSERT INTO deposit_pause_audit
     (chain_id, pause_id, revision, action, operator, reason, version_seq, kind, height, detail)
 VALUES ($1, $2, $3, 'release', $4, $5, $6, $7, $8, $9)`
+
+	// insertMergePauseAuditSQL records one cumulative merge (T029/Q8): the new
+	// cause, the advanced revision and the locked version, same transaction as
+	// the row update.
+	insertMergePauseAuditSQL = `
+INSERT INTO deposit_pause_audit
+    (chain_id, pause_id, revision, action, operator, reason, version_seq, kind, height, detail)
+VALUES ($1, $2, $3, 'merge', $4, $5, $6, $7, $8, $9)`
 )
 
 // Deposit loop defaults, used when the matching DepositConfig knob is zero.
@@ -737,6 +776,231 @@ func pauseEvidenceForStop(err error, a, b uint64) *pauseEvidence {
 	return nil
 }
 
+// --- T029 cumulative pause merge (2026-09-13 Q8) ------------------------------
+
+// Pause-merge trigger paths: the merge audit reason records which ServeLoop
+// stage produced the evidence. The value comes from the call site, never from
+// the environment (Q8/L1).
+const (
+	depositPauseViaReadCoveredUnit = "readCoveredUnit"
+	depositPauseViaParse           = "parse"
+	depositPauseViaCommit          = "commit"
+)
+
+// pauseSegment is one decoded cause of the cumulative pause detail: the first
+// cause lives in the Table 3 kind/height columns, every later cause in a
+// +merged segment.
+type pauseSegment struct {
+	kind   string
+	height uint64
+	core   string
+}
+
+// pauseSegments decodes every cause of a pause row. Malformed merged segments
+// are skipped: a decode failure never fabricates an equivalence hit.
+func pauseSegments(kind string, height uint64, detail string) []pauseSegment {
+	first, merged := detail, ""
+	if idx := strings.Index(detail, "\n+merged["); idx >= 0 {
+		first, merged = detail[:idx], detail[idx:]
+	}
+	out := []pauseSegment{{kind: kind, height: height, core: pauseFirstCore(first)}}
+	for _, raw := range strings.Split(merged, "\n+merged[") {
+		if raw == "" {
+			continue
+		}
+		if seg, ok := parsePauseSegment(raw); ok {
+			out = append(out, seg)
+		}
+	}
+	return out
+}
+
+// pauseFirstCore strips the " version=<seq>" stamp the first cause carries; a
+// detail without a numeric stamp is returned verbatim.
+func pauseFirstCore(first string) string {
+	idx := strings.LastIndex(first, " version=")
+	if idx < 0 {
+		return first
+	}
+	if _, err := strconv.ParseInt(first[idx+len(" version="):], 10, 64); err != nil {
+		return first
+	}
+	return first[:idx]
+}
+
+// parsePauseSegment decodes the text after "+merged[":
+// "rev=<R>] kind=<K> height=<H> version=<S> :: <core>".
+func parsePauseSegment(raw string) (pauseSegment, bool) {
+	closeIdx := strings.Index(raw, "] ")
+	if closeIdx < 0 || !strings.HasPrefix(raw, "rev=") {
+		return pauseSegment{}, false
+	}
+	body := raw[closeIdx+2:]
+	kindPart, rest, ok := strings.Cut(body, " height=")
+	if !ok || !strings.HasPrefix(kindPart, "kind=") {
+		return pauseSegment{}, false
+	}
+	heightPart, rest, ok := strings.Cut(rest, " version=")
+	if !ok {
+		return pauseSegment{}, false
+	}
+	_, core, ok := strings.Cut(rest, " :: ")
+	if !ok {
+		return pauseSegment{}, false
+	}
+	height, err := strconv.ParseUint(heightPart, 10, 64)
+	if err != nil {
+		return pauseSegment{}, false
+	}
+	return pauseSegment{kind: strings.TrimPrefix(kindPart, "kind="), height: height, core: core}, true
+}
+
+// pauseSegmentsContain reports whether want is already recorded (Q8/L3 exact
+// equality on kind, height and core; the version stamp never participates).
+func pauseSegmentsContain(segments []pauseSegment, want pauseSegment) bool {
+	for _, seg := range segments {
+		if seg.kind == want.kind && seg.height == want.height && seg.core == want.core {
+			return true
+		}
+	}
+	return false
+}
+
+// pauseField extracts one "key=value" token from an evidence detail.
+func pauseField(detail, key string) string {
+	idx := strings.Index(detail, key)
+	if idx < 0 {
+		return ""
+	}
+	rest := detail[idx+len(key):]
+	if end := strings.IndexByte(rest, ' '); end >= 0 {
+		return rest[:end]
+	}
+	return rest
+}
+
+// reverifyPauseEvidence re-proves a new durable cause under the pause write
+// lock (Q8): only evidence that still reproduces against durable rows may be
+// merged, and a resolved or unreproducible cause is abandoned (the caller
+// still stops on its original error).
+func (s *DepositScanner) reverifyPauseEvidence(ctx context.Context, tx pgx.Tx, ev *pauseEvidence) bool {
+	switch ev.kind {
+	case "upstream_gap":
+		// R5 re-run: the gap must still classify as structural.
+		from, to, ok := parseGapRange(ev.detail)
+		if !ok {
+			return false
+		}
+		up, err := s.readUpstream(ctx, tx)
+		if err != nil || up == nil {
+			return false
+		}
+		gap := classifyUpstreamGap(s.cfg, up, from, to)
+		return gap != nil && gap.class == depositGapStructural
+	case "chain_view_changed":
+		// Canonical re-read: absent-block evidence holds only while the block
+		// is still absent; hash-mismatch evidence holds while canonical still
+		// reads the hash the evidence recorded.
+		expected := pauseField(ev.detail, "expected=")
+		var hash string
+		err := tx.QueryRow(ctx, canonicalBlockHashSQL, s.cfg.ChainID, int64(ev.height)).Scan(&hash)
+		switch {
+		case errors.Is(err, pgx.ErrNoRows):
+			return expected == ""
+		case err != nil:
+			return false
+		default:
+			return expected != "" && hash == expected
+		}
+	case "validation_failed":
+		return s.reverifyValidationEvidence(ctx, tx, ev)
+	default:
+		return false
+	}
+}
+
+// reverifyValidationEvidence point-reads and reproduces a deterministic
+// validation failure: parse classes carry block/log_index, identity_conflict
+// carries the source identity. Anything unreproducible is not mergeable.
+func (s *DepositScanner) reverifyValidationEvidence(ctx context.Context, tx pgx.Tx, ev *pauseEvidence) bool {
+	if identity := pauseField(ev.detail, "identity="); identity != "" {
+		return s.reverifyConflictEvidence(ctx, tx, identity)
+	}
+	block, err := strconv.ParseUint(pauseField(ev.detail, "block="), 10, 64)
+	if err != nil {
+		return false
+	}
+	index, err := strconv.ParseUint(pauseField(ev.detail, "log_index="), 10, 64)
+	if err != nil {
+		return false
+	}
+	row, ok := s.readPauseSourceRowAt(ctx, tx, block, index)
+	if !ok {
+		return false
+	}
+	if _, _, perr := s.matchConfig().parseLog(row); perr != nil {
+		return true
+	}
+	return false
+}
+
+// reverifyConflictEvidence re-reads the stored observation and the source row
+// and requires the identity to still conflict.
+func (s *DepositScanner) reverifyConflictEvidence(ctx context.Context, tx pgx.Tx, identity string) bool {
+	parts := strings.Split(identity, "/")
+	if len(parts) != 3 {
+		return false
+	}
+	index, err := strconv.ParseUint(parts[2], 10, 64)
+	if err != nil {
+		return false
+	}
+	var (
+		storedContract, storedSender, storedRecipient, storedAmount, storedStatus string
+		storedNumber                                                              int64
+	)
+	err = tx.QueryRow(ctx, readPauseObservationSQL, s.cfg.ChainID, parts[0], parts[1], int64(index)).
+		Scan(&storedContract, &storedNumber, &storedSender, &storedRecipient, &storedAmount, &storedStatus)
+	if err != nil {
+		return false
+	}
+	row, ok := s.readPauseSourceRowByID(ctx, tx, parts[0], parts[1], index)
+	if !ok {
+		return false
+	}
+	obs, verdict, perr := s.matchConfig().parseLog(row)
+	if perr != nil || verdict != depositMatched {
+		return false
+	}
+	return obs.contract != storedContract || uint64(obs.blockNumber) != uint64(storedNumber) ||
+		obs.sender != storedSender || obs.recipient != storedRecipient ||
+		obs.amount != storedAmount || storedStatus != depositObservationStatusPending
+}
+
+// readPauseSourceRowAt point-reads one source row by height and log index.
+func (s *DepositScanner) readPauseSourceRowAt(ctx context.Context, tx pgx.Tx, block, index uint64) (depositSourceLog, bool) {
+	return s.scanPauseSourceRow(tx.QueryRow(ctx, readPauseSourceRowSQL, s.cfg.ChainID, int64(block), int64(index)))
+}
+
+// readPauseSourceRowByID point-reads one source row by its identity.
+func (s *DepositScanner) readPauseSourceRowByID(ctx context.Context, tx pgx.Tx, blockHash, txHash string, index uint64) (depositSourceLog, bool) {
+	return s.scanPauseSourceRow(tx.QueryRow(ctx, readPauseSourceRowByIdentitySQL, s.cfg.ChainID, blockHash, txHash, int64(index)))
+}
+
+// scanPauseSourceRow shares the source-row scan shape of both point reads.
+func (s *DepositScanner) scanPauseSourceRow(row pgx.Row) (depositSourceLog, bool) {
+	var (
+		number, logIndex int64
+		out              depositSourceLog
+	)
+	if err := row.Scan(&number, &out.blockHash, &out.txHash, &logIndex, &out.contract,
+		&out.topic0, &out.topic1, &out.topic2, &out.data); err != nil {
+		return out, false
+	}
+	out.blockNumber, out.logIndex = uint64(number), uint64(logIndex)
+	return out, true
+}
+
 // ReleaseDepositPause removes one pause instance by identity + revision with
 // its audit row in the same transaction (Table 3a manual path). It writes no
 // consumer state — checkpoint, history and observations are untouched
@@ -810,20 +1074,22 @@ func (s *DepositScanner) ReleaseDepositPause(ctx context.Context, lease *Lease, 
 	return true, nil
 }
 
-// persistDepositPause writes the pause row for a durable stop in a dedicated
-// transaction (it never rides the rolled-back unit transaction: a batch
-// rollback itself never writes a pause row). Outcomes: written, converged
-// (row exists / evidence expired / lease lost) or given up after bounded
-// retries on transient DB errors. Every outcome leaves the caller's stop
-// error intact — the loop still stops.
-func (s *DepositScanner) persistDepositPause(ctx context.Context, lease *Lease, ev *pauseEvidence, progress *depositProgress) {
+// persistDepositPause writes or cumulatively merges the pause row for a
+// durable stop in a dedicated transaction (it never rides the rolled-back unit
+// transaction: a batch rollback itself never writes a pause row). Outcomes:
+// written, merged, converged (equivalent cause already present / evidence
+// expired / lease lost) or given up after bounded retries on transient DB
+// errors. via is the ServeLoop trigger path recorded in the merge audit
+// (Q8/L1). Every outcome leaves the caller's stop error intact — the loop
+// still stops.
+func (s *DepositScanner) persistDepositPause(ctx context.Context, lease *Lease, ev *pauseEvidence, progress *depositProgress, via string) {
 	if ev == nil || lease == nil {
 		return
 	}
 	_, retryInitial, retryMax := s.loopTimings()
 	back := newBackoff(retryInitial, retryMax)
 	for i := 0; i < 3; i++ {
-		if s.tryPersistPause(ctx, lease, ev, progress) {
+		if s.tryPersistPause(ctx, lease, ev, progress, via) {
 			return
 		}
 		if !s.wait(ctx, back.next()) {
@@ -833,9 +1099,12 @@ func (s *DepositScanner) persistDepositPause(ctx context.Context, lease *Lease, 
 }
 
 // tryPersistPause runs one Table 3 pause transaction. It reports true when no
-// further attempt is needed (written, converged, or terminally refused) and
-// false only on a transient DB error worth retrying.
-func (s *DepositScanner) tryPersistPause(ctx context.Context, lease *Lease, ev *pauseEvidence, progress *depositProgress) bool {
+// further attempt is needed (written, merged, converged, or terminally
+// refused) and false only on a transient DB error worth retrying.
+func (s *DepositScanner) tryPersistPause(ctx context.Context, lease *Lease, ev *pauseEvidence, progress *depositProgress, via string) bool {
+	if ev == nil {
+		return true
+	}
 	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{})
 	if err != nil {
 		return false
@@ -863,12 +1132,19 @@ func (s *DepositScanner) tryPersistPause(ctx context.Context, lease *Lease, ev *
 	} else if err != nil {
 		return false
 	}
-	// Atomic condition 2: first pause wins. A row already present means
-	// another writer (or an earlier attempt whose COMMIT was uncertain)
-	// established the pause: converge without a second row.
-	if err := tx.QueryRow(ctx, depositPauseExistsSQL, s.cfg.ChainID).Scan(&one); err == nil {
-		return true
-	} else if !errors.Is(err, pgx.ErrNoRows) {
+	// Atomic condition 2 (Q8): read the full pause row. No row: the first
+	// pause INSERT path below. A row: the cumulative merge evaluation (T029) —
+	// never a blind first-wins discard.
+	var (
+		pauseID, revision, rowHeight int64
+		rowKind, rowDetail           string
+	)
+	err = tx.QueryRow(ctx, readAuthPauseSQL, s.cfg.ChainID).Scan(&pauseID, &revision, &rowHeight, &rowKind, &rowDetail)
+	switch {
+	case err == nil:
+	case errors.Is(err, pgx.ErrNoRows):
+		pauseID = 0
+	default:
 		return false
 	}
 	// Atomic condition 3: the evidence still holds — the checkpoint is
@@ -891,9 +1167,15 @@ func (s *DepositScanner) tryPersistPause(ctx context.Context, lease *Lease, ev *
 		current.nextBlock != progress.nextBlock || current.versionSeq != progress.versionSeq:
 		return true
 	}
+	// Q8/L2: the segment and audit version is the captured basis seq; the
+	// exact basis check above has already proven it equals the locked current
+	// seq, so a divergence always abandons and the value is unambiguous.
 	var seq int64
 	if progress != nil {
 		seq = progress.versionSeq
+	}
+	if pauseID != 0 {
+		return s.mergePauseCause(ctx, tx, owner, pauseID, revision, rowHeight, rowKind, rowDetail, ev, seq, via)
 	}
 	detail := fmt.Sprintf("%s version=%d", ev.detail, seq)
 	tag, err := tx.Exec(ctx, insertDepositPauseSQL, s.cfg.ChainID, int64(ev.height), ev.kind, detail)
@@ -901,8 +1183,10 @@ func (s *DepositScanner) tryPersistPause(ctx context.Context, lease *Lease, ev *
 		return false
 	}
 	if tag.RowsAffected() != 1 {
-		// Lost a concurrent first-wins race: converge.
-		return true
+		// A concurrent first-wins writer established the row: retry so the
+		// next attempt merges this cause (or converges when it is already
+		// recorded) instead of dropping it (Q8 rule 1).
+		return false
 	}
 	if err := tx.Commit(ctx); err != nil {
 		// Uncertain COMMIT: the next attempt converges on the row if it
@@ -914,6 +1198,61 @@ func (s *DepositScanner) tryPersistPause(ctx context.Context, lease *Lease, ev *
 	if s.pauseObserver != nil {
 		s.pauseObserver()
 	}
+	return true
+}
+
+// mergePauseCause executes the cumulative merge inside the pause transaction
+// (T029/Q8): the existing row keeps its pause_id and first cause; the new
+// verified cause is appended as a +merged segment, the revision advances under
+// an optimistic guard and one merge audit row commits in the same transaction.
+// It reports true when converged (merged, an equivalent cause already present,
+// or the row vanished) and false only when the caller should retry.
+func (s *DepositScanner) mergePauseCause(ctx context.Context, tx pgx.Tx, owner string,
+	pauseID, revision, rowHeight int64, rowKind, rowDetail string, ev *pauseEvidence, seq int64, via string) bool {
+	if !s.reverifyPauseEvidence(ctx, tx, ev) {
+		// The new cause no longer reproduces: abandon without touching the
+		// live row (the loop still stops on its original error).
+		return true
+	}
+	want := pauseSegment{kind: ev.kind, height: ev.height, core: ev.detail}
+	if pauseSegmentsContain(pauseSegments(rowKind, uint64(rowHeight), rowDetail), want) {
+		// Q8/L3 exact equivalence: the same effective cause is already
+		// recorded, so a repeated delivery writes and audits nothing.
+		return true
+	}
+	newRev := revision + 1
+	segment := fmt.Sprintf("\n+merged[rev=%d] kind=%s height=%d version=%d :: %s",
+		newRev, ev.kind, ev.height, seq, ev.detail)
+	reason := fmt.Sprintf("merge %d→%d +%s h=%d version=%d owner=%s via=%s",
+		revision, newRev, ev.kind, ev.height, seq, owner, via)
+	tag, err := tx.Exec(ctx, mergeDepositPauseSQL, s.cfg.ChainID, pauseID, revision, rowDetail+segment)
+	if err != nil {
+		return false
+	}
+	if tag.RowsAffected() != 1 {
+		// The optimistic guard lost: a vanished row converges; a moved
+		// revision asks for a retry, which re-reads the fresh row and
+		// re-evaluates equivalence before merging (bounded by the caller).
+		var exists int
+		err := tx.QueryRow(ctx, depositPauseExistsSQL, s.cfg.ChainID).Scan(&exists)
+		if errors.Is(err, pgx.ErrNoRows) {
+			return true
+		}
+		return false
+	}
+	tag, err = tx.Exec(ctx, insertMergePauseAuditSQL, s.cfg.ChainID, pauseID, newRev,
+		"system:pause-writer", reason, seq, ev.kind, int64(ev.height), segment)
+	if err != nil {
+		return false
+	}
+	if tag.RowsAffected() != 1 {
+		return false
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return false
+	}
+	// Q8/L4: a merge is not a new pause instance — pauseObserver and the
+	// pause counter are deliberately not fired.
 	return true
 }
 
@@ -1036,7 +1375,7 @@ func (s *DepositScanner) ServeLoop(ctx context.Context, lease *Lease, checkLost 
 			case errors.As(err, &pauseStop):
 				s.depState.Store(3)
 			}
-			s.persistDepositPause(ctx, lease, pauseEvidenceForStop(err, a, b), progress)
+			s.persistDepositPause(ctx, lease, pauseEvidenceForStop(err, a, b), progress, depositPauseViaReadCoveredUnit)
 			return err
 		}
 
@@ -1047,7 +1386,7 @@ func (s *DepositScanner) ServeLoop(ctx context.Context, lease *Lease, checkLost 
 			// The refused row is the one invalid result for the counter.
 			s.observeResult("invalid")
 			s.depState.Store(3)
-			s.persistDepositPause(ctx, lease, pauseEvidenceForStop(err, a, b), progress)
+			s.persistDepositPause(ctx, lease, pauseEvidenceForStop(err, a, b), progress, depositPauseViaParse)
 			return err
 		}
 
@@ -1091,7 +1430,7 @@ func (s *DepositScanner) ServeLoop(ctx context.Context, lease *Lease, checkLost 
 				if pauseEvidenceForStop(err, a, b) != nil {
 					s.depState.Store(3)
 				}
-				s.persistDepositPause(ctx, lease, pauseEvidenceForStop(err, a, b), progress)
+				s.persistDepositPause(ctx, lease, pauseEvidenceForStop(err, a, b), progress, depositPauseViaCommit)
 				return err
 			}
 			// Unknown failure (for example a transient DB error): bounded
