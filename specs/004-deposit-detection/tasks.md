@@ -304,11 +304,24 @@ T000-L / T000-P 见上（本阶段即二者建档）。**Checkpoint**: 门禁状
 
 **Purpose**: 全量验证、门禁复核、实现准入
 
-- [ ] T020 全量验证：`make build` + `make lint` + `go test ./...` + `go test -tags integration ./...` 全绿
+- [x] T020 全量验证：`make build` + `make lint` + `go test ./...` + `go test -tags integration ./...` 全绿
   - 依赖：T005–T019，T024–T028。完成条件：四命令一次全绿；T010/T015/T016/T017/T027/T028 批次证据齐全；
     未解释失败持续为未解决事项（后续成功批次不自动关闭；无新证据停跑并报告待诊断）；
     D11 全部断言证据齐全（承接任务见 T015/T018/T025/T027/T028，不在本条复述）；失败按回归处理，不弱化断言；
     否定性断言：观察表外无余额写路径、deposit 包外无 Pending 之外状态推进（grep 断言，承接 FR-13/14）。
+  - 状态（2026-09-13）：CLOSED，有保留通过（保留项见下，不等于无保留通过）。
+    证据：终态四命令一次全绿——make build ✓；make lint ✓（gofmt+双tag vet；附带修 depositscanner.go 纯对齐，d3dbe3d 遗留，零语义）；
+    make test 全包 ok；make test-integration EXIT=0 八包全绿（app 22s/config/db 58s/eth/health 15s/indexer 314s/logx/metrics），日志 /tmp/opencode/t020/full_integration_final.log。
+    本批最小修正（先修后验）：depositauth.go 授权占位租约过期 1s→1h（容忍宿主机时钟回拨，lease 严格接管不动）+depositITLease !won 回读诊断；
+    暂停 B（同实例旧修订解除失配：手工 Release (false,nil)+零审计 / 授权 ErrAuthRejected+覆盖 RowsAffected!=1 分支）+C（两路径审计失败回滚，复用 depositFault 通道零生产改动）；
+    health 夹具补 deposit 三 env（T018 无条件必需的既有缺口，首轮全量暴露，非断言弱化）；新增 TestDepositWritePathConfinement（FR-13/14 否定性 grep 断言：amount 写仅 deposit_observations 一处、零 UPDATE/DELETE 观察表、pending 字面唯一、包外仅 metric 名）。
+    批次：timing batch A 15/15（NestedReplay+RetainedPause+SameInstanceOldRevision ×恰5次，/tmp/opencode/t020/timing_batch5.log）；
+    manual batch B 5/5（LayeredRecovery 含 2 新子项各 5 次，/tmp/opencode/t020/manual_batch5.log）；TestDepositAuth* 子集 15 集成+2 单元绿。
+    保留未解决项（持续有效，后续成功不自动关闭）：(1) serve 端口偶发仍未知（原始错误串缺失，无新证据停跑；ObservabilityE2E 本身不绑端口已排除；取证方案已记，不在 T020 内无目的重跑）。
+    (2) checkpoint.start_block 语义未决 Q1–Q3（data-model:41 冻结+:311-312 不写 start vs :55 两侧一致+:306 新 history 写 S_new+:87 CHECK+消费守卫；实现取同步 S_new 自洽且测试锁定，规范内冲突未决；T025 偏差注记保持 open；T022 须先澄清，不私改规格）。
+    (3) merge 未实现（data-model:89 与 :95-98 自相冲突，T014 已记开放项）；生产零 UPDATE/零 MERGE 暂停、授权路径仅条件 DELETE 已核验。
+    (4) T028 lease 旧失败日志保留为历史（~/.local/share/rtk/tee/1789300034_go_test.log），本次已解释+修复+新批次，不追认关闭旧失败。
+    未执行：T022/T023；未关闭 003/004 T000-P；未推送/未合并。
 - [x] T021 实现前规划复核（静态一致性，不依赖任何实现与测试结果）
   - 依赖：无（仅依赖 spec/plan/research/data-model/contracts/quickstart/tasks 文档）。
     显式不依赖 T020——本任务在实现开始前即可关闭；关闭是本地实现准入条件之一（另一条件为 T000-L）。
