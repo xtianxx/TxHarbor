@@ -2607,3 +2607,282 @@ func TestDepositCommitUnknownOutcomeVerdicts(t *testing.T) {
 		}
 	})
 }
+
+// TestDepositRestartConfigComparison is T011 (US4): a restart whose
+// configuration differs from the durable row refuses before any write, a
+// blank whitelist refuses inside the constructor (no I/O, hence no upstream
+// read), env/upstream drift refuses, and restoring the original configuration
+// resumes from the durable progress with pre-existing observations
+// byte-identical. Startup asserts both-sides presence plus row-vs-latest
+// linkage; one-sided state is corruption, never repaired. The refusal error
+// returned here is what the serve path maps to a non-zero exit (exit mapping
+// itself is serve wiring, T018); this test locks the refusal + zero-damage
+// contract at the component level.
+func TestDepositRestartConfigComparison(t *testing.T) {
+	dsn := startIndexerPostgres(t)
+	pool := openIndexerPool(t, dsn)
+	defer pool.Close()
+	ctx := context.Background()
+
+	// seedRestart plants the durable progress (checkpoint next=15 + history
+	// seq1), canonical 10..20, upstream next=21, one matched transfer row at
+	// 15 and one orphan pre-existing observation at block 9 (no source row)
+	// used as the zero-change snapshot anchor.
+	seedRestart := func(t *testing.T, chainID int64) DepositConfig {
+		t.Helper()
+		cfg := depositITConfig(t, chainID, testContractA)
+		depositSeedCanonical(t, ctx, pool, chainID, 10, 20, true)
+		depositSeedUpstream(t, ctx, pool, chainID, 0, cfg.LogConfigHash, 21)
+		depositSeedCheckpoint(t, ctx, pool, chainID, 10, cfg.ConfigHash, 15)
+		depositSeedHistory(t, ctx, pool, chainID, 1, 10, cfg.ConfigHash)
+		depositSeedTransferRow(t, ctx, pool, chainID, 15, depositBlockHash(15), depositTxHash(15, 0), 0,
+			common.HexToAddress(testContractA), common.HexToAddress(testContractB), common.HexToAddress(depositWatchAddr), big.NewInt(1))
+		depositSeedObservation(t, ctx, pool, chainID, 9, depositBlockHash(9), depositTxHash(9, 0), 0, "1", 1)
+		return cfg
+	}
+	snapshotObservations := func(t *testing.T, chainID int64) string {
+		t.Helper()
+		rows, err := pool.Query(ctx, `SELECT t::text FROM deposit_observations t WHERE chain_id = $1 ORDER BY block_number, log_index`, chainID)
+		if err != nil {
+			t.Fatalf("snapshot observations: %v", err)
+		}
+		defer rows.Close()
+		var sb strings.Builder
+		for rows.Next() {
+			var s string
+			if err := rows.Scan(&s); err != nil {
+				t.Fatalf("scan observation snapshot: %v", err)
+			}
+			sb.WriteString(s + "\n")
+		}
+		if err := rows.Err(); err != nil {
+			t.Fatalf("snapshot observations: %v", err)
+		}
+		return sb.String()
+	}
+	// runLoopOnce runs ServeLoop until it returns (refusals return fast) and
+	// fails on timeout; cancellable loops must use depositRunLoop instead.
+	runLoopOnce := func(t *testing.T, sc *DepositScanner, lease *Lease) error {
+		t.Helper()
+		loopCtx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		done := make(chan error, 1)
+		go func() { done <- sc.ServeLoop(loopCtx, lease, nil) }()
+		select {
+		case err := <-done:
+			return err
+		case <-time.After(15 * time.Second):
+			t.Fatalf("ServeLoop did not return within 15s")
+			return nil
+		}
+	}
+	assertZeroDamage := func(t *testing.T, chainID int64, before string) {
+		t.Helper()
+		if _, _, next, ok := depositCheckpointState(t, ctx, pool, chainID); !ok || next != 15 {
+			t.Fatalf("checkpoint next = %d (ok=%v), want 15 unchanged", next, ok)
+		}
+		if got := snapshotObservations(t, chainID); got != before {
+			t.Fatalf("observations changed by a refused restart:\nbefore %q\nafter  %q", before, got)
+		}
+		if n := depositCountRows(t, ctx, pool, "deposit_config_history", chainID); n != 1 {
+			t.Fatalf("history rows = %d, want 1 unchanged", n)
+		}
+	}
+
+	t.Run("changed_asset_refuses", func(t *testing.T) {
+		const chainID = 60
+		cfg := seedRestart(t, chainID)
+		before := snapshotObservations(t, chainID)
+		cfg.Assets = []config.DepositEntry{{Address: testContractB, Effective: 10}}
+		cfg.ConfigHash = strings.Repeat("bb", 32)
+		sc := depositITScanner(t, pool, cfg)
+		err := runLoopOnce(t, sc, depositITLease(t, pool, chainID))
+		var mismatch *depositConfigMismatchError
+		if !errors.As(err, &mismatch) {
+			t.Fatalf("ServeLoop() = %v (%T), want *depositConfigMismatchError", err, err)
+		}
+		assertZeroDamage(t, chainID, before)
+	})
+
+	t.Run("changed_watch_address_refuses", func(t *testing.T) {
+		const chainID = 61
+		cfg := seedRestart(t, chainID)
+		before := snapshotObservations(t, chainID)
+		cfg.Watches = []config.DepositEntry{{Address: testContractB, Effective: 10}}
+		cfg.ConfigHash = strings.Repeat("bb", 32)
+		sc := depositITScanner(t, pool, cfg)
+		err := runLoopOnce(t, sc, depositITLease(t, pool, chainID))
+		var mismatch *depositConfigMismatchError
+		if !errors.As(err, &mismatch) {
+			t.Fatalf("ServeLoop() = %v (%T), want *depositConfigMismatchError", err, err)
+		}
+		assertZeroDamage(t, chainID, before)
+	})
+
+	t.Run("changed_start_block_refuses", func(t *testing.T) {
+		const chainID = 62
+		cfg := seedRestart(t, chainID)
+		before := snapshotObservations(t, chainID)
+		// Same hash, different start: proves the comparison object is the row
+		// (start_block, config_hash), not the hash alone.
+		cfg.StartBlock = 11
+		sc := depositITScanner(t, pool, cfg)
+		err := runLoopOnce(t, sc, depositITLease(t, pool, chainID))
+		var mismatch *depositConfigMismatchError
+		if !errors.As(err, &mismatch) {
+			t.Fatalf("ServeLoop() = %v (%T), want *depositConfigMismatchError", err, err)
+		}
+		assertZeroDamage(t, chainID, before)
+	})
+
+	t.Run("changed_effective_height_refuses", func(t *testing.T) {
+		const chainID = 63
+		cfg := seedRestart(t, chainID)
+		before := snapshotObservations(t, chainID)
+		cfg.Assets = []config.DepositEntry{{Address: testContractA, Effective: 12}}
+		cfg.ConfigHash = strings.Repeat("cc", 32)
+		sc := depositITScanner(t, pool, cfg)
+		err := runLoopOnce(t, sc, depositITLease(t, pool, chainID))
+		var mismatch *depositConfigMismatchError
+		if !errors.As(err, &mismatch) {
+			t.Fatalf("ServeLoop() = %v (%T), want *depositConfigMismatchError", err, err)
+		}
+		assertZeroDamage(t, chainID, before)
+	})
+
+	t.Run("blank_whitelists_refuse_without_reads", func(t *testing.T) {
+		const chainID = 64
+		cfg := depositITConfig(t, chainID, testContractA)
+		// The constructor is pure validation: it returns synchronously without
+		// issuing any query, so no upstream read is possible on this path.
+		blank := cfg
+		blank.Assets = nil
+		if _, err := NewDepositScanner(pool, blank); err == nil || !strings.Contains(err.Error(), "empty asset") {
+			t.Fatalf("blank assets err = %v, want empty-set refusal", err)
+		}
+		blank = cfg
+		blank.Watches = nil
+		if _, err := NewDepositScanner(pool, blank); err == nil || !strings.Contains(err.Error(), "empty watch") {
+			t.Fatalf("blank watches err = %v, want empty-set refusal", err)
+		}
+		blank = cfg
+		blank.LogContracts = nil
+		if _, err := NewDepositScanner(pool, blank); err == nil || !strings.Contains(err.Error(), "empty upstream") {
+			t.Fatalf("blank upstream whitelist err = %v, want empty-set refusal", err)
+		}
+		for _, table := range []string{"deposit_checkpoint", "deposit_config_history", "deposit_observations"} {
+			if n := depositCountRows(t, ctx, pool, table, chainID); n != 0 {
+				t.Fatalf("%s rows = %d, want 0 (refusal must precede any read or write)", table, n)
+			}
+		}
+	})
+
+	t.Run("upstream_drift_refuses", func(t *testing.T) {
+		const chainID = 65
+		cfg := depositITConfig(t, chainID, testContractA)
+		depositSeedCanonical(t, ctx, pool, chainID, 10, 20, true)
+		// Persisted identity disagrees with the env recomputation.
+		depositSeedUpstream(t, ctx, pool, chainID, 0, strings.Repeat("ff", 32), 21)
+		sc := depositITScanner(t, pool, cfg)
+		err := runLoopOnce(t, sc, depositITLease(t, pool, chainID))
+		var drift *upstreamDriftError
+		if !errors.As(err, &drift) {
+			t.Fatalf("ServeLoop() = %v (%T), want *upstreamDriftError", err, err)
+		}
+		if !strings.Contains(err.Error(), "upstream_drift") {
+			t.Fatalf("error %q does not name upstream_drift", err.Error())
+		}
+		if _, _, _, ok := depositCheckpointState(t, ctx, pool, chainID); ok {
+			t.Fatal("checkpoint row exists after an upstream_drift refusal")
+		}
+		if n := depositCountRows(t, ctx, pool, "deposit_observations", chainID); n != 0 {
+			t.Fatalf("observations = %d, want 0 after drift refusal", n)
+		}
+	})
+
+	t.Run("startup_integrity_one_sided_is_corrupt", func(t *testing.T) {
+		// Checkpoint without history.
+		cfgA := depositITConfig(t, 66, testContractA)
+		depositSeedCheckpoint(t, ctx, pool, cfgA.ChainID, 10, cfgA.ConfigHash, 15)
+		scA := depositITScanner(t, pool, cfgA)
+		if _, err := scA.readProgress(ctx, pool); !isDepositCorrupt(err) {
+			t.Fatalf("checkpoint-only readProgress = %v, want *depositCorruptStateError", err)
+		}
+		if err := runLoopOnce(t, scA, depositITLease(t, pool, cfgA.ChainID)); !isDepositCorrupt(err) {
+			t.Fatalf("checkpoint-only ServeLoop = %v, want *depositCorruptStateError", err)
+		}
+		// History without checkpoint.
+		cfgB := depositITConfig(t, 67, testContractA)
+		depositSeedHistory(t, ctx, pool, cfgB.ChainID, 1, 10, cfgB.ConfigHash)
+		scB := depositITScanner(t, pool, cfgB)
+		if _, err := scB.readProgress(ctx, pool); !isDepositCorrupt(err) {
+			t.Fatalf("history-only readProgress = %v, want *depositCorruptStateError", err)
+		}
+		// Checkpoint disagreeing with the latest history row.
+		const chainID int64 = 68
+		cfgC := depositITConfig(t, chainID, testContractA)
+		depositSeedCheckpoint(t, ctx, pool, chainID, 10, cfgC.ConfigHash, 15)
+		depositSeedHistory(t, ctx, pool, chainID, 1, 10, cfgC.ConfigHash)
+		depositSeedHistoryVersion(t, ctx, pool, chainID, 2, 1, 10, strings.Repeat("dd", 32), "req-2")
+		scC := depositITScanner(t, pool, cfgC)
+		if _, err := scC.readProgress(ctx, pool); !isDepositCorrupt(err) {
+			t.Fatalf("disagreeing readProgress = %v, want *depositCorruptStateError", err)
+		}
+	})
+
+	t.Run("restore_original_config_resumes", func(t *testing.T) {
+		const chainID = 69
+		cfg := seedRestart(t, chainID)
+		before := snapshotObservations(t, chainID)
+		// A changed configuration refuses first (zero damage).
+		bad := cfg
+		bad.ConfigHash = strings.Repeat("bb", 32)
+		lease := depositITLease(t, pool, chainID)
+		if err := runLoopOnce(t, depositITScanner(t, pool, bad), lease); !isDepositMismatch(err) {
+			t.Fatalf("changed config ServeLoop = %v, want *depositConfigMismatchError", err)
+		}
+		assertZeroDamage(t, chainID, before)
+		// Restoring the original configuration passes the exact guard and
+		// continues from the durable next=15 to 21.
+		cfg.PollInterval = 20 * time.Millisecond
+		cfg.RetryInitial = 20 * time.Millisecond
+		cfg.RetryMax = 100 * time.Millisecond
+		sc := depositITScanner(t, pool, cfg)
+		stop := depositRunLoop(t, ctx, sc, lease)
+		waitUntil(t, time.Now().Add(10*time.Second), "restored next_block 21", func() bool {
+			_, _, next, ok := depositCheckpointState(t, ctx, pool, chainID)
+			return ok && next == 21
+		})
+		time.Sleep(100 * time.Millisecond)
+		stop()
+		start, hash, next, ok := depositCheckpointState(t, ctx, pool, chainID)
+		if !ok || start != 10 || hash != cfg.ConfigHash || next != 21 {
+			t.Fatalf("checkpoint = (%d,%s,%d,%v), want (10,%s,21,true)", start, hash, next, ok, cfg.ConfigHash)
+		}
+		after := snapshotObservations(t, chainID)
+		if !strings.Contains(after, before) || after == before {
+			t.Fatalf("observations must keep the pre-existing row and add exactly the new unit:\nbefore %q\nafter  %q", before, after)
+		}
+		var (
+			amount  string
+			version int64
+		)
+		if err := pool.QueryRow(ctx, `SELECT amount::text, version_seq FROM deposit_observations
+WHERE chain_id = $1 AND block_number = 15`, chainID).Scan(&amount, &version); err != nil {
+			t.Fatalf("read new observation: %v", err)
+		}
+		if amount != "1" || version != 1 {
+			t.Fatalf("new observation = amount %s version %d, want 1/1", amount, version)
+		}
+	})
+}
+
+func isDepositCorrupt(err error) bool {
+	var corrupt *depositCorruptStateError
+	return errors.As(err, &corrupt)
+}
+
+func isDepositMismatch(err error) bool {
+	var mismatch *depositConfigMismatchError
+	return errors.As(err, &mismatch)
+}

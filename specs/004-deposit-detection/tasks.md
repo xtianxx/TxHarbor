@@ -169,7 +169,7 @@ T000-L / T000-P 见上（本阶段即二者建档）。**Checkpoint**: 门禁状
 
 **Independent Test**: 改配置后重启；上游滞后追赶；所需历史超出上游范围时的停止与修复恢复
 
-- [ ] T011 [US4] 重启配置比较 + 空白名单拒绝 + 上游漂移拒绝测试（`internal/indexer/deposit_integration_test.go`，按序执行）
+- [x] T011 [US4] 重启配置比较 + 空白名单拒绝 + 上游漂移拒绝测试（`internal/indexer/deposit_integration_test.go`，按序执行）
   - 需求：FR-06/I5。验收场景：D5（SC-07）。依赖：T002，T006。
   - 完成条件：改资产/地址/高度/起点重启即拒绝退出（码非零），观察与进度零破坏；
     比较对象是行内 `start_block` + `config_hash`；空白名单拒绝且绝无上游外读；
@@ -177,6 +177,7 @@ T000-L / T000-P 见上（本阶段即二者建档）。**Checkpoint**: 门禁状
     精确守卫通过并从原进度继续，观察零变化（真库断言）；
     启动前断言两侧同有同无 + 行内与最新 history 行关联一致，单侧缺失即损坏态报错（禁补建/改回/授权修复）；
     本条仅覆盖意外漂移改回路径；有意授权转换见 T025–T028，两条路径不得混同。
+  - 状态（2026-09-13）：CLOSED。证据：TestDepositRestartConfigComparison真库8子项全过（资产/监控地址/起点/生效高度四变体各拒*depositConfigMismatchError且检查点next=15、观察快照、history=1零破坏；起点单变体证比较对象为行内start+hash非hash alone；三空白集构造器同步拒绝零表行；上游ff持久身份拒upstream_drift且无检查点行；单侧checkpoint-only/history-only/行内与最新seq2dd分歧三态皆*depositCorruptStateError，loop层复验checkpoint-only；改配置拒后改回原配置精确守卫通过15→21，新观察amount=1/version=1，孤儿行字节一致）。回归：go build净+全仓单元283过。未验证：T012+、完整验收。
 - [ ] T012 [US4] 缺口分类与恢复：暂时等待自动续 + 结构报错停止 + 修复重验后原缺口幂等恢复（`internal/indexer/deposit_integration_test.go`，按序执行）
   - 需求：FR-07/I3/I6，research R5。验收场景：D6/D7（SC-06 部分、SC-08）。依赖：T006。
   - 完成条件：`p >= N_u`（范围内）→ 等待零推进，补齐后自动从缺口继续；
