@@ -193,7 +193,7 @@ T000-L / T000-P 见上（本阶段即二者建档）。**Checkpoint**: 门禁状
      证明五要素（高度水位、链身份、上游起点、配置指纹+白名单、三暂停行、canonical、lease）缺一即停推。
      真库断言。
   - 状态（2026-09-13）：CLOSED。证据：TestDepositCoverageProofElements真库4子项全过（空区间loop推进21零观察 vs N_u<=a停留无行对照；新资产生效12在单元内停structural/asset_not_indexed vs 生效25超b本单元照常提交21后fail-fast停，同错零检查点；deposit_pause行loop停*streamPauseError零写；纯外链覆盖本链等待零状态）。配置不一致引用T011四变体，提交期canonical翻转引用TestDepositCommitCanonicalRevertAborts，暂停三流read层/水位/起点引用既有测试，不重复。未验证：T025+、完整验收。
-- [ ] T025 [US4] 授权转换实现：身份更新/位置回放/暂停处置/审计原子提交 + 前置重验（`internal/indexer/depositauth.go`，与 T024 同文件按序扩展）
+- [x] T025 [US4] 授权转换实现：身份更新/位置回放/暂停处置/审计原子提交 + 前置重验（`internal/indexer/depositauth.go`，与 T024 同文件按序扩展）
   - 需求：FR-06/FR-09/FR-12/I2，research R11，data-model 授权协议。验收场景：D7/D11。依赖：T024，T006。
   - 完成条件：同一 lease 锁下重验（身份仍旧 + 覆盖重证明 + canonical + 暂停处置条件），任一失败全回滚；
     history 行以 version_seq 为身份（持锁取 max+1），审计字段（request_id、expected_old_seq、操作者/时间/旧新哈希/位置变化/原因）齐全，缺任一即回滚；
@@ -206,6 +206,7 @@ T000-L / T000-P 见上（本阶段即二者建档）。**Checkpoint**: 门禁状
     请求幂等按 request_id 先查 history：同 ID 同参返回已记录结果（即使已进入更晚版本），同 ID 异参明确拒绝，
     异 ID 即使同参亦独立校验；expected_old_seq 等于当前最新 seq 否则过期拒绝；过期拒绝报告预期与当前版本；
     提交成功即生效；切换前已提交有效；跳过 owner/token 检查但操作员身份入审计；空授权（H′==H）拒绝。真库断言。
+  - 状态（2026-09-13）：CLOSED。证据：depositauth.go受控SQL脚本实现（BEGIN→过期占位lease行→FOR UPDATE锁→锁内重验→原子提交；步骤1完整性分流+request_id四则只读返回，H'重算/replay min/过期/空变更/上游绑定/缺口可行/暂停依据，步骤3锁内重验，步骤4 history+checkpoint精确守卫+条件DELETE+审计同事务，未知提交以DB为准，并发request_id冲突回滚重查）。单测4过（R3向量/快照解析/回放min/缺口解析）；集成TestDepositAuth 3顶层+9子项全过（lane 3轮，orchestrator独立重跑14过）：H1→H2(v2/replay12/retained)+旧依据提交版本隔离拒零写+v3后跨版本回读v2、同ID异参拒、异ID过期/空变更独立裁决、显式目标释放+审计、needs_006无目标保留/有目标拒、可处置无目标拒、目标替换拒、无源版本拒、双侧单侧损坏态，每拒皆快照零变化。偏差（待确认）：checkpoint UPDATE同步 SET start_block=S_new，spec步骤4文本仅列config_hash/next_block；不跟随则Table2两侧一致 invariant 破坏（T011锁定的readProgress语义），改动最小可 revert。回放缺口起点候选与收缩边界归T026。未验证：T026+、完整验收。
 - [ ] T026 [US4] 历史回放与收缩边界实现：最小值规则/收缩向前/混合双规则/history 快照读写（`internal/indexer/depositscanner.go`/`depositcommit.go` 按序扩展 + `depositauth.go` 回放计算）
   - 需求：FR-05/FR-06/FR-07/I1/I3，research R5/R11。验收场景：D6/D7/D11。依赖：T025。
   - 完成条件：组合有效起点 max 规则 + replay min 规则 + 上游起点仅检查（禁抬高裁剪）；
