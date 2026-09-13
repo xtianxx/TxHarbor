@@ -337,6 +337,13 @@ func AuthorizeDepositConfig(ctx context.Context, pool *pgxpool.Pool, req Deposit
 	if err != nil {
 		return DepositAuthResult{}, err
 	}
+	// T026 gap fold (data-model §回放位置计算 "未解决适用缺口起点"): a
+	// disposed gap was never consumed, so the replay position must include
+	// its start or the range would be skipped. basis.lo already covers
+	// [min(replay,from), a-1], so the under-lock re-proof stays valid.
+	if basis.gapFrom != nil && *basis.gapFrom < replay {
+		replay = *basis.gapFrom
+	}
 
 	// Step 2: BEGIN a short transaction and take the chain-wide coordination
 	// lock. Owner/token checks are skipped: the executor is the DB operator,
@@ -548,13 +555,14 @@ type authAffected struct {
 	whitelist map[string]struct{}
 }
 
-// depositAuthReplayFrom computes the replay position (data-model §回放位置计算,
-// T025 scope): min over the current next and the affected-combination
-// effective starts. A combination (asset × watch) is affected when it is new
-// (absent from the old snapshots) or when the global start was lowered, in
-// which case every new combination is in scope. Pure shrink naturally yields
-// the current next via min(). Gap-start candidates and shrink-boundary rules
-// are T026's extension point.
+// depositAuthReplayFrom computes the replay position (data-model §回放位置计算):
+// min over the current next and the affected-combination effective starts. A
+// combination (asset × watch) is affected when it is new (absent from the old
+// snapshots) or when the global start was lowered, in which case every new
+// combination is in scope. Pure shrink naturally yields the current next via
+// min(). A resolved upstream-gap start folds in afterwards via
+// authPauseBasis.gapFrom (T026); shrink-boundary no-retroactivity is a test
+// lock (observations are never rewritten or deleted).
 func depositAuthReplayFrom(newStart, oldStart uint64, oldAssets, oldWatches,
 	newAssets, newWatches []authSnapshotEntry, a uint64, upstreamContracts []string) (uint64, authAffected) {
 	old := make(map[string]struct{}, len(oldAssets)*len(oldWatches))
@@ -788,11 +796,15 @@ type authPauseRow struct {
 }
 
 // authPauseBasis is the step-1 pause decision: dispose (needs the explicit
-// matching target) or retain, plus the re-proof low bound.
+// matching target) or retain, plus the re-proof low bound. gapFrom carries a
+// resolved upstream-gap range start that folds into replay_from (T026;
+// data-model §回放位置计算 "未解决适用缺口起点": a disposed gap was never
+// consumed, so replay must include it or the range would be skipped).
 type authPauseBasis struct {
 	pause   *authPauseRow
 	dispose bool
 	lo      uint64
+	gapFrom *uint64
 }
 
 // parseGapRange extracts the "gap=<from>-<to>" range from a pause detail line
@@ -880,6 +892,8 @@ func decideAuthPause(ctx context.Context, q depositQuerier, req DepositAuthReque
 			ErrAuthRejected, id, err)
 	}
 	// In scope and resolved: disposal needs the explicit matching target.
+	// The resolved gap start folds into the replay position via gapFrom
+	// (applied by the caller after this decision).
 	if req.ExpectedPauseID == nil {
 		return nil, fmt.Errorf("deposit auth: %w: pause %d (%s) must be disposed; re-authorize with a new request_id and the explicit expected_pause target",
 			ErrAuthRejected, id, kind)
@@ -888,7 +902,14 @@ func decideAuthPause(ctx context.Context, q depositQuerier, req DepositAuthReque
 		return nil, fmt.Errorf("deposit auth: %w: pause target (%d,%d) replaced live (%d,%d); refusing",
 			ErrAuthRejected, *req.ExpectedPauseID, *req.ExpectedPauseRevision, id, rev)
 	}
-	return &authPauseBasis{pause: pause, dispose: true, lo: lo}, nil
+	basis := &authPauseBasis{pause: pause, dispose: true, lo: lo}
+	if kind == "upstream_gap" {
+		if from, _, ok := parseGapRange(detail); ok {
+			gf := from
+			basis.gapFrom = &gf
+		}
+	}
+	return basis, nil
 }
 
 // authReproveRange re-proves [lo, hi] (empty when lo > hi): every height

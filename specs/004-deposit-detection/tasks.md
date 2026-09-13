@@ -207,11 +207,12 @@ T000-L / T000-P 见上（本阶段即二者建档）。**Checkpoint**: 门禁状
     异 ID 即使同参亦独立校验；expected_old_seq 等于当前最新 seq 否则过期拒绝；过期拒绝报告预期与当前版本；
     提交成功即生效；切换前已提交有效；跳过 owner/token 检查但操作员身份入审计；空授权（H′==H）拒绝。真库断言。
   - 状态（2026-09-13）：CLOSED。证据：depositauth.go受控SQL脚本实现（BEGIN→过期占位lease行→FOR UPDATE锁→锁内重验→原子提交；步骤1完整性分流+request_id四则只读返回，H'重算/replay min/过期/空变更/上游绑定/缺口可行/暂停依据，步骤3锁内重验，步骤4 history+checkpoint精确守卫+条件DELETE+审计同事务，未知提交以DB为准，并发request_id冲突回滚重查）。单测4过（R3向量/快照解析/回放min/缺口解析）；集成TestDepositAuth 3顶层+9子项全过（lane 3轮，orchestrator独立重跑14过）：H1→H2(v2/replay12/retained)+旧依据提交版本隔离拒零写+v3后跨版本回读v2、同ID异参拒、异ID过期/空变更独立裁决、显式目标释放+审计、needs_006无目标保留/有目标拒、可处置无目标拒、目标替换拒、无源版本拒、双侧单侧损坏态，每拒皆快照零变化。偏差（待确认）：checkpoint UPDATE同步 SET start_block=S_new，spec步骤4文本仅列config_hash/next_block；不跟随则Table2两侧一致 invariant 破坏（T011锁定的readProgress语义），改动最小可 revert。回放缺口起点候选与收缩边界归T026。未验证：T026+、完整验收。
-- [ ] T026 [US4] 历史回放与收缩边界实现：最小值规则/收缩向前/混合双规则/history 快照读写（`internal/indexer/depositscanner.go`/`depositcommit.go` 按序扩展 + `depositauth.go` 回放计算）
+- [x] T026 [US4] 历史回放与收缩边界实现：最小值规则/收缩向前/混合双规则/history 快照读写（`internal/indexer/depositscanner.go`/`depositcommit.go` 按序扩展 + `depositauth.go` 回放计算）
   - 需求：FR-05/FR-06/FR-07/I1/I3，research R5/R11。验收场景：D6/D7/D11。依赖：T025。
   - 完成条件：组合有效起点 max 规则 + replay min 规则 + 上游起点仅检查（禁抬高裁剪）；
     纯收缩 replay_from = 当前 next；收缩边界 = 切换前 next，禁追溯；回放幂等不新增不重置；
     history 快照读写；混合增减双规则并存。真库断言。
+  - 状态（2026-09-13）：CLOSED。证据：实现增量仅缺口起点折入（basis.gapFrom+主流程min；消费侧零改动，复用既有版本隔离/收敛路径）。TestDepositAuthReplayShrink真库5子项全过（推迟高度replay=15位置不动、旧观察(5,1)保留；起点提高replay=15；加B再删B三版本链replay=12、B观察(7,2)保留；resolved gap=10-14+新资产eff18经显式目标释放replay=10确证fold、审计release v2；新起点5<S_u=20判structural拒零变化）。TestDepositReplayConsumerConverges真库过（回放[10,20]观察仍2且版本皆1、history仍2行，后续覆盖观察3版本2、位置26）。回归：全仓单元287过。嵌套/二次转换归T028。未验证：T027+、完整验收。
 - [ ] T027 [US4] D11 授权子集测试（1）：失败回滚/重复/过期/未知/旧在途隔离/越权解除（`internal/indexer/deposit_integration_test.go`，按序执行；本条按固定批次执行：每批次恰好 5 次并记录全部结果，任一次失败则该批次不通过，不追加运行凑成功；修复或明确诊断后的重跑另记批次并保留原证据）
   - 需求：FR-06/FR-09/FR-12。验收场景：D11。依赖：T025。
   - 完成条件：前置任一失败全回滚原状；旧版本在途提交 0 行；请求四则断言——同 ID 同参跨版本重试返原结果不重执行、

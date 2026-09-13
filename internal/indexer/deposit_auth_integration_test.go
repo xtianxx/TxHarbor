@@ -617,3 +617,162 @@ func TestDepositAuthPauseDispositions(t *testing.T) {
 		depositAuthAssertUnchanged(t, ctx, pool, chainID, before)
 	})
 }
+
+// --- T026 replay, shrink and the gap fold ------------------------------------
+
+// TestDepositAuthReplayShrink: pure shrink replays from the current position
+// (no backward move, history preserved byte-identical), a deleted asset keeps
+// its observations with their original version, a resolved upstream gap folds
+// its start into replay_from, and a replay below the upstream start refuses
+// instead of trimming.
+func TestDepositAuthReplayShrink(t *testing.T) {
+	dsn := startIndexerPostgres(t)
+	pool := openIndexerPool(t, dsn)
+	defer pool.Close()
+	ctx := context.Background()
+
+	readObservation := func(t *testing.T, chainID int64, block uint64) (amount string, version int64) {
+		t.Helper()
+		if err := pool.QueryRow(ctx, `SELECT amount::text, version_seq FROM deposit_observations
+WHERE chain_id = $1 AND block_number = $2`, chainID, int64(block)).Scan(&amount, &version); err != nil {
+			t.Fatalf("read observation at %d: %v", block, err)
+		}
+		return amount, version
+	}
+
+	t.Run("postpone_height_replays_at_position", func(t *testing.T) {
+		const chainID = 120
+		_, _, watches := depositAuthSeedChain(t, ctx, pool, chainID, 15)
+		depositSeedObservation(t, ctx, pool, chainID, 12, depositBlockHash(12), depositTxHash(12, 0), 0, "5", 1)
+		// Postpone the asset effective height 10->15: pure shrink, replay = a.
+		postponed := depositAuthSnapshot(depositAuthLine(testContractA, 15))
+		h2 := depositAuthHash(t, 10, postponed, watches)
+		req := depositAuthBaseReq(t, chainID, "auth-postpone", 1)
+		req.NewConfigHash, req.NewStartBlock, req.NewAssets, req.NewWatches = h2, 10, postponed, watches
+		res, err := AuthorizeDepositConfig(ctx, pool, req)
+		if err != nil {
+			t.Fatalf("authorize shrink: %v", err)
+		}
+		if want := (DepositAuthResult{VersionSeq: 2, ReplayFrom: 15, Pause: DepositPauseRetained}); res != want {
+			t.Fatalf("result = %+v, want %+v", res, want)
+		}
+		if start, hash, next, ok := depositCheckpointState(t, ctx, pool, chainID); !ok || start != 10 || hash != h2 || next != 15 {
+			t.Fatalf("checkpoint = (%d,%s,%d,%v), want (10,%s,15,true): shrink must not move the position", start, hash, next, ok, h2)
+		}
+		if got := depositAuthReadHistory(t, ctx, pool, chainID, 2); got.replay != 15 || got.assets != postponed || got.prevSeq != "1" {
+			t.Fatalf("history v2 = %+v, want replay 15 with the postponed snapshot and prev 1", got)
+		}
+		if amount, version := readObservation(t, chainID, 12); amount != "5" || version != 1 {
+			t.Fatalf("old observation = (%s,%d), want (5,1) retained with its version", amount, version)
+		}
+	})
+
+	t.Run("raise_start_replays_at_position", func(t *testing.T) {
+		const chainID = 121
+		_, assets, watches := depositAuthSeedChain(t, ctx, pool, chainID, 15)
+		h2 := depositAuthHash(t, 12, assets, watches)
+		req := depositAuthBaseReq(t, chainID, "auth-raise-start", 1)
+		req.NewConfigHash, req.NewStartBlock, req.NewAssets, req.NewWatches = h2, 12, assets, watches
+		res, err := AuthorizeDepositConfig(ctx, pool, req)
+		if err != nil {
+			t.Fatalf("authorize raise-start: %v", err)
+		}
+		if want := (DepositAuthResult{VersionSeq: 2, ReplayFrom: 15, Pause: DepositPauseRetained}); res != want {
+			t.Fatalf("result = %+v, want %+v", res, want)
+		}
+		if start, hash, next, ok := depositCheckpointState(t, ctx, pool, chainID); !ok || start != 12 || hash != h2 || next != 15 {
+			t.Fatalf("checkpoint = (%d,%s,%d,%v), want (12,%s,15,true)", start, hash, next, ok, h2)
+		}
+	})
+
+	t.Run("delete_after_add_keeps_history", func(t *testing.T) {
+		const chainID = 122
+		_, _, watches := depositAuthSeedChain(t, ctx, pool, chainID, 15)
+		withB := depositAuthSnapshot(depositAuthLine(testContractA, 10), depositAuthLine(testContractB, 12))
+		h1b := depositAuthHash(t, 10, withB, watches)
+		add := depositAuthBaseReq(t, chainID, "auth-add-b", 1)
+		add.NewConfigHash, add.NewStartBlock, add.NewAssets, add.NewWatches = h1b, 10, withB, watches
+		if res, err := AuthorizeDepositConfig(ctx, pool, add); err != nil {
+			t.Fatalf("authorize add: %v", err)
+		} else if res.ReplayFrom != 12 || res.VersionSeq != 2 {
+			t.Fatalf("add result = %+v, want v2/replay 12", res)
+		}
+		depositSeedObservation(t, ctx, pool, chainID, 12, depositBlockHash(12), depositTxHash(12, 0), 0, "7", 2)
+		// Delete B again: every new combination already existed, replay = a.
+		onlyA := depositAuthLine(testContractA, 10)
+		h2 := depositAuthHash(t, 10, onlyA, watches)
+		del := depositAuthBaseReq(t, chainID, "auth-del-b", 2)
+		del.NewConfigHash, del.NewStartBlock, del.NewAssets, del.NewWatches = h2, 10, onlyA, watches
+		res, err := AuthorizeDepositConfig(ctx, pool, del)
+		if err != nil {
+			t.Fatalf("authorize delete: %v", err)
+		}
+		if want := (DepositAuthResult{VersionSeq: 3, ReplayFrom: 12, Pause: DepositPauseRetained}); res != want {
+			t.Fatalf("result = %+v, want %+v", res, want)
+		}
+		if _, hash, next, _ := depositCheckpointState(t, ctx, pool, chainID); hash != h2 || next != 12 {
+			t.Fatalf("checkpoint = (%s,%d), want (%s,12)", hash, next, h2)
+		}
+		if n := depositCountRows(t, ctx, pool, "deposit_config_history", chainID); n != 3 {
+			t.Fatalf("history rows = %d, want 3 (shrink preserves history)", n)
+		}
+		if amount, version := readObservation(t, chainID, 12); amount != "7" || version != 2 {
+			t.Fatalf("deleted-asset observation = (%s,%d), want (7,2) preserved", amount, version)
+		}
+	})
+
+	t.Run("resolved_gap_folds_into_replay", func(t *testing.T) {
+		const chainID = 123
+		h1, _, watches := depositAuthSeedChain(t, ctx, pool, chainID, 15)
+		depositSeedCanonical(t, ctx, pool, chainID, 15, 20, true)
+		if _, err := pool.Exec(ctx, `UPDATE log_checkpoint SET next_block = 21 WHERE chain_id = $1`, chainID); err != nil {
+			t.Fatalf("extend upstream watermark: %v", err)
+		}
+		pauseID, pauseRev := depositAuthSeedPause(t, ctx, pool, chainID, "upstream_gap",
+			"deposit upstream gap: class=structural gap=10-14 cause=asset_not_indexed config="+h1, 10)
+		// New asset effective 18: combos alone give replay 15, but the
+		// resolved gap [10,14] folds replay back to 10.
+		withB := depositAuthSnapshot(depositAuthLine(testContractA, 10), depositAuthLine(testContractB, 18))
+		h2 := depositAuthHash(t, 10, withB, watches)
+		req := depositAuthBaseReq(t, chainID, "auth-gap-fold", 1)
+		req.NewConfigHash, req.NewStartBlock, req.NewAssets, req.NewWatches = h2, 10, withB, watches
+		req.ExpectedPauseID, req.ExpectedPauseRevision = &pauseID, &pauseRev
+		res, err := AuthorizeDepositConfig(ctx, pool, req)
+		if err != nil {
+			t.Fatalf("authorize gap fold: %v", err)
+		}
+		if want := (DepositAuthResult{VersionSeq: 2, ReplayFrom: 10, Pause: DepositPauseReleased}); res != want {
+			t.Fatalf("result = %+v, want %+v", res, want)
+		}
+		if _, hash, next, _ := depositCheckpointState(t, ctx, pool, chainID); hash != h2 || next != 10 {
+			t.Fatalf("checkpoint = (%s,%d), want (%s,10): the gap start must fold into replay", hash, next, h2)
+		}
+		if got := depositAuthReadHistory(t, ctx, pool, chainID, 2); got.replay != 10 {
+			t.Fatalf("history v2 replay = %d, want 10", got.replay)
+		}
+		if _, ok := depositAuthReadPause(t, ctx, pool, chainID); ok {
+			t.Fatal("pause row still exists after the release")
+		}
+		audit := depositAuthReadAudit(t, ctx, pool, chainID, pauseID, pauseRev)
+		if audit.action != "release" || audit.versionSeq != 2 {
+			t.Fatalf("audit = %+v, want release at version 2", audit)
+		}
+	})
+
+	t.Run("replay_below_upstream_start_refused", func(t *testing.T) {
+		const chainID = 124
+		_, assets, watches := depositAuthSeedChain(t, ctx, pool, chainID, 15)
+		if _, err := pool.Exec(ctx, `UPDATE log_checkpoint SET start_block = 20, next_block = 25 WHERE chain_id = $1`, chainID); err != nil {
+			t.Fatalf("raise upstream start: %v", err)
+		}
+		h2 := depositAuthHash(t, 5, assets, watches)
+		req := depositAuthBaseReq(t, chainID, "auth-below-start", 1)
+		req.NewConfigHash, req.NewStartBlock, req.NewAssets, req.NewWatches = h2, 5, assets, watches
+		before := depositAuthStateOf(t, ctx, pool, chainID)
+		_, err := AuthorizeDepositConfig(ctx, pool, req)
+		if !errors.Is(err, ErrAuthRejected) || !strings.Contains(err.Error(), "structural gap") {
+			t.Fatalf("below-start error = %v, want ErrAuthRejected naming the structural gap (never trim to fit)", err)
+		}
+		depositAuthAssertUnchanged(t, ctx, pool, chainID, before)
+	})
+}

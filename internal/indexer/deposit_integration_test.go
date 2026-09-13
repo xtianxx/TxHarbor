@@ -3173,3 +3173,117 @@ INSERT INTO deposit_pause (chain_id, height, kind, detail) VALUES ($1, 10, 'upst
 		stop()
 	})
 }
+
+// TestDepositReplayConsumerConverges is T026 (US4) consumer side: after an
+// authorization rewinds the position, the loop replays the range without
+// adding or resetting observations (original version references kept) and
+// then continues past the old position.
+func TestDepositReplayConsumerConverges(t *testing.T) {
+	dsn := startIndexerPostgres(t)
+	pool := openIndexerPool(t, dsn)
+	defer pool.Close()
+	ctx := context.Background()
+
+	const chainID = 130
+	cfg1 := depositITConfig(t, chainID, testContractA, testContractB)
+	cfg1.PollInterval = 20 * time.Millisecond
+	cfg1.RetryInitial = 20 * time.Millisecond
+	cfg1.RetryMax = 100 * time.Millisecond
+	depositSeedCanonical(t, ctx, pool, chainID, 10, 20, true)
+	depositSeedUpstream(t, ctx, pool, chainID, 0, cfg1.LogConfigHash, 21)
+	depositSeedTransferRow(t, ctx, pool, chainID, 12, depositBlockHash(12), depositTxHash(12, 0), 0,
+		common.HexToAddress(testContractA), common.HexToAddress(testContractB), common.HexToAddress(depositWatchAddr), big.NewInt(1))
+	depositSeedTransferRow(t, ctx, pool, chainID, 15, depositBlockHash(15), depositTxHash(15, 0), 0,
+		common.HexToAddress(testContractA), common.HexToAddress(testContractB), common.HexToAddress(depositWatchAddr), big.NewInt(2))
+
+	lease := depositITLease(t, pool, chainID)
+	stop1 := depositRunLoop(t, ctx, depositITScanner(t, pool, cfg1), lease)
+	waitUntil(t, time.Now().Add(10*time.Second), "pre-auth next_block 21", func() bool {
+		_, _, next, ok := depositCheckpointState(t, ctx, pool, chainID)
+		return ok && next == 21
+	})
+	time.Sleep(100 * time.Millisecond)
+	stop1()
+	if n := depositCountRows(t, ctx, pool, "deposit_observations", chainID); n != 2 {
+		t.Fatalf("observations = %d, want 2 before the authorization", n)
+	}
+
+	// Authorize H1->H2 (add asset B effective 10): replay rewinds 21->10.
+	watches := depositAuthLine(depositWatchAddr, 10)
+	h2Assets := depositAuthSnapshot(depositAuthLine(testContractA, 10), depositAuthLine(testContractB, 10))
+	h2 := depositAuthHash(t, 10, h2Assets, watches)
+	req := depositAuthBaseReq(t, chainID, "replay-auth-1", 1)
+	req.NewConfigHash, req.NewStartBlock, req.NewAssets, req.NewWatches = h2, 10, h2Assets, watches
+	res, err := AuthorizeDepositConfig(ctx, pool, req)
+	if err != nil {
+		t.Fatalf("authorize H2: %v", err)
+	}
+	if want := (DepositAuthResult{VersionSeq: 2, ReplayFrom: 10, Pause: DepositPauseRetained}); res != want {
+		t.Fatalf("result = %+v, want %+v", res, want)
+	}
+
+	// Replay under H2: the two identities converge with version_seq=1 kept,
+	// the position returns to 21 with no new rows.
+	cfg2 := cfg1
+	cfg2.Assets = append(append([]config.DepositEntry(nil), cfg1.Assets...),
+		config.DepositEntry{Address: testContractB, Effective: 10})
+	cfg2.ConfigHash = h2
+	stop2 := depositRunLoop(t, ctx, depositITScanner(t, pool, cfg2), lease)
+	waitUntil(t, time.Now().Add(10*time.Second), "replay next_block 21", func() bool {
+		_, _, next, ok := depositCheckpointState(t, ctx, pool, chainID)
+		return ok && next == 21
+	})
+	time.Sleep(100 * time.Millisecond)
+	stop2()
+	if n := depositCountRows(t, ctx, pool, "deposit_observations", chainID); n != 2 {
+		t.Fatalf("observations = %d after replay, want 2 (replay adds nothing, resets nothing)", n)
+	}
+	for _, tc := range []struct {
+		block         uint64
+		amount        string
+		version       int64
+	}{
+		{12, "1", 1},
+		{15, "2", 1},
+	} {
+		var amount string
+		var version int64
+		if err := pool.QueryRow(ctx, `SELECT amount::text, version_seq FROM deposit_observations
+WHERE chain_id = $1 AND block_number = $2`, chainID, int64(tc.block)).Scan(&amount, &version); err != nil {
+			t.Fatalf("read replayed observation at %d: %v", tc.block, err)
+		}
+		if amount != tc.amount || version != tc.version {
+			t.Fatalf("replayed observation at %d = (%s,%d), want (%s,%d)", tc.block, amount, version, tc.amount, tc.version)
+		}
+	}
+	if n := depositCountRows(t, ctx, pool, "deposit_config_history", chainID); n != 2 {
+		t.Fatalf("history rows = %d, want 2 (replay adds no versions)", n)
+	}
+
+	// Past the old position: new coverage generates under the current version.
+	depositSeedCanonical(t, ctx, pool, chainID, 21, 25, true)
+	if _, err := pool.Exec(ctx, `UPDATE log_checkpoint SET next_block = 26 WHERE chain_id = $1`, chainID); err != nil {
+		t.Fatalf("extend upstream watermark: %v", err)
+	}
+	depositSeedTransferRow(t, ctx, pool, chainID, 22, depositBlockHash(22), depositTxHash(22, 0), 0,
+		common.HexToAddress(testContractA), common.HexToAddress(testContractB), common.HexToAddress(depositWatchAddr), big.NewInt(3))
+	stop3 := depositRunLoop(t, ctx, depositITScanner(t, pool, cfg2), lease)
+	waitUntil(t, time.Now().Add(10*time.Second), "post-replay next_block 26", func() bool {
+		_, _, next, ok := depositCheckpointState(t, ctx, pool, chainID)
+		return ok && next == 26
+	})
+	time.Sleep(100 * time.Millisecond)
+	stop3()
+	if n := depositCountRows(t, ctx, pool, "deposit_observations", chainID); n != 3 {
+		t.Fatalf("observations = %d, want 3 after continuing", n)
+	}
+	var amount string
+	var version int64
+	if err := pool.QueryRow(ctx, `SELECT amount::text, version_seq FROM deposit_observations
+WHERE chain_id = $1 AND block_number = 22`, chainID).Scan(&amount, &version); err != nil {
+		t.Fatalf("read new observation: %v", err)
+	}
+	if amount != "3" || version != 2 {
+		t.Fatalf("new observation = (%s,%d), want (3,2) under the current version", amount, version)
+	}
+}
