@@ -510,6 +510,22 @@ func depositITLease(t *testing.T, pool *pgxpool.Pool, chainID int64) *Lease {
 	l := newTestLease(t, pool, chainID, fmt.Sprintf("deposit-it-%d", chainID), time.Minute, 10*time.Second)
 	won, token, err := l.Acquire(context.Background())
 	if err != nil || !won {
+		// Diagnostic only: read the coordination row back with the DB clock so
+		// a lost takeover (for example a backward host clock step) is
+		// explainable from the failure output; the success path is unchanged.
+		var (
+			owner   string
+			expires time.Time
+			dbNow   time.Time
+		)
+		if qerr := pool.QueryRow(context.Background(),
+			`SELECT owner_id, expires_at, now() FROM indexer_lease WHERE chain_id = $1`, chainID).
+			Scan(&owner, &expires, &dbNow); qerr != nil {
+			t.Logf("lease read-back failed: %v", qerr)
+		} else {
+			t.Logf("lease read-back: owner=%q expires_at=%s now=%s expired=%v",
+				owner, expires.Format(time.RFC3339Nano), dbNow.Format(time.RFC3339Nano), expires.Before(dbNow))
+		}
 		t.Fatalf("acquire deposit test lease: won=%v token=%d err=%v", won, token, err)
 	}
 	return l
@@ -2136,6 +2152,12 @@ const (
 	// depositFaultCommit is the COMMIT statement itself (the reply-lost and
 	// never-reached cases).
 	depositFaultCommit = "commit"
+	// depositFaultPauseAudit is the pause audit INSERT shared by the manual
+	// release (insertReleasePauseAuditSQL) and the authorization
+	// (insertAuthPauseAuditSQL) paths: failing it must roll the whole pause
+	// transaction back. One marker covers both statements because both insert
+	// into deposit_pause_audit.
+	depositFaultPauseAudit = "INSERT INTO deposit_pause_audit"
 )
 
 // Deposit-fault verdicts returned by depositFault.match.
@@ -3239,9 +3261,9 @@ func TestDepositReplayConsumerConverges(t *testing.T) {
 		t.Fatalf("observations = %d after replay, want 2 (replay adds nothing, resets nothing)", n)
 	}
 	for _, tc := range []struct {
-		block         uint64
-		amount        string
-		version       int64
+		block   uint64
+		amount  string
+		version int64
 	}{
 		{12, "1", 1},
 		{15, "2", 1},
@@ -4098,6 +4120,80 @@ SELECT 1 FROM deposit_pause_audit WHERE chain_id = $1 AND pause_id = $2 AND acti
 		if after := depositAuthStateOf(t, ctx, pool, chainID); after.history != before.history || after.obs != before.obs {
 			t.Fatalf("state changed by the stale release: %+v -> %+v", before, after)
 		}
+	})
+
+	t.Run("same_instance_old_revision_miss", func(t *testing.T) {
+		const chainID = 177
+		cfg := depositITConfig(t, chainID, testContractA)
+		depositSeedCanonical(t, ctx, pool, chainID, 10, 14, true)
+		depositSeedCanonical(t, ctx, pool, chainID, 16, 20, true)
+		depositSeedUpstream(t, ctx, pool, chainID, 0, cfg.LogConfigHash, 21)
+		lease := depositITLease(t, pool, chainID)
+		sc := depositITScanner(t, pool, cfg)
+		if err := depositRunLoopOnce(t, sc, lease); !isChainView(err) {
+			t.Fatalf("first run = %v, want a chain-view stop", err)
+		}
+		p, ok := depositReadPause(t, ctx, pool, chainID)
+		if !ok {
+			t.Fatal("no pause row after the stop")
+		}
+		// The same instance advances its revision in place (the revision axis
+		// alone), so the old revision now names a dead fence.
+		if _, err := pool.Exec(ctx, `UPDATE deposit_pause SET revision = revision + 1 WHERE chain_id = $1`, chainID); err != nil {
+			t.Fatalf("bump pause revision: %v", err)
+		}
+		before := depositAuthStateOf(t, ctx, pool, chainID)
+
+		released, err := sc.ReleaseDepositPause(ctx, lease, p.id, p.rev, "op-oldrev", "stale revision")
+		if err != nil || released {
+			t.Fatalf("old-revision release = (%v,%v), want (false,nil) with zero rows", released, err)
+		}
+		if n := depositCountRows(t, ctx, pool, "deposit_pause_audit", chainID); n != 0 {
+			t.Fatalf("audit rows = %d, want 0 (a revision mismatch writes no audit)", n)
+		}
+		live, ok := depositReadPause(t, ctx, pool, chainID)
+		if !ok || live.id != p.id || live.rev != p.rev+1 || live.kind != p.kind ||
+			live.height != p.height || live.detail != p.detail {
+			t.Fatalf("live pause = %+v (ok=%v), want same id %d at revision %d with content intact", live, ok, p.id, p.rev+1)
+		}
+		depositAuthAssertUnchanged(t, ctx, pool, chainID, before)
+	})
+
+	t.Run("audit_insert_failure_rolls_back", func(t *testing.T) {
+		const chainID = 178
+		cfg := depositITConfig(t, chainID, testContractA)
+		depositSeedCanonical(t, ctx, pool, chainID, 10, 14, true)
+		depositSeedCanonical(t, ctx, pool, chainID, 16, 20, true)
+		depositSeedUpstream(t, ctx, pool, chainID, 0, cfg.LogConfigHash, 21)
+		lease := depositITLease(t, pool, chainID)
+		sc := depositITScanner(t, pool, cfg)
+		if err := depositRunLoopOnce(t, sc, lease); !isChainView(err) {
+			t.Fatalf("first run = %v, want a chain-view stop", err)
+		}
+		p, ok := depositReadPause(t, ctx, pool, chainID)
+		if !ok {
+			t.Fatal("no pause row after the stop")
+		}
+		before := depositAuthStateOf(t, ctx, pool, chainID)
+
+		fault := newDepositFault()
+		faultPool := depositOpenFaultPool(t, dsn, fault)
+		fault.armSQL(depositFaultPauseAudit, false, false)
+		faultSc := depositITScanner(t, faultPool, cfg)
+		released, err := faultSc.ReleaseDepositPause(ctx, lease, p.id, p.rev, "op-audit", "audit must fail")
+		if err == nil || released {
+			t.Fatalf("release with a failed audit insert = (%v,%v), want (false,error)", released, err)
+		}
+		if !strings.Contains(err.Error(), "insert release pause audit") {
+			t.Fatalf("error = %v, want it to name the failed audit insert", err)
+		}
+		if got := fault.fires.Load(); got != 1 {
+			t.Fatalf("audit fault fires = %d, want exactly 1", got)
+		}
+		// The DELETE raced ahead of the audit INSERT and must have rolled back
+		// with it: the pause row, the audit table and every other trace are
+		// unchanged.
+		depositAuthAssertUnchanged(t, ctx, pool, chainID, before)
 	})
 
 	t.Run("rerelease_returns_original_facts", func(t *testing.T) {

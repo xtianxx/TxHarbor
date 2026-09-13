@@ -79,9 +79,9 @@ type DepositScanner struct {
 	// deposit_state/next gauges (contracts/observability.md): 0 running, 1
 	// waiting on upstream coverage, 2 backing off, 3 paused, 4 structural
 	// stop. Atomics because serve samples them off-loop on a ticker.
-	depState        atomic.Int32
-	depNext         atomic.Uint64
-	depHasProgress  atomic.Bool
+	depState       atomic.Int32
+	depNext        atomic.Uint64
+	depHasProgress atomic.Bool
 }
 
 // NewDepositScanner validates the deposit configuration without any I/O. A

@@ -9,7 +9,12 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io/fs"
 	"math/big"
+	"os"
+	"path/filepath"
+	"regexp"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -582,4 +587,147 @@ func TestDepositMatchConfigNormalizes(t *testing.T) {
 	if match.watches[depositWatchAddr] != 6 {
 		t.Fatalf("watches = %v, want lowercase key %s:6", match.watches, depositWatchAddr)
 	}
+}
+
+var (
+	depositInsertIntoRe = regexp.MustCompile(`(?i)INSERT\s+INTO\s+([A-Za-z_]\w*)`)
+	depositUpdateObsRe  = regexp.MustCompile(`(?i)\bUPDATE\s+deposit_observations\b`)
+	depositDeleteObsRe  = regexp.MustCompile(`(?i)\bDELETE\s+FROM\s+deposit_observations\b`)
+)
+
+// TestDepositWritePathConfinement is the T020 FR-13/14 negative assertion
+// (grep assertion): balance (amount) writes land only in deposit_observations,
+// observation rows are never updated or deleted, the only pending literal in
+// production code is the status constant, and no Go file outside
+// internal/indexer touches the observations table. The DB CHECK pins
+// status='pending' with a 'pending' default, so every written row is Pending
+// and stays Pending. It scans production source text, so a new write path
+// fails loudly instead of slipping past the shape-pinning tests above.
+// Production SQL lives in raw string literals; the per-statement window ends
+// at the closing backtick (capped at 1500 bytes), so a window can never bleed
+// into neighboring Go code.
+func TestDepositWritePathConfinement(t *testing.T) {
+	pkgDir := depositSourceDir(t)
+	entries, err := os.ReadDir(pkgDir)
+	if err != nil {
+		t.Fatalf("read package dir: %v", err)
+	}
+	amountInserts := 0
+	doublePending := 0
+	singlePending := 0
+	for _, e := range entries {
+		name := e.Name()
+		if e.IsDir() || !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") {
+			continue
+		}
+		raw, err := os.ReadFile(filepath.Join(pkgDir, name))
+		if err != nil {
+			t.Fatalf("read %s: %v", name, err)
+		}
+		body := depositStripGoComments(string(raw))
+		for _, loc := range depositInsertIntoRe.FindAllStringSubmatchIndex(body, -1) {
+			table := body[loc[2]:loc[3]]
+			end := len(body)
+			if k := strings.IndexByte(body[loc[1]:], '`'); k >= 0 {
+				end = loc[1] + k
+			}
+			if end-loc[0] > 1500 {
+				end = loc[0] + 1500
+			}
+			if window := body[loc[0]:end]; strings.Contains(window, "amount") {
+				if table != "deposit_observations" {
+					t.Errorf("%s: amount write targets %s, want deposit_observations only", name, table)
+				}
+				amountInserts++
+			}
+		}
+		if depositUpdateObsRe.MatchString(body) {
+			t.Errorf("%s: UPDATE of deposit_observations is forbidden (observations are append-only)", name)
+		}
+		if depositDeleteObsRe.MatchString(body) {
+			t.Errorf("%s: DELETE FROM deposit_observations is forbidden", name)
+		}
+		doublePending += strings.Count(body, `"pending"`)
+		singlePending += strings.Count(body, `'pending'`)
+	}
+	if amountInserts != 1 {
+		t.Errorf("amount INSERT statements = %d, want exactly 1 (insertDepositObservationSQL)", amountInserts)
+	}
+	if doublePending != 1 {
+		t.Errorf(`"pending" literals = %d, want exactly 1 (depositObservationStatusPending)`, doublePending)
+	}
+	if singlePending != 0 {
+		t.Errorf(`'pending' literals = %d, want 0 (status rides the DB default)`, singlePending)
+	}
+	// Outside internal/indexer only the metrics name may mention the table.
+	root := filepath.Join(pkgDir, "..", "..")
+	prefix := "internal" + string(filepath.Separator) + "indexer" + string(filepath.Separator)
+	if err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.IsDir() {
+			if base := filepath.Base(path); base == ".git" || base == ".slim" {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if !strings.HasSuffix(path, ".go") || strings.HasSuffix(path, "_test.go") {
+			return nil
+		}
+		if rel, err := filepath.Rel(root, path); err != nil || strings.HasPrefix(rel, prefix) {
+			return err
+		}
+		raw, err := os.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		for _, line := range strings.Split(string(raw), "\n") {
+			if strings.Contains(line, "deposit_observations") &&
+				!strings.Contains(line, "txharbor_deposit_observations_total") {
+				rel, _ := filepath.Rel(root, path)
+				t.Errorf("%s: references deposit_observations outside internal/indexer", rel)
+			}
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("walk repo: %v", err)
+	}
+}
+
+func depositSourceDir(t *testing.T) string {
+	t.Helper()
+	_, file, _, ok := runtime.Caller(0)
+	if !ok {
+		t.Fatal("runtime.Caller failed")
+	}
+	return filepath.Dir(file)
+}
+
+// depositStripGoComments removes // line comments and /* block */ comments so
+// keyword scans do not trip on prose. It is approximate (a // inside a string
+// literal truncates the line) but statement windows are backtick-bounded, so a
+// truncated line can only shrink a window, never widen one past its literal.
+func depositStripGoComments(s string) string {
+	var b strings.Builder
+	b.Grow(len(s))
+	for i := 0; i < len(s); {
+		if strings.HasPrefix(s[i:], "//") {
+			for i < len(s) && s[i] != '\n' {
+				i++
+			}
+			continue
+		}
+		if strings.HasPrefix(s[i:], "/*") {
+			end := strings.Index(s[i+2:], "*/")
+			if end < 0 {
+				break
+			}
+			i += 2 + end + 2
+			continue
+		}
+		b.WriteByte(s[i])
+		i++
+	}
+	return b.String()
 }

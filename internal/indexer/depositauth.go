@@ -478,6 +478,7 @@ func observeDepositAuthResult(res DepositAuthResult, err error) {
 		depositAuthObserver("error")
 	}
 }
+
 const (
 	readAuthCheckpointSQL = `
 SELECT start_block, config_hash, next_block FROM deposit_checkpoint WHERE chain_id = $1`
@@ -501,12 +502,14 @@ SELECT pause_id, revision, height, kind, detail FROM deposit_pause WHERE chain_i
 SELECT 1 FROM deposit_pause_audit WHERE chain_id = $1 AND pause_id = $2 AND action = 'release'`
 
 	// ensureAuthLeaseSQL makes sure the coordination row exists for the lock.
-	// The placeholder is already expired (seconds in the past), so a later
-	// consumer Acquire takes it over normally; the authorization itself never
+	// The placeholder is expired far in the past (one hour, not one second) so
+	// a later consumer Acquire takes it over even when the host clock steps
+	// backward by seconds relative to the DB clock; the takeover condition
+	// itself stays the strict expires_at < now(). The authorization never
 	// performs owner/token verdicts.
 	ensureAuthLeaseSQL = `
 INSERT INTO indexer_lease (chain_id, owner_id, fencing_token, expires_at)
-VALUES ($1, 'deposit-auth', 0, now() - make_interval(secs => 1))
+VALUES ($1, 'deposit-auth', 0, now() - make_interval(secs => 3600))
 ON CONFLICT (chain_id) DO NOTHING`
 
 	insertAuthHistorySQL = `
@@ -686,7 +689,7 @@ func readAuthProgress(ctx context.Context, q depositQuerier, chainID int64) (*de
 		return nil, nil, fmt.Errorf("auth read deposit checkpoint: %w", err)
 	}
 	var (
-		versionSeq, hStart int64
+		versionSeq, hStart     int64
 		hHash, assets, watches string
 	)
 	haveHistory := false
@@ -829,10 +832,10 @@ func readAuthUpstream(ctx context.Context, q depositQuerier, chainID int64, upHa
 
 // authPauseRow is the live deposit_pause row the disposition is decided on.
 type authPauseRow struct {
-	id, rev  int64
-	height   int64
-	kind     string
-	detail   string
+	id, rev int64
+	height  int64
+	kind    string
+	detail  string
 }
 
 // authPauseBasis is the step-1 pause decision: dispose (needs the explicit
@@ -1041,7 +1044,7 @@ func reverifyAuthUnderLock(ctx context.Context, tx pgx.Tx, req DepositAuthReques
 	{
 		var (
 			id, rev, height int64
-			kind, detail     string
+			kind, detail    string
 		)
 		err := tx.QueryRow(ctx, readAuthPauseSQL, req.ChainID).Scan(&id, &rev, &height, &kind, &detail)
 		switch {

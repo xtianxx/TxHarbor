@@ -1435,6 +1435,160 @@ SELECT count(*) FROM deposit_pause_audit WHERE chain_id = $1 AND pause_id = $2 A
 	depositAuthAssertUnchanged(t, ctx, pool, chainID, before)
 }
 
+// TestDepositAuthD11SameInstanceOldRevision: a pause target that names the
+// live instance with an older revision is refused deterministically before the
+// transaction, and a revision move landing between the under-lock
+// re-verification and the conditional DELETE is fenced to zero rows: the whole
+// authorization rolls back with the pause row, the version chain and the
+// checkpoint untouched (deleteAuthPause affected != 1).
+func TestDepositAuthD11SameInstanceOldRevision(t *testing.T) {
+	dsn := startIndexerPostgres(t)
+	ctx := context.Background()
+	pool := openIndexerPool(t, dsn)
+	defer pool.Close()
+
+	t.Run("pre_tx_replaced_target", func(t *testing.T) {
+		const chainID = 148
+		_, _, watches := depositAuthSeedChain(t, ctx, pool, chainID, 16)
+		pauseID, pauseRev := depositAuthSeedPause(t, ctx, pool, chainID, "chain_view_changed", "class=chain_view_changed version=1", 12)
+		// Same instance, newer revision: revision 1 is now an old fence.
+		if _, err := pool.Exec(ctx, `UPDATE deposit_pause SET revision = revision + 1 WHERE chain_id = $1`, chainID); err != nil {
+			t.Fatalf("bump pause revision: %v", err)
+		}
+		h2, assets := depositAuthD11H2(t, watches)
+		req := depositAuthD11Req(t, chainID, "d11-oldrev-pre", 1, h2, assets, watches)
+		req.ExpectedPauseID, req.ExpectedPauseRevision = &pauseID, &pauseRev
+		before := depositAuthStateOf(t, ctx, pool, chainID)
+
+		_, err := AuthorizeDepositConfig(ctx, pool, req)
+		if !errors.Is(err, ErrAuthRejected) || !strings.Contains(err.Error(), "replaced live") {
+			t.Fatalf("old-revision target = %v, want ErrAuthRejected naming the replaced live target", err)
+		}
+		depositAuthAssertUnchanged(t, ctx, pool, chainID, before)
+	})
+
+	t.Run("delete_branch_fences_zero_rows", func(t *testing.T) {
+		const chainID = 149
+		_, _, watches := depositAuthSeedChain(t, ctx, pool, chainID, 16)
+		pauseID, pauseRev := depositAuthSeedPause(t, ctx, pool, chainID, "chain_view_changed", "class=chain_view_changed version=1", 12)
+		h2, assets := depositAuthD11H2(t, watches)
+		req := depositAuthD11Req(t, chainID, "d11-oldrev-delete", 1, h2, assets, watches)
+		req.ExpectedPauseID, req.ExpectedPauseRevision = &pauseID, &pauseRev
+
+		// An uncommitted in-place revision bump holds the pause row lock. The
+		// authorization's reads (including the under-lock re-check) still see
+		// revision 1, while its conditional DELETE parks on the row lock.
+		// Committing the bump afterwards makes the DELETE match zero rows.
+		hold, err := pool.BeginTx(ctx, pgx.TxOptions{})
+		if err != nil {
+			t.Fatalf("begin hold transaction: %v", err)
+		}
+		defer func() { _ = hold.Rollback(ctx) }()
+		if _, err := hold.Exec(ctx, `UPDATE deposit_pause SET revision = revision + 1 WHERE chain_id = $1`, chainID); err != nil {
+			t.Fatalf("hold revision bump: %v", err)
+		}
+
+		authCfg, err := pgxpool.ParseConfig(dsn)
+		if err != nil {
+			t.Fatalf("parse auth pool dsn: %v", err)
+		}
+		authCfg.ConnConfig.RuntimeParams["application_name"] = "deposit-auth-stale-rev"
+		authPool, err := pgxpool.NewWithConfig(ctx, authCfg)
+		if err != nil {
+			t.Fatalf("create auth pool: %v", err)
+		}
+		defer authPool.Close()
+
+		before := depositAuthStateOf(t, ctx, pool, chainID)
+		type outcome struct {
+			res DepositAuthResult
+			err error
+		}
+		done := make(chan outcome, 1)
+		go func() {
+			res, err := AuthorizeDepositConfig(ctx, authPool, req)
+			done <- outcome{res: res, err: err}
+		}()
+
+		waitUntil(t, time.Now().Add(10*time.Second), "authorization DELETE to park on the held pause row lock", func() bool {
+			var waiting bool
+			if err := pool.QueryRow(ctx, `
+SELECT EXISTS (
+    SELECT 1 FROM pg_stat_activity
+    WHERE application_name = 'deposit-auth-stale-rev' AND wait_event_type = 'Lock')`).Scan(&waiting); err != nil {
+				return false
+			}
+			return waiting
+		})
+		if err := hold.Commit(ctx); err != nil {
+			t.Fatalf("commit revision bump: %v", err)
+		}
+		got := <-done
+
+		if got.err == nil || !errors.Is(got.err, ErrAuthRejected) ||
+			!strings.Contains(got.err.Error(), "changed under the delete") {
+			t.Fatalf("old-revision delete race = (%+v, %v), want the zero-row DELETE fence to reject", got.res, got.err)
+		}
+		after := depositAuthStateOf(t, ctx, pool, chainID)
+		if after.cpOK != before.cpOK || after.cpStart != before.cpStart || after.cpHash != before.cpHash ||
+			after.cpNext != before.cpNext || !after.cpUpdated.Equal(before.cpUpdated) {
+			t.Fatalf("checkpoint changed by the rolled-back authorization: %+v -> %+v", before, after)
+		}
+		if after.history != before.history || after.obs != before.obs || after.audit != before.audit {
+			t.Fatalf("ledger/audit counts changed: %+v -> %+v", before, after)
+		}
+		live, ok := depositAuthReadPause(t, ctx, pool, chainID)
+		if !ok || live.id != pauseID || live.rev != pauseRev+1 || live.kind != "chain_view_changed" || live.height != 12 {
+			t.Fatalf("live pause = %+v (ok=%v), want the same instance at revision %d", live, ok, pauseRev+1)
+		}
+	})
+}
+
+// TestDepositAuthD11AuditInsertFailureRollsBack: a forced failure of the
+// pause-audit INSERT on the authorization path must roll the whole
+// authorization back: the history row, the checkpoint move and the pause
+// DELETE are all undone, so the version chain, the checkpoint and the pause
+// instance are exactly as before (T015: 审计失败则解除回滚).
+func TestDepositAuthD11AuditInsertFailureRollsBack(t *testing.T) {
+	dsn := startIndexerPostgres(t)
+	ctx := context.Background()
+	pool := openIndexerPool(t, dsn)
+	defer pool.Close()
+
+	const chainID = 179
+	h1, _, watches := depositAuthSeedChain(t, ctx, pool, chainID, 16)
+	pauseID, pauseRev := depositAuthSeedPause(t, ctx, pool, chainID, "chain_view_changed", "class=chain_view_changed version=1", 12)
+	h2, assets := depositAuthD11H2(t, watches)
+	req := depositAuthD11Req(t, chainID, "d11-audit-fail", 1, h2, assets, watches)
+	req.ExpectedPauseID, req.ExpectedPauseRevision = &pauseID, &pauseRev
+	before := depositAuthStateOf(t, ctx, pool, chainID)
+
+	fault := newDepositFault()
+	faultPool := depositOpenFaultPool(t, dsn, fault)
+	fault.armSQL(depositFaultPauseAudit, false, false)
+	res, err := AuthorizeDepositConfig(ctx, faultPool, req)
+	if err == nil {
+		t.Fatalf("authorization with a failed pause audit insert = %+v, want an error", res)
+	}
+	if !strings.Contains(err.Error(), "insert auth pause audit") {
+		t.Fatalf("error = %v, want it to name the failed audit insert", err)
+	}
+	if got := fault.fires.Load(); got != 1 {
+		t.Fatalf("audit fault fires = %d, want exactly 1", got)
+	}
+	depositAuthAssertUnchanged(t, ctx, pool, chainID, before)
+	if start, hash, next, ok := depositCheckpointState(t, ctx, pool, chainID); !ok || start != 10 || hash != h1 || next != 16 {
+		t.Fatalf("checkpoint = (%d,%s,%d,%v), want (10,%s,16,true) with the version chain untouched", start, hash, next, ok, h1)
+	}
+	if n := depositCountRows(t, ctx, pool, "deposit_config_history", chainID); n != 1 {
+		t.Fatalf("history rows = %d, want the single bootstrap row", n)
+	}
+	live, ok := depositAuthReadPause(t, ctx, pool, chainID)
+	if !ok || live.id != pauseID || live.rev != pauseRev {
+		t.Fatalf("pause = %+v (ok=%v), want the live instance intact (%d,%d)", live, ok, pauseID, pauseRev)
+	}
+}
+
 // TestDepositAuthD11SameContentReplayAndTimestamp: two observations with the
 // same content (contract/sender/recipient/amount) and the same fixed
 // observed_at timestamp, but different source identities, exist under two
