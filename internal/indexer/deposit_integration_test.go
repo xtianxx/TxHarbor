@@ -3517,6 +3517,391 @@ func isStreamPause(err error) bool {
 	return errors.As(err, &paused)
 }
 
+// TestDepositObservabilityEndToEnd is T019 (US5): every contracts/
+// observability.md diagnostic query runs verbatim against a rich state
+// (consumed observations, two versions, a released pause plus a live one)
+// with the documented results; the transition and pause hooks count exactly
+// the terminal outcomes and pause events; the state/progress accessors report
+// each loop condition; amounts are decimal-only and produced texts are
+// single-line (no log forging, no secret-shaped smuggling).
+func TestDepositObservabilityEndToEnd(t *testing.T) {
+	dsn := startIndexerPostgres(t)
+	pool := openIndexerPool(t, dsn)
+	defer pool.Close()
+	ctx := context.Background()
+
+	const chainID = 200
+	h1 := depositAuthHash(t, 10, depositAuthLine(testContractA, 10), depositAuthLine(depositWatchAddr, 10))
+	cfg := depositITConfig(t, chainID, testContractA, testContractB)
+	cfg.PollInterval = 20 * time.Millisecond
+	cfg.RetryInitial = 20 * time.Millisecond
+	cfg.RetryMax = 100 * time.Millisecond
+	cfg.ConfigHash = h1
+	depositSeedCanonical(t, ctx, pool, chainID, 10, 20, true)
+	depositSeedUpstream(t, ctx, pool, chainID, 0, cfg.LogConfigHash, 21)
+	depositSeedTransferRow(t, ctx, pool, chainID, 12, depositBlockHash(12), depositTxHash(12, 0), 0,
+		common.HexToAddress(testContractA), common.HexToAddress(testContractB), common.HexToAddress(depositWatchAddr), big.NewInt(1))
+	depositSeedTransferRow(t, ctx, pool, chainID, 15, depositBlockHash(15), depositTxHash(15, 0), 0,
+		common.HexToAddress(testContractA), common.HexToAddress(testContractB), common.HexToAddress(depositWatchAddr), big.NewInt(2))
+
+	// Transition hook: ok / rejected / error in that order.
+	var transitions []string
+	SetDepositAuthObserver(func(result string) { transitions = append(transitions, result) })
+	t.Cleanup(func() { SetDepositAuthObserver(nil) })
+
+	lease := depositITLease(t, pool, chainID)
+	scRun := depositITScanner(t, pool, cfg)
+	stop := depositRunLoop(t, ctx, scRun, lease)
+	waitUntil(t, time.Now().Add(10*time.Second), "observability next_block 21", func() bool {
+		_, _, next, ok := depositCheckpointState(t, ctx, pool, chainID)
+		return ok && next == 21
+	})
+	time.Sleep(100 * time.Millisecond)
+	stop()
+	// Committed (0) or already waiting at the covered watermark (1): both
+	// are healthy post-commit conditions; the durable progress is exact.
+	if got := scRun.DepositState(); got != 0 && got != 1 {
+		t.Fatalf("post-commit state = %d, want 0 running or 1 waiting", got)
+	}
+	if next, ok := scRun.DepositProgress(); !ok || next != 21 {
+		t.Fatalf("progress = (%d,%v), want (21,true)", next, ok)
+	}
+
+	watches := depositAuthLine(depositWatchAddr, 10)
+	withB := depositAuthSnapshot(depositAuthLine(testContractA, 10), depositAuthLine(testContractB, 10))
+	h2 := depositAuthHash(t, 10, withB, watches)
+	authReq := depositAuthBaseReq(t, chainID, "obs-auth-2", 1)
+	authReq.NewConfigHash, authReq.NewStartBlock, authReq.NewAssets, authReq.NewWatches = h2, 10, withB, watches
+	if _, err := AuthorizeDepositConfig(ctx, pool, authReq); err != nil {
+		t.Fatalf("authorize v2: %v", err)
+	}
+
+	// A chain-view stop persists one pause row and fires the pause hook once.
+	if _, err := pool.Exec(ctx, `UPDATE chain_blocks SET canonical = FALSE WHERE chain_id = $1 AND number = 18`, chainID); err != nil {
+		t.Fatalf("flip canonical: %v", err)
+	}
+	var pauses int
+	cfgStop := cfg
+	cfgStop.Assets = append(append([]config.DepositEntry(nil), cfg.Assets...),
+		config.DepositEntry{Address: testContractB, Effective: 10})
+	cfgStop.ConfigHash = h2
+	scStop := depositITScanner(t, pool, cfgStop)
+	scStop.SetPauseObserver(func() { pauses++ })
+	if err := depositRunLoopOnce(t, scStop, lease); !isChainView(err) {
+		t.Fatalf("stop run = %v, want a chain-view stop", err)
+	}
+	if pauses != 1 {
+		t.Fatalf("pause hook calls = %d, want exactly 1 for the inserted row", pauses)
+	}
+	if got := scStop.DepositState(); got != 3 {
+		t.Fatalf("post-stop state = %d, want 3 paused", got)
+	}
+	paused, ok := depositReadPause(t, ctx, pool, chainID)
+	if !ok {
+		t.Fatal("no pause row after the stop")
+	}
+
+	// Release it, repair, resume convergently, then seed the live pause the
+	// diagnostic queries below read.
+	if released, err := scStop.ReleaseDepositPause(ctx, lease, paused.id, paused.rev, "operator-o", "recovered"); err != nil || !released {
+		t.Fatalf("release = (%v,%v), want (true,nil)", released, err)
+	}
+	if _, err := pool.Exec(ctx, `UPDATE chain_blocks SET canonical = TRUE WHERE chain_id = $1 AND number = 18`, chainID); err != nil {
+		t.Fatalf("repair canonical: %v", err)
+	}
+	cfg2 := cfg
+	cfg2.ConfigHash = h2
+	stop2 := depositRunLoop(t, ctx, depositITScanner(t, pool, cfg2), lease)
+	waitUntil(t, time.Now().Add(10*time.Second), "observability replay next_block 21", func() bool {
+		_, _, next, ok := depositCheckpointState(t, ctx, pool, chainID)
+		return ok && next == 21
+	})
+	time.Sleep(100 * time.Millisecond)
+	stop2()
+	liveID, liveRev := depositAuthSeedPause(t, ctx, pool, chainID, "upstream_gap",
+		"class=structural gap=10-14 cause=below_upstream_start config="+h2, 10)
+
+	// Rejected + error transitions for the hook sequence.
+	expReq := depositAuthBaseReq(t, chainID, "obs-expired", 1)
+	expReq.NewConfigHash, expReq.NewStartBlock, expReq.NewAssets, expReq.NewWatches = h2, 10, withB, watches
+	if _, err := AuthorizeDepositConfig(ctx, pool, expReq); !errors.Is(err, ErrAuthExpired) {
+		t.Fatalf("expired auth = %v, want ErrAuthExpired", err)
+	}
+	const errChain = 201
+	depositSeedCheckpoint(t, ctx, pool, errChain, 10, h1, 15)
+	corruptReq := depositAuthBaseReq(t, errChain, "obs-corrupt", 1)
+	corruptReq.NewConfigHash, corruptReq.NewStartBlock, corruptReq.NewAssets, corruptReq.NewWatches = h2, 10, withB, watches
+	if _, err := AuthorizeDepositConfig(ctx, pool, corruptReq); err == nil {
+		t.Fatal("corrupt auth = nil, want an error")
+	}
+	if len(transitions) != 3 || transitions[0] != "ok" || transitions[1] != "rejected" || transitions[2] != "error" {
+		t.Fatalf("transitions = %v, want [ok rejected error]", transitions)
+	}
+
+	// --- Diagnostic SQL, verbatim from contracts/observability.md ---
+	watch := depositWatchAddr
+	var start, next int64
+	var hash string
+	var updated time.Time
+	if err := pool.QueryRow(ctx, `
+SELECT start_block, config_hash, next_block, updated_at
+FROM deposit_checkpoint WHERE chain_id = $1`, chainID).Scan(&start, &hash, &next, &updated); err != nil {
+		t.Fatalf("progress query: %v", err)
+	}
+	if start != 10 || hash != h2 || next != 21 {
+		t.Fatalf("progress = (%d,%s,%d), want (10,%s,21)", start, hash, next, h2)
+	}
+	var height int64
+	var kind, detail string
+	var created time.Time
+	if err := pool.QueryRow(ctx, `
+SELECT height, kind, detail, created_at
+FROM deposit_pause WHERE chain_id = $1`, chainID).Scan(&height, &kind, &detail, &created); err != nil {
+		t.Fatalf("pause query: %v", err)
+	}
+	if kind != "upstream_gap" || height != 10 {
+		t.Fatalf("pause = (%s,%d), want (upstream_gap,10)", kind, height)
+	}
+	var blockCP *int64
+	var logNext, depNext int64
+	if err := pool.QueryRow(ctx, `
+SELECT c.height AS block_checkpoint, l.next_block AS log_next, d.next_block AS deposit_next
+FROM indexer_checkpoint c
+FULL JOIN log_checkpoint l USING (chain_id)
+FULL JOIN deposit_checkpoint d USING (chain_id)
+WHERE chain_id = $1`, chainID).Scan(&blockCP, &logNext, &depNext); err != nil {
+		t.Fatalf("lag query: %v", err)
+	}
+	if blockCP != nil || logNext != 21 || depNext != 21 {
+		t.Fatalf("lag row = (%v,%d,%d), want (NULL,21,21) without a 002 side", blockCP, logNext, depNext)
+	}
+	var covered bool
+	if err := pool.QueryRow(ctx, `
+SELECT (SELECT next_block FROM log_checkpoint WHERE chain_id = $1) > $2 AS covered`, chainID, 15).Scan(&covered); err != nil || !covered {
+		t.Fatalf("covered = (%v,%v), want (true,nil)", covered, err)
+	}
+	rows, err := pool.Query(ctx, `
+SELECT block_number, block_hash, tx_hash, log_index, contract, sender, amount, status
+FROM deposit_observations
+WHERE chain_id = $1 AND recipient = $2 ORDER BY block_number, log_index`, chainID, watch)
+	if err != nil {
+		t.Fatalf("address query: %v", err)
+	}
+	var amounts []string
+	for rows.Next() {
+		var number, index int64
+		var bh, th, contract, sender, amount, status string
+		if err := rows.Scan(&number, &bh, &th, &index, &contract, &sender, &amount, &status); err != nil {
+			t.Fatalf("scan address row: %v", err)
+		}
+		amounts = append(amounts, amount)
+		if status != "pending" {
+			t.Fatalf("observation status = %q, want pending", status)
+		}
+	}
+	rows.Close()
+	if len(amounts) != 2 || amounts[0] != "1" || amounts[1] != "2" {
+		t.Fatalf("address amounts = %v, want [1 2] ordered", amounts)
+	}
+	type versionRow struct {
+		seq      int64
+		hash     string
+		prev     *string
+		start    int64
+		replay   int64
+		operator string
+		reason   string
+		request  *string
+		expID    *string
+		expRev   *string
+	}
+	vrows, err := pool.Query(ctx, `
+SELECT version_seq, config_hash, prev_seq, start_block, replay_from, operator, reason, request_id, expected_pause_id, expected_pause_revision, created_at
+FROM deposit_config_history WHERE chain_id = $1 ORDER BY version_seq`, chainID)
+	if err != nil {
+		t.Fatalf("version chain query: %v", err)
+	}
+	var versions []versionRow
+	for vrows.Next() {
+		var vr versionRow
+		var createdAt time.Time
+		if err := vrows.Scan(&vr.seq, &vr.hash, &vr.prev, &vr.start, &vr.replay, &vr.operator, &vr.reason,
+			&vr.request, &vr.expID, &vr.expRev, &createdAt); err != nil {
+			t.Fatalf("scan version row: %v", err)
+		}
+		versions = append(versions, vr)
+	}
+	vrows.Close()
+	if err := vrows.Err(); err != nil {
+		t.Fatalf("version chain rows: %v", err)
+	}
+	if len(versions) != 2 || versions[0].seq != 1 || versions[1].seq != 2 ||
+		versions[0].prev != nil || versions[1].prev == nil || *versions[1].prev != "1" ||
+		versions[1].hash != h2 || versions[1].replay != 10 || versions[0].request != nil ||
+		versions[1].request == nil || *versions[1].request != "obs-auth-2" {
+		t.Fatalf("version chain = %+v, want linear bootstrap + v2", versions)
+	}
+	var vseq int64
+	var vhash string
+	var vreplay int64
+	var voperator, vreason string
+	var vcreated time.Time
+	if err := pool.QueryRow(ctx, `
+SELECT version_seq, config_hash, replay_from, operator, reason, created_at
+FROM deposit_config_history WHERE chain_id = $1 AND request_id = $2`, chainID, "obs-auth-2").
+		Scan(&vseq, &vhash, &vreplay, &voperator, &vreason, &vcreated); err != nil {
+		t.Fatalf("request lookup: %v", err)
+	}
+	if vseq != 2 || vhash != h2 || vreplay != 10 || voperator != "operator-1" {
+		t.Fatalf("request lookup = (%d,%s,%d,%s), want (2,%s,10,operator-1)", vseq, vhash, vreplay, voperator, h2)
+	}
+	arows, err := pool.Query(ctx, `
+SELECT pause_id, revision, action, operator, reason, version_seq, kind, height, detail, at
+FROM deposit_pause_audit WHERE chain_id = $1 ORDER BY at`, chainID)
+	if err != nil {
+		t.Fatalf("pause audit query: %v", err)
+	}
+	var audits int
+	for arows.Next() {
+		var pid, rev, version, height int64
+		var action, operator, reason, kind, detail string
+		var at time.Time
+		if err := arows.Scan(&pid, &rev, &action, &operator, &reason, &version, &kind, &height, &detail, &at); err != nil {
+			t.Fatalf("scan audit row: %v", err)
+		}
+		audits++
+		if action != "release" || operator != "operator-o" {
+			t.Fatalf("audit row action/operator = (%s,%s), want (release,operator-o)", action, operator)
+		}
+	}
+	arows.Close()
+	if audits != 1 {
+		t.Fatalf("audit rows = %d, want exactly the one release", audits)
+	}
+	var aAction, aOperator, aReason string
+	var aVersion, aKindHeight int64
+	var aKind string
+	var aAt time.Time
+	if err := pool.QueryRow(ctx, `
+SELECT action, operator, reason, version_seq, kind, height, at
+FROM deposit_pause_audit WHERE chain_id = $1 AND pause_id = $2 AND revision = $3 AND action = 'release'`,
+		chainID, paused.id, paused.rev).Scan(&aAction, &aOperator, &aReason, &aVersion, &aKind, &aKindHeight, &aAt); err != nil {
+		t.Fatalf("release determination hit: %v", err)
+	}
+	if aAction != "release" || aOperator != "operator-o" {
+		t.Fatalf("release determination = (%s,%s), want the original facts", aAction, aOperator)
+	}
+	var one int
+	if err := pool.QueryRow(ctx, `
+SELECT action, operator, reason, version_seq, kind, height, at
+FROM deposit_pause_audit WHERE chain_id = $1 AND pause_id = $2 AND revision = $3 AND action = 'release'`,
+		chainID, liveID, liveRev).Scan(&aAction, &aOperator, &aReason, &aVersion, &aKind, &aKindHeight, &aAt); !errors.Is(err, pgx.ErrNoRows) {
+		_ = one
+		t.Fatalf("live-pause determination = %v, want a miss (stale)", err)
+	}
+	jrows, err := pool.Query(ctx, `
+SELECT o.block_number, o.tx_hash, o.log_index, o.amount, o.version_seq, h.config_hash
+FROM deposit_observations o JOIN deposit_config_history h
+  ON h.chain_id = o.chain_id AND h.version_seq = o.version_seq
+WHERE o.chain_id = $1 AND o.recipient = $2 ORDER BY o.block_number, o.log_index`, chainID, watch)
+	if err != nil {
+		t.Fatalf("obs-version join: %v", err)
+	}
+	var joined int
+	for jrows.Next() {
+		var number, index, version int64
+		var th, amount, vhash string
+		if err := jrows.Scan(&number, &th, &index, &amount, &version, &vhash); err != nil {
+			t.Fatalf("scan join row: %v", err)
+		}
+		joined++
+		if version != 1 || vhash != h1 {
+			t.Fatalf("join row = (version %d, hash %s), want (1,%s): replay keeps originals", version, vhash, h1)
+		}
+	}
+	jrows.Close()
+	if joined != 2 {
+		t.Fatalf("join rows = %d, want 2", joined)
+	}
+
+	// Amounts are decimal-only. Log-bound texts (pause details) are
+	// single-line (no log forging); canonical snapshot texts are multi-line
+	// by format and instead must parse as snapshots (nothing smuggled).
+	for _, amount := range amounts {
+		for _, r := range amount {
+			if r < '0' || r > '9' {
+				t.Fatalf("amount %q is not decimal-only", amount)
+			}
+		}
+	}
+	for _, text := range []string{paused.detail, detail} {
+		if strings.Contains(text, "\n") {
+			t.Fatalf("produced text %q contains a newline", text)
+		}
+	}
+	for _, text := range []string{withB, watches} {
+		if _, err := parseAuthSnapshot(text, "stored snapshot"); err != nil {
+			t.Fatalf("stored snapshot does not parse: %v", err)
+		}
+	}
+	if scStop.DepositState() != 3 {
+		t.Fatalf("stop-run state = %d, want 3 held", scStop.DepositState())
+	}
+}
+
+// TestDepositStructuralStopState locks the state=4 sample: an upstream gap
+// stop reports structural on the accessor.
+func TestDepositStructuralStopState(t *testing.T) {
+	dsn := startIndexerPostgres(t)
+	pool := openIndexerPool(t, dsn)
+	defer pool.Close()
+	ctx := context.Background()
+
+	const chainID = 202
+	cfg := depositITConfig(t, chainID, testContractA)
+	depositSeedUpstream(t, ctx, pool, chainID, 15, cfg.LogConfigHash, 25)
+	sc := depositITScanner(t, pool, cfg)
+	if next, ok := sc.DepositProgress(); ok || next != 0 {
+		t.Fatalf("initial progress = (%d,%v), want (0,false) absent", next, ok)
+	}
+	if err := depositRunLoopOnce(t, sc, depositITLease(t, pool, chainID)); !isStructuralGap(err) {
+		t.Fatalf("loop = %v, want a structural gap stop", err)
+	}
+	if got := sc.DepositState(); got != 4 {
+		t.Fatalf("post-stop state = %d, want 4 structural", got)
+	}
+}
+
+// TestDepositBackoffState locks the state=2 sample: unreadable durable state
+// backs off instead of stopping, until cancellation wins with nil.
+func TestDepositBackoffState(t *testing.T) {
+	dsn := startIndexerPostgres(t)
+	pool := openIndexerPool(t, dsn)
+	cfg := depositITConfig(t, 203, testContractA)
+	sc := depositITScanner(t, pool, cfg)
+	lease := depositITLease(t, pool, 203)
+	pool.Close() // every read now fails transiently; nothing is asserted but the state
+	loopCtx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- sc.ServeLoop(loopCtx, lease, nil) }()
+	deadline := time.Now().Add(5 * time.Second)
+	for sc.DepositState() != 2 && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	cancel()
+	if err := <-done; err != nil {
+		t.Fatalf("loop = %v, want nil on cancellation", err)
+	}
+	if got := sc.DepositState(); got != 2 {
+		t.Fatalf("backoff state = %d, want 2", got)
+	}
+}
+
+func isStructuralGap(err error) bool {
+	var gap *depositGap
+	return errors.As(err, &gap) && gap.class == depositGapStructural
+}
+
 // TestDepositPauseLayeredRecovery is T015 (US5) with a fixed batch (exactly 5
 // runs, all recorded; any failure fails the batch): upstream-pause auto
 // resume without 004 ever clearing an upstream row, manual instance release

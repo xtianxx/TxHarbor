@@ -16,6 +16,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/ethereum/go-ethereum/common"
@@ -68,6 +69,19 @@ type DepositScanner struct {
 	// unit, invalid for a batch refused by the structural re-check). It keeps
 	// the scanner independent of the metrics registry; app wiring is T018.
 	resultObserver func(result string)
+	// pauseObserver, when non-nil, receives one call per newly persisted
+	// pause row (contracts/observability.md txharbor_deposit_pause_total,
+	// which counts pause events, not live rows). First-wins convergence
+	// calls it only for the writer that inserted the row. App wiring is
+	// T018; T019 locks the count.
+	pauseObserver func()
+	// depState/depNext/depHasProgress mirror the loop condition for the
+	// deposit_state/next gauges (contracts/observability.md): 0 running, 1
+	// waiting on upstream coverage, 2 backing off, 3 paused, 4 structural
+	// stop. Atomics because serve samples them off-loop on a ticker.
+	depState        atomic.Int32
+	depNext         atomic.Uint64
+	depHasProgress  atomic.Bool
 }
 
 // NewDepositScanner validates the deposit configuration without any I/O. A
@@ -91,6 +105,30 @@ func NewDepositScanner(pool *pgxpool.Pool, cfg DepositConfig) (*DepositScanner, 
 // observer (the default) disables counting; app wiring is T018.
 func (s *DepositScanner) SetResultObserver(observe func(result string)) {
 	s.resultObserver = observe
+}
+
+// SetPauseObserver wires the pause-event hook behind
+// txharbor_deposit_pause_total (contracts/observability.md). It fires once
+// per newly inserted pause row, never on first-wins convergence. A nil
+// observer (the default) disables counting; app wiring is T018.
+func (s *DepositScanner) SetPauseObserver(observe func()) {
+	s.pauseObserver = observe
+}
+
+// DepositState reports the loop condition for the deposit_state gauge
+// (contracts/observability.md): 0 running, 1 waiting on upstream coverage, 2
+// backing off, 3 paused, 4 structural stop. It mirrors the last loop
+// decision; terminal stops keep their verdict so the final sample explains
+// the exit.
+func (s *DepositScanner) DepositState() int {
+	return int(s.depState.Load())
+}
+
+// DepositProgress reports the last committed next_block for the deposit_next
+// gauge (contracts/observability.md). ok is false until the first unit
+// commits, so the series stays absent on empty progress.
+func (s *DepositScanner) DepositProgress() (uint64, bool) {
+	return s.depNext.Load(), s.depHasProgress.Load()
 }
 
 // observeResult forwards one processed-row result to the observer, if any.
@@ -871,6 +909,11 @@ func (s *DepositScanner) tryPersistPause(ctx context.Context, lease *Lease, ev *
 		// landed, or retries the write if it did not.
 		return false
 	}
+	// Exactly one writer converges here: this attempt inserted the row, so
+	// the pause event counts once (first-wins convergence never re-fires).
+	if s.pauseObserver != nil {
+		s.pauseObserver()
+	}
 	return true
 }
 
@@ -919,6 +962,7 @@ func (s *DepositScanner) ServeLoop(ctx context.Context, lease *Lease, checkLost 
 			}
 			// The durable state is unreadable: bounded retry with zero
 			// advance. The exact guards re-adjudicate the unit on retry.
+			s.depState.Store(2)
 			if !s.wait(ctx, back.next()) {
 				return nil
 			}
@@ -946,6 +990,7 @@ func (s *DepositScanner) ServeLoop(ctx context.Context, lease *Lease, checkLost 
 			if errors.As(err, &drift) {
 				return err
 			}
+			s.depState.Store(2)
 			if !s.wait(ctx, back.next()) {
 				return nil
 			}
@@ -971,6 +1016,7 @@ func (s *DepositScanner) ServeLoop(ctx context.Context, lease *Lease, checkLost 
 				// The freshly read watermark still covers nothing at a: wait
 				// for upstream progress, never raise the start or drop
 				// required history (R5).
+				s.depState.Store(1)
 				if !s.wait(ctx, poll) {
 					return nil
 				}
@@ -978,7 +1024,18 @@ func (s *DepositScanner) ServeLoop(ctx context.Context, lease *Lease, checkLost 
 			}
 			// Structural gaps and chain-view divergence persist a pause row
 			// (T014); drift, present pauses and corruption stop bare with
-			// zero damage.
+			// zero damage. The terminal sample keeps the stop verdict:
+			// structural stops read 4, any pause-governed stop reads 3.
+			var gapStop *depositGap
+			var pauseStop *streamPauseError
+			switch {
+			case errors.As(err, &gapStop) && gapStop.class == depositGapStructural:
+				s.depState.Store(4)
+			case pauseEvidenceForStop(err, a, b) != nil:
+				s.depState.Store(3)
+			case errors.As(err, &pauseStop):
+				s.depState.Store(3)
+			}
 			s.persistDepositPause(ctx, lease, pauseEvidenceForStop(err, a, b), progress)
 			return err
 		}
@@ -989,6 +1046,7 @@ func (s *DepositScanner) ServeLoop(ctx context.Context, lease *Lease, checkLost 
 			// committed and the loop stops with a validation_failed pause row.
 			// The refused row is the one invalid result for the counter.
 			s.observeResult("invalid")
+			s.depState.Store(3)
 			s.persistDepositPause(ctx, lease, pauseEvidenceForStop(err, a, b), progress)
 			return err
 		}
@@ -1007,6 +1065,9 @@ func (s *DepositScanner) ServeLoop(ctx context.Context, lease *Lease, checkLost 
 			for i := 0; i < batch.nomatch; i++ {
 				s.observeResult("nomatch")
 			}
+			s.depState.Store(0)
+			s.depNext.Store(b + 1)
+			s.depHasProgress.Store(true)
 			back.reset()
 		case errors.Is(err, errDepositVersionMismatch), errors.Is(err, errStaleState):
 			// The captured basis moved under us (version isolation or a
@@ -1025,9 +1086,11 @@ func (s *DepositScanner) ServeLoop(ctx context.Context, lease *Lease, checkLost 
 				errors.As(err, &conflict) || errors.As(err, &mismatch) ||
 				errors.Is(err, errDepositCoverageLost) {
 				// Durable stop conditions: the atomic commit rolled back.
-				// Identity conflicts and chain-view divergence persist a
-				// pause row; corruption, config mismatch and coverage loss
-				// stop bare.
+				// Pause-governed stops (conflict, chain-view) sample 3;
+				// corruption, config mismatch and coverage loss stop bare.
+				if pauseEvidenceForStop(err, a, b) != nil {
+					s.depState.Store(3)
+				}
 				s.persistDepositPause(ctx, lease, pauseEvidenceForStop(err, a, b), progress)
 				return err
 			}

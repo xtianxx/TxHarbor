@@ -192,10 +192,21 @@ type DepositAuthResult struct {
 // T024 skeleton: this stub fixes the signature and the boundary above. T025
 // replaces the body with the controlled statement script; until then no caller
 // may treat the transaction as available.
+// AuthorizeDepositConfig runs the privileged configuration-transition
+// transaction for one operator authorization request and reports the terminal
+// outcome to the transition hook. It owns BEGIN..COMMIT; the body lives in
+// authorizeDepositConfig so every return path below is classified exactly
+// once.
+func AuthorizeDepositConfig(ctx context.Context, pool *pgxpool.Pool, req DepositAuthRequest) (DepositAuthResult, error) {
+	res, err := authorizeDepositConfig(ctx, pool, req)
+	observeDepositAuthResult(res, err)
+	return res, err
+}
+
 // T025 implementation: the controlled statement script. The function owns
 // BEGIN..COMMIT; every adjudication read is an independent parameterized
 // statement, any failure rolls back with no state change.
-func AuthorizeDepositConfig(ctx context.Context, pool *pgxpool.Pool, req DepositAuthRequest) (DepositAuthResult, error) {
+func authorizeDepositConfig(ctx context.Context, pool *pgxpool.Pool, req DepositAuthRequest) (DepositAuthResult, error) {
 	if pool == nil {
 		return DepositAuthResult{}, errors.New("deposit auth: nil pool")
 	}
@@ -435,9 +446,38 @@ func AuthorizeDepositConfig(ctx context.Context, pool *pgxpool.Pool, req Deposit
 	return DepositAuthResult{VersionSeq: newSeq, ReplayFrom: int64(replay), Pause: disp}, nil
 }
 
-// Auth SQL: the controlled statement script (T024 carrier). Every statement
-// is parameterized and independent; the transaction in AuthorizeDepositConfig
-// owns BEGIN..COMMIT.
+// depositAuthObserver, when non-nil, receives one call per authorization
+// terminal outcome behind txharbor_deposit_transition_total
+// (contracts/observability.md: ok|error|rejected; rejected covers the
+// deterministic refusals including expiry and empty change). The detail stays
+// in the DB history row; the counter is only the index. It keeps the
+// transaction independent of the metrics registry; operator tooling wires it.
+// A nil observer (the default) disables counting.
+var depositAuthObserver func(result string)
+
+// SetDepositAuthObserver wires the authorization-outcome counter hook.
+func SetDepositAuthObserver(observe func(result string)) {
+	depositAuthObserver = observe
+}
+
+// observeDepositAuthResult classifies one terminal outcome for the hook:
+// committed ok, deterministic refusals (rejected, expired) rejected,
+// everything else (corruption, drift, coverage loss, DB failures, unknown
+// outcomes) error.
+func observeDepositAuthResult(res DepositAuthResult, err error) {
+	if depositAuthObserver == nil {
+		return
+	}
+	_ = res
+	switch {
+	case err == nil:
+		depositAuthObserver("ok")
+	case errors.Is(err, ErrAuthRejected) || errors.Is(err, ErrAuthExpired):
+		depositAuthObserver("rejected")
+	default:
+		depositAuthObserver("error")
+	}
+}
 const (
 	readAuthCheckpointSQL = `
 SELECT start_block, config_hash, next_block FROM deposit_checkpoint WHERE chain_id = $1`
