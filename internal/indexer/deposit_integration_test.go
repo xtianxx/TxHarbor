@@ -3287,3 +3287,232 @@ WHERE chain_id = $1 AND block_number = 22`, chainID).Scan(&amount, &version); er
 		t.Fatalf("new observation = (%s,%d), want (3,2) under the current version", amount, version)
 	}
 }
+
+// depositPauseRow reads one live deposit_pause row for assertions.
+type depositPauseRow struct {
+	id, rev, height int64
+	kind, detail    string
+}
+
+func depositReadPause(t *testing.T, ctx context.Context, pool *pgxpool.Pool, chainID int64) (depositPauseRow, bool) {
+	t.Helper()
+	var row depositPauseRow
+	err := pool.QueryRow(ctx, `
+SELECT pause_id, revision, height, kind, detail FROM deposit_pause WHERE chain_id = $1`, chainID).
+		Scan(&row.id, &row.rev, &row.height, &row.kind, &row.detail)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return row, false
+	}
+	if err != nil {
+		t.Fatalf("read deposit_pause: %v", err)
+	}
+	return row, true
+}
+
+// TestDepositPauseWriteAndStop is T014 (US5): chain-view re-check failures,
+// structural gaps, deterministic validation failures and identity conflicts
+// stop without advancing and persist exactly one pause row (instance identity
+// + revision 1 + version tag); drift stops bare with zero damage; a pause
+// survives restarts with the same instance identity.
+func TestDepositPauseWriteAndStop(t *testing.T) {
+	dsn := startIndexerPostgres(t)
+	pool := openIndexerPool(t, dsn)
+	defer pool.Close()
+	ctx := context.Background()
+
+	assertNoProgress := func(t *testing.T, chainID int64) {
+		t.Helper()
+		if _, _, _, ok := depositCheckpointState(t, ctx, pool, chainID); ok {
+			t.Fatal("checkpoint row created despite the pause stop")
+		}
+		if n := depositCountRows(t, ctx, pool, "deposit_config_history", chainID); n != 0 {
+			t.Fatalf("history rows = %d, want 0", n)
+		}
+	}
+
+	t.Run("structural_gap_writes_pause", func(t *testing.T) {
+		const chainID = 160
+		cfg := depositITConfig(t, chainID, testContractA)
+		depositSeedUpstream(t, ctx, pool, chainID, 15, cfg.LogConfigHash, 25)
+		err := depositRunLoopOnce(t, depositITScanner(t, pool, cfg), depositITLease(t, pool, chainID))
+		var gap *depositGap
+		if !errors.As(err, &gap) || gap.class != depositGapStructural {
+			t.Fatalf("ServeLoop() = %v, want a structural gap stop", err)
+		}
+		row, ok := depositReadPause(t, ctx, pool, chainID)
+		if !ok {
+			t.Fatal("no deposit_pause row after the structural stop")
+		}
+		if row.kind != "upstream_gap" || row.height != 10 || row.rev != 1 || row.id <= 0 {
+			t.Fatalf("pause = %+v, want upstream_gap at 10 rev 1 with a sequence identity", row)
+		}
+		for _, want := range []string{"class=structural", "gap=10-24", "cause=below_upstream_start", cfg.ConfigHash, "version=0"} {
+			if !strings.Contains(row.detail, want) {
+				t.Fatalf("pause detail %q misses %q", row.detail, want)
+			}
+		}
+		assertNoProgress(t, chainID)
+		if n := depositCountRows(t, ctx, pool, "deposit_observations", chainID); n != 0 {
+			t.Fatalf("observations = %d, want 0", n)
+		}
+	})
+
+	t.Run("chain_view_writes_pause", func(t *testing.T) {
+		const chainID = 161
+		cfg := depositITConfig(t, chainID, testContractA)
+		depositSeedCanonical(t, ctx, pool, chainID, 10, 14, true)
+		depositSeedCanonical(t, ctx, pool, chainID, 16, 20, true)
+		depositSeedUpstream(t, ctx, pool, chainID, 0, cfg.LogConfigHash, 21)
+		err := depositRunLoopOnce(t, depositITScanner(t, pool, cfg), depositITLease(t, pool, chainID))
+		var cv *chainViewError
+		if !errors.As(err, &cv) || !cv.absent || cv.height != 15 {
+			t.Fatalf("ServeLoop() = %v, want chainViewError absent at 15", err)
+		}
+		row, ok := depositReadPause(t, ctx, pool, chainID)
+		if !ok {
+			t.Fatal("no deposit_pause row after the chain-view stop")
+		}
+		if row.kind != "chain_view_changed" || row.height != 15 || row.rev != 1 {
+			t.Fatalf("pause = %+v, want chain_view_changed at 15 rev 1", row)
+		}
+		for _, want := range []string{"class=chain_view_changed", "version=0"} {
+			if !strings.Contains(row.detail, want) {
+				t.Fatalf("pause detail %q misses %q", row.detail, want)
+			}
+		}
+		assertNoProgress(t, chainID)
+	})
+
+	t.Run("validation_failure_writes_pause", func(t *testing.T) {
+		const chainID = 162
+		cfg := depositITConfig(t, chainID, testContractA)
+		depositSeedCanonical(t, ctx, pool, chainID, 10, 20, true)
+		depositSeedUpstream(t, ctx, pool, chainID, 0, cfg.LogConfigHash, 21)
+		topic1 := common.BytesToHash(common.HexToAddress(testContractB).Bytes()).Hex()
+		topic2 := common.BytesToHash(common.HexToAddress(depositWatchAddr).Bytes()).Hex()
+		if _, err := pool.Exec(ctx, `
+INSERT INTO erc20_transfer_logs
+    (chain_id, block_number, block_hash, tx_hash, log_index, contract, topic0, topic1, topic2, data)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
+			chainID, 15, depositBlockHash(15), depositTxHash(15, 0), 0,
+			testContractA, "0x"+strings.Repeat("00", 32), topic1, topic2,
+			common.BigToHash(big.NewInt(1)).Hex()); err != nil {
+			t.Fatalf("seed invalid transfer row: %v", err)
+		}
+		err := depositRunLoopOnce(t, depositITScanner(t, pool, cfg), depositITLease(t, pool, chainID))
+		var pe *depositParseError
+		if !errors.As(err, &pe) {
+			t.Fatalf("ServeLoop() = %v (%T), want *depositParseError", err, err)
+		}
+		switch pe.class {
+		case "bad_address", "bad_topics", "bad_amount", "out_of_range", "missing_field":
+		default:
+			t.Fatalf("parse class = %q, want a Table 3 validation class", pe.class)
+		}
+		row, ok := depositReadPause(t, ctx, pool, chainID)
+		if !ok {
+			t.Fatal("no deposit_pause row after the validation stop")
+		}
+		if row.kind != "validation_failed" || row.height != 15 || row.rev != 1 {
+			t.Fatalf("pause = %+v, want validation_failed at 15 rev 1", row)
+		}
+		for _, want := range []string{"class=" + pe.class, "unit=10-20", "version=0"} {
+			if !strings.Contains(row.detail, want) {
+				t.Fatalf("pause detail %q misses %q", row.detail, want)
+			}
+		}
+		assertNoProgress(t, chainID)
+		if n := depositCountRows(t, ctx, pool, "deposit_observations", chainID); n != 0 {
+			t.Fatalf("observations = %d, want 0", n)
+		}
+	})
+
+	t.Run("conflict_writes_pause_with_version", func(t *testing.T) {
+		const chainID = 163
+		cfg := depositITConfig(t, chainID, testContractA)
+		depositSeedCanonical(t, ctx, pool, chainID, 10, 20, true)
+		depositSeedUpstream(t, ctx, pool, chainID, 0, cfg.LogConfigHash, 21)
+		depositSeedCheckpoint(t, ctx, pool, chainID, 10, cfg.ConfigHash, 10)
+		depositSeedHistory(t, ctx, pool, chainID, 1, 10, cfg.ConfigHash)
+		depositSeedTransferRow(t, ctx, pool, chainID, 15, depositBlockHash(15), depositTxHash(15, 0), 0,
+			common.HexToAddress(testContractA), common.HexToAddress(testContractB), common.HexToAddress(depositWatchAddr), big.NewInt(1))
+		depositSeedObservation(t, ctx, pool, chainID, 15, depositBlockHash(15), depositTxHash(15, 0), 0, "99", 1)
+		err := depositRunLoopOnce(t, depositITScanner(t, pool, cfg), depositITLease(t, pool, chainID))
+		var conflict *depositIdentityConflictError
+		if !errors.As(err, &conflict) {
+			t.Fatalf("ServeLoop() = %v (%T), want *depositIdentityConflictError", err, err)
+		}
+		row, ok := depositReadPause(t, ctx, pool, chainID)
+		if !ok {
+			t.Fatal("no deposit_pause row after the conflict stop")
+		}
+		if row.kind != "validation_failed" || row.rev != 1 {
+			t.Fatalf("pause = %+v, want validation_failed rev 1", row)
+		}
+		for _, want := range []string{"class=identity_conflict", "unit=10-20", "version=1"} {
+			if !strings.Contains(row.detail, want) {
+				t.Fatalf("pause detail %q misses %q (the locked current version)", row.detail, want)
+			}
+		}
+		if _, _, next, _ := depositCheckpointState(t, ctx, pool, chainID); next != 10 {
+			t.Fatalf("checkpoint next = %d, want 10 unchanged", next)
+		}
+		var amount string
+		if err := pool.QueryRow(ctx, `SELECT amount::text FROM deposit_observations
+WHERE chain_id = $1 AND block_number = 15`, chainID).Scan(&amount); err != nil || amount != "99" {
+			t.Fatalf("conflicting observation = (%s,%v), want (99,nil) intact", amount, err)
+		}
+	})
+
+	t.Run("drift_writes_no_pause", func(t *testing.T) {
+		const chainID = 164
+		cfg := depositITConfig(t, chainID, testContractA)
+		depositSeedCanonical(t, ctx, pool, chainID, 10, 20, true)
+		depositSeedUpstream(t, ctx, pool, chainID, 0, strings.Repeat("ff", 32), 21)
+		err := depositRunLoopOnce(t, depositITScanner(t, pool, cfg), depositITLease(t, pool, chainID))
+		var drift *upstreamDriftError
+		if !errors.As(err, &drift) {
+			t.Fatalf("ServeLoop() = %v (%T), want *upstreamDriftError", err, err)
+		}
+		if _, ok := depositReadPause(t, ctx, pool, chainID); ok {
+			t.Fatal("pause row written for drift (operator domain stops bare)")
+		}
+		assertNoProgress(t, chainID)
+	})
+
+	t.Run("restart_keeps_pause", func(t *testing.T) {
+		const chainID = 165
+		cfg := depositITConfig(t, chainID, testContractA)
+		depositSeedCanonical(t, ctx, pool, chainID, 10, 14, true)
+		depositSeedCanonical(t, ctx, pool, chainID, 16, 20, true)
+		depositSeedUpstream(t, ctx, pool, chainID, 0, cfg.LogConfigHash, 21)
+		lease := depositITLease(t, pool, chainID)
+		if err := depositRunLoopOnce(t, depositITScanner(t, pool, cfg), lease); !isChainView(err) {
+			t.Fatalf("first run = %v, want a chain-view stop", err)
+		}
+		first, ok := depositReadPause(t, ctx, pool, chainID)
+		if !ok {
+			t.Fatal("no pause row after the first stop")
+		}
+		// Restart with a fresh scanner: the pause pre-check stops the loop
+		// before any proof, and the row keeps its instance identity.
+		if err := depositRunLoopOnce(t, depositITScanner(t, pool, cfg), lease); !isStreamPause(err) {
+			t.Fatalf("second run = %v, want *streamPauseError (pause still effective)", err)
+		}
+		second, ok := depositReadPause(t, ctx, pool, chainID)
+		if !ok || second != first {
+			t.Fatalf("pause = %+v (ok=%v), want unchanged %+v", second, ok, first)
+		}
+		assertNoProgress(t, chainID)
+	})
+}
+
+func isChainView(err error) bool {
+	var cv *chainViewError
+	return errors.As(err, &cv)
+}
+
+func isStreamPause(err error) bool {
+	var paused *streamPauseError
+	return errors.As(err, &paused)
+}

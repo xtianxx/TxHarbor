@@ -556,6 +556,14 @@ SELECT block_number, block_hash, tx_hash, log_index, contract, topic0, topic1, t
 FROM erc20_transfer_logs
 WHERE chain_id = $1 AND block_number >= $2 AND block_number <= $3
 ORDER BY block_number, log_index`
+
+	// insertDepositPauseSQL writes one first-wins pause row (T014): the
+	// sequence mints a never-reused instance identity, revision starts at 1.
+	// ON CONFLICT converges a concurrent first-wins race to zero rows.
+	insertDepositPauseSQL = `
+INSERT INTO deposit_pause (chain_id, height, kind, detail)
+VALUES ($1, $2, $3, $4)
+ON CONFLICT (chain_id) DO NOTHING`
 )
 
 // Deposit loop defaults, used when the matching DepositConfig knob is zero.
@@ -632,6 +640,151 @@ func (s *DepositScanner) wait(ctx context.Context, d time.Duration) bool {
 	case <-timer.C:
 		return true
 	}
+}
+
+// --- T014 durable pause persistence (data-model Table 3) ---
+
+// pauseEvidence is one persisted stop: the Table 3 kind, the height the row
+// points at (unit first block or gap start), and the detail without the
+// version stamp (the writer appends version=<seq> under the lock from the
+// locked current version).
+type pauseEvidence struct {
+	kind   string
+	height uint64
+	detail string
+}
+
+// pauseEvidenceForStop maps a ServeLoop stop error to pause evidence, or nil
+// when the condition writes no pause row: upstream drift, corruption and
+// config mismatch belong to the operator/config domain (refuse and stop, zero
+// damage), and an already-present pause converges by first-wins.
+func pauseEvidenceForStop(err error, a, b uint64) *pauseEvidence {
+	var gap *depositGap
+	if errors.As(err, &gap) && gap.class == depositGapStructural {
+		return &pauseEvidence{kind: "upstream_gap", height: gap.from,
+			detail: fmt.Sprintf("class=structural gap=%d-%d cause=%s config=%s",
+				gap.from, gap.to, gap.cause, gap.configHash)}
+	}
+	var cv *chainViewError
+	if errors.As(err, &cv) {
+		return &pauseEvidence{kind: "chain_view_changed", height: cv.height,
+			detail: fmt.Sprintf("class=chain_view_changed height=%d expected=%s actual=%s",
+				cv.height, cv.expected, cv.actual)}
+	}
+	var pe *depositParseError
+	if errors.As(err, &pe) {
+		return &pauseEvidence{kind: "validation_failed", height: pe.height,
+			detail: fmt.Sprintf("%s unit=%d-%d", pe.detail, a, b)}
+	}
+	var conflict *depositIdentityConflictError
+	if errors.As(err, &conflict) {
+		return &pauseEvidence{kind: "validation_failed", height: a,
+			detail: fmt.Sprintf("class=identity_conflict identity=%s unit=%d-%d",
+				conflict.identity, a, b)}
+	}
+	return nil
+}
+
+// persistDepositPause writes the pause row for a durable stop in a dedicated
+// transaction (it never rides the rolled-back unit transaction: a batch
+// rollback itself never writes a pause row). Outcomes: written, converged
+// (row exists / evidence expired / lease lost) or given up after bounded
+// retries on transient DB errors. Every outcome leaves the caller's stop
+// error intact — the loop still stops.
+func (s *DepositScanner) persistDepositPause(ctx context.Context, lease *Lease, ev *pauseEvidence, progress *depositProgress) {
+	if ev == nil || lease == nil {
+		return
+	}
+	_, retryInitial, retryMax := s.loopTimings()
+	back := newBackoff(retryInitial, retryMax)
+	for i := 0; i < 3; i++ {
+		if s.tryPersistPause(ctx, lease, ev, progress) {
+			return
+		}
+		if !s.wait(ctx, back.next()) {
+			return
+		}
+	}
+}
+
+// tryPersistPause runs one Table 3 pause transaction. It reports true when no
+// further attempt is needed (written, converged, or terminally refused) and
+// false only on a transient DB error worth retrying.
+func (s *DepositScanner) tryPersistPause(ctx context.Context, lease *Lease, ev *pauseEvidence, progress *depositProgress) bool {
+	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{})
+	if err != nil {
+		return false
+	}
+	defer func() { _ = tx.Rollback(ctx) }() // no-op after COMMIT
+	if _, err := tx.Exec(ctx, writeGuard); err != nil {
+		return false
+	}
+	if _, err := tx.Exec(ctx, ensureLeaseSQL, s.cfg.ChainID, lease.ownerID, lease.Token(), lease.ttl.Seconds()); err != nil {
+		return false
+	}
+	var (
+		owner string
+		token int64
+		valid bool
+	)
+	if err := tx.QueryRow(ctx, lockCoordSQL, s.cfg.ChainID).Scan(&owner, &token, &valid); err != nil {
+		return false
+	}
+	// Atomic condition 1: the lease verdict. A dispossessed worker writes
+	// nothing here; the loop still stops on its original error.
+	var one int
+	if err := tx.QueryRow(ctx, leaseVerdictSQL, s.cfg.ChainID, lease.ownerID, lease.Token()).Scan(&one); errors.Is(err, pgx.ErrNoRows) {
+		return true
+	} else if err != nil {
+		return false
+	}
+	// Atomic condition 2: first pause wins. A row already present means
+	// another writer (or an earlier attempt whose COMMIT was uncertain)
+	// established the pause: converge without a second row.
+	if err := tx.QueryRow(ctx, depositPauseExistsSQL, s.cfg.ChainID).Scan(&one); err == nil {
+		return true
+	} else if !errors.Is(err, pgx.ErrNoRows) {
+		return false
+	}
+	// Atomic condition 3: the evidence still holds — the checkpoint is
+	// exactly the captured basis (any advance means the stop evidence
+	// expired with it). History is never touched by this transaction.
+	current, _, err := readAuthProgress(ctx, tx, s.cfg.ChainID)
+	if err != nil {
+		// Corruption is a terminal stop, not a pause write.
+		var corrupt *depositCorruptStateError
+		if errors.As(err, &corrupt) {
+			return true
+		}
+		return false
+	}
+	switch {
+	case progress == nil && current == nil:
+	case progress == nil || current == nil:
+		return true
+	case current.startBlock != progress.startBlock || current.configHash != progress.configHash ||
+		current.nextBlock != progress.nextBlock || current.versionSeq != progress.versionSeq:
+		return true
+	}
+	var seq int64
+	if progress != nil {
+		seq = progress.versionSeq
+	}
+	detail := fmt.Sprintf("%s version=%d", ev.detail, seq)
+	tag, err := tx.Exec(ctx, insertDepositPauseSQL, s.cfg.ChainID, int64(ev.height), ev.kind, detail)
+	if err != nil {
+		return false
+	}
+	if tag.RowsAffected() != 1 {
+		// Lost a concurrent first-wins race: converge.
+		return true
+	}
+	if err := tx.Commit(ctx); err != nil {
+		// Uncertain COMMIT: the next attempt converges on the row if it
+		// landed, or retries the write if it did not.
+		return false
+	}
+	return true
 }
 
 // ServeLoop is the T006 consumption loop skeleton: while the coordinator holds
@@ -736,17 +889,20 @@ func (s *DepositScanner) ServeLoop(ctx context.Context, lease *Lease, checkLost 
 				}
 				continue
 			}
-			// Structural gaps, drift, pause rows, chain-view divergence and
-			// corruption all stop the loop; T014 owns the durable pause row.
+			// Structural gaps and chain-view divergence persist a pause row
+			// (T014); drift, present pauses and corruption stop bare with
+			// zero damage.
+			s.persistDepositPause(ctx, lease, pauseEvidenceForStop(err, a, b), progress)
 			return err
 		}
 
 		batch, err := parseDepositLogs(match, unit.rows)
 		if err != nil {
 			// A deterministic invalid row fails the whole batch; no unit is
-			// committed and the loop stops (T014 persists validation_failed).
+			// committed and the loop stops with a validation_failed pause row.
 			// The refused row is the one invalid result for the counter.
 			s.observeResult("invalid")
+			s.persistDepositPause(ctx, lease, pauseEvidenceForStop(err, a, b), progress)
 			return err
 		}
 
@@ -781,8 +937,11 @@ func (s *DepositScanner) ServeLoop(ctx context.Context, lease *Lease, checkLost 
 			if errors.As(err, &corrupt) || errors.As(err, &cv) ||
 				errors.As(err, &conflict) || errors.As(err, &mismatch) ||
 				errors.Is(err, errDepositCoverageLost) {
-				// Durable stop conditions: the atomic commit rolled back and
-				// T014 will persist the pause row, never this loop.
+				// Durable stop conditions: the atomic commit rolled back.
+				// Identity conflicts and chain-view divergence persist a
+				// pause row; corruption, config mismatch and coverage loss
+				// stop bare.
+				s.persistDepositPause(ctx, lease, pauseEvidenceForStop(err, a, b), progress)
 				return err
 			}
 			// Unknown failure (for example a transient DB error): bounded

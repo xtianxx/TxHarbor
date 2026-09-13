@@ -247,11 +247,12 @@ T000-L / T000-P 见上（本阶段即二者建档）。**Checkpoint**: 门禁状
 
 **Independent Test**: 构造暂停与失效；解除上游暂停观察自动续；人工解除走重验门；双真 worker 竞争
 
-- [ ] T014 [US5] 链视图复核 + `chain_view_changed` / `validation_failed` 暂停实现与测试（实现落入 `depositscanner.go`/`depositcommit.go`（T005/T006 已建，按序扩展）；测试落入 `internal/indexer/deposit_integration_test.go`）
+- [x] T014 [US5] 链视图复核 + `chain_view_changed` / `validation_failed` 暂停实现与测试（实现落入 `depositscanner.go`/`depositcommit.go`（T005/T006 已建，按序扩展）；测试落入 `internal/indexer/deposit_integration_test.go`）
   - 需求：FR-12/I4。验收场景：D8（SC-06）。依赖：T006。
   - 完成条件：引用块缺失/非 canonical/来源失效 → 不提交不推进 + 暂停行；
     新建暂停行携带 `pause_id`（SEQUENCE 分配）+ `revision=1` + `version=<seq>` 标签；
     `detail.class` 七分类正确；不回退进度不删历史；暂停重启后仍有效。真库断言。
+  - 状态（2026-09-13）：CLOSED。证据：depositscanner.go新增暂停证据映射+Table3原子条件专用暂停事务（lease裁决/首胜收敛/检查点证据门/version=<seq>戳，批回滚永不直写，3次有界重试）+ServeLoop三停止路径钩子（depositcommit.go零改动）。TestDepositPauseWriteAndStop真库6子项全过（结构缺口upstream_gap高10rev1版0零推进；链视图缺15行；非法topic0行validation_failed类内+版本0；冲突identity_conflict版1预存行完整；漂移零暂停行；重启二轮streamPauseError同实例）。回归全仓单元287过。合并更新（revision+1/merge审计）无任务断言，记为开放项。未验证：T015+、完整验收。
 - [ ] T015 [US5] 分层恢复验证：上游解除自动续 + 自身暂停按实例条件解除与重验门 + 需 006 时保持暂停（`internal/indexer/deposit_integration_test.go`，按序执行；本条按固定批次执行：每批次恰好 5 次并记录全部结果，任一次失败则该批次不通过，不追加运行凑成功；修复或明确诊断后的重跑另记批次并保留原证据）
   - 需求：FR-12/I6，research R6。验收场景：D8（SC-06）。依赖：T014。
   - 完成条件：上游行消失 + 链视图一致 + 覆盖完整 + 位置有效 → 自动从原位置继续，
