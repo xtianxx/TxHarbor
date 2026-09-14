@@ -215,6 +215,24 @@ Evidence base (read-only, no code modified):
 - **Rationale**: Lease serialization makes "at most one Class-1 straggler" provable; live-range sweeps
   make it covered; the completion gate makes "unfinished ⇒ held" structural. Claiming zero pre-pause
   stragglers would be false; claiming post-pause submits are possible would also be false.
+- **Post-release staleness proof (row deleted — "no row now" does NOT mean "stale passes")**: after a
+  clean release the chain is canonical-consistent again, so the pre-existing guards bind on their own:
+  - *002*: exact guard `height=n-1 AND block_hash=parent` — a pre-recovery view carries the old fork
+    hash on forked heights → mismatch → refused. On unaffected heights hashes coincide → the write is
+    idempotent-convergent (`ON CONFLICT DO NOTHING` + same content), not corrupting.
+  - *003*: exact `(start_block, config_hash, next_block=a)` guard + per-height canonical recheck vs
+    captured coverage — replayed frontiers may coincide numerically, but captured old-fork hashes fail
+    the recheck on forked heights → `chainViewError`, refused. Unaffected heights converge harmlessly.
+  - *004*: same shape + `version_seq` + upstream-coverage re-proof + canonical re-adjudication vs
+    captured rows — forked heights refused, unaffected converge.
+  - *005*: policy `(S,N)` recheck + tip `(T,TH)` recheck — a post-recovery tip has advanced (or the
+    candidate is gone/orphaned) → mismatch → refused; an untouched still-pending candidate with
+    identical tip remains confirmable, which is correct (it was never affected).
+  - *Round-1 executor after round-2 establish*: refused by `captured_seq != current_seq` — seqs come
+    from the append-only event stream and are never reused across deletes (Table 1 rule), so instance
+    versions cannot collide.
+  Hence: the recovery row is load-bearing DURING recovery (mixed views); after a clean release the
+  normal guards are sufficient, and where they coincide the outcome is convergence, never corruption.
 - **Alternatives considered**:
   - *Abort/kill in-flight ordinary txns at establish*: rejected — PostgreSQL has no safe "cancel the
     other guy's txn and be sure" primitive from app code without superuser `pg_cancel_backend`, which
@@ -238,7 +256,25 @@ Evidence base (read-only, no code modified):
   to ChainViewError-stop (unchanged behavior, now reachable — explicitly listed, not silently kept).
 - **Rationale**: Basis columns are never cleared (005's "never rewrite first confirmation fact" extends
   naturally); the transition log (not row mutation) carries repeated-cycle history, mirroring
-  `deposit_pause_audit` precedent. Revival-to-pending reuses all existing downstream readers unchanged.
+  `deposit_pause_audit` precedent. Field-effectiveness rule (exact, no reader guesswork): for
+  `status='confirmed'`, in-row confirm_* IS the current effective basis and history lives in the
+  transition log; for `status='orphaned'` there is NO current effective confirmation — retained
+  confirm_* are history evidence only; for revived `status='pending'` there is likewise no current
+  basis and old values MUST NOT enter the new confirmation decision (005 recomputes from tip);
+  on re-confirmation 005 overwrites confirm_* with the NEW basis while the old survives exclusively
+  in transition rows. (The earlier summary "non-pending ⇒ history" was imprecise for Confirmed and
+  is superseded by this paragraph; Q4 unchanged.)
+- **Non-blocking proof (bulk Orphaned history vs live 005 confirmation)**: three cases —
+  (a) *Selection*: `readConfirmationCandidatesSQL` filters `status='pending'` (`confirmscan.go`),
+  so retained historical Orphaned rows are never selected — no per-tick collision possible.
+  (b) *Selected-then-orphaned*: a Pending row selected pre-recovery and orphaned before its commit
+  fails the commit-time re-read (`neither pending nor confirmed` → ChainViewError) and halts that
+  tick once, by spec (stop, not skip); next tick the row is excluded by the `status='pending'`
+  filter, so the stall is exactly one tick and never permanent.
+  (c) *Genuine chain-view anomaly*: same halt path as (b); unblocked by recovery completion or
+  reconciliation, never by skipping (no spec change — skipping anomalies is forbidden).
+  `countConfirmationPendingSQL` likewise counts pendings only. Therefore post-release 005 processes
+  new Pendings indefinitely alongside arbitrary Orphaned history with zero structural stall. Revival-to-pending reuses all existing downstream readers unchanged.
 - **Alternatives considered**:
   - *Null the basis columns on orphan*: rejected — destroys the "旧确认依据保留为历史证据" requirement
     and the 006→005 re-verification input.

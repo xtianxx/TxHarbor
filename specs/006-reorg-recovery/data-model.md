@@ -27,10 +27,19 @@ reuse `indexer_lease` as the single coordination row (research R1); decisions in
 | deposit_frontier | BIGINT | NULL | ditto |
 | detected_at | TIMESTAMPTZ | `NOT NULL DEFAULT now()` | fork-evidence time |
 | updated_at | TIMESTAMPTZ | `NOT NULL DEFAULT now()` | diagnosis |
+| recovery_seq | BIGINT | `NOT NULL CHECK (> 0 AND recovery_seq < 9223372036854775807)` | fencing version; rule below |
 
 - One row = one active recovery; repeat triggers converge (INSERT ... ON CONFLICT DO NOTHING, loser
   re-reads and joins). Terminal release = row DELETE (only by `complete_reverify` or `auth_release`
   transactions) + terminal event in Table 2. History lives in Table 2, never in this table.
+- `recovery_seq` generation, persistence, exhaustion (authoritative rule): new value =
+  `COALESCE(MAX(recovery_seq), 0) + 1` over `reorg_recovery_events` for the chain,
+  read under the lease lock inside `establish`; assert result `< 9223372036854775807` (MaxInt64),
+  else refuse establish (never wrap, never reset, never reuse). Rationale: Table 2 is append-only
+  and survives row DELETEs, so the sequence is monotonic across rounds and releases — round-1
+  executors can never collide with round-2 values, and deletes cannot resurrect old versions.
+  (A SEQUENCE object is deliberately not used: rollback of a failed establish must not burn fencing
+  versions outside the audited event stream; per-chain event volume is tiny so MAX is cheap.)
 - `CHECK (ancestor_number IS NULL) = (ancestor_hash IS NULL)`; when set,
   `CHECK (bound_old_number - ancestor_number >= 0 AND bound_old_number - ancestor_number <= max_depth)`.
 
@@ -40,6 +49,7 @@ reuse `indexer_lease` as the single coordination row (research R1); decisions in
 |--------|------|-------------|-------|
 | chain_id | BIGINT | `NOT NULL CHECK (> 0)` | |
 | recovery_id | TEXT | `NOT NULL` | instance (no FK: survives row DELETE) |
+| recovery_seq | BIGINT | `NOT NULL CHECK (> 0)` | fencing version of the causing instance (copied from Table 1 at write time) |
 | event_seq | BIGINT | `NOT NULL CHECK (> 0)` | per-instance order |
 | event | TEXT | `NOT NULL CHECK IN ('established','ancestor_confirmed','blocks_invalidated','observations_invalidated','checkpoints_rolled_back','replay_progress','observation_revived','auto_completed','repair_authorized','released','reconcile_signaled')` | phase/transition record |
 | detail | TEXT | `NOT NULL DEFAULT ''` | evidence refs (heights, hashes, ranges, versions); no secrets, no raw RPC dumps |
@@ -124,9 +134,9 @@ Notation: `L` = lease ownership recheck, `P` = pause/ownership recheck, `V` = re
 | `rollback_block/log/deposit_checkpoint` | L + V + phase + exact current-position match | guarded next_block/floor move (`$to = max(ancestor+1, start)`) | floors respected; no forward jump of unprocessed positions |
 | `replay_range` (per stream) | L + V + phase + frontier match + coverage/canon proof over batch | new rows (new identities only) + frontier advance, same batch | idempotent; empty ranges advance legitimately |
 | `revive_observation` | L + V + phase + row still orphaned + block/log binding + history-semantics recheck | status→pending + transition-log row (Q4 six rules) | no duplicate observation; old basis retained |
-| `complete_reverify` (auto) | L + V + phase + ALL FR-19判据 re-read (ancestor, invalidation, conversions, rollback, replay coverage, reconfirmation) | DELETE recovery row + terminal event (records surviving stream pauses as evidence). NEVER deletes stream pause rows | only this recovery's cause released; independent pauses intact and still stopping ordinary work |
+| `complete_reverify` (auto) | L + V + phase + ALL FR-19判据 re-read (ancestor, invalidation, conversions, rollback, replay coverage, reconfirmation) | DELETE recovery row + terminal event. Terminal `detail` MUST carry: bound tip, policy_seq, ancestor, swept ranges, disposition list, surviving stream pauses | only this recovery's cause released; independent pauses intact and still stopping ordinary work |
 | `auth_enter_repair` (manual) | privilege (operator session) + Q2b evidence present + active row match | phase→repair-authorized marker + event row (NOT a release) | does not release confirm/sign/broadcast pauses |
-| `auth_release` (manual) | privilege + Q2b minimum evidence + disposition list all terminal + re-verify pass | DELETE recovery row + terminal event (records surviving stream pauses). NEVER deletes stream pause rows | atomic-or-nothing; reboot re-verifies; independent pauses intact |
+| `auth_release` (manual) | privilege + Q2b minimum evidence + disposition list all terminal + re-verify pass | DELETE recovery row + terminal event with the same mandatory content as above + audit. NEVER deletes stream pause rows | atomic-or-nothing; reboot re-verifies; independent pauses intact |
 
 Programmatic reconcile writes (evidence/progress/disposition during recovery) run as short txns under
 the same lock with V + permission rechecks; each audited; none can trigger a paused external action
