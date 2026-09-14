@@ -61,9 +61,18 @@ Evidence base (read-only, no code modified):
     post-lock check and O's write there is no lock release; establish cannot interleave.
   - *Lease fields' division of labor*: `owner_id`+`fencing_token` reject the previous holder's **next**
     transaction after a takeover (in-transaction holder unaffected — same residual as above, covered
-    by sweep);   `expires_at` bounds staleness of a holder that stops heartbeating (DB `now()` clock only). Recovery-seq rejects post-establish stale **views**; lease rejects
-    post-takeover stale **holders**. Neither alone suffices; together with the shared lock they close
-    the window.
+    by sweep); `expires_at` bounds staleness of a holder that stops heartbeating (DB `now()` clock only).
+    Recovery-seq rejects post-establish stale **views**; lease rejects post-takeover stale **holders**.
+    Neither alone suffices; together with the shared lock they close the window.
+- **Current-version read, capture point, commit triple (authoritative)**: current version = active
+  row's seq if present, else events-stream MAX for the chain, else 0 — one statement, read committed.
+  Ordinary loops MUST NOT start a batch while an active row exists; otherwise capture version FIRST,
+  then read batch inputs. Commit rechecks post-lock: (a) no active non-terminal row, (b) captured ==
+  current, (c) all existing guards. (a)/(b) mismatch refuses the whole batch with zero writes and zero
+  progress; recomputation starts a new batch. Establish writes row+event atomically in one txn
+  (rollback burns nothing); only 006 transactions may append events; events are never deleted or
+  archived (per-chain volume is tens of rows per recovery), so cleanup cannot undermine version
+  authority.
 
 ## R2 — `chain_blocks` must hold two rows per height: PK rework (resolves FR-24-storage)
 
@@ -215,24 +224,33 @@ Evidence base (read-only, no code modified):
 - **Rationale**: Lease serialization makes "at most one Class-1 straggler" provable; live-range sweeps
   make it covered; the completion gate makes "unfinished ⇒ held" structural. Claiming zero pre-pause
   stragglers would be false; claiming post-pause submits are possible would also be false.
-- **Post-release staleness proof (row deleted — "no row now" does NOT mean "stale passes")**: after a
-  clean release the chain is canonical-consistent again, so the pre-existing guards bind on their own:
-  - *002*: exact guard `height=n-1 AND block_hash=parent` — a pre-recovery view carries the old fork
-    hash on forked heights → mismatch → refused. On unaffected heights hashes coincide → the write is
-    idempotent-convergent (`ON CONFLICT DO NOTHING` + same content), not corrupting.
-  - *003*: exact `(start_block, config_hash, next_block=a)` guard + per-height canonical recheck vs
-    captured coverage — replayed frontiers may coincide numerically, but captured old-fork hashes fail
-    the recheck on forked heights → `chainViewError`, refused. Unaffected heights converge harmlessly.
-  - *004*: same shape + `version_seq` + upstream-coverage re-proof + canonical re-adjudication vs
-    captured rows — forked heights refused, unaffected converge.
-  - *005*: policy `(S,N)` recheck + tip `(T,TH)` recheck — a post-recovery tip has advanced (or the
-    candidate is gone/orphaned) → mismatch → refused; an untouched still-pending candidate with
-    identical tip remains confirmable, which is correct (it was never affected).
-  - *Round-1 executor after round-2 establish*: refused by `captured_seq != current_seq` — seqs come
-    from the append-only event stream and are never reused across deletes (Table 1 rule), so instance
-    versions cannot collide.
-  Hence: the recovery row is load-bearing DURING recovery (mixed views); after a clean release the
-  normal guards are sufficient, and where they coincide the outcome is convergence, never corruption.
+- **Post-release version isolation (row deleted — version gate persists; content match is NOT
+  exculpatory)**: deletion removes the row, never the version. Current version is always readable in
+  one statement: active row's seq if a row exists, else events-stream MAX for the chain (0 when no
+  history). Ordinary batches MUST capture this version BEFORE reading batch inputs (loop level: never
+  start a batch while an active row exists — this order binds inputs to the version), and the commit
+  transaction MUST recheck post-lock all three: (a) no active non-terminal recovery row,
+  (b) captured == current version, (c) existing checkpoint/config/canonical/policy guards. Version
+  mismatch refuses the WHOLE old batch — zero progress, zero business writes — even if hashes,
+  contents, and checkpoints coincide: Q4 re-canonicalization makes content coincidence the expected
+  case, and content re-verification, though still required, cannot substitute version isolation.
+  Recomputation MUST start a NEW batch (re-capture, re-read); re-labeling old results with a new
+  version is forbidden.
+  - *Demanded interleaving*: W captures v=5 (no active row) → establish R6 writes row seq=6 (+event,
+    same txn) → R6 completes, row deleted (events MAX now 6) → W returns and commits with fully
+    matching content: post-lock recheck reads current=6 ≠ 5 → REFUSED, zero writes. The verdict never
+    consults content.
+  - *Preserved legal order*: O holds the lease, passes all three checks (no row, v==v, guards),
+    commits, releases; establish then creates v+1. Pre-pause legal commits are never misjudged —
+    the gate fires only on actual staleness (a completed round between capture and commit).
+  - *Per-path second layer (still required, no longer sufficient alone)*: 002 parent-hash exact guard,
+    003/004 canonical re-adjudication + coverage re-proof, 005 tip/policy rechecks. They now decide
+    only same-version commits: the capture-during-recovery residual (loop gating forbids starting it;
+    if it happens anyway, content guards judge against true current canonical state — match means
+    genuinely still-valid derivation, mismatch refuses) and I-A legal commits.
+  - *Round-1 executor after round-2 establish*: captured R1 seq ≠ current (events MAX ≥ R2 seq) →
+    refused. Instance versions cannot collide: monotonic, never reset, deletes cannot resurrect them
+    (Table 1 generation rule).
 - **Alternatives considered**:
   - *Abort/kill in-flight ordinary txns at establish*: rejected — PostgreSQL has no safe "cancel the
     other guy's txn and be sure" primitive from app code without superuser `pg_cancel_backend`, which

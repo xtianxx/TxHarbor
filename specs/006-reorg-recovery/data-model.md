@@ -127,7 +127,7 @@ Notation: `L` = lease ownership recheck, `P` = pause/ownership recheck, `V` = re
 
 | Transaction | Post-lock rechecks | Write set | Post-commit invariant |
 |---|---|---|---|
-| `establish` | L + policy bind (env max_depth == effective row, else refuse) + no active recovery row (else converge) + record pre-existing stream pauses as precondition (never modify them) | INSERT recovery row (phase=detected, bound tip) + event row. Writes NO pause table (research R9) | recovery row exists; ordinary commits refused via recovery gate; stream diagnoses intact; exactly one active recovery |
+| `establish` | L + policy bind (env max_depth == effective row, else refuse) + no active recovery row (else converge) + record pre-existing stream pauses as precondition (never modify them) | INSERT recovery row (phase=detected, bound tip, seq=events-MAX+1 asserted < MaxInt64) + established event row, SAME txn (atomic; rollback burns no seq). Writes NO pause table (research R9) | recovery row exists; ordinary commits refused via recovery gate; stream diagnoses intact; exactly one active recovery |
 | `confirm_ancestor` | L + V + ancestor candidate re-verified (local+chain equality, continuity) + depth recompute ≤ bound | UPDATE phase→ancestor_confirmed + ancestor cols + event row | ancestor satisfies closed-bound formula |
 | `invalidate_blocks` | L + V + phase | UPDATE `chain_blocks SET canonical=false` over `[ancestor+1, sweep_tip]` where canonical (rowcount recorded) + event row | old fork rows retained non-canonical; single canonical per height preserved |
 | `invalidate_observations` | L + V + phase | UPDATE observations in swept range to `orphaned` + evidence cols + transition-log rows | affected Pending/Confirmed → Orphaned; ancestor-side rows untouched |
@@ -148,8 +148,13 @@ or skip the completion gate (Q3).
    recovery = fork evidence → existing hash_mismatch pause path; inside recovery = 006-owned rows).
    Upsert target retargets to `(chain_id, number, hash)` with the migration (research R2 linkage).
 2. Four commit paths (`scanner.commitBlock`, `logscanner.commitLogRange`, `depositcommit.commitDepositUnit`,
-   `confirmcommit.ConfirmDepositUnit`): add post-lock recovery-state recheck (active non-terminal row →
-   refuse) beside existing verdicts — the gate (primary: recovery row; stream pause rows unchanged).
+   `confirmcommit.ConfirmDepositUnit`): add post-lock triple recheck — (a) no active non-terminal
+   recovery row, (b) captured == current version (single-statement read: active seq else events MAX
+   else 0), (c) existing verdicts/guards — beside existing verdicts. Loop level: never start a batch
+   while an active row exists; capture version BEFORE reading batch inputs (binds inputs to the
+   version). (a)/(b) mismatch refuses the whole batch with zero writes and zero progress, even on
+   full content coincidence; recomputation starts a new batch, never re-labels old results.
+   006's own transactions gate on captured seq+phase (enumerated paths only).
    Startup/loop gating readers (`scanner.loadProgress`/loop, `logscanner.loadLogState`/loop, serve
    health) read the recovery row the same way they read pause rows today.
 3. 004 re-read conflict rule (`storedStatus != 'pending'`): 006's own re-reads exempt rows under the

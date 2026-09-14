@@ -87,7 +87,7 @@ violations introduced by the design.
 | FR-09/10 (replay semantics) | `replay_range`; history-semantics inheritance; 005 re-gating | V3–V5 |
 | FR-11 (skew/empty) | rollback floors; empty-range advance | V5 |
 | FR-12/13 (resume/unknown) | phases + frontiers; re-read-to-triage | V7, resume drill |
-| FR-14/15/20 (fencing/races) | R1 seq + R7 coverage bound | V6, V7 |
+| FR-14/15/20 (fencing/races) | R1 version gate (capture-first/commit-triple) + R7 proofs | V6, V7, V11 |
 | FR-16 (re-fork) | ancestor re-validation, no false release | V8 |
 | FR-17 (independent pauses) | release deletes recovery row only; survivors recorded | V11 |
 | FR-18/21/22 (query/audit/observe) | R11; contracts/observability.md | V11, V12 |
