@@ -22,6 +22,12 @@
   证明：tip < h 时两边皆假；tip ≥ h 时 `tip - h + 1 >= N ⟺ tip - h >= N - 1`），任意输入无溢出。
 - 精确确认数（`confirmations` 列与展示）按规格公式原样计算；可达域 `[0, MaxInt64]`
   （tip/h 来源列均为 `BIGINT CHECK (>= 0)`）内恒精确；饱和 guard 仅纵深防御，被触发按内部错误拒绝提交。
+- 精度与转换设计（OI-1 决议，2026-09-14 remediation）：`confirmations` 列用 `NUMERIC`
+  （精确十进制，整数性由 `CHECK (confirmations = floor(confirmations))` 保证，非负由 `CHECK (>= 0)` 保证；
+  与 004 `amount NUMERIC` 精确整数先例同形）。tip=MaxInt64、h=0 时精确值 2^63 可精确保存、读取和审计。
+  Go↔SQL 转换：写入为 uint64→十进制字符串→`NUMERIC`（全程无 int64/float64 中转，
+  形态镜像 `depositNumericAmount`）；读取为十进制字符串→uint64，遇非整数/超范围按内部错误拒绝。
+  `BIGINT` 列（高度、阈值）保持不变——其域 `[0, MaxInt64]`（N）/`[0, MaxInt64]`（高度）天然容纳，无需改动。
 - N 的可达域为 `[1, MaxInt64]`：`BIGINT` 列即系统表示上限（解析期拒绝更大值，不属业务上限）；
   极大合法 N（如 MaxInt64）永不达标，行为是合法等待而非错误。详见 research R1。
 
@@ -35,7 +41,7 @@
 | confirm_tip_number | BIGINT | NULL，`CHECK (>= 0)` | 转换依据链头高度；confirmed 行 MUST NOT NULL |
 | confirm_tip_hash | TEXT | NULL，`^0x[0-9a-f]{64}$` | 转换依据链头哈希；confirmed 行 MUST NOT NULL |
 | confirm_threshold | BIGINT | NULL，`CHECK (> 0)` | 转换当时阈值 N；confirmed 行 MUST NOT NULL |
-| confirmations | BIGINT | NULL，`CHECK (>= 0)` | 转换当时所得确认数；confirmed 行 MUST NOT NULL |
+| confirmations | NUMERIC | NULL，`CHECK (confirmations >= 0 AND confirmations = floor(confirmations))` | 转换当时所得确认数，精确整数（NUMERIC 精确十进制，无 float 通道；见 §确认数计算）；confirmed 行 MUST NOT NULL |
 | confirm_policy_seq | BIGINT | NULL，`CHECK (> 0)`，FK → `confirmation_policy_history (chain_id, policy_seq)` | 转换当时策略版本（显式引用，非时间戳推导）；confirmed 行 MUST NOT NULL |
 
 - `status` CHECK 由 `000004` 的 `status = 'pending'` 拓宽为 `status IN ('pending', 'confirmed')`
@@ -98,7 +104,8 @@
    - 链头重裁决：`SELECT number, hash FROM chain_blocks WHERE chain_id=$c AND canonical
      ORDER BY number DESC LIMIT 1` 必须等于捕获 (T, TH)（tip 缺失→无行→拒绝；tip 变化→失配→拒绝）；
    - 候选重裁决：观察行仍 `status='pending'`，且 `chain_blocks` 中 `(h)` 行存在、canonical 且哈希 = bh
-     （缺一即回滚；引用不可信的候选只跳过，不建暂停行——见 research R5）；
+     （缺一即回滚；引用缺失/哈希不一致属链视图异常，按 §候选分类停止确认——US3-2/Edge-170，
+     不建暂停行：暂停行归属 002/004 流）；
    - 用重读值重算确认数（R1），必须 `>= N`（tip 回退导致不足即回滚）。
 4. 执行写入：`UPDATE deposit_observations SET status='confirmed', confirmed_at=now(), …依据列…
    WHERE chain_id=$c AND block_hash=$bh AND tx_hash=$tx AND log_index=$li AND status='pending'`；
@@ -120,22 +127,26 @@
 - 条件 UPDATE 的 `status='pending'` 谓词是第二道门（防步骤 3 与写入之间的本事务内竞窗无意义——
   同一事务内无并发；真正防的是锁等待期间的排序变化，而那已被步骤 3 覆盖；双门即纵深）。
 
-## 候选分类：行级跳过 vs 循环级停止（跳过永不代替停止）
+## 候选分类：行级等待 vs 循环级停止（规格原文决定，无新业务选择）
 
-- **行级跳过**（该行留 Pending，计数，同批其他行与在途提交不受影响，不建暂停行）：
-  - `below_depth`（正常）：选中后 tip 推进/重算不足。纯竞态，无告警语义，下 tick 自动重估。
-  - `noncanonical`（防御）：观察哈希 ≠ 同高度 canonical 行哈希，且三暂停行皆无。
-    pre-006 不可达（`chain_blocks` 行不可变，PK + 无 UPDATE 路径；见 research R5）；
-    若出现按 error 日志 + 计数，行留 Pending 供运维核查，不 halt（单行损坏不得劫持全循环）。
-- **循环级停止**（整循环 halt，零提交；对应 `confirmation_state=3`，等待类为 state=1）：
-  任一暂停行存在；tip 缺失；tip 不可信（`indexer_pause` 在）；策略漂移；lease 失权；DB 不可达（退避）。
-  这是规格 FR-06/US3-2 的"停止确认"，与行级跳过互不代替。
-- **同批独立性**：批量只做选择，转换是逐行独立事务；一行跳过/回滚不中止批量、不污染同批其他行；
-  在途提交各自由步骤 3 守卫（异常在锁等待期间落地 → 该事务自杀；已提交者属合法先后，见 §并发时序情形 1）。
-- **无饿死论证**：tip、N 固定时资格对 h 单调递减（h 越小确认数越大）；LIMIT 批恒取最低 Pending；
-  故前排不合格蕴含后排（更高 h）在同 tip 下亦不合格——不存在"前排卡住挡住后排合格"的反例。
-  前排永久不可信行（`noncanonical` 防御）只被跳过不中止批量，后排合格行同批照常转换；
-  tip 推进 / N 降低只扩大候选窗。降阈值重评估无游标可跳（research R4），提高阈值前排最先达标。
+分类依据为已批准规格原文（remediation 逐条核对，非新决定）：
+FR-06"引用区块缺失或非 canonical……任一成立即不得提交确认转换"；
+US3-2"链视图异常（暂停有效、引用区块无法核实）→ 停止确认，不提交任何转换"；
+Edge"同高度存在 canonical 行但哈希与充值引用不一致：不得确认，按链视图异常停止"。
+
+- **行级等待**（该行留 Pending，继续同批，无异常，仅 `below_depth` 一类）：
+  选中后 tip 推进/重算不足。纯竞态，下 tick 自动重估；`skipped_total{below_depth}` 只计常规重估。
+- **循环级停止**（整循环 halt，本 tick 及后续零提交；对应 `confirmation_state=3`，
+  链头缺失表现为 state=1 等待可信 tip——零提交语义与 FR-02"停止确认"一致，tip 出现即恢复）：
+  引用行缺失（= 引用区块无法核实，US3-2）、哈希不一致（Edge-170 按链视图异常）、
+  链头缺失、tip 不可信、任一暂停有效、策略漂移。停止前不建暂停行（暂停行归属 002/004 流；
+  005 以循环停止 + error 日志 `reason=reference_unverifiable|…` 表达，006 接管前保持停止）。
+- **后果（规格要求，非设计选择）**：前排异常行阻塞后排（US3-2"不提交任何转换"），
+  后排合格行在异常消除前不被处理——006 接管前保持停止。无饿死论证仅适用于良性情形：
+  tip、N 固定时资格对 h 单调，`below_depth` 前排不合格蕴含后排亦不合格，不存在良性饿死；
+  异常阻塞的解除属 006/人工职责，不属 005。
+- **同批独立性（良性范围内）**：`below_depth` 行的留 Pending 不影响同批其他行；
+  任一异常行触发即整批终止（已提交者属锁排序合法先后，未提交者零写入，见 §并发时序情形 1）。
 
 ## 首确认协议（策略 bootstrap，与 004 首单元同构）
 

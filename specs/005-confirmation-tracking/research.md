@@ -20,8 +20,10 @@
   在可达域外不可达（约束证据：上述两列的 `BIGINT` 类型 + `CHECK (>= 0)` + 行只源自 RPC 高度；
   见 `migrations/000002_chain_indexer.sql`、`000004_deposit_detection.sql`）。
 - **等价 vs 精确的分工**：门禁比较只用等价式（任意输入无溢出，含假设性 MaxUint64）；
-  审计列存精确值（可达域内恒精确）；饱和值永不作为精确确认数展示或审计——若 guard 被触发，
+  审计列存精确值；饱和值永不作为精确确认数展示或审计——若 guard 被触发，
   按内部错误拒绝提交（不可达断言，单元测覆盖存在性，集成不模拟）。
+  精确值列用 `NUMERIC`（OI-1 决议，见 data-model §确认数计算）：tip=MaxInt64、h=0 的 2^63 精确可存；
+  Go↔SQL 经十进制字符串，无 int64/float64 中转（镜像 `depositNumericAmount`）。
 - **Rationale**：`tip - h` 在 tip ≥ h 时永不下溢；等价式彻底消除 `+1` 溢出点，比"饱和后比较"更干净。
   N=1 且 tip == h 时 `tip - h(0) >= 0` 成立，符合规格。无符号全程避免 int64/uint64 互转的符号陷阱；
   与既有 `DepositConfig.StartBlock uint64` / `next_block uint64` 口径一致
@@ -78,12 +80,13 @@
 
 - **Decision**：005 不建 `confirmation_pause` 表。瞬态停止（tip 缺失/滞后/DB 失败/lease 失权）= 循环内等待 + 退避，
   无 durable 行（镜像 004 state=1/2/4 的无行等待）；结构性停止复用既有三行（`deposit_pause`/`indexer_pause`/`log_pause`），
-  提交门禁要求三行皆无；单行不可信候选（引用块非 canonical）= 跳过该行（留 Pending）+ `skipped` 计数，不 halt 全循环。
+  提交门禁要求三行皆无；引用缺失/哈希不一致按规格（US3-2/Edge-170）属链视图异常 → 循环停止（state=3），
+  不建暂停行（行归属 002/004 流，005 以停止 + error 日志表达）；`below_depth` 行级等待是唯一非停止分支。
+  行级/循环级完整分类与后果见 data-model §候选分类。
 - **Rationale**：004 Table 3 的首胜/累积合并/修订语义（Q8）是充值流专用的，005 写入会破坏其不变量；
   005 无游标故无需 durable 停止位即可保证"不越过"（无位可越）；读多写少使跳过重评估廉价（只读索引查询，无写放大）。
   006 未来可通过既有暂停行 halt 确认提交（门禁已含），交接无需新表。
-  行级/循环级分类、无饿死论证见 data-model §候选分类；`skipped` 原因二分
-  （`below_depth` 正常竞态 / `noncanonical` 防御告警）见 contracts。
+  `skipped` 计数仅覆盖良性 `below_depth` 重估；异常一律停止（data-model §候选分类）。
 - **Alternatives considered**：
   - 新建 `confirmation_pause(+audit)`：+2 表 + 跨组件语义，与"最小迁移"冲突；且 005 的停止条件均可由既有行 + 循环等待表达，拒绝。
   - 复用 `deposit_pause` 加 kind：破坏 004 累积合并与审计归属（detail 版本段按 deposit seq 打标），拒绝。
@@ -120,7 +123,7 @@
 - **Decision**：仅新增 `confirmation_*` 组（gauges： pending 估计/滞后/state/policy_seq；counters：
   confirmed_total{ok}、skipped_total{reason}、transition_total{ok|stale|rejected}、policy_transition_total{ok|rejected}），
   结构化日志字段与诊断 SQL 见 contracts；002/003/004 指标名与语义冻结；`/readyz` 不翻转（镜像 004 R8）；
-  全部经 `logx.Redact`，金额十进制。
+  全部经 `logx.Redact`，金额十进制。`skipped` 仅计良性重估；停止经 state=3 + error 日志表达。
 - **Rationale**：FR-11 只要求进度/积压/滞后/暂停可见；skipped 计数使"跳过未确认"可观测而不 halt；transition 计数使
   stale/rejected 提交可审计。
 

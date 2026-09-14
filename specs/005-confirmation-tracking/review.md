@@ -72,7 +72,8 @@
   （无充值长期无行 + 分歧双首启胜者落定/败者大声停 + 胜负不决正确性）、§授权切换协议（入口=DB 操作员直连 SQL、
   守卫全在事务内无旁路 + 丢失响应按 request_id 重读定性）、§切换后恢复程序（整进程退出范围 + 零暂停行 +
   发版重启 runbook）。未扩展通用配置平台。
-- Q3 跳过分类：疑点为跳过与停止边界及饿死。证据：spec FR-06/US3（行级"不得提交" vs 循环级"停止确认"）、
+- Q3 跳过分类【本条已被 §九 F4 取代：行级跳过不可用于异常引用，缺失/不一致引用按规格属链视图异常→循环停止；
+  以下为 plan 复核当时的历史记录，保留不删】：疑点为跳过与停止边界及饿死。证据：spec FR-06/US3（行级"不得提交" vs 循环级"停止确认"）、
   chain_blocks 不可变（pre-006）。结论：行级跳过（`below_depth` 正常 / `noncanonical` 防御，不建暂停行）
   与循环级停止（暂停/tip/漂移/失权）互不代替；批量选择、逐行独立事务；单调性无饿死证明。
   修正：data-model §候选分类、contracts skipped 原因二分、research R5 指针、quickstart D5 滞留用例。
@@ -81,11 +82,41 @@
   占位，"预留"纯属设计说明。修正：data-model §Table 1、§006 预留，research R6，plan 交接节。
 - 本次复核未发现须改变已批准业务语义的问题；spec 未动。验证场景同步至 quickstart D1/D5。
 
-## 八、任务拆解进展（2026-09-14 tasks）
+## 八、任务拆解进展（2026-09-14 tasks；remediation 后为 30 项）
 
-- 产物：`tasks.md`（T000-L/T000-P + T001–T004 + T010–T032，共 31 项，全未完成）。
+- 产物：`tasks.md`（T000-L/T000-P + T001–T004 + T010–T032 + remediation 新增 T033，共 30 项定义行，全未完成）。
   按模板分阶段：Setup（门禁建档）、Foundational（迁移/配置/数学/指标）、US1–US5（P1×4、P2×1）、Polish。
+  （计数修正：此前记"31 项"有误，实际定义行 29，新增 T033 后 30。F8）
 - 自检（本步内，非正式 analyze）：格式全合规；依赖 7 条同文件链无环；FR-01–12、SC-01–10、18 验收场景全映射；
   [P] 仅跨文件无依赖者（T020 同文件冲突已去标记）；T030/T032 来源已声明；业务代码零改动。
 - OI-1（`confirmations BIGINT` vs 2^63 精确值）记入 tasks 待 T017 决议，未掩盖、未改规格。
+  【§九 F1 已决议关闭为 NUMERIC，本条为 tasks 步骤当时的历史记录，保留不删】
 - 阻塞：无新增阻塞；具备进入正式一致性分析的条件（本次不执行）。下一命令建议 `/speckit.analyze`。
+
+## 九、remediation 处理（2026-09-14，直改规划文档；修正完成，待正式复分析）
+
+本节记录 analyze F1–F10 的逐项处理与证据位置。状态为"修正完成，待正式复分析"——
+**不自行宣称 analyze 已通过**，复分析另行安排。spec 未动（无一处需改变已批准业务语义）。
+
+- F1（OI-1 关闭）：`confirmations` 改 `NUMERIC` 精确整数（整数性 + 非负 CHECK），2^63 精确可存可审；
+  Go↔SQL 十进制字符串，禁 int64/float64 中转；"二选一"删除。证据：data-model §确认数计算/Table 1、
+  research R1、tasks T001/T017/OI-1 条目、quickstart D1。
+- F2：新增 T033（异配置首启 race：恰好一行 bootstrap、败者漂移错误零转换、胜者绑定现行策略）；
+  覆盖/批次/依赖同步。证据：tasks Phase 6/依赖链/覆盖矩阵/Batch D。
+- F3：T011 加空状态断言（零候选→无策略行、无写入、等待非停止）。证据：tasks T011。
+- F4（先核对后修正，未直接采纳行级跳过）：核对 FR-06（"引用区块缺失……任一成立即不得提交"）、
+  US3-2（"引用区块无法核实"→停止确认、不提交任何转换）、Edge-170（哈希不一致→按链视图异常停止），
+  判定缺失/不一致引用属链视图异常→循环停止（state=3，链头缺失 state=1），`below_depth` 为唯一行级等待；
+  前排异常阻塞后排是规格要求（006 接管前保持停止），无饿死论证仅限良性。未作新业务选择。
+  证据：data-model §候选分类/§提交协议、research R5/R8、contracts（skipped 仅 `below_depth`、
+  停止日志加 `reference_unverifiable`）、quickstart D5（含 SQL 播种可行性：无指向 chain_blocks 的 FK）、
+  plan 关键流程/Constitution Check IV、tasks T018/T019/T020/T004。
+- F5：T026 加独立第二连接、锁等待同步点、两种线性化顺序断言、禁 sleep。证据：tasks T026。
+- F6：T019 明确小批量 LIMIT 多 tick；T025 加降阈值后小批量复核。证据：tasks T019/T025、quickstart D5。
+- F7：T013 加旧 `version_seq` 观察照常确认断言（含全部门禁仍须通过，非绕过）。证据：tasks T013。
+- F8：计数 29→30（新增 T033 后）同步本节；此前"31"为笔误。证据：任务定义行实测。
+- F9：T024 补 004 T024（`specs/004-deposit-detection/tasks.md:91` 受控 SQL 脚本）引用，不重做选型。证据：tasks T024。
+- F10：T030 收窄为核验现有 CI（`make test-integration` 自动覆盖，无需新 job）。证据：tasks T030、
+  `.github/workflows/ci.yml:71-92`。
+- F11：无需修改。
+- 剩余问题：无新增阻塞；F4 判定链已完整引用规格原文，复分析可直接复核。

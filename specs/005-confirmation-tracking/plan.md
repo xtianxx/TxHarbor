@@ -13,7 +13,7 @@
 链头身份、候选 pending 与哈希一致，重算 ≥ N；data-model 提交协议）。
 阈值策略以单表 `confirmation_policy_history` 为权威（有效 = max seq；首确认事务内原子 bootstrap；
 切换为特权单行 INSERT，request_id 幂等，镜像 004 授权形态的缩小版）。
-调度为无游标有序扫描（降阈值自动纳入，无跳过）；瞬态停止只等待，结构停止复用既有三暂停行，
+调度为无游标有序扫描（降阈值自动纳入）；瞬态停止只等待，结构停止复用既有三暂停行，
 不新增暂停表；可观测只增 `confirmation_*` 组。006 交接：暂停门禁、锁顺序、依据列三项契约落定，
 不实现 006 算法。生产就绪 T000-P 保持 open。
 
@@ -52,7 +52,7 @@ go-ethereum（无新增使用——005 零 RPC，所有链视图来自库内 `ch
 - I 金融正确优先：条件 UPDATE + 三版本持锁重裁决 + 行数核对 + 首次不可变 → 通过。
 - II 幂等：PK 身份 + 条件写 + 重读收敛（胜者值保留），内存只做短路 → 通过。
 - III PG 唯一真相：策略版本链 + 确认依据列全 durable；零 RPC；无 Redis/Kafka → 通过。
-- IV 重组感知：引用块逐行重裁决 canonical + 哈希；分歧跳过/停止，不自动恢复；Confirmed 回退归 006 → 通过。
+- IV 重组感知：引用块逐行重裁决 canonical + 哈希；分歧停止、不自动恢复；Confirmed 回退归 006 → 通过。
 - V 显式状态机：Pending → Confirmed 单转换 + CHECK 显式集合；策略版本链显式生命周期；运行/等待/重试/停止经 `confirmation_state` 表达 → 通过。
 - VI 事务边界：候选读取在 BEGIN 前，转换与依据同提交；bootstrap 与首确认同事务；切换单行 INSERT 即原子 → 通过。
 - VII nonce：不涉及 → N/A。
@@ -110,7 +110,7 @@ coordinator 扩展面限于循环注册）。
 Coordinator 取 lease（获胜/旁观）→ 胜出期间四 serveLoop 并存（单心跳保活）：
   每 tick 读可信 tip（无 tip→等待；indexer_pause 在→停止）→ 算 maxEligible →
   有序批量取 Pending 候选（partial 索引；降阈值自动纳入）→ 逐个评估：
-    引用不可信→跳过计数（留 Pending）｜ 达标→短事务[确保 lease 行→FOR UPDATE 取协调锁→
+    引用不可信→停止确认（零提交，state=3）｜ 达标→短事务[确保 lease 行→FOR UPDATE 取协调锁→
     独立语句重读裁决（三暂停皆无 + lease 归属 + 策略(S,N) + tip(T,TH) + 候选 pending + 哈希一致 + 重算≥N）→
     条件 UPDATE + 行数核对]→commit；失配→回滚（stale 计数），重读再决策
   可重试错→退避｜漂移→大声停｜失权→停写

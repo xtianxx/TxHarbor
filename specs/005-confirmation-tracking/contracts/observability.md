@@ -15,7 +15,7 @@
 | txharbor_confirmation_state | Gauge | chain | 0 运行 / 1 等待可信 tip / 2 重试 / 3 停止（暂停/漂移/链视图不可信） |
 | txharbor_confirmation_policy_seq | Gauge | chain | 当前有效策略 `policy_seq`；策略表空时不暴露 |
 | txharbor_confirmation_confirmed_total | Counter | chain | 成功转换计数（明细在观察行依据列） |
-| txharbor_confirmation_skipped_total | Counter | chain, reason(`below_depth\|noncanonical`) | 跳过未确认计数（行留 Pending，不 halt；`below_depth` 为正常竞态，`noncanonical` 为防御性告警） |
+| txharbor_confirmation_skipped_total | Counter | chain, reason(`below_depth`) | 良性重估计数（选中后 tip 推进致不足，行留 Pending；异常一律停止不停跳，见 data-model §候选分类） |
 | txharbor_confirmation_transition_total | Counter | chain, result(`ok\|stale\|rejected`) | 提交裁决审计计数（`stale`=锁内失配回滚，`rejected`=漂移/暂停拒绝） |
 | txharbor_confirmation_policy_transition_total | Counter | chain, result(`ok\|rejected`) | 策略切换审计计数（明细在 DB history 行） |
 
@@ -26,9 +26,9 @@
 ## Logs（结构化，字段固定，经 `logx.Redact`）
 
 - 确认转换：`chain_id, block_number, block_hash, tx_hash, log_index, tip, threshold, confirmations, policy_seq, attempt`（info）。
-- 跳过：`chain_id, block_number, block_hash, reason(below_depth|noncanonical)`（debug=below_depth 低频 / error=noncanonical）。
+- 跳过：`chain_id, block_number, block_hash, reason(below_depth)`（debug，低频；唯一非停止分支）。
+- 停止：`chain_id, reason(pause_present|tip_missing|tip_untrusted|reference_unverifiable|policy_drift|lease_lost)`（error=需介入 / warn=等待类；`reference_unverifiable` 含引用缺失与哈希不一致，见 US3-2/Edge-170）。
 - 重试：`chain_id, kind, attempt, retry_in`（warn；有界退避，复用 INDEX 参数）。
-- 停止：`chain_id, reason(pause_present|tip_missing|tip_untrusted|policy_drift|lease_lost)`（error=需介入 / warn=等待类）。
 - 配置拒绝：`chain_id, reason(blank|non_integer|non_positive|out_of_range|policy_drift), detail`（error；启动期与切换期同形）。
 - 策略切换：`chain_id, request_id, operator, old_seq, old_threshold, new_threshold, result(ok|rejected), reason`（info=ok / warn=rejected；审计明细以 DB history 行为准）。
 - 脱敏：禁止转储无限制原始数据；阈值与高度为普通数值字段，可打点。
