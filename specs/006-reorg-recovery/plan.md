@@ -178,6 +178,25 @@ Recorded by T001–T005; nothing here claims 005 acceptance or production readin
   missing-with-handling: T016/T034 stay blocked (plus story phases via unclosed
   Phase 2). 005 tasks show 29/30 checked with only T000-P open, but that box
   count is not scored as gate-passed here.
+- T002 gate verdict — PASSED 2026-09-14 (verification-only session, no Batch B,
+  no code changes). Per-requirement evidence, each independently re-verified
+  (not inferred from boxes/merges):
+  - 005 regression suites present + executed green: PR #7 head `c71123d`, 4 checks
+    COMPLETED/SUCCESS (lint / build / unit+race / integration-Docker), verified via
+    `gh pr view 7 --json statusCheckRollup`.
+  - 005 remote CI on main: merge `a73e31b`, run 34805751040, 4 jobs
+    completed/success with zero skipped, verified via `gh run view 34805751040`.
+  - 005 local acceptance: 005 tasks T031 checked + `review.md` §(j) full-run record
+    (orchestrator全量口径 unit/race/integration/lint 全绿, `make test-integration`
+    7:34; reviewer transcribed, not re-proven) + off-branch evidence commit
+    `78180e2` (`review.md` §十二, NOT in 006 ancestry — cited, not relied on).
+  - 005 code unchanged since the green CI: Batch A + T001 confirm zero 005-file
+    modifications on this branch, so the merge-time evidence applies to the current tree.
+  - Known flakies (004-legacy 偶发未知) stay open as unresolved items; the green runs
+    observed no new occurrences but do not close them.
+  - Consequence: T016/T034 are UNBLOCKED at the T002-gate level (their remaining
+    deps — T011 for T016; T006–T008/T013–T016 for T034 — still govern Batch B order).
+    Story phases still wait on the rest of Phase 2 (T010–T019, Batch B).
 - T003: T000-P stays open per 005 spec Assumptions + 005 tasks `T000-P` unchecked;
   open neither proves nor disproves local acceptance; production readiness stays
   out of 006 scope. No task conflates T000-P with local preconditions.
