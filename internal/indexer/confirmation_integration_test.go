@@ -45,6 +45,8 @@ import (
 	"errors"
 	"math/big"
 	"strconv"
+	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -1226,4 +1228,747 @@ func confirm19Scanner(t *testing.T, pool *pgxpool.Pool, chainID int64, n uint64,
 	}
 	_ = lease
 	return sc
+}
+
+// -- T021 --------------------------------------------------------------------
+
+// T021 [US4] quickstart D2 idempotence + concurrency (FR-05/07, SC-05/06,
+// US4-1/2): (a) two REAL database connections (two pgxpool handles to the
+// same testcontainers DB, one committer each) race ConfirmDepositUnit on the
+// same Pending row — exactly one durable conversion, the loser converges;
+// (b) repeat checks never rewrite first-seen facts. T022/T023 append below
+// under their own banners; helpers stay confirm13*-prefixed.
+
+// TestConfirmationDualWorkerRaceConverges is T021(a) / quickstart D2
+// (data-model §并发时序情形 2, US4-1): two committers on two separate pools
+// confirm the same Pending row concurrently. The coordination lock
+// (indexer_lease FOR UPDATE) serializes the two transactions: the winner's
+// conditional UPDATE converts the row, the loser re-reads status='confirmed'
+// under the lock (step 3) and converges via convergeCommitted with zero
+// writes — confirmed_at and all five basis columns stay the winner's (I2).
+// The channel rendezvous (both goroutines signal ready, main closes the
+// gate) is the only sync point — no fixed sleeps; the loser's lock wait is
+// the in-DB serialization. Either interleaving (true overlap or
+// back-to-back) exercises the same converge path, so the end-state
+// assertions hold regardless of which connection wins.
+func TestConfirmationDualWorkerRaceConverges(t *testing.T) {
+	dsn := startIndexerPostgres(t)
+	poolA := openIndexerPool(t, dsn)
+	defer poolA.Close()
+	poolB := openIndexerPool(t, dsn)
+	defer poolB.Close()
+	ctx := context.Background()
+
+	const chainID, h, tip, n = int64(31345), uint64(100), uint64(109), uint64(10)
+	depositSeedCanonical(t, ctx, poolA, chainID, h, tip, true)
+	bh, txHash := confirmSeedPending(t, ctx, poolA, chainID, h)
+	confirmSeedPolicyRow(t, ctx, poolA, chainID, 1, int64(n), nil, "bootstrap", nil)
+
+	committerA, err := NewConfirmationCommitter(poolA, ConfirmationConfig{ChainID: chainID, ThresholdN: n})
+	if err != nil {
+		t.Fatalf("NewConfirmationCommitter(A): %v", err)
+	}
+	committerB, err := NewConfirmationCommitter(poolB, ConfirmationConfig{ChainID: chainID, ThresholdN: n})
+	if err != nil {
+		t.Fatalf("NewConfirmationCommitter(B): %v", err)
+	}
+	// One acquired lease shared by both workers (Token() is an atomic
+	// load, safe for concurrent use); both present the same owner/token.
+	lease := depositITLease(t, poolA, chainID)
+	basis := ConfirmBasis{BlockHash: bh, TxHash: txHash, Height: h,
+		TipNumber: tip, TipHash: depositBlockHash(tip), PolicySeq: 1, ThresholdN: n}
+
+	ready := make(chan struct{}, 2)
+	gate := make(chan struct{})
+	var wg sync.WaitGroup
+	errs := make([]error, 2)
+	for i, c := range []*ConfirmationCommitter{committerA, committerB} {
+		wg.Add(1)
+		go func(i int, c *ConfirmationCommitter) {
+			defer wg.Done()
+			ready <- struct{}{}
+			<-gate
+			errs[i] = c.ConfirmDepositUnit(ctx, lease, basis)
+		}(i, c)
+	}
+	for i := 0; i < 2; i++ {
+		select {
+		case <-ready:
+		case <-time.After(10 * time.Second):
+			t.Fatal("race workers did not reach the rendezvous")
+		}
+	}
+	close(gate) // release both real connections at once; the DB lock orders them
+	wg.Wait()
+
+	// Winner committed, loser converged (case 2 converge returns nil, not
+	// an error): both calls succeed with exactly one durable conversion.
+	for i, err := range errs {
+		if err != nil {
+			t.Fatalf("worker %d ConfirmDepositUnit() = %v, want nil (win or converge)", i, err)
+		}
+	}
+	// Cross-pool reads: the conversion is visible from the other handle.
+	var confirmed, pending int
+	if err := poolB.QueryRow(ctx, `
+SELECT count(*) FROM deposit_observations WHERE chain_id = $1 AND status = 'confirmed'`,
+		chainID).Scan(&confirmed); err != nil {
+		t.Fatalf("count confirmed via poolB: %v", err)
+	}
+	if err := poolB.QueryRow(ctx, `
+SELECT count(*) FROM deposit_observations WHERE chain_id = $1 AND status = 'pending'`,
+		chainID).Scan(&pending); err != nil {
+		t.Fatalf("count pending via poolB: %v", err)
+	}
+	if confirmed != 1 || pending != 0 {
+		t.Fatalf("confirmed=%d pending=%d via poolB, want exactly 1 confirmed and 0 pending", confirmed, pending)
+	}
+	if k := depositCountRows(t, ctx, poolB, "confirmation_policy_history", chainID); k != 1 {
+		t.Fatalf("confirmation_policy_history rows via poolB = %d, want 1 (no second bootstrap)", k)
+	}
+	// Winner's values: the single conversion carries the exact basis.
+	status, nullAt, tipN, thr, seq, gotTipHash, conf :=
+		confirmReadBasis(t, ctx, poolB, chainID, bh, txHash)
+	if status != "confirmed" || nullAt {
+		t.Fatalf("status=%s nullAt=%v via poolB, want confirmed/non-null confirmed_at", status, nullAt)
+	}
+	if tipN != int64(tip) || gotTipHash != depositBlockHash(tip) || thr != int64(n) || seq != 1 || conf != "10" {
+		t.Fatalf("basis via poolB = tip(%d %s) N=%d conf=%s seq=%d, want tip(%d %s) N=10 conf=10 seq=1",
+			tipN, gotTipHash, thr, conf, seq, tip, depositBlockHash(tip))
+	}
+	winnerAt := confirm13ConfirmedAt(t, ctx, poolB, chainID, bh, txHash)
+
+	// Loser converges on re-read: a repeat commit through the losing
+	// handle returns nil with confirmed_at and every basis column
+	// byte-identical to the winner's (first-seen facts immutable, I2).
+	if err := committerB.ConfirmDepositUnit(ctx, lease, basis); err != nil {
+		t.Fatalf("loser re-read ConfirmDepositUnit() = %v, want nil (converge)", err)
+	}
+	if got := confirm13ConfirmedAt(t, ctx, poolA, chainID, bh, txHash); got != winnerAt {
+		t.Fatalf("confirmed_at changed %s -> %s on loser re-read (rewrote winner facts)", winnerAt, got)
+	}
+	status2, nullAt2, tipN2, thr2, seq2, gotTipHash2, conf2 :=
+		confirmReadBasis(t, ctx, poolA, chainID, bh, txHash)
+	if status2 != status || nullAt2 != nullAt || tipN2 != tipN || thr2 != thr ||
+		seq2 != seq || gotTipHash2 != gotTipHash || conf2 != conf {
+		t.Fatalf("basis changed on loser re-read: was (%s %d %s %d %s %d), now (%s %d %s %d %s %d)",
+			status, tipN, gotTipHash, thr, conf, seq, status2, tipN2, gotTipHash2, thr2, conf2, seq2)
+	}
+	// Integrity: zero confirmed rows may lack basis columns.
+	var incomplete int
+	if err := poolA.QueryRow(ctx, `
+SELECT COUNT(*) FROM deposit_observations
+WHERE chain_id = $1 AND status = 'confirmed'
+  AND (confirmed_at IS NULL OR confirm_tip_number IS NULL OR confirm_tip_hash IS NULL
+       OR confirm_threshold IS NULL OR confirmations IS NULL OR confirm_policy_seq IS NULL)`,
+		chainID).Scan(&incomplete); err != nil {
+		t.Fatalf("integrity check: %v", err)
+	}
+	if incomplete != 0 {
+		t.Fatalf("incomplete confirmed rows = %d, want 0", incomplete)
+	}
+}
+
+// TestConfirmationRepeatChecksStaySingleConversion is T021(b) / quickstart D2
+// (FR-05, SC-05, US4-2): the same Pending row checked >= 2 times after
+// conversion still shows exactly 1 conversion with confirmed_at and basis
+// immutable (the single-connection form of case 2 convergence; the
+// concurrent form is TestConfirmationDualWorkerRaceConverges above).
+func TestConfirmationRepeatChecksStaySingleConversion(t *testing.T) {
+	dsn := startIndexerPostgres(t)
+	pool := openIndexerPool(t, dsn)
+	defer pool.Close()
+	ctx := context.Background()
+
+	const chainID, h, tip, n = int64(31346), uint64(100), uint64(109), uint64(10)
+	depositSeedCanonical(t, ctx, pool, chainID, h, tip, true)
+	bh, txHash := confirmSeedPending(t, ctx, pool, chainID, h)
+	confirmSeedPolicyRow(t, ctx, pool, chainID, 1, int64(n), nil, "bootstrap", nil)
+
+	c, lease := confirmCommitter(t, pool, chainID, n)
+	basis := ConfirmBasis{BlockHash: bh, TxHash: txHash, Height: h,
+		TipNumber: tip, TipHash: depositBlockHash(tip), PolicySeq: 1, ThresholdN: n}
+	if err := c.ConfirmDepositUnit(ctx, lease, basis); err != nil {
+		t.Fatalf("first ConfirmDepositUnit(): %v", err)
+	}
+	firstAt := confirm13ConfirmedAt(t, ctx, pool, chainID, bh, txHash)
+	firstStatus, firstNullAt, firstTipN, firstThr, firstSeq, firstTipHash, firstConf :=
+		confirmReadBasis(t, ctx, pool, chainID, bh, txHash)
+
+	// Repeat checks >= 2: every one converges (nil), none rewrites.
+	for i := 0; i < 2; i++ {
+		if err := c.ConfirmDepositUnit(ctx, lease, basis); err != nil {
+			t.Fatalf("repeat ConfirmDepositUnit() #%d = %v, want nil (converge)", i+1, err)
+		}
+	}
+	if got := confirm13ConfirmedAt(t, ctx, pool, chainID, bh, txHash); got != firstAt {
+		t.Fatalf("confirmed_at changed %s -> %s across repeat checks (rewrote first-seen time)", firstAt, got)
+	}
+	status, nullAt, tipN, thr, seq, gotTipHash, conf :=
+		confirmReadBasis(t, ctx, pool, chainID, bh, txHash)
+	if status != firstStatus || nullAt != firstNullAt || tipN != firstTipN || thr != firstThr ||
+		seq != firstSeq || gotTipHash != firstTipHash || conf != firstConf {
+		t.Fatalf("basis changed across repeat checks: was (%s %d %s %d %s %d), now (%s %d %s %d %s %d)",
+			firstStatus, firstTipN, firstTipHash, firstThr, firstConf, firstSeq,
+			status, tipN, gotTipHash, thr, conf, seq)
+	}
+	if status != "confirmed" || nullAt {
+		t.Fatalf("status=%s nullAt=%v, want confirmed/non-null confirmed_at", status, nullAt)
+	}
+	if tipN != int64(tip) || gotTipHash != depositBlockHash(tip) || thr != int64(n) || seq != 1 || conf != "10" {
+		t.Fatalf("basis = tip(%d %s) N=%d conf=%s seq=%d, want tip(%d %s) N=10 conf=10 seq=1",
+			tipN, gotTipHash, thr, conf, seq, tip, depositBlockHash(tip))
+	}
+	var confirmed int
+	if err := pool.QueryRow(ctx, `
+SELECT count(*) FROM deposit_observations WHERE chain_id = $1 AND status = 'confirmed'`,
+		chainID).Scan(&confirmed); err != nil {
+		t.Fatalf("count confirmed: %v", err)
+	}
+	if confirmed != 1 {
+		t.Fatalf("confirmed rows = %d, want exactly 1 after repeat checks", confirmed)
+	}
+	if k := depositCountRows(t, ctx, pool, "confirmation_policy_history", chainID); k != 1 {
+		t.Fatalf("confirmation_policy_history rows = %d, want 1 (repeat checks write nothing)", k)
+	}
+	var incomplete int
+	if err := pool.QueryRow(ctx, `
+SELECT COUNT(*) FROM deposit_observations
+WHERE chain_id = $1 AND status = 'confirmed'
+  AND (confirmed_at IS NULL OR confirm_tip_number IS NULL OR confirm_tip_hash IS NULL
+       OR confirm_threshold IS NULL OR confirmations IS NULL OR confirm_policy_seq IS NULL)`,
+		chainID).Scan(&incomplete); err != nil {
+		t.Fatalf("integrity check: %v", err)
+	}
+	if incomplete != 0 {
+		t.Fatalf("incomplete confirmed rows = %d, want 0", incomplete)
+	}
+}
+
+// -- T022 --------------------------------------------------------------------
+
+// T022 [US4] crash boundary + restart recovery (FR-05, SC-08, US4-3,
+// quickstart D2): (a) pre-commit kill retries from durable state with zero
+// footprint; (b) unknown COMMIT outcomes are定性 by observation-PK re-read
+// (committed -> converge nil, else retry) and never assumed not-committed;
+// (c) a fresh-handle restart resumes from durable state (pending processed,
+// confirmed untouched). Fault shape mirrors 004
+// TestDepositCrashRecoveryInjectedFaults: the TCP-level depositFaultConn on a
+// dedicated fault pool (the committer's pool only; seeding and durable
+// assertions stay on the clean pool), channel-fired sync, no fixed sleeps.
+// T023 appends below under its own banner.
+
+// TestConfirmationPreCommitKillRetriesFromDurableState is T022(a): the
+// connection dies at the conditional UPDATE — the last statement before
+// COMMIT never lands — so the whole attempt rolls back with zero footprint;
+// a retry from durable state converts exactly once (no omission, no
+// duplication, no partial row; integrity SQL = 0).
+func TestConfirmationPreCommitKillRetriesFromDurableState(t *testing.T) {
+	dsn := startIndexerPostgres(t)
+	pool := openIndexerPool(t, dsn)
+	defer pool.Close()
+	fault := newDepositFault()
+	faultPool := depositOpenFaultPool(t, dsn, fault)
+	ctx := context.Background()
+
+	const chainID, h, tip, n = int64(31347), uint64(100), uint64(109), uint64(10)
+	depositSeedCanonical(t, ctx, pool, chainID, h, tip, true)
+	bh, txHash := confirmSeedPending(t, ctx, pool, chainID, h)
+	confirmSeedPolicyRow(t, ctx, pool, chainID, 1, int64(n), nil, "bootstrap", nil)
+
+	committer, err := NewConfirmationCommitter(faultPool, ConfirmationConfig{ChainID: chainID, ThresholdN: n})
+	if err != nil {
+		t.Fatalf("NewConfirmationCommitter(): %v", err)
+	}
+	lease := depositITLease(t, pool, chainID)
+	basis := ConfirmBasis{BlockHash: bh, TxHash: txHash, Height: h,
+		TipNumber: tip, TipHash: depositBlockHash(tip), PolicySeq: 1, ThresholdN: n}
+
+	// Kill the connection at the conditional write: it never lands, so the
+	// server rolls the attempt back. The call must fail (never silent
+	// success on a killed write).
+	fault.armSQL("UPDATE deposit_observations", false, false)
+	if err := committer.ConfirmDepositUnit(ctx, lease, basis); err == nil {
+		t.Fatal("ConfirmDepositUnit() with the write killed = nil, want a connection error")
+	}
+	fault.waitFired(t, "connection death at the conditional UPDATE")
+	fault.disarm()
+	if got := fault.fires.Load(); got != 1 {
+		t.Fatalf("fault fires = %d, want exactly 1 (no hidden retry slipped a write through)", got)
+	}
+
+	// Zero footprint: still pending with no conversion facts, seeded policy
+	// row only.
+	confirmAssertZeroWrite(t, ctx, pool, chainID, bh, txHash, 1)
+
+	// Retry from durable state converts exactly once with the exact basis.
+	if err := committer.ConfirmDepositUnit(ctx, lease, basis); err != nil {
+		t.Fatalf("retry ConfirmDepositUnit() = %v, want nil", err)
+	}
+	status, nullAt, tipN, thr, seq, gotTipHash, conf :=
+		confirmReadBasis(t, ctx, pool, chainID, bh, txHash)
+	if status != "confirmed" || nullAt {
+		t.Fatalf("status=%s nullAt=%v after retry, want confirmed/non-null confirmed_at", status, nullAt)
+	}
+	if tipN != int64(tip) || gotTipHash != depositBlockHash(tip) || thr != int64(n) || seq != 1 || conf != "10" {
+		t.Fatalf("basis after retry = tip(%d %s) N=%d conf=%s seq=%d, want tip(%d %s) N=10 conf=10 seq=1",
+			tipN, gotTipHash, thr, conf, seq, tip, depositBlockHash(tip))
+	}
+	var confirmed int
+	if err := pool.QueryRow(ctx, `
+SELECT count(*) FROM deposit_observations WHERE chain_id = $1 AND status = 'confirmed'`,
+		chainID).Scan(&confirmed); err != nil {
+		t.Fatalf("count confirmed: %v", err)
+	}
+	if confirmed != 1 {
+		t.Fatalf("confirmed rows = %d, want exactly 1 after kill + retry", confirmed)
+	}
+	if k := depositCountRows(t, ctx, pool, "confirmation_policy_history", chainID); k != 1 {
+		t.Fatalf("confirmation_policy_history rows = %d, want 1 (retry writes no policy row)", k)
+	}
+	var incomplete int
+	if err := pool.QueryRow(ctx, `
+SELECT COUNT(*) FROM deposit_observations
+WHERE chain_id = $1 AND status = 'confirmed'
+  AND (confirmed_at IS NULL OR confirm_tip_number IS NULL OR confirm_tip_hash IS NULL
+       OR confirm_threshold IS NULL OR confirmations IS NULL OR confirm_policy_seq IS NULL)`,
+		chainID).Scan(&incomplete); err != nil {
+		t.Fatalf("integrity check: %v", err)
+	}
+	if incomplete != 0 {
+		t.Fatalf("incomplete confirmed rows = %d, want 0", incomplete)
+	}
+}
+
+// TestConfirmationUnknownCommitOutcomeResolvesByPKReread is T022(b) /
+// quickstart D2 (FR-05, SC-08, US4-3): a COMMIT whose outcome the caller
+// never learns is定性 by re-reading the observation PK — committed means
+// converge nil (never treated as not-committed, never rewritten), unlanded
+// means error-then-retry converts exactly once. Shape mirrors 004
+// TestDepositAuthD11UnknownCommitResolvesByDB (direct call through the fault
+// pool, fires==1 pins a single attempt).
+func TestConfirmationUnknownCommitOutcomeResolvesByPKReread(t *testing.T) {
+	dsn := startIndexerPostgres(t)
+	pool := openIndexerPool(t, dsn)
+	defer pool.Close()
+	fault := newDepositFault()
+	faultPool := depositOpenFaultPool(t, dsn, fault)
+	ctx := context.Background()
+
+	const chainID, h1, h2, tip, n = int64(31348), uint64(100), uint64(101), uint64(110), uint64(10)
+	depositSeedCanonical(t, ctx, pool, chainID, h1, tip, true)
+	bh1, txHash1 := confirmSeedPending(t, ctx, pool, chainID, h1)
+	// A second pending needs its own observation row only: confirmSeedPending
+	// plants the shared seq-1 history row, which already exists.
+	bh2, txHash2 := depositBlockHash(h2), depositTxHash(h2, 0)
+	depositSeedObservation(t, ctx, pool, chainID, h2, bh2, txHash2, 0, "1", 1)
+	confirmSeedPolicyRow(t, ctx, pool, chainID, 1, int64(n), nil, "bootstrap", nil)
+
+	committer, err := NewConfirmationCommitter(faultPool, ConfirmationConfig{ChainID: chainID, ThresholdN: n})
+	if err != nil {
+		t.Fatalf("NewConfirmationCommitter(): %v", err)
+	}
+	lease := depositITLease(t, pool, chainID)
+	basis1 := ConfirmBasis{BlockHash: bh1, TxHash: txHash1, Height: h1,
+		TipNumber: tip, TipHash: depositBlockHash(tip), PolicySeq: 1, ThresholdN: n}
+	basis2 := ConfirmBasis{BlockHash: bh2, TxHash: txHash2, Height: h2,
+		TipNumber: tip, TipHash: depositBlockHash(tip), PolicySeq: 1, ThresholdN: n}
+
+	// Case 1: COMMIT lands at the DB but the reply never reaches the caller.
+	// The PK re-read定性 it committed -> nil (not an error, not a blind
+	// "not-committed" retry).
+	fault.armSQL(depositFaultCommit, true, false)
+	if err := committer.ConfirmDepositUnit(ctx, lease, basis1); err != nil {
+		t.Fatalf("ConfirmDepositUnit() with the COMMIT reply lost = %v, want nil (PK re-read converges)", err)
+	}
+	fault.waitFired(t, "COMMIT reply loss")
+	fault.disarm()
+	if got := fault.fires.Load(); got != 1 {
+		t.Fatalf("COMMIT drops = %d, want exactly 1 (a second attempt would be a duplicate)", got)
+	}
+	status, nullAt, tipN, thr, seq, gotTipHash, conf :=
+		confirmReadBasis(t, ctx, pool, chainID, bh1, txHash1)
+	if status != "confirmed" || nullAt {
+		t.Fatalf("status=%s nullAt=%v after reply loss, want confirmed/non-null confirmed_at", status, nullAt)
+	}
+	if tipN != int64(tip) || gotTipHash != depositBlockHash(tip) || thr != int64(n) || seq != 1 || conf != "11" {
+		t.Fatalf("basis after reply loss = tip(%d %s) N=%d conf=%s seq=%d, want tip(%d %s) N=10 conf=11 seq=1",
+			tipN, gotTipHash, thr, conf, seq, tip, depositBlockHash(tip))
+	}
+	firstAt := confirm13ConfirmedAt(t, ctx, pool, chainID, bh1, txHash1)
+
+	// The follow-up check converges with byte-identical facts: the unknown
+	// outcome was committed, so treating it as not-committed would have
+	// rewritten first-seen facts (I2).
+	if err := committer.ConfirmDepositUnit(ctx, lease, basis1); err != nil {
+		t.Fatalf("follow-up ConfirmDepositUnit() = %v, want nil (converge)", err)
+	}
+	if got := confirm13ConfirmedAt(t, ctx, pool, chainID, bh1, txHash1); got != firstAt {
+		t.Fatalf("confirmed_at changed %s -> %s on follow-up (unknown outcome was rewritten)", firstAt, got)
+	}
+	status2, nullAt2, tipN2, thr2, seq2, gotTipHash2, conf2 :=
+		confirmReadBasis(t, ctx, pool, chainID, bh1, txHash1)
+	if status2 != status || nullAt2 != nullAt || tipN2 != tipN || thr2 != thr ||
+		seq2 != seq || gotTipHash2 != gotTipHash || conf2 != conf {
+		t.Fatal("basis changed on follow-up after reply loss (unknown outcome was rewritten)")
+	}
+
+	// Case 2: COMMIT never lands (connection dies first). The PK re-read
+	//定性 it uncommitted -> error (never silent success, never a phantom
+	// row); a retry then converts exactly once.
+	fault.armSQL(depositFaultCommit, false, false)
+	if err := committer.ConfirmDepositUnit(ctx, lease, basis2); err == nil {
+		t.Fatal("ConfirmDepositUnit() with COMMIT unlanded = nil, want an unknown-outcome error")
+	}
+	fault.waitFired(t, "connection death at COMMIT")
+	fault.disarm()
+	if got := fault.fires.Load(); got != 2 {
+		t.Fatalf("fault fires = %d, want 2 (one per unknown-outcome case)", got)
+	}
+	confirmAssertZeroWrite(t, ctx, pool, chainID, bh2, txHash2, 1)
+
+	if err := committer.ConfirmDepositUnit(ctx, lease, basis2); err != nil {
+		t.Fatalf("retry ConfirmDepositUnit() = %v, want nil", err)
+	}
+	status3, nullAt3, tipN3, thr3, seq3, gotTipHash3, conf3 :=
+		confirmReadBasis(t, ctx, pool, chainID, bh2, txHash2)
+	if status3 != "confirmed" || nullAt3 {
+		t.Fatalf("status=%s nullAt=%v after retry, want confirmed/non-null confirmed_at", status3, nullAt3)
+	}
+	if tipN3 != int64(tip) || gotTipHash3 != depositBlockHash(tip) || thr3 != int64(n) || seq3 != 1 || conf3 != "10" {
+		t.Fatalf("basis after retry = tip(%d %s) N=%d conf=%s seq=%d, want tip(%d %s) N=10 conf=10 seq=1",
+			tipN3, gotTipHash3, thr3, conf3, seq3, tip, depositBlockHash(tip))
+	}
+	var confirmed int
+	if err := pool.QueryRow(ctx, `
+SELECT count(*) FROM deposit_observations WHERE chain_id = $1 AND status = 'confirmed'`,
+		chainID).Scan(&confirmed); err != nil {
+		t.Fatalf("count confirmed: %v", err)
+	}
+	if confirmed != 2 {
+		t.Fatalf("confirmed rows = %d, want exactly 2 (one per case, no duplicate)", confirmed)
+	}
+	if k := depositCountRows(t, ctx, pool, "confirmation_policy_history", chainID); k != 1 {
+		t.Fatalf("confirmation_policy_history rows = %d, want 1 (unknown outcomes write no policy row)", k)
+	}
+	var incomplete int
+	if err := pool.QueryRow(ctx, `
+SELECT COUNT(*) FROM deposit_observations
+WHERE chain_id = $1 AND status = 'confirmed'
+  AND (confirmed_at IS NULL OR confirm_tip_number IS NULL OR confirm_tip_hash IS NULL
+       OR confirm_threshold IS NULL OR confirmations IS NULL OR confirm_policy_seq IS NULL)`,
+		chainID).Scan(&incomplete); err != nil {
+		t.Fatalf("integrity check: %v", err)
+	}
+	if incomplete != 0 {
+		t.Fatalf("incomplete confirmed rows = %d, want 0", incomplete)
+	}
+}
+
+// TestConfirmationRestartRecoveryResumesDurableState is T022(c) / quickstart
+// D2 (FR-05, SC-08, US4-3): after a kill -9 (every connection of the crashed
+// worker dropped, lease left to expire on the DB clock), a restart with fresh
+// handles (new pool, new committer, re-acquired lease) against the same DB
+// resumes from durable state: the pre-crash conversion is untouched
+// (confirmed_at and all basis columns byte-identical) and the still-pending
+// row is processed. Restart shape mirrors 004's lease-expiry + fresh-owner
+// recovery.
+func TestConfirmationRestartRecoveryResumesDurableState(t *testing.T) {
+	dsn := startIndexerPostgres(t)
+	pool := openIndexerPool(t, dsn)
+	defer pool.Close()
+	ctx := context.Background()
+
+	const chainID, h1, h2, tip, n = int64(31349), uint64(100), uint64(101), uint64(110), uint64(10)
+	depositSeedCanonical(t, ctx, pool, chainID, h1, tip, true)
+	bh1, txHash1 := confirmSeedPending(t, ctx, pool, chainID, h1)
+	bh2, txHash2 := depositBlockHash(h2), depositTxHash(h2, 0)
+	depositSeedObservation(t, ctx, pool, chainID, h2, bh2, txHash2, 0, "1", 1)
+	confirmSeedPolicyRow(t, ctx, pool, chainID, 1, int64(n), nil, "bootstrap", nil)
+
+	basis1 := ConfirmBasis{BlockHash: bh1, TxHash: txHash1, Height: h1,
+		TipNumber: tip, TipHash: depositBlockHash(tip), PolicySeq: 1, ThresholdN: n}
+	basis2 := ConfirmBasis{BlockHash: bh2, TxHash: txHash2, Height: h2,
+		TipNumber: tip, TipHash: depositBlockHash(tip), PolicySeq: 1, ThresholdN: n}
+
+	// Pre-crash worker on its own pool with a short-TTL lease converts h1.
+	crashPool := openIndexerPool(t, dsn)
+	crasher, err := NewConfirmationCommitter(crashPool, ConfirmationConfig{ChainID: chainID, ThresholdN: n})
+	if err != nil {
+		t.Fatalf("NewConfirmationCommitter(crasher): %v", err)
+	}
+	crashLease := depositITOwnedLease(t, pool, chainID, "crasher-31349", time.Second, 250*time.Millisecond)
+	if err := crasher.ConfirmDepositUnit(ctx, crashLease, basis1); err != nil {
+		t.Fatalf("pre-crash ConfirmDepositUnit() = %v", err)
+	}
+	at1 := confirm13ConfirmedAt(t, ctx, pool, chainID, bh1, txHash1)
+	oldStatus, oldNullAt, oldTipN, oldThr, oldSeq, oldTipHash, oldConf :=
+		confirmReadBasis(t, ctx, pool, chainID, bh1, txHash1)
+
+	// kill -9: drop every connection of the crashed worker, then wait for
+	// its lease to expire on the DB clock so a fresh owner can take over.
+	crashPool.Close()
+	depositWaitLeaseExpired(t, ctx, pool, chainID)
+
+	// Restart: fresh pool, fresh committer, freshly acquired lease against
+	// the same test DB. Durable progress is re-read, never inherited.
+	freshPool := openIndexerPool(t, dsn)
+	defer freshPool.Close()
+	restarter, err := NewConfirmationCommitter(freshPool, ConfirmationConfig{ChainID: chainID, ThresholdN: n})
+	if err != nil {
+		t.Fatalf("NewConfirmationCommitter(restarter): %v", err)
+	}
+	freshLease := depositITOwnedLease(t, pool, chainID, "restarted-31349", time.Minute, 10*time.Second)
+
+	// The pre-crash conversion converges byte-identical (confirmed untouched).
+	if err := restarter.ConfirmDepositUnit(ctx, freshLease, basis1); err != nil {
+		t.Fatalf("restart re-check of h1 = %v, want nil (converge)", err)
+	}
+	if got := confirm13ConfirmedAt(t, ctx, pool, chainID, bh1, txHash1); got != at1 {
+		t.Fatalf("h1 confirmed_at changed %s -> %s across restart (rewrote first-seen time)", at1, got)
+	}
+	status, nullAt, tipN, thr, seq, gotTipHash, conf :=
+		confirmReadBasis(t, ctx, pool, chainID, bh1, txHash1)
+	if status != oldStatus || nullAt != oldNullAt || tipN != oldTipN || thr != oldThr ||
+		seq != oldSeq || gotTipHash != oldTipHash || conf != oldConf {
+		t.Fatal("h1 basis changed across restart (confirmed row was rewritten)")
+	}
+
+	// The still-pending row is processed exactly once with the exact basis.
+	if err := restarter.ConfirmDepositUnit(ctx, freshLease, basis2); err != nil {
+		t.Fatalf("restart ConfirmDepositUnit(h2) = %v, want nil", err)
+	}
+	status2, nullAt2, tipN2, thr2, seq2, gotTipHash2, conf2 :=
+		confirmReadBasis(t, ctx, pool, chainID, bh2, txHash2)
+	if status2 != "confirmed" || nullAt2 {
+		t.Fatalf("h2 status=%s nullAt=%v after restart, want confirmed/non-null confirmed_at", status2, nullAt2)
+	}
+	if tipN2 != int64(tip) || gotTipHash2 != depositBlockHash(tip) || thr2 != int64(n) || seq2 != 1 || conf2 != "10" {
+		t.Fatalf("h2 basis after restart = tip(%d %s) N=%d conf=%s seq=%d, want tip(%d %s) N=10 conf=10 seq=1",
+			tipN2, gotTipHash2, thr2, conf2, seq2, tip, depositBlockHash(tip))
+	}
+	var confirmed, pending int
+	if err := pool.QueryRow(ctx, `
+SELECT count(*) FILTER (WHERE status = 'confirmed'), count(*) FILTER (WHERE status = 'pending')
+FROM deposit_observations WHERE chain_id = $1`, chainID).Scan(&confirmed, &pending); err != nil {
+		t.Fatalf("count by status: %v", err)
+	}
+	if confirmed != 2 || pending != 0 {
+		t.Fatalf("confirmed=%d pending=%d after restart, want 2/0 (no omission, no duplication)", confirmed, pending)
+	}
+	if k := depositCountRows(t, ctx, pool, "confirmation_policy_history", chainID); k != 1 {
+		t.Fatalf("confirmation_policy_history rows = %d, want 1 (restart writes no policy row)", k)
+	}
+	var incomplete int
+	if err := pool.QueryRow(ctx, `
+SELECT COUNT(*) FROM deposit_observations
+WHERE chain_id = $1 AND status = 'confirmed'
+  AND (confirmed_at IS NULL OR confirm_tip_number IS NULL OR confirm_tip_hash IS NULL
+       OR confirm_threshold IS NULL OR confirmations IS NULL OR confirm_policy_seq IS NULL)`,
+		chainID).Scan(&incomplete); err != nil {
+		t.Fatalf("integrity check: %v", err)
+	}
+	if incomplete != 0 {
+		t.Fatalf("incomplete confirmed rows = %d, want 0", incomplete)
+	}
+}
+
+// -- T023 --------------------------------------------------------------------
+
+// T023 [US4] no-rewrite regression (FR-05/I2, data-model Table 1 immutability
+// mechanism, US4-1 no-rewrite side, SC-08; quickstart D2/D5 behavioral half):
+// a confirmed row rejects every rewrite attempt with zero rows affected and
+// byte-identical first-seen facts (confirmed_at + all six basis columns),
+// and the contracts integrity SQL reports 0.
+//
+// Write-path list review (static half, NOT re-proven here): the repo-wide 005
+// write path to deposit_observations is exactly the single commit-tx
+// conditional UPDATE confirmDepositObservationSQL (confirmcommit.go, with the
+// status='pending' predicate). That static half is closed by the grep gate
+// TestDepositWritePathConfinement (depositscanner_test.go, extended in commit
+// 5d43e98: exactly one UPDATE of deposit_observations in confirmcommit.go,
+// confirmation_policy_history update-free, pending literals pinned, probe
+// interception proof). The tests below prove the behavioral half: the
+// zero-row property through every plausible application path. A
+// predicate-less UPDATE is deliberately never attempted — it would succeed by
+// design (no DB triggers, data-model Table 1: application predicate + tests
+// carry the guarantee so 006 inherits zero constraints); the gate above is
+// what guarantees no such statement exists in production code.
+
+// TestConfirmationConfirmedRowsRejectEveryRewritePath is T023(a): seed one
+// Pending, convert it, then attempt rewrites through every plausible path —
+// (1) re-commit of the same basis through ConfirmDepositUnit (converge, nil),
+// (2) raw conditional UPDATE of the basis columns with the pending predicate
+// on the confirmed PK, (3) raw predicate UPDATE attempting a status/timestamp
+// touch on the confirmed PK — and assert each affects 0 rows with
+// confirmed_at and every basis column byte-identical afterwards.
+func TestConfirmationConfirmedRowsRejectEveryRewritePath(t *testing.T) {
+	dsn := startIndexerPostgres(t)
+	pool := openIndexerPool(t, dsn)
+	defer pool.Close()
+	ctx := context.Background()
+
+	const chainID, h, tip, n = int64(31350), uint64(100), uint64(109), uint64(10)
+	depositSeedCanonical(t, ctx, pool, chainID, h, tip, true)
+	bh, txHash := confirmSeedPending(t, ctx, pool, chainID, h)
+	confirmSeedPolicyRow(t, ctx, pool, chainID, 1, int64(n), nil, "bootstrap", nil)
+
+	c, lease := confirmCommitter(t, pool, chainID, n)
+	basis := ConfirmBasis{BlockHash: bh, TxHash: txHash, Height: h,
+		TipNumber: tip, TipHash: depositBlockHash(tip), PolicySeq: 1, ThresholdN: n}
+	if err := c.ConfirmDepositUnit(ctx, lease, basis); err != nil {
+		t.Fatalf("ConfirmDepositUnit(): %v", err)
+	}
+
+	firstAt := confirm13ConfirmedAt(t, ctx, pool, chainID, bh, txHash)
+	firstStatus, firstNullAt, firstTipN, firstThr, firstSeq, firstTipHash, firstConf :=
+		confirmReadBasis(t, ctx, pool, chainID, bh, txHash)
+	if firstStatus != "confirmed" || firstNullAt {
+		t.Fatalf("status=%s nullAt=%v after convert, want confirmed/non-null confirmed_at", firstStatus, firstNullAt)
+	}
+	assertUnchanged := func(stage string) {
+		t.Helper()
+		if got := confirm13ConfirmedAt(t, ctx, pool, chainID, bh, txHash); got != firstAt {
+			t.Fatalf("%s: confirmed_at changed %s -> %s (rewrote first-seen time)", stage, firstAt, got)
+		}
+		status, nullAt, tipN, thr, seq, gotTipHash, conf :=
+			confirmReadBasis(t, ctx, pool, chainID, bh, txHash)
+		if status != firstStatus || nullAt != firstNullAt || tipN != firstTipN || thr != firstThr ||
+			seq != firstSeq || gotTipHash != firstTipHash || conf != firstConf {
+			t.Fatalf("%s: basis changed: was (%s %d %s %d %s %d), now (%s %d %s %d %s %d)",
+				stage, firstStatus, firstTipN, firstTipHash, firstThr, firstConf, firstSeq,
+				status, tipN, gotTipHash, thr, conf, seq)
+		}
+	}
+
+	// Path 1: re-commit of the same basis converges (nil) with zero writes.
+	if err := c.ConfirmDepositUnit(ctx, lease, basis); err != nil {
+		t.Fatalf("re-commit ConfirmDepositUnit() = %v, want nil (converge)", err)
+	}
+	assertUnchanged("re-commit same basis")
+
+	// Path 2: raw conditional UPDATE of the basis columns carrying the
+	// pending predicate, aimed at the confirmed PK with foreign values.
+	tag, err := pool.Exec(ctx, `
+UPDATE deposit_observations
+SET confirm_tip_number = $5, confirm_tip_hash = $6, confirm_threshold = $7,
+    confirmations = $8, confirm_policy_seq = $9
+WHERE chain_id = $1 AND block_hash = $2 AND tx_hash = $3 AND log_index = $4
+  AND status = 'pending'`,
+		chainID, bh, txHash, 0, int64(tip+1), depositBlockHash(tip), int64(n), "99", 1)
+	if err != nil {
+		t.Fatalf("predicate basis UPDATE: %v", err)
+	}
+	if got := tag.RowsAffected(); got != 0 {
+		t.Fatalf("predicate basis UPDATE affected %d rows, want 0 (confirmed row is unwritable)", got)
+	}
+	assertUnchanged("predicate basis UPDATE")
+
+	// Path 3: raw predicate UPDATE attempting a status/timestamp touch on
+	// the confirmed PK.
+	tag, err = pool.Exec(ctx, `
+UPDATE deposit_observations
+SET status = 'confirmed', confirmed_at = now()
+WHERE chain_id = $1 AND block_hash = $2 AND tx_hash = $3 AND log_index = $4
+  AND status = 'pending'`,
+		chainID, bh, txHash, 0)
+	if err != nil {
+		t.Fatalf("predicate status-touch UPDATE: %v", err)
+	}
+	if got := tag.RowsAffected(); got != 0 {
+		t.Fatalf("predicate status-touch UPDATE affected %d rows, want 0 (confirmed row is unwritable)", got)
+	}
+	assertUnchanged("predicate status-touch UPDATE")
+
+	// Exactly one durable conversion; the contracts integrity SQL reports 0.
+	var confirmed int
+	if err := pool.QueryRow(ctx, `
+SELECT count(*) FROM deposit_observations WHERE chain_id = $1 AND status = 'confirmed'`,
+		chainID).Scan(&confirmed); err != nil {
+		t.Fatalf("count confirmed: %v", err)
+	}
+	if confirmed != 1 {
+		t.Fatalf("confirmed rows = %d, want exactly 1 (rewrite attempts wrote nothing)", confirmed)
+	}
+	var restartIncomplete int
+	if err := pool.QueryRow(ctx, `
+SELECT COUNT(*) FROM deposit_observations
+WHERE chain_id = $1 AND status = 'confirmed'
+  AND (confirmed_at IS NULL OR confirm_tip_number IS NULL OR confirm_tip_hash IS NULL
+       OR confirm_threshold IS NULL OR confirmations IS NULL OR confirm_policy_seq IS NULL)`,
+		chainID).Scan(&restartIncomplete); err != nil {
+		t.Fatalf("integrity check: %v", err)
+	}
+	if restartIncomplete != 0 {
+		t.Fatalf("incomplete confirmed rows = %d, want 0", restartIncomplete)
+	}
+}
+
+// TestConfirmationIntegritySpotCheckSQL is T023(b/c): the write-path list
+// review pins the commit-tx UPDATE predicate on the constant itself (the
+// repo-wide grep half stays with TestDepositWritePathConfinement per the T023
+// banner — this is a constant pin, not a second grep), and the verbatim
+// contracts/observability.md integrity SQL asserts 0 over two conversions
+// while a still-pending row proves the spot-check only flags confirmed rows.
+func TestConfirmationIntegritySpotCheckSQL(t *testing.T) {
+	// Write-path list review, constant pin: the single approved 005 write
+	// path to deposit_observations carries the status='pending' predicate.
+	// (Full-repo confinement is asserted by TestDepositWritePathConfinement;
+	// cited, not duplicated.)
+	if !strings.Contains(confirmDepositObservationSQL, "status = 'pending'") {
+		t.Fatal("confirmDepositObservationSQL lost its status='pending' predicate (sole 005 write path)")
+	}
+
+	dsn := startIndexerPostgres(t)
+	pool := openIndexerPool(t, dsn)
+	defer pool.Close()
+	ctx := context.Background()
+
+	const chainID, h1, h2, h3, tip, n = int64(31351), uint64(100), uint64(101), uint64(102), uint64(111), uint64(10)
+	depositSeedCanonical(t, ctx, pool, chainID, h1, tip, true)
+	bh1, txHash1 := confirmSeedPending(t, ctx, pool, chainID, h1)
+	bh2, txHash2 := depositBlockHash(h2), depositTxHash(h2, 0)
+	depositSeedObservation(t, ctx, pool, chainID, h2, bh2, txHash2, 0, "1", 1)
+	bh3, txHash3 := depositBlockHash(h3), depositTxHash(h3, 0)
+	depositSeedObservation(t, ctx, pool, chainID, h3, bh3, txHash3, 0, "1", 1)
+	confirmSeedPolicyRow(t, ctx, pool, chainID, 1, int64(n), nil, "bootstrap", nil)
+
+	c, lease := confirmCommitter(t, pool, chainID, n)
+	for i, b := range []ConfirmBasis{
+		{BlockHash: bh1, TxHash: txHash1, Height: h1,
+			TipNumber: tip, TipHash: depositBlockHash(tip), PolicySeq: 1, ThresholdN: n},
+		{BlockHash: bh2, TxHash: txHash2, Height: h2,
+			TipNumber: tip, TipHash: depositBlockHash(tip), PolicySeq: 1, ThresholdN: n},
+	} {
+		if err := c.ConfirmDepositUnit(ctx, lease, b); err != nil {
+			t.Fatalf("ConfirmDepositUnit(#%d): %v", i+1, err)
+		}
+	}
+
+	// Verbatim contracts/observability.md 转换完整性抽查 SQL: must return 0
+	// (confirmed rows all-basis-non-null), with a pending row present.
+	var incomplete int
+	if err := pool.QueryRow(ctx, `
+SELECT COUNT(*) FROM deposit_observations
+WHERE chain_id = $1 AND status = 'confirmed'
+  AND (confirmed_at IS NULL OR confirm_tip_number IS NULL OR confirm_tip_hash IS NULL
+       OR confirm_threshold IS NULL OR confirmations IS NULL OR confirm_policy_seq IS NULL)`,
+		chainID).Scan(&incomplete); err != nil {
+		t.Fatalf("integrity spot-check SQL: %v", err)
+	}
+	if incomplete != 0 {
+		t.Fatalf("incomplete confirmed rows = %d, want 0", incomplete)
+	}
+	var confirmed, pending int
+	if err := pool.QueryRow(ctx, `
+SELECT count(*) FILTER (WHERE status = 'confirmed'), count(*) FILTER (WHERE status = 'pending')
+FROM deposit_observations WHERE chain_id = $1`, chainID).Scan(&confirmed, &pending); err != nil {
+		t.Fatalf("count by status: %v", err)
+	}
+	if confirmed != 2 || pending != 1 {
+		t.Fatalf("confirmed=%d pending=%d, want 2/1 (two conversions, one row left pending)", confirmed, pending)
+	}
+	if k := depositCountRows(t, ctx, pool, "confirmation_policy_history", chainID); k != 1 {
+		t.Fatalf("confirmation_policy_history rows = %d, want 1 (conversions write no policy row)", k)
+	}
 }
