@@ -1052,6 +1052,12 @@ func maybeCompletePendingTx(ctx context.Context, tx pgx.Tx, chainID int64, row *
 // row goes canonical=true — each statement individually satisfies the partial
 // unique (no deferral); the transient zero-canonical state is invisible
 // inside the transaction. Only afterwards may revive run for that height.
+//
+// When no canonical foreign row exists (the chain returned to the old bytes
+// before any new-fork row was replayed — invalidate-only history), there is
+// nothing to clear: the old row is restored directly. A present canonical
+// row (old or foreign) with zero cleared rows is a repeat/concurrent flip
+// and still refuses, so double execution never double-applies.
 func RecanonicalizeRecoveryBlock(ctx context.Context, pool *pgxpool.Pool, lease *Lease, chainID int64, cap RecoveryCapture, height int64, oldHash string) error {
 	if pool == nil {
 		return errors.New("recanonicalize block: nil pool")
@@ -1073,15 +1079,33 @@ func RecanonicalizeRecoveryBlock(ctx context.Context, pool *pgxpool.Pool, lease 
 		return fmt.Errorf("clear new-fork canonical: %w", err)
 	}
 	if tag.RowsAffected() != 1 {
-		return &RecoveryGateError{detail: fmt.Sprintf(
-			"height %d has no single canonical foreign row to clear", height)}
-	}
-	tag, err = tx.Exec(ctx, restoreOldForkCanonicalSQL, chainID, height, oldHash)
-	if err != nil {
-		return fmt.Errorf("restore old-fork canonical: %w", err)
-	}
-	if tag.RowsAffected() != 1 {
-		return &RecoveryGateError{detail: fmt.Sprintf("height %d old row %s not restored", height, oldHash)}
+		// Zero cleared rows: either no canonical row exists at all
+		// (invalidate-only history — restore the old row directly) or a
+		// canonical row is already present (repeat flip — refuse).
+		var present string
+		cerr := tx.QueryRow(ctx, canonicalHashAtHeightSQL, chainID, height).Scan(&present)
+		if errors.Is(cerr, pgx.ErrNoRows) {
+			tag, err = tx.Exec(ctx, restoreOldForkCanonicalSQL, chainID, height, oldHash)
+			if err != nil {
+				return fmt.Errorf("restore old-fork canonical (no foreign row): %w", err)
+			}
+			if tag.RowsAffected() != 1 {
+				return &RecoveryGateError{detail: fmt.Sprintf("height %d old row %s not restored", height, oldHash)}
+			}
+		} else if cerr != nil {
+			return fmt.Errorf("re-read height canonical for recanonicalize: %w", cerr)
+		} else {
+			return &RecoveryGateError{detail: fmt.Sprintf(
+				"height %d has no single canonical foreign row to clear", height)}
+		}
+	} else {
+		tag, err = tx.Exec(ctx, restoreOldForkCanonicalSQL, chainID, height, oldHash)
+		if err != nil {
+			return fmt.Errorf("restore old-fork canonical: %w", err)
+		}
+		if tag.RowsAffected() != 1 {
+			return &RecoveryGateError{detail: fmt.Sprintf("height %d old row %s not restored", height, oldHash)}
+		}
 	}
 	detail := fmt.Sprintf("recovery=%s height=%d hash=%s version=%d", row.RecoveryID, height, oldHash, row.Seq)
 	if err := appendRecoveryEvent(ctx, tx, chainID, row.RecoveryID, row.Seq, "replay_progress", detail); err != nil {
@@ -1693,8 +1717,14 @@ WHERE o.chain_id = $1 AND o.block_hash = $2 AND o.tx_hash = $3 AND o.log_index =
 
 	// reviveObservationSQL flips one orphan back to pending in place (the
 	// exact orphan guard makes repeat/concurrent conversion affect 0 rows).
+	// The pass-through clears the confirm/orphan timestamps the approved
+	// CHECK ties to non-pending status (pending ⟺ confirmed_at/orphaned_at
+	// NULL); the old basis survives in the orphan-time transition snapshot
+	// and the confirm_* columns, and 005 reconfirmation overwrites confirm_*
+	// with the new basis. orphan_recovery_id is retained so the terminal
+	// disposition still attributes the round.
 	reviveObservationSQL = `
-UPDATE deposit_observations SET status = 'pending'
+UPDATE deposit_observations SET status = 'pending', confirmed_at = NULL, orphaned_at = NULL
 WHERE chain_id = $1 AND block_hash = $2 AND tx_hash = $3 AND log_index = $4
   AND status = 'orphaned' AND orphan_recovery_id = $5`
 

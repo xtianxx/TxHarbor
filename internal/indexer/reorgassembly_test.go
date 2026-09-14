@@ -232,7 +232,89 @@ func TestReorgAssemblyUnboundHeightHolds(t *testing.T) {
 	}
 }
 
-// TestReorgAssemblyEmptyIntervalAdvances: a genuinely empty log interval is
+// asmTransferLog builds a well-formed watched-Transfer log at one height
+// (contract testContractA, recipient watched, amount 1).
+func asmTransferLog(fork map[int64]string, h int64) types.Log {
+	return types.Log{
+		BlockNumber: uint64(h), BlockHash: common.HexToHash(fork[h]),
+		TxHash: common.HexToHash(depositTxHash(uint64(h), 0)), Index: 0,
+		Address: common.HexToAddress(testContractA),
+		Topics: []common.Hash{eth.TransferSig,
+			common.HexToHash("0x000000000000000000000000bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"),
+			common.HexToHash("0x000000000000000000000000" + depositWatchAddr[2:])},
+		Data: common.BigToHash(big.NewInt(1)).Bytes(),
+	}
+}
+
+// TestReorgAssemblyBelowDepositStartSkips: transfer logs below the
+// bootstrapped deposit start are outside deposit scope — their logs are
+// kept but no observations are identified and the range does NOT hold, so
+// block/log replay can never wedge over pre-start transfers (US3
+// late-start liveness). In-scope heights still identify normally.
+func TestReorgAssemblyBelowDepositStartSkips(t *testing.T) {
+	const chainID = int64(907004)
+	fx := asmSetup(t, chainID, &asmLogsClient{}, 18)
+	ctx := context.Background()
+	// Reshape the seeded stream into a late start: checkpoint start 18
+	// (floor 18, nothing swept for deposit), versions from 18.
+	if _, err := fx.pool.Exec(ctx, `UPDATE deposit_checkpoint SET start_block = 18, next_block = 18 WHERE chain_id = $1`, chainID); err != nil {
+		t.Fatalf("reshape deposit start: %v", err)
+	}
+	fx.ex.logs = &asmLogsClient{logs: []types.Log{asmTransferLog(fx.fork, 17), asmTransferLog(fx.fork, 19)}}
+	logs, obs, err := fx.ex.assembleLogsAndDeposits(ctx, 16, 20)
+	if err != nil {
+		t.Fatalf("assembleLogsAndDeposits() with pre-start logs = %v, want skip (no hold, no error)", err)
+	}
+	if len(logs) != 2 {
+		t.Fatalf("assembled logs = %d, want 2 (pre-start log kept)", len(logs))
+	}
+	if len(obs) != 1 || obs[0].BlockNumber != 19 {
+		t.Fatalf("assembled observations = %+v, want exactly the in-scope height 19", obs)
+	}
+	if err := fx.ex.replayStream(ctx, fx.row, fx.cap, RecoveryStreamLog, 20); err != nil {
+		t.Fatalf("replayStream(log) over pre-start transfers = %v, want advance (no wedge)", err)
+	}
+	if f := asmFrontier(t, ctx, fx.pool, chainID, "log_frontier"); f == nil || *f != 20 {
+		t.Fatalf("log_frontier = %v after pre-start range, want 20", f)
+	}
+}
+
+// TestReorgAssemblyNeverBootstrappedSkips: a deposit stream that never
+// bootstrapped owns nothing (ordinary bootstrap owns it post-release), so
+// its heights identify zero observations without holding — block/log
+// replay completes over watched transfers instead of wedging.
+func TestReorgAssemblyNeverBootstrappedSkips(t *testing.T) {
+	const chainID = int64(907005)
+	fx := asmSetup(t, chainID, &asmLogsClient{}, 10)
+	ctx := context.Background()
+	if _, err := fx.pool.Exec(ctx, `DELETE FROM deposit_checkpoint WHERE chain_id = $1`, chainID); err != nil {
+		t.Fatalf("drop deposit checkpoint: %v", err)
+	}
+	if _, err := fx.pool.Exec(ctx, `DELETE FROM deposit_config_history WHERE chain_id = $1`, chainID); err != nil {
+		t.Fatalf("drop deposit versions: %v", err)
+	}
+	fx.ex.logs = &asmLogsClient{logs: []types.Log{asmTransferLog(fx.fork, 17)}}
+	logs, obs, err := fx.ex.assembleLogsAndDeposits(ctx, 16, 20)
+	if err != nil {
+		t.Fatalf("assembleLogsAndDeposits() with unbootstrapped deposit = %v, want skip (no hold, no error)", err)
+	}
+	if len(logs) != 1 || len(obs) != 0 {
+		t.Fatalf("assembled logs/obs = %d/%d, want 1/0 (log kept, zero observations)", len(logs), len(obs))
+	}
+	if err := fx.ex.replayStream(ctx, fx.row, fx.cap, RecoveryStreamLog, 20); err != nil {
+		t.Fatalf("replayStream(log) with unbootstrapped deposit = %v, want advance (no wedge)", err)
+	}
+	if f := asmFrontier(t, ctx, fx.pool, chainID, "log_frontier"); f == nil || *f != 20 {
+		t.Fatalf("log_frontier = %v with unbootstrapped deposit, want 20", f)
+	}
+	if err := fx.ex.replayStream(ctx, fx.row, fx.cap, RecoveryStreamDeposit, 20); err != nil {
+		t.Fatalf("replayStream(deposit) with unbootstrapped deposit = %v, want self-skip nil", err)
+	}
+	if f := asmFrontier(t, ctx, fx.pool, chainID, "deposit_frontier"); f != nil {
+		t.Fatalf("deposit_frontier = %d with unbootstrapped deposit, want NULL (ordinary bootstrap owns it)", *f)
+	}
+}
+
 // legitimate — the frontier advances, the checkpoint follows, and every
 // replayed height still proves exactly one canonical block row.
 func TestReorgAssemblyEmptyIntervalAdvances(t *testing.T) {

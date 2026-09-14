@@ -722,7 +722,11 @@ func (e *RecoveryExecutor) assembleLogsAndDeposits(ctx context.Context, from, to
 			topic0:      strings.ToLower(l.Topics[0].Hex()),
 			topic1:      pickTopic(l.Topics, 1),
 			topic2:      pickTopic(l.Topics, 2),
-			data:        strings.ToLower(common.Bytes2Hex(l.Data)),
+			// data keeps the 0x-prefixed 32-byte form parseDepositLogs demands
+			// (depositHexFixed) — the same form 003 persists via hexutil.Encode.
+			// Bytes2Hex alone drops the prefix and every replayed observation
+			// would fail closed as bad_amount (T020 E2E finding).
+			data: "0x" + strings.ToLower(common.Bytes2Hex(l.Data)),
 		}
 		logs = append(logs, ReplayLog{
 			BlockNumber: h, BlockHash: src.blockHash, TxHash: src.txHash, LogIndex: int64(l.Index),
@@ -731,7 +735,23 @@ func (e *RecoveryExecutor) assembleLogsAndDeposits(ctx context.Context, from, to
 		byHeight[h] = append(byHeight[h], src)
 	}
 	var observations []ReplayObservation
+	// Deposit scope gate (US3 late-start/fresh-stream liveness): observations
+	// are identified only for heights the deposit stream owns. Below the
+	// bootstrapped deposit start — or when the stream never bootstrapped
+	// (ordinary bootstrap owns it post-release) — those heights can never
+	// carry deposit observations, so their logs are kept while observation
+	// identification is skipped. Holding there would wedge the block/log
+	// streams over data outside deposit scope. A missing version INSIDE
+	// owned scope is corruption (bootstrap writes version + checkpoint
+	// atomically) and still holds.
+	depStart, depOwned, err := e.depositScopeStart(ctx)
+	if err != nil {
+		return nil, nil, err
+	}
 	for h, rows := range byHeight {
+		if !depOwned || h < depStart {
+			continue // outside deposit scope: logs kept, zero observations
+		}
 		match, versionSeq, ok, err := e.historicalMatch(ctx, h)
 		if err != nil {
 			return nil, nil, fmt.Errorf("recovery deposit assembly: historicalMatch height %d: %w", h, err)
@@ -758,6 +778,23 @@ func (e *RecoveryExecutor) assembleLogsAndDeposits(ctx context.Context, from, to
 		}
 	}
 	return logs, observations, nil
+}
+
+// depositScopeStart names the deposit stream's owned floor: the durable
+// checkpoint start_block (the ordinary path creates it with the configured
+// start and never changes it; rollback preserves it). owned=false means the
+// stream never bootstrapped — the ordinary post-release bootstrap owns every
+// height. A read failure fails loud (tick retry), never a silent scope.
+func (e *RecoveryExecutor) depositScopeStart(ctx context.Context) (start int64, owned bool, err error) {
+	err = e.pool.QueryRow(ctx, `SELECT start_block FROM deposit_checkpoint WHERE chain_id = $1`, e.cfg.ChainID).Scan(&start)
+	switch {
+	case err == nil:
+		return start, true, nil
+	case errors.Is(err, pgx.ErrNoRows):
+		return 0, false, nil
+	default:
+		return 0, false, fmt.Errorf("recovery deposit scope: %w", err)
+	}
 }
 
 // historicalMatch rebuilds the match view in effect at height h from the
