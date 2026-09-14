@@ -8,6 +8,7 @@ package indexer
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -220,6 +221,15 @@ func scanCount(n int64) func(...any) error {
 	}
 }
 
+// scanOne serves a present single-row existence check (e.g. a pause row:
+// err==nil from the existence SELECT means the pause is effective).
+func scanOne() func(...any) error {
+	return func(dest ...any) error {
+		*(dest[0].(*int)) = 1
+		return nil
+	}
+}
+
 // confirmCandidateRow builds one batch row: block_number, block_hash,
 // tx_hash, log_index.
 func confirmCandidateRow(h int64, bh, tx string, li int64) []any {
@@ -282,6 +292,12 @@ func TestClassifyConfirmationOutcome(t *testing.T) {
 		{"reference_missing_halts", chainErr("reference block 5 is missing or non-canonical under the lock"), confirmHalt, "reference_unverifiable"},
 		{"hash_mismatch_halts", chainErr("reference block 5 hash a diverges from candidate bh b"), confirmHalt, "reference_unverifiable"},
 		{"candidate_missing_halts", chainErr("candidate a/b/0 is missing under the lock"), confirmHalt, "reference_unverifiable"},
+		{"candidate_reread_mismatch_halts", chainErr("candidate re-read (status=pending block_number=5 block_hash=a) mismatches captured (h=5 bh=b)"), confirmHalt, "reference_unverifiable"},
+		{"candidate_bad_status_halts", chainErr(`candidate status "orphaned" is neither pending nor confirmed`), confirmHalt, "reference_unverifiable"},
+		{"negative_tip_halts", chainErr("canonical tip number -1 is negative"), confirmHalt, "reference_unverifiable"},
+		{"wrapped_reference_missing_halts", fmt.Errorf("commit: %w", chainErr("reference block 5 is missing or non-canonical under the lock")), confirmHalt, "reference_unverifiable"},
+		{"wrapped_drift_halts", fmt.Errorf("commit: %w", &ConfirmationDriftError{detail: "x"}), confirmHalt, "policy_drift"},
+		{"wrapped_pause_halts", fmt.Errorf("commit: %w", &streamPauseError{stream: "deposit_pause", chainID: 7}), confirmHalt, "pause_present"},
 		{"lease_lost_halts", errors.Join(ErrLeaseLost, errors.New(" verdict failed")), confirmHalt, "lease_lost"},
 		{"startup_mismatch_halts", &confirmationConfigMismatchError{detail: "x"}, confirmHalt, "policy_drift"},
 		{"transient_backs_off", errors.New("connection refused"), confirmBackoff, ""},
@@ -486,6 +502,145 @@ func TestConfirmationTipMissingWaits(t *testing.T) {
 	}
 	if got := sc.ConfirmationState(); got != 1 {
 		t.Fatalf("ConfirmationState() = %d, want 1 (waiting on trusted tip)", got)
+	}
+}
+
+func TestConfirmationTipUntrustedWaits(t *testing.T) {
+	q := &confirmFakeQuerier{
+		rows: map[string]func(dest ...any) error{
+			readConfirmationPolicySQL:   scanPolicy(1, 10),
+			readConfirmationTipSQL:      scanTip(100, ""),
+			countConfirmationPendingSQL: scanCount(2),
+		},
+	}
+	committer := &confirmFakeCommitter{}
+	sc := newConfirmTestScanner(t, q, committer, &confirmFakeMetrics{})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 40*time.Millisecond)
+	defer cancel()
+	if err := sc.ServeLoop(ctx, &Lease{}, nil); err != nil {
+		t.Fatalf("ServeLoop() with untrusted tip = %v, want nil (ctx shutdown)", err)
+	}
+	if len(committer.calls) != 0 {
+		t.Fatalf("untrusted tip committed %d candidates, want 0", len(committer.calls))
+	}
+	if got := sc.ConfirmationState(); got != 1 {
+		t.Fatalf("ConfirmationState() = %d, want 1 (waiting on trusted tip)", got)
+	}
+}
+
+func TestConfirmationPausePrecheckStops(t *testing.T) {
+	tipHash := "0x" + strings.Repeat("ab", 32)
+	q := &confirmFakeQuerier{
+		rows: map[string]func(dest ...any) error{
+			readConfirmationPolicySQL:   scanPolicy(1, 10),
+			readConfirmationTipSQL:      scanTip(100, tipHash),
+			countConfirmationPendingSQL: scanCount(2),
+			depositPauseExistsSQL:       scanOne(),
+		},
+	}
+	committer := &confirmFakeCommitter{}
+	m := &confirmFakeMetrics{}
+	sc := newConfirmTestScanner(t, q, committer, m)
+
+	err := sc.ServeLoop(context.Background(), &Lease{}, nil)
+	var paused *streamPauseError
+	if !errors.As(err, &paused) {
+		t.Fatalf("ServeLoop() = %v (%T), want *streamPauseError halt", err, err)
+	}
+	if len(committer.calls) != 0 {
+		t.Fatalf("pause-present tick committed %d candidates, want 0", len(committer.calls))
+	}
+	if got := sc.ConfirmationState(); got != 3 {
+		t.Fatalf("ConfirmationState() = %d, want 3 (stopped)", got)
+	}
+	if m.transitions["rejected"] != 1 {
+		t.Fatalf("transitions = %v, want rejected 1", m.transitions)
+	}
+	for _, c := range q.calls {
+		if upper := strings.ToUpper(c); strings.Contains(upper, "INSERT") ||
+			strings.Contains(upper, "UPDATE") || strings.Contains(upper, "DELETE") {
+			t.Fatalf("pause halt issued a write statement, want reads only:\n%s", c)
+		}
+	}
+}
+
+func TestConfirmationCommitDriftStopsBatch(t *testing.T) {
+	tipHash := "0x" + strings.Repeat("ab", 32)
+	q := &confirmFakeQuerier{
+		rows: map[string]func(dest ...any) error{
+			readConfirmationPolicySQL:   scanPolicy(1, 10),
+			readConfirmationTipSQL:      scanTip(100, tipHash),
+			countConfirmationPendingSQL: scanCount(3),
+		},
+		batch: [][]any{
+			confirmCandidateRow(90, "0x"+strings.Repeat("aa", 32), "0xtx1", 0),
+			confirmCandidateRow(91, "0x"+strings.Repeat("bb", 32), "0xtx2", 1),
+			confirmCandidateRow(92, "0x"+strings.Repeat("cc", 32), "0xtx3", 2),
+		},
+	}
+	committer := &confirmFakeCommitter{
+		fn: func(call int, _ ConfirmBasis) error {
+			if call == 0 {
+				return nil
+			}
+			return &ConfirmationDriftError{detail: "captured policy (seq=1 N=10) differs from effective (seq=2 N=20)"}
+		},
+	}
+	m := &confirmFakeMetrics{}
+	sc := newConfirmTestScanner(t, q, committer, m)
+
+	err := sc.ServeLoop(context.Background(), &Lease{}, nil)
+	var drift *ConfirmationDriftError
+	if !errors.As(err, &drift) {
+		t.Fatalf("ServeLoop() = %v (%T), want *ConfirmationDriftError halt", err, err)
+	}
+	if len(committer.calls) != 2 {
+		t.Fatalf("committer calls = %d, want 2 (third row never attempted after halt)", len(committer.calls))
+	}
+	if got := sc.ConfirmationState(); got != 3 {
+		t.Fatalf("ConfirmationState() = %d, want 3 (stopped)", got)
+	}
+	if m.confirmed != 1 || m.transitions["ok"] != 1 || m.transitions["rejected"] != 1 {
+		t.Fatalf("counters = confirmed %d transitions %v, want confirmed 1 ok 1 rejected 1",
+			m.confirmed, m.transitions)
+	}
+}
+
+func TestConfirmationCommitLeaseLostStopsBatch(t *testing.T) {
+	tipHash := "0x" + strings.Repeat("ab", 32)
+	q := &confirmFakeQuerier{
+		rows: map[string]func(dest ...any) error{
+			readConfirmationPolicySQL:   scanPolicy(1, 10),
+			readConfirmationTipSQL:      scanTip(100, tipHash),
+			countConfirmationPendingSQL: scanCount(3),
+		},
+		batch: [][]any{
+			confirmCandidateRow(90, "0x"+strings.Repeat("aa", 32), "0xtx1", 0),
+			confirmCandidateRow(91, "0x"+strings.Repeat("bb", 32), "0xtx2", 1),
+			confirmCandidateRow(92, "0x"+strings.Repeat("cc", 32), "0xtx3", 2),
+		},
+	}
+	committer := &confirmFakeCommitter{
+		fn: func(call int, _ ConfirmBasis) error {
+			if call == 0 {
+				return nil
+			}
+			return errors.Join(ErrLeaseLost, errors.New("owner/fencing/expiry verdict failed"))
+		},
+	}
+	m := &confirmFakeMetrics{}
+	sc := newConfirmTestScanner(t, q, committer, m)
+
+	err := sc.ServeLoop(context.Background(), &Lease{}, nil)
+	if !errors.Is(err, ErrLeaseLost) {
+		t.Fatalf("ServeLoop() = %v (%T), want ErrLeaseLost halt", err, err)
+	}
+	if len(committer.calls) != 2 {
+		t.Fatalf("committer calls = %d, want 2 (third row never attempted after halt)", len(committer.calls))
+	}
+	if m.confirmed != 1 {
+		t.Fatalf("confirmed = %d, want 1 (first row stays committed, rest zero writes)", m.confirmed)
 	}
 }
 

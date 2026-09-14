@@ -182,9 +182,14 @@ const (
 )
 
 // classifyConfirmationOutcome maps a commit outcome to a batch verdict with
-// the contracts/observability.md stop reason. below_depth (the pre-check or
-// the re-computed gate refusal after a tip move) is the only wait branch;
-// every other anomaly halts.
+// the contracts/observability.md stop reason. T018 mapping
+// (data-model.md §候选分类, FR-06/US3-2/Edge-170): below_depth (the
+// pre-check or the re-computed gate refusal after a tip move) is the only
+// wait branch; every other anomaly halts the whole loop with zero further
+// commits and no pause-row creation (pause rows belong to the 002/004
+// streams). Chain-view details that name no narrower cause — reference
+// missing, hash divergence, candidate anomaly — share the
+// reference_unverifiable reason (US3-2/Edge-170).
 func classifyConfirmationOutcome(err error) (confirmOutcome, string) {
 	if err == nil {
 		return confirmCommitted, ""
@@ -517,6 +522,9 @@ outer:
 			if ctx.Err() != nil {
 				return nil
 			}
+			// T018 (data-model §候选分类/US3-2): any effective pause halts
+			// the loop; 005 builds no pause row, it only stops with
+			// reason=pause_present.
 			s.conState.Store(3)
 			s.observeTick(pending, policy, tip, true)
 			if s.metrics != nil {
@@ -592,6 +600,9 @@ outer:
 				}
 				continue outer
 			case confirmHalt:
+				// T018 (data-model §候选分类 §后果): an anomalous row ends
+				// the whole batch — already-committed rows are legal
+				// lock-ordering先后, uncommitted rows see zero writes.
 				if errors.Is(err, ErrLeaseLost) {
 					slog.Warn("confirmation loop stopped",
 						"chain_id", s.cfg.ChainID, "reason", reason,

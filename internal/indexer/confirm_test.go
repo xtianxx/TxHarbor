@@ -2,6 +2,7 @@ package indexer
 
 import (
 	"errors"
+	"fmt"
 	"testing"
 )
 
@@ -177,4 +178,179 @@ func TestConfirmationReachedBoundaryMatrix(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestConfirmationWaitStopPredicateMatrix is T020 (FR-06; US3-1/3):
+// the pure-logic predicate matrix for data-model.md §候选分类, driven through
+// the real classifyConfirmationOutcome (confirmscan.go, read-only here) and
+// the real ConfirmationReached gate. below_depth is the only row-level wait
+// (row stays Pending, batch continues); every other anomaly halts with the
+// exact contracts/observability.md reason string.
+//
+// Loop-level distinction (not duplicated here; T018 owns the ServeLoop
+// tests): a missing/untrusted tip on the loop read path waits for a trusted
+// tip (state=1, zero commits), while the classifier maps the commit-time
+// chain-view tip details below to halt verdicts (tip_missing/tip_untrusted)
+// as specified — the wait-vs-halt split is read-path vs commit-path, and this
+// test pins only the classifier side.
+func TestConfirmationWaitStopPredicateMatrix(t *testing.T) {
+	// below_depth arises two ways; both are row-wait, batch continues.
+	t.Run("below_depth/pre-check gate false stays Pending", func(t *testing.T) {
+		// tip=108 h=100 N=10: conf=9 < 10, gate false (same row as T014).
+		if ConfirmationReached(108, 100, 10) {
+			t.Fatal("ConfirmationReached(108,100,10) = true, want false (below_depth pre-check wait)")
+		}
+	})
+	t.Run("below_depth/commit-time re-computed gate fails waits row", func(t *testing.T) {
+		// Detail built exactly as confirmcommit.go builds it (Sprintf with
+		// tip/h/N verbs); wrapped once to prove the As path survives
+		// production-style %w layering.
+		err := fmt.Errorf("confirm deposit observation: %w",
+			&ConfirmationChainViewError{detail: fmt.Sprintf(
+				"re-computed gate fails: tip=%d h=%d N=%d", 10, 5, 10)})
+		got, reason := classifyConfirmationOutcome(err)
+		if got != confirmWaitRow || reason != "below_depth" {
+			t.Fatalf("classify(gate-fail) = (%d, %q), want (%d, %q)",
+				got, reason, confirmWaitRow, "below_depth")
+		}
+	})
+
+	// Halt matrix: each error is constructed exactly as production produces
+	// it (confirmcommit.go Sprintf verbs, depositscanner.go streamPauseError
+	// fields, lease.go ErrLeaseLost wrapping).
+	halts := []struct {
+		name       string
+		err        error
+		wantReason string
+	}{
+		{"reference missing halts",
+			&ConfirmationChainViewError{detail: fmt.Sprintf(
+				"reference block %d is missing or non-canonical under the lock", 5)},
+			"reference_unverifiable"},
+		{"hash mismatch halts",
+			&ConfirmationChainViewError{detail: fmt.Sprintf(
+				"reference block %d hash %s diverges from candidate bh %s", 5, "0xref", "0xbh")},
+			"reference_unverifiable"},
+		{"tip missing halts",
+			&ConfirmationChainViewError{detail: "canonical tip is missing under the lock"},
+			"tip_missing"},
+		{"untrusted tip halts",
+			&ConfirmationChainViewError{detail: fmt.Sprintf(
+				"captured tip (%d %s) differs from canonical tip (%d %s)", 10, "0xa", 11, "0xb")},
+			"tip_untrusted"},
+		{"pause halts",
+			&streamPauseError{stream: "log_pause", chainID: 7},
+			"pause_present"},
+		{"policy drift halts",
+			&ConfirmationDriftError{detail: fmt.Sprintf(
+				"captured policy (seq=%d N=%d) differs from effective (seq=%d N=%d)", 1, 10, 2, 10)},
+			"policy_drift"},
+		{"startup config mismatch halts as drift",
+			&confirmationConfigMismatchError{detail: "effective policy threshold=7 differs from configured N=10"},
+			"policy_drift"},
+		{"lease lost halts",
+			fmt.Errorf("%w: owner/fencing/expiry verdict failed", ErrLeaseLost),
+			"lease_lost"},
+	}
+	for _, tc := range halts {
+		t.Run(tc.name, func(t *testing.T) {
+			got, reason := classifyConfirmationOutcome(tc.err)
+			if got != confirmHalt || reason != tc.wantReason {
+				t.Fatalf("classify(%v) = (%d, %q), want (%d, %q)",
+					tc.err, got, reason, confirmHalt, tc.wantReason)
+			}
+		})
+	}
+
+	// Boundary rows (neither wait-row nor halt): stale basis re-ticks the
+	// outer loop, an unknown transient backs off. Included so the matrix
+	// shows below_depth is the ONLY wait branch.
+	t.Run("stale basis reticks (not wait, not halt)", func(t *testing.T) {
+		got, reason := classifyConfirmationOutcome(errStaleState)
+		if got != confirmRetryTick || reason != "" {
+			t.Fatalf("classify(errStaleState) = (%d, %q), want (%d, %q)",
+				got, reason, confirmRetryTick, "")
+		}
+	})
+	t.Run("transient backs off (not wait, not halt)", func(t *testing.T) {
+		got, reason := classifyConfirmationOutcome(errors.New("connection refused"))
+		if got != confirmBackoff || reason != "" {
+			t.Fatalf("classify(transient) = (%d, %q), want (%d, %q)",
+				got, reason, confirmBackoff, "")
+		}
+	})
+}
+
+// TestConfirmationHaltTransitionBuckets is T020 (FR-06; US3-1/3): the
+// stale-vs-rejected counter mapping for contracts/observability.md
+// transition_total (ok|stale|rejected). The bucket rule mirrors the ServeLoop
+// halt branch (confirmscan.go: drift/pause reason → "rejected", every other
+// commit-time halt reason → "stale"; lease_lost returns early with no
+// transition_total sample). Reasons come from the real classifier; only the
+// bucket rule is quoted here because it has no standalone helper (production
+// owns it inline, read-only for this test).
+func TestConfirmationHaltTransitionBuckets(t *testing.T) {
+	// transitionBucket quotes the ServeLoop halt-branch counter rule.
+	transitionBucket := func(reason string) string {
+		if reason == "policy_drift" || reason == "pause_present" {
+			return "rejected"
+		}
+		return "stale"
+	}
+	cases := []struct {
+		name           string
+		err            error
+		wantReason     string
+		wantTransition string // literal per ServeLoop + observability contract
+	}{
+		{"drift rejected",
+			&ConfirmationDriftError{detail: "captured N=10 differs from configured N=7"},
+			"policy_drift", "rejected"},
+		{"startup mismatch rejected",
+			&confirmationConfigMismatchError{detail: "x"},
+			"policy_drift", "rejected"},
+		{"pause rejected",
+			&streamPauseError{stream: "deposit_pause", chainID: 7},
+			"pause_present", "rejected"},
+		{"reference missing stale",
+			&ConfirmationChainViewError{detail: fmt.Sprintf(
+				"reference block %d is missing or non-canonical under the lock", 91)},
+			"reference_unverifiable", "stale"},
+		{"hash mismatch stale",
+			&ConfirmationChainViewError{detail: fmt.Sprintf(
+				"reference block %d hash %s diverges from candidate bh %s", 91, "0xref", "0xbh")},
+			"reference_unverifiable", "stale"},
+		{"tip missing stale",
+			&ConfirmationChainViewError{detail: "canonical tip is missing under the lock"},
+			"tip_missing", "stale"},
+		{"untrusted tip stale",
+			&ConfirmationChainViewError{detail: fmt.Sprintf(
+				"captured tip (%d %s) differs from canonical tip (%d %s)", 100, "0xa", 101, "0xb")},
+			"tip_untrusted", "stale"},
+		{"commit-time below_depth stale",
+			&ConfirmationChainViewError{detail: fmt.Sprintf(
+				"re-computed gate fails: tip=%d h=%d N=%d", 100, 95, 10)},
+			"below_depth", "stale"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			_, reason := classifyConfirmationOutcome(c.err)
+			if reason != c.wantReason {
+				t.Fatalf("classify(%v) reason = %q, want %q", c.err, reason, c.wantReason)
+			}
+			if got := transitionBucket(reason); got != c.wantTransition {
+				t.Fatalf("transition bucket for reason %q = %q, want %q", reason, got, c.wantTransition)
+			}
+		})
+	}
+	// lease_lost halts but emits no transition_total sample (ServeLoop takes
+	// the early warn-and-return path before ObserveConfirmationTransition).
+	t.Run("lease lost halts with no transition sample", func(t *testing.T) {
+		got, reason := classifyConfirmationOutcome(
+			fmt.Errorf("%w: owner/fencing/expiry verdict failed", ErrLeaseLost))
+		if got != confirmHalt || reason != "lease_lost" {
+			t.Fatalf("classify(lease-lost) = (%d, %q), want (%d, %q)",
+				got, reason, confirmHalt, "lease_lost")
+		}
+	})
 }

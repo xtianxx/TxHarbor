@@ -153,19 +153,19 @@ T000-L / T000-P 见上（本阶段即二者建档）。**Checkpoint**: 门禁状
 
 **Independent Test**: 异常矩阵 + 滞留 starvation 集成全绿（quickstart D5）
 
-- [ ] T018 [US3] 等待与停止映射（`internal/indexer/confirmscan.go` 增补）
+- [x] T018 [US3] 等待与停止映射（`internal/indexer/confirmscan.go` 增补）
   - 需求：FR-04/06，data-model §候选分类（规格原文：FR-06/US3-2/Edge-170）。验收场景：US3-1/2/3。依赖：T011（同文件顺序增补）。
   - 内容：`below_depth` 行级等待（留 Pending，继续同批，计数；唯一非停止分支）；
     引用缺失/哈希不一致/链头缺失/tip 不可信/暂停/漂移→循环停止（state=3，链头缺失 state=1；零提交，不建暂停行）。
   - 完成条件：分类与 data-model 表述逐项对应；异常行触发整批终止（已提交属合法先后）。
-- [ ] T019 [US3] 集成：异常停止、追赶与小批量覆盖（`internal/indexer/confirmation_integration_test.go` 增补）
+- [x] T019 [US3] 集成：异常停止、追赶与小批量覆盖（`internal/indexer/confirmation_integration_test.go` 增补）
   - 需求：FR-02/06，SC-03/04。验收场景：US3-1/2/3/4、quickstart D5。依赖：T018（同文件顺序追加）。
   - 内容：SQL 直插伪造引用行（`deposit_observations` 无指向 `chain_blocks` 的 FK，直插可行；须附 history 行满足版本 FK；
     scanner 路径 pre-006 产不出此类行）→ 循环停止、本 tick 及后续零提交（state=3，`reference_unverifiable` 日志）；
     暂停行存在零提交；tip 缺失停止；滞后消除后符合 Pending 全处理；
     良性小批量：LIMIT 小于合格集 → 多 tick 后排全覆盖（单调性；异常阻塞不在此列，按规格保持停止）。
   - 完成条件：5 次固定批次全绿。
-- [ ] T020 [US3] 等待/停止纯逻辑单元测试（`internal/indexer/confirm_test.go` 增补）
+- [x] T020 [US3] 等待/停止纯逻辑单元测试（`internal/indexer/confirm_test.go` 增补）
   - 需求：FR-06。验收场景：US3-1/3。依赖：T014（同文件顺序增补，不可并行）。
   - 内容：分类谓词矩阵（`below_depth` 行级等待 vs 引用缺失/哈希不一致/链头缺失/暂停/漂移停止条件）。
   - 完成条件：全绿（含 `-race`）。

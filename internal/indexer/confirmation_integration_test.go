@@ -719,3 +719,511 @@ SELECT count(*) FROM deposit_observations WHERE chain_id = $1 AND status = 'conf
 		t.Fatalf("%s{ok} = %v, want 1", metrics.ConfirmationTransitionMetricName, got)
 	}
 }
+
+// --- T019 anomaly halt / catch-up / small-batch coverage --------------------
+
+// T019 [US3] quickstart D5 anomaly matrix (FR-02/06, SC-03/04, US3-1/2/3/4):
+// forged-reference and hash-mismatch rows halt the whole loop (state=3,
+// zero commits this tick and after, back eligible rows blocked as required
+// behavior per data-model §候选分类 §后果); pause halts; missing tip waits
+// (state=1); cleared lag converts everything eligible; a benign set larger
+// than confirmationCandidateBatchLimit (500) is covered over multiple ticks.
+// Every test owns an isolated pg (+ Anvil where chain truth matters) and
+// reuses the confirm13* harness verbatim. One old 004 version_seq=1 row
+// rides along wherever a second row exists: version-agnostic never bypasses
+// a gate. T018's ServeLoop mapping is NOT re-implemented here, only
+// exercised end to end; no drift-exit scenarios (T027 lane).
+
+// TestConfirmationAnomalyReferenceMissingHalts is T019(a) / quickstart D5
+// (US3-2): a SQL-seeded forged reference row (deposit_observations row at
+// h=100 whose block_number/hash has no canonical chain_blocks row — legal,
+// no FK; history row attached for the version_seq FK; the scanner path
+// pre-006 cannot produce it) sits front-row ahead of an eligible benign row.
+// The loop halts with *ConfirmationChainViewError: state=3, both rows still
+// pending with zero conversion facts, zero policy rows, no pause row built,
+// confirmed_total 0 and transition_total{stale} 1. A second loop run halts
+// the same way (subsequent ticks zero commits).
+func TestConfirmationAnomalyReferenceMissingHalts(t *testing.T) {
+	dsn := startIndexerPostgres(t)
+	pool := openIndexerPool(t, dsn)
+	defer pool.Close()
+	ctx := context.Background()
+
+	const chainID, tip, n = int64(31340), uint64(110), uint64(10)
+	// Canonical rows 101..110 only: h=100 has no reference row at all.
+	depositSeedCanonical(t, ctx, pool, chainID, 101, tip, true)
+	depositSeedHistory(t, ctx, pool, chainID, 1, 10, histA19)
+	depositSeedHistoryVersion(t, ctx, pool, chainID, 2, 1, 10, histB19, "t019-req")
+
+	// Front forged row (old version_seq=1 carryover): tip-h+1 = 11 >= 10,
+	// so it reaches the commit path and halts there instead of waiting.
+	bhF, txF := depositBlockHash(100), depositTxHash(100, 0)
+	depositSeedObservation(t, ctx, pool, chainID, 100, bhF, txF, 0, "1", 1)
+	// Back benign row, eligible (110-101+1 = 10) on the current version:
+	// blocked by the front-row halt as required behavior, not a bug.
+	bhB, txB := depositBlockHash(101), depositTxHash(101, 0)
+	depositSeedObservation(t, ctx, pool, chainID, 101, bhB, txB, 0, "1", 2)
+
+	m := metrics.New(func() bool { return true })
+	sc, lease := confirm13Scanner(t, pool, chainID, n, m)
+
+	done := make(chan error, 1)
+	go func() { done <- sc.ServeLoop(ctx, lease, nil) }()
+	select {
+	case err := <-done:
+		var cv *ConfirmationChainViewError
+		if !errors.As(err, &cv) {
+			t.Fatalf("ServeLoop() = %v (%T), want *ConfirmationChainViewError (forged reference)", err, err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("ServeLoop did not halt on the forged reference row")
+	}
+	if got := sc.ConfirmationState(); got != 3 {
+		t.Fatalf("ConfirmationState() = %d, want 3 (stopped)", got)
+	}
+	confirmAssertZeroWrite(t, ctx, pool, chainID, bhF, txF, 0)
+	confirmAssertZeroWrite(t, ctx, pool, chainID, bhB, txB, 0)
+	var pending int
+	if err := pool.QueryRow(ctx, `
+SELECT count(*) FROM deposit_observations WHERE chain_id = $1 AND status = 'pending'`,
+		chainID).Scan(&pending); err != nil {
+		t.Fatalf("count pending: %v", err)
+	}
+	if pending != 2 {
+		t.Fatalf("pending rows = %d, want 2 (forged front row + blocked back row, zero commits)", pending)
+	}
+	if k := depositCountRows(t, ctx, pool, "deposit_pause", chainID); k != 0 {
+		t.Fatalf("deposit_pause rows = %d, want 0 (halt builds no pause row)", k)
+	}
+	chain := confirm13ChainLabel(chainID)
+	if got := confirm13Counter(t, m, metrics.ConfirmationConfirmedMetricName, chain); got != 0 {
+		t.Fatalf("%s = %v, want 0 (halt commits nothing)", metrics.ConfirmationConfirmedMetricName, got)
+	}
+	stale := map[string]string{"chain": strconv.FormatInt(chainID, 10), "result": "stale"}
+	if got := confirm13Counter(t, m, metrics.ConfirmationTransitionMetricName, stale); got != 1 {
+		t.Fatalf("%s{stale} = %v, want 1 (reference_unverifiable halt)", metrics.ConfirmationTransitionMetricName, got)
+	}
+
+	// Subsequent ticks: a fresh scanner on the same durable state halts
+	// again with zero commits (fresh registry proves no write happened).
+	m2 := metrics.New(func() bool { return true })
+	sc2 := confirm19Scanner(t, pool, chainID, n, m2, lease)
+	done2 := make(chan error, 1)
+	go func() { done2 <- sc2.ServeLoop(ctx, lease, nil) }()
+	select {
+	case err := <-done2:
+		var cv *ConfirmationChainViewError
+		if !errors.As(err, &cv) {
+			t.Fatalf("second ServeLoop() = %v (%T), want *ConfirmationChainViewError", err, err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("second ServeLoop did not halt on the forged reference row")
+	}
+	if got := sc2.ConfirmationState(); got != 3 {
+		t.Fatalf("second ConfirmationState() = %d, want 3", got)
+	}
+	confirmAssertZeroWrite(t, ctx, pool, chainID, bhF, txF, 0)
+	confirmAssertZeroWrite(t, ctx, pool, chainID, bhB, txB, 0)
+	if got := confirm13Counter(t, m2, metrics.ConfirmationConfirmedMetricName, confirm13ChainLabel(chainID)); got != 0 {
+		t.Fatalf("second run %s = %v, want 0", metrics.ConfirmationConfirmedMetricName, got)
+	}
+}
+
+// TestConfirmationAnomalyHashMismatchHalts is T019(b) / quickstart D5
+// (Edge-170): the canonical row exists at h but carries a different hash
+// than the observation reference. Same halt as (a): state=3, zero commits
+// this tick and on re-run, back eligible row blocked, stale adjudication.
+func TestConfirmationAnomalyHashMismatchHalts(t *testing.T) {
+	dsn := startIndexerPostgres(t)
+	pool := openIndexerPool(t, dsn)
+	defer pool.Close()
+	ctx := context.Background()
+
+	const chainID, tip, n = int64(31341), uint64(110), uint64(10)
+	depositSeedCanonical(t, ctx, pool, chainID, 100, tip, true)
+	depositSeedHistory(t, ctx, pool, chainID, 1, 10, histA19)
+	depositSeedHistoryVersion(t, ctx, pool, chainID, 2, 1, 10, histB19, "t019-req")
+
+	// Front row references h=100 with a hash that diverges from the
+	// canonical row (old version_seq=1 carryover); eligible so it halts.
+	bhM, txM := depositBlockHash(999), depositTxHash(100, 7)
+	depositSeedObservation(t, ctx, pool, chainID, 100, bhM, txM, 0, "1", 1)
+	bhB, txB := depositBlockHash(101), depositTxHash(101, 0)
+	depositSeedObservation(t, ctx, pool, chainID, 101, bhB, txB, 0, "1", 2)
+
+	m := metrics.New(func() bool { return true })
+	sc, lease := confirm13Scanner(t, pool, chainID, n, m)
+
+	done := make(chan error, 1)
+	go func() { done <- sc.ServeLoop(ctx, lease, nil) }()
+	select {
+	case err := <-done:
+		var cv *ConfirmationChainViewError
+		if !errors.As(err, &cv) {
+			t.Fatalf("ServeLoop() = %v (%T), want *ConfirmationChainViewError (hash mismatch)", err, err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("ServeLoop did not halt on the hash-mismatched reference")
+	}
+	if got := sc.ConfirmationState(); got != 3 {
+		t.Fatalf("ConfirmationState() = %d, want 3 (stopped)", got)
+	}
+	confirmAssertZeroWrite(t, ctx, pool, chainID, bhM, txM, 0)
+	confirmAssertZeroWrite(t, ctx, pool, chainID, bhB, txB, 0)
+	chain := confirm13ChainLabel(chainID)
+	if got := confirm13Counter(t, m, metrics.ConfirmationConfirmedMetricName, chain); got != 0 {
+		t.Fatalf("%s = %v, want 0 (halt commits nothing)", metrics.ConfirmationConfirmedMetricName, got)
+	}
+	stale := map[string]string{"chain": strconv.FormatInt(chainID, 10), "result": "stale"}
+	if got := confirm13Counter(t, m, metrics.ConfirmationTransitionMetricName, stale); got != 1 {
+		t.Fatalf("%s{stale} = %v, want 1 (reference_unverifiable halt)", metrics.ConfirmationTransitionMetricName, got)
+	}
+
+	m2 := metrics.New(func() bool { return true })
+	sc2 := confirm19Scanner(t, pool, chainID, n, m2, lease)
+	done2 := make(chan error, 1)
+	go func() { done2 <- sc2.ServeLoop(ctx, lease, nil) }()
+	select {
+	case err := <-done2:
+		var cv *ConfirmationChainViewError
+		if !errors.As(err, &cv) {
+			t.Fatalf("second ServeLoop() = %v (%T), want *ConfirmationChainViewError", err, err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("second ServeLoop did not halt on the hash-mismatched reference")
+	}
+	confirmAssertZeroWrite(t, ctx, pool, chainID, bhM, txM, 0)
+	confirmAssertZeroWrite(t, ctx, pool, chainID, bhB, txB, 0)
+	if got := confirm13Counter(t, m2, metrics.ConfirmationConfirmedMetricName, confirm13ChainLabel(chainID)); got != 0 {
+		t.Fatalf("second run %s = %v, want 0", metrics.ConfirmationConfirmedMetricName, got)
+	}
+}
+
+// TestConfirmationPausePresentZeroCommitsT019 is T019(c) / quickstart D5
+// (US3-1): a deposit_pause row is present while an eligible old-version
+// carryover row waits. The real loop halts (state=3) with zero commits,
+// zero policy rows, confirmed_total 0 and transition_total{rejected} 1:
+// gates hold regardless of the observation's 004 version.
+func TestConfirmationPausePresentZeroCommitsT019(t *testing.T) {
+	dsn := startIndexerPostgres(t)
+	pool := openIndexerPool(t, dsn)
+	defer pool.Close()
+	ctx := context.Background()
+
+	const chainID, h, tip, n = int64(31342), uint64(100), uint64(110), uint64(10)
+	depositSeedCanonical(t, ctx, pool, chainID, h, tip, true)
+	depositSeedHistory(t, ctx, pool, chainID, 1, 10, histA19)
+	depositSeedHistoryVersion(t, ctx, pool, chainID, 2, 1, 10, histB19, "t019-req")
+	bh, txHash := depositBlockHash(h), depositTxHash(h, 0)
+	depositSeedObservation(t, ctx, pool, chainID, h, bh, txHash, 0, "1", 1) // old version_seq carryover
+	if _, err := pool.Exec(ctx, `
+INSERT INTO deposit_pause (chain_id, height, kind, detail) VALUES ($1, 10, 'upstream_gap', 't019')`,
+		chainID); err != nil {
+		t.Fatalf("seed deposit_pause: %v", err)
+	}
+
+	m := metrics.New(func() bool { return true })
+	sc, lease := confirm13Scanner(t, pool, chainID, n, m)
+
+	done := make(chan error, 1)
+	go func() { done <- sc.ServeLoop(ctx, lease, nil) }()
+	select {
+	case err := <-done:
+		var paused *streamPauseError
+		if !errors.As(err, &paused) || paused.stream != "deposit_pause" {
+			t.Fatalf("ServeLoop() = %v (%T), want *streamPauseError for deposit_pause", err, err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("ServeLoop did not halt on the present pause row")
+	}
+	if got := sc.ConfirmationState(); got != 3 {
+		t.Fatalf("ConfirmationState() = %d, want 3 (stopped)", got)
+	}
+	confirmAssertZeroWrite(t, ctx, pool, chainID, bh, txHash, 0)
+	if got := confirm13Counter(t, m, metrics.ConfirmationConfirmedMetricName, confirm13ChainLabel(chainID)); got != 0 {
+		t.Fatalf("%s under pause = %v, want 0", metrics.ConfirmationConfirmedMetricName, got)
+	}
+	rejected := map[string]string{"chain": strconv.FormatInt(chainID, 10), "result": "rejected"}
+	if got := confirm13Counter(t, m, metrics.ConfirmationTransitionMetricName, rejected); got != 1 {
+		t.Fatalf("%s{rejected} under pause = %v, want 1", metrics.ConfirmationTransitionMetricName, got)
+	}
+}
+
+// TestConfirmationTipMissingWaitsZeroCommitsT019 is T019(d) / quickstart D5
+// (FR-02): a Pending old-version carryover row with no chain_blocks at all
+// -> the loop waits for a trusted tip (state=1) with zero commits and zero
+// policy rows. Same wait semantics as the T013 empty-tip case, here with
+// the version_seq carryover shape.
+func TestConfirmationTipMissingWaitsZeroCommitsT019(t *testing.T) {
+	dsn := startIndexerPostgres(t)
+	pool := openIndexerPool(t, dsn)
+	defer pool.Close()
+	ctx := context.Background()
+
+	const chainID, h, n = int64(31343), uint64(50), uint64(10)
+	depositSeedHistory(t, ctx, pool, chainID, 1, 10, histA19)
+	depositSeedHistoryVersion(t, ctx, pool, chainID, 2, 1, 10, histB19, "t019-req")
+	bh, txHash := depositBlockHash(h), depositTxHash(h, 0)
+	depositSeedObservation(t, ctx, pool, chainID, h, bh, txHash, 0, "1", 1) // old version_seq carryover
+	// No chain_blocks rows: the canonical tip is missing entirely.
+
+	m := metrics.New(func() bool { return true })
+	sc, lease := confirm13Scanner(t, pool, chainID, n, m)
+
+	stop := confirm13RunLoop(t, ctx, sc, lease)
+	time.Sleep(600 * time.Millisecond) // several 25ms poll ticks
+	if got := sc.ConfirmationState(); got != 1 {
+		t.Fatalf("ConfirmationState() = %d, want 1 (waiting for trusted tip)", got)
+	}
+	confirmAssertZeroWrite(t, ctx, pool, chainID, bh, txHash, 0)
+	if got := confirm13Counter(t, m, metrics.ConfirmationConfirmedMetricName, confirm13ChainLabel(chainID)); got != 0 {
+		t.Fatalf("%s with missing tip = %v, want 0", metrics.ConfirmationConfirmedMetricName, got)
+	}
+	stop()
+}
+
+// TestConfirmationLagClearedCatchupAllEligible is T019(e) / quickstart D5
+// (SC-04, US3-4): Anvil is the real chain truth. Below-depth lag waits with
+// zero commits and no omission (all three rows still pending); once the tip
+// clears the lag, every eligible Pending converts exactly once with the
+// exact basis columns (catch-up, no omission). One row rides the old 004
+// version_seq=1.
+func TestConfirmationLagClearedCatchupAllEligible(t *testing.T) {
+	dsn := startIndexerPostgres(t)
+	pool := openIndexerPool(t, dsn)
+	defer pool.Close()
+	ctx := context.Background()
+
+	node := logscanStartAnvilNode(t)
+	client, err := eth.Dial(ctx, node.url, 5*time.Second)
+	if err != nil {
+		t.Fatalf("dial anvil client: %v", err)
+	}
+	defer client.Close()
+
+	const chainID = scanChainID // 31337, matching the Anvil chain id
+	const n = uint64(10)
+
+	// Lagged tip=18: candidates at h=10,11,12 sit at 9/8/7 confirmations.
+	node.mine(t, 18)
+	head := node.blockNumber(t)
+	if head < 18 {
+		t.Fatalf("anvil head = %d, want >= 18", head)
+	}
+	hashes := confirm13AnvilHashes(t, ctx, client, 0, head)
+	confirm13SeedCanonicalReal(t, ctx, pool, chainID, hashes, 0, head)
+
+	depositSeedHistory(t, ctx, pool, chainID, 1, 10, histA19)
+	depositSeedHistoryVersion(t, ctx, pool, chainID, 2, 1, 10, histB19, "t019-req")
+	type cand struct {
+		h          uint64
+		bh, txHash string
+		version    int64
+	}
+	seeds := []cand{
+		{10, "", depositTxHash(10, 0), 2},
+		{11, "", depositTxHash(11, 0), 2},
+		{12, "", depositTxHash(12, 0), 1}, // old version_seq carryover
+	}
+	for i, s := range seeds {
+		seeds[i].bh = hashes[s.h]
+		depositSeedObservation(t, ctx, pool, chainID, s.h, hashes[s.h], s.txHash, 0, "1", s.version)
+	}
+
+	m := metrics.New(func() bool { return true })
+	sc, lease := confirm13Scanner(t, pool, chainID, n, m)
+
+	// Lagged phase: zero commits, zero policy rows, nothing omitted (all
+	// three rows still pending).
+	stop := confirm13RunLoop(t, ctx, sc, lease)
+	time.Sleep(600 * time.Millisecond) // several 25ms poll ticks
+	for _, s := range seeds {
+		confirmAssertZeroWrite(t, ctx, pool, chainID, s.bh, s.txHash, 0)
+	}
+	var pending int
+	if err := pool.QueryRow(ctx, `
+SELECT count(*) FROM deposit_observations WHERE chain_id = $1 AND status = 'pending'`,
+		chainID).Scan(&pending); err != nil {
+		t.Fatalf("count pending during lag: %v", err)
+	}
+	if pending != len(seeds) {
+		t.Fatalf("pending rows during lag = %d, want %d (no omission, no partial commit)", pending, len(seeds))
+	}
+	stop()
+
+	// Clear the lag: advance the Anvil tip past the threshold (head=25)
+	// and extend chain_blocks with the new real headers.
+	node.mine(t, 25-head)
+	tip := node.blockNumber(t)
+	if tip != 25 {
+		t.Fatalf("anvil head = %d, want exactly 25", tip)
+	}
+	for h := head + 1; h <= tip; h++ {
+		hashes[h] = confirm13AnvilHashes(t, ctx, client, h, h)[h]
+	}
+	confirm13SeedCanonicalReal(t, ctx, pool, chainID, hashes, head+1, tip)
+	tipHash := hashes[tip]
+
+	sc2 := confirm19Scanner(t, pool, chainID, n, m, lease)
+	stop2 := confirm13RunLoop(t, ctx, sc2, lease)
+	waitUntil(t, time.Now().Add(60*time.Second), "all lagged candidates confirmed after catch-up", func() bool {
+		var k int
+		if err := pool.QueryRow(ctx, `
+SELECT count(*) FROM deposit_observations WHERE chain_id = $1 AND status = 'confirmed'`,
+			chainID).Scan(&k); err != nil {
+			return false
+		}
+		return k == len(seeds)
+	})
+	time.Sleep(200 * time.Millisecond) // surface any erroneous extra write
+	stop2()
+
+	// Exact basis per row (decimal-string compare for NUMERIC).
+	for _, s := range seeds {
+		status, nullAt, tipN, thr, seq, gotTipHash, conf :=
+			confirmReadBasis(t, ctx, pool, chainID, s.bh, s.txHash)
+		wantConf := strconv.FormatUint(tip-s.h+1, 10)
+		if status != "confirmed" || nullAt {
+			t.Fatalf("h=%d: status=%s nullAt=%v, want confirmed/non-null confirmed_at", s.h, status, nullAt)
+		}
+		if tipN != int64(tip) || gotTipHash != tipHash || thr != int64(n) || seq != 1 || conf != wantConf {
+			t.Fatalf("h=%d: basis = tip(%d %s) N=%d conf=%s seq=%d, want tip(%d %s) N=%d conf=%s seq=1",
+				s.h, tipN, gotTipHash, thr, conf, seq, tip, tipHash, n, wantConf)
+		}
+	}
+	chain := confirm13ChainLabel(chainID)
+	if got := confirm13Counter(t, m, metrics.ConfirmationConfirmedMetricName, chain); got != float64(len(seeds)) {
+		t.Fatalf("%s = %v, want %d (catch-up converts everything eligible)", metrics.ConfirmationConfirmedMetricName, got, len(seeds))
+	}
+	okLabels := map[string]string{"chain": strconv.FormatInt(chainID, 10), "result": "ok"}
+	if got := confirm13Counter(t, m, metrics.ConfirmationTransitionMetricName, okLabels); got != float64(len(seeds)) {
+		t.Fatalf("%s{ok} = %v, want %d", metrics.ConfirmationTransitionMetricName, got, len(seeds))
+	}
+	var incomplete int
+	if err := pool.QueryRow(ctx, `
+SELECT COUNT(*) FROM deposit_observations
+WHERE chain_id = $1 AND status = 'confirmed'
+  AND (confirmed_at IS NULL OR confirm_tip_number IS NULL OR confirm_tip_hash IS NULL
+       OR confirm_threshold IS NULL OR confirmations IS NULL OR confirm_policy_seq IS NULL)`,
+		chainID).Scan(&incomplete); err != nil {
+		t.Fatalf("integrity check: %v", err)
+	}
+	if incomplete != 0 {
+		t.Fatalf("incomplete confirmed rows = %d, want 0", incomplete)
+	}
+}
+
+// TestConfirmationBenignSmallBatchMultiTickCoverage is T019(f) / quickstart
+// D5 (SC-04 benign no-starvation): all rows benign and eligible, but the
+// eligible set (506 rows across h=100..110) is larger than the per-tick
+// candidate LIMIT (500). Multiple ticks cover every row (monotonicity):
+// pending reaches 0, confirmed_total and transition_total{ok} equal the
+// full set, exactly one bootstrap policy row exists, and the integrity
+// check returns 0. Anomalous blocking is excluded here by construction —
+// the spec keeps halt for anomalies (cases a/b above).
+func TestConfirmationBenignSmallBatchMultiTickCoverage(t *testing.T) {
+	dsn := startIndexerPostgres(t)
+	pool := openIndexerPool(t, dsn)
+	defer pool.Close()
+	ctx := context.Background()
+
+	const chainID, tip, n = int64(31344), uint64(119), uint64(10)
+	depositSeedCanonical(t, ctx, pool, chainID, 100, tip, true)
+	depositSeedHistory(t, ctx, pool, chainID, 1, 10, histA19)
+
+	// maxEligible = 119-10+1 = 110: heights 100..110 (11 heights x 46 rows
+	// = 506 rows) are all eligible, exceeding the 500-row tick LIMIT.
+	const perHeight = 46
+	var total int
+	for h := uint64(100); h <= 110; h++ {
+		for i := uint64(0); i < perHeight; i++ {
+			depositSeedObservation(t, ctx, pool, chainID, h, depositBlockHash(h), depositTxHash(h, i), i, "1", 1)
+			total++
+		}
+	}
+	if total != 506 {
+		t.Fatalf("seeded rows = %d, want 506 (must exceed the 500-row tick LIMIT)", total)
+	}
+
+	m := metrics.New(func() bool { return true })
+	sc, lease := confirm13Scanner(t, pool, chainID, n, m)
+
+	stop := confirm13RunLoop(t, ctx, sc, lease)
+	waitUntil(t, time.Now().Add(120*time.Second), "all 506 benign rows confirmed over multiple ticks", func() bool {
+		var k int
+		if err := pool.QueryRow(ctx, `
+SELECT count(*) FROM deposit_observations WHERE chain_id = $1 AND status = 'confirmed'`,
+			chainID).Scan(&k); err != nil {
+			return false
+		}
+		return k == total
+	})
+	time.Sleep(300 * time.Millisecond) // surface any erroneous extra write
+	stop()
+
+	var pending int
+	if err := pool.QueryRow(ctx, `
+SELECT count(*) FROM deposit_observations WHERE chain_id = $1 AND status = 'pending'`,
+		chainID).Scan(&pending); err != nil {
+		t.Fatalf("count pending: %v", err)
+	}
+	if pending != 0 {
+		t.Fatalf("pending rows = %d, want 0 (multi-tick full coverage, no starvation)", pending)
+	}
+	if k := depositCountRows(t, ctx, pool, "confirmation_policy_history", chainID); k != 1 {
+		t.Fatalf("confirmation_policy_history rows = %d, want 1 (bootstrap on first conversion)", k)
+	}
+	chain := confirm13ChainLabel(chainID)
+	if got := confirm13Counter(t, m, metrics.ConfirmationConfirmedMetricName, chain); got != float64(total) {
+		t.Fatalf("%s = %v, want %d", metrics.ConfirmationConfirmedMetricName, got, total)
+	}
+	okLabels := map[string]string{"chain": strconv.FormatInt(chainID, 10), "result": "ok"}
+	if got := confirm13Counter(t, m, metrics.ConfirmationTransitionMetricName, okLabels); got != float64(total) {
+		t.Fatalf("%s{ok} = %v, want %d", metrics.ConfirmationTransitionMetricName, got, total)
+	}
+	var incomplete int
+	if err := pool.QueryRow(ctx, `
+SELECT COUNT(*) FROM deposit_observations
+WHERE chain_id = $1 AND status = 'confirmed'
+  AND (confirmed_at IS NULL OR confirm_tip_number IS NULL OR confirm_tip_hash IS NULL
+       OR confirm_threshold IS NULL OR confirmations IS NULL OR confirm_policy_seq IS NULL)`,
+		chainID).Scan(&incomplete); err != nil {
+		t.Fatalf("integrity check: %v", err)
+	}
+	if incomplete != 0 {
+		t.Fatalf("incomplete confirmed rows = %d, want 0", incomplete)
+	}
+}
+
+// --- T019 helpers -----------------------------------------------------------
+
+// histA19/histB19 are distinct config hashes for the T019 004-carryover
+// shape (history at seq 2, observations on seq 1 or 2).
+const (
+	histA19 = "e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1"
+	histB19 = "e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2"
+)
+
+// confirm19Scanner builds a follow-up scanner reusing an already-acquired
+// lease handle (same-process second run, T013 sc2/sc3 precedent): the
+// confirm13Scanner helper always acquires, which a second run must not redo.
+func confirm19Scanner(t *testing.T, pool *pgxpool.Pool, chainID int64, n uint64, m *metrics.Metrics, lease *Lease) *ConfirmationScanner {
+	t.Helper()
+	cfg := ConfirmationConfig{
+		ChainID:      chainID,
+		ThresholdN:   n,
+		PollInterval: 25 * time.Millisecond,
+		RetryInitial: 25 * time.Millisecond,
+		RetryMax:     250 * time.Millisecond,
+	}
+	committer, err := NewConfirmationCommitter(pool, cfg)
+	if err != nil {
+		t.Fatalf("NewConfirmationCommitter(): %v", err)
+	}
+	sc, err := NewConfirmationScanner(pool, cfg, committer, m)
+	if err != nil {
+		t.Fatalf("NewConfirmationScanner(): %v", err)
+	}
+	_ = lease
+	return sc
+}
