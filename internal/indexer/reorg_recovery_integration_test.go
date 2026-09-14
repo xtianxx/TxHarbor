@@ -3020,3 +3020,1024 @@ WHERE chain_id=$1 AND block_number>$2 AND block_number<=$3 AND status IN ('pendi
 		t.Fatalf("orphan transitions = %d, want 2 (P+C)", total)
 	}
 }
+
+// --- T026: Anvil stale-worker refusal (Batch D, FR-14/20) --------------------
+
+// rrecT26Snap is the zero-write fingerprint for the stale-worker test:
+// business tables, checkpoints, and audit counts must be identical before and
+// after every refused submit.
+type rrecT26Snap struct {
+	blocks, canon, noncanon   int
+	kStatus, cStatus, pStatus string
+	kBasis, cBasis            string
+	cpH                       int64
+	cpHash                    string
+	logNext, depNext          int64
+	events, trans             int
+}
+
+func rrecT26Snapshot(t *testing.T, ctx context.Context, s *rrecScene) rrecT26Snap {
+	t.Helper()
+	var snap rrecT26Snap
+	if err := s.pool.QueryRow(ctx, `SELECT count(*) FROM chain_blocks WHERE chain_id=$1`,
+		s.chainID).Scan(&snap.blocks); err != nil {
+		t.Fatalf("count chain_blocks: %v", err)
+	}
+	if err := s.pool.QueryRow(ctx, `SELECT count(*) FROM chain_blocks WHERE chain_id=$1 AND canonical`,
+		s.chainID).Scan(&snap.canon); err != nil {
+		t.Fatalf("count canonical: %v", err)
+	}
+	if err := s.pool.QueryRow(ctx, `SELECT count(*) FROM chain_blocks WHERE chain_id=$1 AND NOT canonical`,
+		s.chainID).Scan(&snap.noncanon); err != nil {
+		t.Fatalf("count non-canonical: %v", err)
+	}
+	snap.kStatus, snap.cStatus, snap.pStatus = rrecReadObs(t, ctx, s.pool, s.chainID,
+		s.kBH, strings.ToLower(s.kTx.Hex())).status,
+		rrecReadObs(t, ctx, s.pool, s.chainID, s.cBH, strings.ToLower(s.cTx.Hex())).status,
+		rrecReadObs(t, ctx, s.pool, s.chainID, s.pBH, strings.ToLower(s.pTx.Hex())).status
+	kSt, kNull, kTipN, kThr, kSeq, kTipHash, kConf := confirmReadBasis(t, ctx, s.pool, s.chainID,
+		s.kBH, strings.ToLower(s.kTx.Hex()))
+	cSt, cNull, cTipN, cThr, cSeq, cTipHash, cConf := confirmReadBasis(t, ctx, s.pool, s.chainID,
+		s.cBH, strings.ToLower(s.cTx.Hex()))
+	snap.kBasis = fmt.Sprintf("%s null=%v tip=%d:%s N=%d seq=%d conf=%s", kSt, kNull, kTipN, kTipHash, kThr, kSeq, kConf)
+	snap.cBasis = fmt.Sprintf("%s null=%v tip=%d:%s N=%d seq=%d conf=%s", cSt, cNull, cTipN, cTipHash, cThr, cSeq, cConf)
+	cp := rrecReadCheckpoints(t, ctx, s.pool, s.chainID)
+	snap.cpH, snap.cpHash, snap.logNext, snap.depNext = cp.blockH, cp.blockHash, cp.logNext, cp.depNext
+	if err := s.pool.QueryRow(ctx, `SELECT count(*) FROM reorg_recovery_events WHERE chain_id=$1`,
+		s.chainID).Scan(&snap.events); err != nil {
+		t.Fatalf("count recovery events: %v", err)
+	}
+	if err := s.pool.QueryRow(ctx, `SELECT count(*) FROM deposit_observation_transitions WHERE chain_id=$1`,
+		s.chainID).Scan(&snap.trans); err != nil {
+		t.Fatalf("count transitions: %v", err)
+	}
+	return snap
+}
+
+func rrecT26AssertSame(t *testing.T, want, got rrecT26Snap, where string) {
+	t.Helper()
+	if want != got {
+		t.Fatalf("state moved across refused %s:\n want %+v\n got  %+v", where, want, got)
+	}
+}
+
+// TestT026AnvilStaleWorkerRefusal is T026-Anvil (FR-14/20, V6-isolation): on a
+// live Anvil fork, ordinary-path captures taken BEFORE the recovery version
+// change refuse 100% after it — old scan (002 rescan), old identify (004 unit
+// commit), old confirm (005 unit commit) — with zero business writes and zero
+// progress. The version-alone proof runs pauseless (direct establish, so no
+// pause row can shadow the gate); the live-fork proof then lands fork B with
+// the seeded pauses and shows the same delayed submits still refuse
+// (pause-first fencing) while the legal pre-pause commits stand.
+func TestT026AnvilStaleWorkerRefusal(t *testing.T) {
+	s := rrecSetup(t, "rrec-t026-stale")
+	ctx := context.Background()
+
+	rrecMineForkA(t, ctx, s)
+	rrecIndexForkA(t, ctx, s)
+
+	// Delayed-worker inputs: everything captured BEFORE the version change.
+	cap0 := testRecoveryCap(t, ctx, s.pool, s.chainID)
+	if cap0.Seq != 0 {
+		t.Fatalf("pre-recovery capture seq = %d, want 0", cap0.Seq)
+	}
+	sc002, err := NewScanner(s.pool, s.client, s.lease, Config{
+		StartHeight: 0, RPCTimeout: 2 * time.Second, PollInterval: 25 * time.Millisecond,
+		RetryInitial: 25 * time.Millisecond, RetryMax: 250 * time.Millisecond,
+	}, logscanLogger())
+	if err != nil {
+		t.Fatalf("NewScanner(): %v", err)
+	}
+	rescan := blockWrite{number: s.hTip, hash: s.aHashes[s.hTip], parent: s.aHashes[s.hTip-1]}
+	sc004, err := NewDepositScanner(s.pool, rrecDepositCfg(s))
+	if err != nil {
+		t.Fatalf("NewDepositScanner(): %v", err)
+	}
+	unit0, batch0 := depositITReadUnit(t, ctx, sc004, 0, 0)
+	committer, err := NewConfirmationCommitter(s.pool, ConfirmationConfig{ChainID: s.chainID, ThresholdN: rrecThresholdN})
+	if err != nil {
+		t.Fatalf("NewConfirmationCommitter(): %v", err)
+	}
+	stalePBasis := ConfirmBasis{
+		BlockHash: s.pBH, TxHash: strings.ToLower(s.pTx.Hex()), LogIndex: 0, Height: s.hP,
+		TipNumber: s.hTip, TipHash: s.aHashes[s.hTip], PolicySeq: 1, ThresholdN: rrecThresholdN,
+	}
+
+	// Legal ordinary-first order: the K/C confirmations + P pending above ARE
+	// the pre-pause commits (real 002/003/004/005 loops); establish-after-them
+	// must stay allowed, and the baseline below pins the post-version state
+	// every refused submit must preserve.
+	if _, err := EstablishRecovery(ctx, s.pool, s.lease, EstablishRequest{
+		ChainID:      s.chainID,
+		OldTipNumber: int64(s.hTip), OldTipHash: s.aHashes[s.hTip],
+		NewTipNumber: int64(s.hTip), NewTipHash: s.aHashes[s.hTip],
+		DetectedHeight: int64(s.hA + 1), EnvMaxDepthRaw: rrecMaxDepth,
+	}); err != nil {
+		t.Fatalf("pauseless establish: %v", err)
+	}
+	est, err := func() (EstablishResult, error) {
+		row, err := LoadRecoveryState(ctx, s.pool, s.chainID)
+		if err != nil || row == nil {
+			return EstablishResult{}, err
+		}
+		return EstablishResult{RecoveryID: row.RecoveryID, Seq: row.Seq}, nil
+	}()
+	if err != nil {
+		t.Fatalf("read established row: %v", err)
+	}
+	if est.Seq != 1 {
+		t.Fatalf("established seq = %d, want 1", est.Seq)
+	}
+	base := rrecT26Snapshot(t, ctx, s)
+	if base.kStatus != "confirmed" || base.cStatus != "confirmed" || base.pStatus != "pending" {
+		t.Fatalf("legal baseline = K:%s C:%s P:%s, want confirmed/confirmed/pending",
+			base.kStatus, base.cStatus, base.pStatus)
+	}
+	if base.noncanon != 0 || base.trans != 0 || base.events != 1 {
+		t.Fatalf("legal baseline = (noncanon=%d trans=%d events=%d), want (0 0 1-established)",
+			base.noncanon, base.trans, base.events)
+	}
+
+	// Delayed old scan: the tip rescan refuses on version alone.
+	if err := sc002.commitBlock(ctx, rescan, cap0); !isRecoveryGate(err) {
+		t.Fatalf("stale scan rescan post-version = %v, want gate refusal", err)
+	}
+	rrecT26AssertSame(t, base, rrecT26Snapshot(t, ctx, s), "stale scan")
+	// Delayed old identify: a well-formed first-unit submit refuses on version
+	// alone (gate runs before progress guards).
+	if err := sc004.commitDepositUnit(ctx, s.lease, unit0, batch0, nil, 0, 0, cap0); !isRecoveryGate(err) {
+		t.Fatalf("stale identify commit post-version = %v, want gate refusal", err)
+	}
+	rrecT26AssertSame(t, base, rrecT26Snapshot(t, ctx, s), "stale identify")
+	// Delayed old confirm: fully content-matching P basis refuses on version.
+	if err := committer.ConfirmDepositUnit(ctx, s.lease, stalePBasis, cap0); !isRecoveryGate(err) {
+		t.Fatalf("stale confirm post-version = %v, want gate refusal", err)
+	}
+	rrecT26AssertSame(t, base, rrecT26Snapshot(t, ctx, s), "stale confirm")
+	// Primitive half: straight through the gate, content never consulted.
+	func() {
+		tx, err := s.pool.Begin(ctx)
+		if err != nil {
+			t.Fatalf("begin gate probe: %v", err)
+		}
+		defer func() { _ = tx.Rollback(ctx) }()
+		if _, err := recheckRecoveryGate(ctx, tx, s.chainID, cap0); !isRecoveryGate(err) {
+			t.Fatalf("gate primitive with pre-round capture = %v, want refusal", err)
+		}
+		if err := tx.Rollback(ctx); err != nil {
+			t.Fatalf("rollback gate probe: %v", err)
+		}
+	}()
+	rrecT26AssertSame(t, base, rrecT26Snapshot(t, ctx, s), "gate probe")
+
+	// The live fork lands: revert + fork B with all-new hashes, seeded pauses,
+	// and the executor converges onto the one persistent instance (no second
+	// established event, same seq).
+	rrecForkB(t, ctx, s)
+	rrecSeedPauses(t, ctx, s)
+	ex := rrecExecutor(t, s.pool, s.lease, s)
+	done, err := ex.tickIdle(ctx)
+	if err != nil || !done {
+		t.Fatalf("tickIdle() on live fork = (%v, %v), want (true, nil) via convergence", done, err)
+	}
+	row, _ := rrecRow(t, ctx, s.pool, s.chainID)
+	if row.RecoveryID == "" || row.Seq != 1 || row.Phase != reorgPhaseDetected {
+		t.Fatalf("post-fork row = (%s %d %s), want (same id 1 detected)",
+			row.RecoveryID, row.Seq, row.Phase)
+	}
+	if n := rrecEventCount(t, ctx, s.pool, s.chainID, "established"); n != 1 {
+		t.Fatalf("established events after convergence = %d, want 1 (no second instance)", n)
+	}
+	var estDetail string
+	if err := s.pool.QueryRow(ctx, `SELECT detail FROM reorg_recovery_events WHERE chain_id=$1 AND event='established'`,
+		s.chainID).Scan(&estDetail); err != nil {
+		t.Fatalf("read established detail: %v", err)
+	}
+	for _, want := range []string{
+		fmt.Sprintf("old_tip=%d:%s", s.hTip, s.aHashes[s.hTip]),
+		fmt.Sprintf("new_tip=%d:%s", s.hTip, s.aHashes[s.hTip]),
+		"policy=1", "version=1",
+	} {
+		if !strings.Contains(estDetail, want) {
+			t.Fatalf("established detail missing %q: %q", want, estDetail)
+		}
+	}
+
+	// Same delayed workers under the live fork + pauses: still refused 100%
+	// (pause-first fencing now shadows the gate), zero writes each.
+	liveBase := rrecT26Snapshot(t, ctx, s)
+	if err := sc002.commitBlock(ctx, rescan, cap0); !errors.Is(err, errPaused) {
+		t.Fatalf("stale scan on live fork = %v, want the indexer_pause stop", err)
+	}
+	rrecT26AssertSame(t, liveBase, rrecT26Snapshot(t, ctx, s), "live-fork stale scan")
+	if err := sc004.commitDepositUnit(ctx, s.lease, unit0, batch0, nil, 0, 0, cap0); err == nil ||
+		!strings.Contains(strings.ToLower(err.Error()), "pause") {
+		t.Fatalf("stale identify on live fork = %v, want a pause refusal", err)
+	}
+	rrecT26AssertSame(t, liveBase, rrecT26Snapshot(t, ctx, s), "live-fork stale identify")
+	if err := committer.ConfirmDepositUnit(ctx, s.lease, stalePBasis, cap0); err == nil ||
+		!strings.Contains(err.Error(), "deposit_pause") {
+		t.Fatalf("stale confirm on live fork = %v, want the deposit_pause stop", err)
+	}
+	rrecT26AssertSame(t, liveBase, rrecT26Snapshot(t, ctx, s), "live-fork stale confirm")
+
+	// Legal pre-pause commits stand: K/C confirmed on the ORIGINAL basis, P
+	// pending; A-chain canonical everywhere (no invalidate ran); checkpoints
+	// frozen at the tip (zero progress); exactly the established event.
+	final := rrecT26Snapshot(t, ctx, s)
+	if final.kStatus != "confirmed" || final.cStatus != "confirmed" || final.pStatus != "pending" {
+		t.Fatalf("post-refusal statuses = K:%s C:%s P:%s, want confirmed/confirmed/pending",
+			final.kStatus, final.cStatus, final.pStatus)
+	}
+	if final.kBasis != base.kBasis || final.cBasis != base.cBasis {
+		t.Fatalf("legal basis moved:\n K %+v -> %+v\n C %+v -> %+v", base.kBasis, final.kBasis, base.cBasis, final.cBasis)
+	}
+	if final.noncanon != 0 || final.blocks != base.blocks || final.canon != base.canon {
+		t.Fatalf("chain blocks moved: base (total=%d canon=%d noncanon=%d) vs final (total=%d canon=%d noncanon=%d)",
+			base.blocks, base.canon, base.noncanon, final.blocks, final.canon, final.noncanon)
+	}
+	if final.cpH != int64(s.hTip) || final.cpHash != s.aHashes[s.hTip] ||
+		final.logNext != int64(s.hTip+1) || final.depNext != int64(s.hTip+1) {
+		t.Fatalf("checkpoints moved: block=(%d %s) logNext=%d depNext=%d, want tip (%d %s) +1/+1",
+			final.cpH, final.cpHash, final.logNext, final.depNext, s.hTip, s.aHashes[s.hTip])
+	}
+	if row.BlockFrontier != nil || row.LogFrontier != nil || row.DepositFrontier != nil {
+		t.Fatalf("frontiers moved: (%v %v %v), want all nil (zero progress)",
+			row.BlockFrontier, row.LogFrontier, row.DepositFrontier)
+	}
+	if final.events != 1 || final.trans != 0 {
+		t.Fatalf("audit = (events=%d trans=%d), want (1 established, 0 conversions)", final.events, final.trans)
+	}
+	rrecAssertSeededPausesOnly(t, ctx, s.pool, s)
+}
+
+// --- T028: crash drill + re-fork E2E (Batch D, FR-12/13/16/19) ---------------
+
+// rrecT28Frontiers reads the three stream frontiers (-1 for nil) for the
+// monotonic-frontier proof.
+func rrecT28Frontiers(t *testing.T, row *RecoveryRow) [3]int64 {
+	t.Helper()
+	out := [3]int64{-1, -1, -1}
+	for i, f := range []*int64{row.BlockFrontier, row.LogFrontier, row.DepositFrontier} {
+		if f != nil {
+			out[i] = *f
+		}
+	}
+	return out
+}
+
+func rrecT28AssertFrontiers(t *testing.T, prev, got [3]int64, tip uint64, where string) {
+	t.Helper()
+	for i, name := range []string{"block", "log", "deposit"} {
+		if got[i] < prev[i] {
+			t.Fatalf("%s frontier regressed at %s: %v -> %v", name, where, prev, got)
+		}
+		if got[i] > int64(tip) {
+			t.Fatalf("%s frontier %d past bound tip %d at %s", name, got[i], tip, where)
+		}
+	}
+}
+
+// TestT028CrashDrillAndRefork is T028 (FR-12/13/16/19, V7-crash + V8) in two
+// scenes on the shared harness shape: (1) a kill -9 drill between EVERY phase
+// pair with commit-response-loss triage in all three persisted outcomes and an
+// exactly-once terminal release over monotonic frontiers; (2) a mid-replay
+// second fork that never falsely releases, re-validates the ancestor, and
+// holds completion against the bound tip + swept range, never the live head.
+func TestT028CrashDrillAndRefork(t *testing.T) {
+	ctx := context.Background()
+
+	// Scene 1: the crash drill on fork B (narrow batch 2 so replaying is
+	// observable across three ticks over the six-height sweep).
+	s := rrecSetup(t, "rrec-t028-drill")
+	rrecMineForkA(t, ctx, s)
+	rrecIndexForkA(t, ctx, s)
+	rrecForkB(t, ctx, s)
+	rrecSeedPauses(t, ctx, s)
+
+	// rrecT28Resume drops everything (the kill -9) and rebuilds the executor
+	// on the same DB + same Anvil endpoint: durable state is the only
+	// continuity. Lease credentials carry over; only the pool is replaced.
+	resume := func(t *testing.T) (*pgxpool.Pool, *RecoveryExecutor) {
+		t.Helper()
+		s.pool.Close()
+		pool := openIndexerPool(t, s.dsn)
+		t.Cleanup(pool.Close)
+		s.pool = pool
+		return pool, rrecExecutorBatch(t, pool, s.lease, s, 2)
+	}
+
+	pool, ex := resume(t)
+	done, err := ex.tickIdle(ctx)
+	if err != nil || !done {
+		t.Fatalf("tickIdle() = (%v, %v), want (true, nil)", done, err)
+	}
+	firstID, firstSeq := rrecRowID(t, ctx, pool, s.chainID)
+	phases := []string{reorgPhaseDetected}
+
+	// Crash 1: between establish and ancestor confirm (unknown outcome, but
+	// nothing was in flight — resume must land on detected with no redo).
+	pool, ex = resume(t)
+	row, cap := rrecRow(t, ctx, pool, s.chainID)
+	if row.RecoveryID != firstID || row.Seq != firstSeq || row.Phase != reorgPhaseDetected {
+		t.Fatalf("resume-1 row = (%s %d %s), want (%s %d detected)",
+			row.RecoveryID, row.Seq, row.Phase, firstID, firstSeq)
+	}
+	if n := rrecEventCount(t, ctx, pool, s.chainID, "established"); n != 1 {
+		t.Fatalf("established events after crash-1 = %d, want 1 (no redo)", n)
+	}
+	if f := rrecT28Frontiers(t, row); f != [3]int64{-1, -1, -1} {
+		t.Fatalf("frontiers after crash-1 = %v, want all nil", f)
+	}
+
+	// Triage (a) uncommitted: a refused confirm fails clean; re-read decides
+	// still-detected with zero ancestor events, and the retry stays safe.
+	wrongHash := "0x" + strings.Repeat("00", 32)
+	if err := ConfirmRecoveryAncestor(ctx, pool, s.lease, s.chainID, cap,
+		int64(s.hA), wrongHash, "t028 triage uncommitted"); !isRecoveryGate(err) {
+		t.Fatalf("wrong-ancestor confirm = %v, want gate refusal (uncommitted)", err)
+	}
+	if triRow, triErr := LoadRecoveryState(ctx, pool, s.chainID); triErr != nil || triRow == nil ||
+		triRow.Phase != reorgPhaseDetected {
+		t.Fatalf("triage re-read = (%+v, %v), want still detected", triRow, triErr)
+	}
+	if n := rrecEventCount(t, ctx, pool, s.chainID, "ancestor_confirmed"); n != 0 {
+		t.Fatalf("ancestor_confirmed events after refused confirm = %d, want 0", n)
+	}
+
+	// Triage (b) committed: the COMMIT lands server-side while the worker
+	// observes the lost response; re-read decides ancestor_confirmed, and the
+	// immediate retry refuses instead of duplicating the event.
+	dropPool, dropCtl := logscanOpenCommitDropPool(t, s.dsn)
+	dropCtl.arm.Store(true)
+	lostErr := ConfirmRecoveryAncestor(ctx, dropPool, s.lease, s.chainID, cap,
+		int64(s.hA), s.aHashes[s.hA], "t028 triage lost-response evidence")
+	if lostErr == nil {
+		t.Fatal("ConfirmRecoveryAncestor through the commit-drop pool = nil, want the lost-response error")
+	}
+	triRow, triErr := LoadRecoveryState(ctx, pool, s.chainID)
+	if triErr != nil || triRow == nil {
+		t.Fatalf("triage re-read = (%+v, %v), want the row", triRow, triErr)
+	}
+	if triRow.Phase != reorgPhaseAncestorConfirmed || triRow.AncestorNumber == nil ||
+		*triRow.AncestorNumber != int64(s.hA) {
+		t.Fatalf("triage outcome = phase %s ancestor %v, want (ancestor_confirmed %d): re-read decides, not memory",
+			triRow.Phase, triRow.AncestorNumber, s.hA)
+	}
+	if n := rrecEventCount(t, ctx, pool, s.chainID, "ancestor_confirmed"); n != 1 {
+		t.Fatalf("ancestor_confirmed events = %d, want 1 (committed once)", n)
+	}
+	row, cap = rrecRow(t, ctx, pool, s.chainID)
+	if err := ConfirmRecoveryAncestor(ctx, pool, s.lease, s.chainID, cap,
+		int64(s.hA), s.aHashes[s.hA], "t028 redo"); !isRecoveryGate(err) {
+		t.Fatalf("re-confirm after committed confirm = %v, want gate refusal (no redo)", err)
+	}
+	if n := rrecEventCount(t, ctx, pool, s.chainID, "ancestor_confirmed"); n != 1 {
+		t.Fatalf("ancestor_confirmed events after redo attempt = %d, want still 1", n)
+	}
+	phases = append(phases, reorgPhaseAncestorConfirmed)
+
+	// Crash 2: between ancestor_confirmed and invalidated (ancestor pinned,
+	// frontiers still nil — resume keeps both with no skip).
+	pool, ex = resume(t)
+	row, cap = rrecRow(t, ctx, pool, s.chainID)
+	if row.RecoveryID != firstID || row.Phase != reorgPhaseAncestorConfirmed ||
+		row.AncestorNumber == nil || *row.AncestorNumber != int64(s.hA) ||
+		row.AncestorHash == nil || *row.AncestorHash != s.aHashes[s.hA] {
+		t.Fatalf("resume-2 row = %+v, want ancestor_confirmed @(%d %s)", row, s.hA, s.aHashes[s.hA])
+	}
+
+	// Triage (c) unknown-at-crash: the invalidate tick runs on the commit-drop
+	// pool (first COMMIT lands, reply lost — outcome truly unknown), then the
+	// process dies before reading anything; restart re-reads: blocks flipped
+	// + phase invalidated + exactly one event means committed, so the drill
+	// continues with the REMAINING steps only (never re-runs the committed
+	// blocks step).
+	exDrop := rrecExecutorBatch(t, dropPool, s.lease, s, 2)
+	dropCtl.arm.Store(true)
+	if err := exDrop.tickInvalidate(ctx, row, cap); err == nil {
+		t.Fatal("tickInvalidate through the commit-drop pool = nil, want the lost-response error")
+	}
+	pool, ex = resume(t)
+	row, cap = rrecRow(t, ctx, pool, s.chainID)
+	if row.RecoveryID != firstID || row.Phase != reorgPhaseInvalidated {
+		t.Fatalf("post-crash row = (%s %s), want (same id invalidated): re-read triages committed",
+			row.RecoveryID, row.Phase)
+	}
+	var flipped int64
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM chain_blocks WHERE chain_id=$1 AND number>$2 AND NOT canonical`,
+		s.chainID, int64(s.hA)).Scan(&flipped); err != nil || flipped != int64(s.hTip-s.hA) {
+		t.Fatalf("flipped = %d (err=%v), want %d (blocks step committed despite lost response)",
+			flipped, err, s.hTip-s.hA)
+	}
+	if n := rrecEventCount(t, ctx, pool, s.chainID, "blocks_invalidated"); n != 1 {
+		t.Fatalf("blocks_invalidated events = %d, want 1 (committed once, never redone)", n)
+	}
+	// Continue forward without redo: observations + the three checkpoint
+	// rollbacks only.
+	if _, err := InvalidateRecoveryObservations(ctx, pool, s.lease, s.chainID, cap); err != nil {
+		t.Fatalf("continued invalidate observations: %v", err)
+	}
+	for _, stream := range []RecoveryStream{RecoveryStreamBlock, RecoveryStreamLog, RecoveryStreamDeposit} {
+		if _, _, err := RollbackRecoveryCheckpoint(ctx, pool, s.lease, s.chainID, cap, stream); err != nil {
+			t.Fatalf("continued rollback %s: %v", stream, err)
+		}
+	}
+	if n := rrecEventCount(t, ctx, pool, s.chainID, "blocks_invalidated"); n != 1 {
+		t.Fatalf("blocks_invalidated events after continuation = %d, want still 1 (no redo)", n)
+	}
+	if n := rrecEventCount(t, ctx, pool, s.chainID, "observations_invalidated"); n != 1 {
+		t.Fatalf("observations_invalidated events = %d, want 1", n)
+	}
+	if n := rrecEventCount(t, ctx, pool, s.chainID, "checkpoints_rolled_back"); n != 3 {
+		t.Fatalf("checkpoints_rolled_back events = %d, want 3", n)
+	}
+	phases = append(phases, reorgPhaseInvalidated)
+
+	// Crash 3: between invalidated and replaying (sweep durable, frontiers
+	// nil — resume must not skip the replay).
+	pool, ex = resume(t)
+	row, cap = rrecRow(t, ctx, pool, s.chainID)
+	if row.RecoveryID != firstID || row.Phase != reorgPhaseInvalidated {
+		t.Fatalf("resume-3 row = (%s %s), want (same id invalidated)", row.RecoveryID, row.Phase)
+	}
+	if f := rrecT28Frontiers(t, row); f != [3]int64{-1, -1, -1} {
+		t.Fatalf("frontiers after crash-3 = %v, want all nil", f)
+	}
+
+	// Replay tick 1 (batch 2 over the six-height sweep): phase replaying,
+	// frontiers at hA+2 on every stream.
+	if err := ex.tickReplay(ctx, row, cap); err != nil {
+		t.Fatalf("tickReplay #1: %v", err)
+	}
+	row, cap = rrecRow(t, ctx, pool, s.chainID)
+	if row.Phase != reorgPhaseReplaying {
+		t.Fatalf("phase after tick #1 = %q, want replaying", row.Phase)
+	}
+	prev := [3]int64{-1, -1, -1}
+	got := rrecT28Frontiers(t, row)
+	rrecT28AssertFrontiers(t, prev, got, s.hTip, "tick #1")
+	for _, f := range got {
+		if f != int64(s.hA+2) {
+			t.Fatalf("frontiers after tick #1 = %v, want all %d (one batch of 2)", got, s.hA+2)
+		}
+	}
+	prev = got
+	progAfterTick1 := rrecEventCount(t, ctx, pool, s.chainID, "replay_progress")
+	if progAfterTick1 != 3 {
+		t.Fatalf("replay_progress events after tick #1 = %d, want 3 (one per stream)", progAfterTick1)
+	}
+	phases = append(phases, reorgPhaseReplaying)
+
+	// Crash 4: mid-replay (partial frontiers — resume keeps them with no
+	// replayed range redone: event count frozen, frontiers identical).
+	pool, ex = resume(t)
+	row, cap = rrecRow(t, ctx, pool, s.chainID)
+	if row.RecoveryID != firstID || row.Phase != reorgPhaseReplaying {
+		t.Fatalf("resume-4 row = (%s %s), want (same id replaying)", row.RecoveryID, row.Phase)
+	}
+	rrecT28AssertFrontiers(t, prev, rrecT28Frontiers(t, row), s.hTip, "resume-4")
+	if n := rrecEventCount(t, ctx, pool, s.chainID, "replay_progress"); n != progAfterTick1 {
+		t.Fatalf("replay_progress events after crash-4 = %d, want %d (no redone range)", n, progAfterTick1)
+	}
+
+	// Replay to complete_pending: frontiers monotonic every tick, never past
+	// the bound tip.
+	for i := 0; i < 10; i++ {
+		row, cap = rrecRow(t, ctx, pool, s.chainID)
+		if row.Phase == reorgPhaseCompletePending {
+			break
+		}
+		if row.Phase != reorgPhaseInvalidated && row.Phase != reorgPhaseReplaying {
+			t.Fatalf("unexpected phase %q mid-replay (skipped or regressed)", row.Phase)
+		}
+		if err := ex.tickReplay(ctx, row, cap); err != nil {
+			t.Fatalf("tickReplay #%d: %v", i+2, err)
+		}
+		row, cap = rrecRow(t, ctx, pool, s.chainID)
+		got = rrecT28Frontiers(t, row)
+		rrecT28AssertFrontiers(t, prev, got, s.hTip, fmt.Sprintf("replay tick #%d", i+2))
+		prev = got
+	}
+	row, cap = rrecRow(t, ctx, pool, s.chainID)
+	if row.Phase != reorgPhaseCompletePending {
+		t.Fatalf("phase = %q after replay, want complete_pending", row.Phase)
+	}
+	rrecT28AssertFrontiers(t, [3]int64{int64(s.hTip), int64(s.hTip), int64(s.hTip)},
+		rrecT28Frontiers(t, row), s.hTip, "complete_pending")
+	phases = append(phases, reorgPhaseCompletePending)
+
+	// Crash 5: between complete_pending and release (full frontiers durable —
+	// resume must release exactly once, never twice).
+	pool, ex = resume(t)
+	row, cap = rrecRow(t, ctx, pool, s.chainID)
+	if row.RecoveryID != firstID || row.Phase != reorgPhaseCompletePending {
+		t.Fatalf("resume-5 row = (%s %s), want (same id complete_pending)", row.RecoveryID, row.Phase)
+	}
+	rrecT28AssertFrontiers(t, [3]int64{int64(s.hTip), int64(s.hTip), int64(s.hTip)},
+		rrecT28Frontiers(t, row), s.hTip, "resume-5")
+	if err := ex.tickComplete(ctx, row, cap); err != nil {
+		t.Fatalf("post-crash tickComplete(): %v", err)
+	}
+	if prow, err := LoadRecoveryState(ctx, pool, s.chainID); err != nil || prow != nil {
+		t.Fatalf("recovery row after release = %+v (err=%v), want gone exactly once", prow, err)
+	}
+	if n := rrecEventCount(t, ctx, pool, s.chainID, "auto_completed"); n != 1 {
+		t.Fatalf("auto_completed events = %d, want exactly 1 (exactly-once terminal release)", n)
+	}
+	// A second release with the spent capture refuses on the gate (no row to
+	// release); the terminal count stays exactly one.
+	if err := CompleteRecoveryVerify(ctx, pool, s.lease, s.chainID, cap); !isRecoveryGate(err) {
+		t.Fatalf("second release = %v, want gate refusal", err)
+	}
+	if n := rrecEventCount(t, ctx, pool, s.chainID, "auto_completed"); n != 1 {
+		t.Fatalf("auto_completed events after second attempt = %d, want still 1", n)
+	}
+
+	// Phase ledger: monotonic, no redo, no skip, one terminal release.
+	wantPhases := []string{
+		reorgPhaseDetected, reorgPhaseAncestorConfirmed, reorgPhaseInvalidated,
+		reorgPhaseReplaying, reorgPhaseCompletePending,
+	}
+	if fmt.Sprintf("%v", phases) != fmt.Sprintf("%v", wantPhases) {
+		t.Fatalf("phase ledger = %v, want %v", phases, wantPhases)
+	}
+	for _, ev := range []string{"established", "ancestor_confirmed", "blocks_invalidated", "observations_invalidated", "auto_completed"} {
+		if n := rrecEventCount(t, ctx, pool, s.chainID, ev); n != 1 {
+			t.Fatalf("%s events = %d, want 1 (no redone committed phase)", ev, n)
+		}
+	}
+	if n := rrecEventCount(t, ctx, pool, s.chainID, "checkpoints_rolled_back"); n != 3 {
+		t.Fatalf("checkpoints_rolled_back events = %d, want 3", n)
+	}
+	if n := rrecEventCount(t, ctx, pool, s.chainID, "replay_progress"); n != 9 {
+		t.Fatalf("replay_progress events = %d, want 9 (3 ticks x 3 streams)", n)
+	}
+	dropPool.Close()
+}
+
+// --- T029: depth boundary + reconcile evidence E2E (Batch D, FR-04/17) ------
+
+// rrecT29ExtendTip mines empties so the fork depth (tip - ancestor) equals
+// wantDepth exactly, extending the fork-A hash record over the new heights.
+func rrecT29ExtendTip(t *testing.T, ctx context.Context, s *rrecScene, wantDepth uint64) {
+	t.Helper()
+	have := s.hTip - s.hA
+	if wantDepth < have {
+		t.Fatalf("want depth %d below harness depth %d", wantDepth, have)
+	}
+	if wantDepth > have {
+		s.node.mine(t, wantDepth-have)
+		s.hTip = s.node.blockNumber(t)
+	}
+	if s.hTip-s.hA != wantDepth {
+		t.Fatalf("fork depth = %d, want %d", s.hTip-s.hA, wantDepth)
+	}
+	for h := s.hA; h <= s.hTip; h++ {
+		if _, ok := s.aHashes[h]; !ok {
+			s.aHashes[h] = rrecHeaderHash(t, ctx, s, h)
+		}
+	}
+}
+
+// rrecT29IndexDeep mirrors rrecIndexForkA over a deep tip where P is already
+// confirmed (the standard helper waits for P pending, which never holds
+// here): K+C+P confirmed via the REAL 002/003/004/005 loops.
+func rrecT29IndexDeep(t *testing.T, ctx context.Context, s *rrecScene) {
+	t.Helper()
+	sc002, err := NewScanner(s.pool, s.client, s.lease, Config{
+		StartHeight: 0, RPCTimeout: 2 * time.Second, PollInterval: 25 * time.Millisecond,
+		RetryInitial: 25 * time.Millisecond, RetryMax: 250 * time.Millisecond,
+	}, logscanLogger())
+	if err != nil {
+		t.Fatalf("NewScanner(): %v", err)
+	}
+	runScanTo(t, sc002, s.hTip, 60*time.Second)
+
+	ls := logscanNewScanner(t, s.pool, s.client, s.client, s.lease, LogConfig{
+		StartBlock: 0, Contracts: s.tokens, ConfigHash: s.logHash, BatchBlocks: 2,
+	})
+	logscanServeTo(t, ctx, s.pool, s.chainID, ls, uint64(int64(s.hTip)+1), 60*time.Second)
+
+	sc004, err := NewDepositScanner(s.pool, rrecDepositCfg(s))
+	if err != nil {
+		t.Fatalf("NewDepositScanner(): %v", err)
+	}
+	stop004 := depositRunLoop(t, ctx, sc004, s.lease)
+	waitUntil(t, time.Now().Add(60*time.Second), "deposit checkpoint reaches tip+1", func() bool {
+		_, _, next, ok := depositCheckpointState(t, ctx, s.pool, s.chainID)
+		return ok && next >= s.hTip+1
+	})
+	time.Sleep(100 * time.Millisecond)
+	stop004()
+
+	m := metrics.New(func() bool { return true })
+	confirmCfg := ConfirmationConfig{
+		ChainID:      s.chainID,
+		ThresholdN:   rrecThresholdN,
+		PollInterval: 25 * time.Millisecond,
+		RetryInitial: 25 * time.Millisecond,
+		RetryMax:     250 * time.Millisecond,
+	}
+	committer005, err := NewConfirmationCommitter(s.pool, confirmCfg)
+	if err != nil {
+		t.Fatalf("NewConfirmationCommitter(): %v", err)
+	}
+	sc005, err := NewConfirmationScanner(s.pool, confirmCfg, committer005, m)
+	if err != nil {
+		t.Fatalf("NewConfirmationScanner(): %v", err)
+	}
+	stop005 := confirm13RunLoop(t, ctx, sc005, s.lease)
+	waitUntil(t, time.Now().Add(60*time.Second), "K+C+P confirmed", func() bool {
+		var n int
+		_ = s.pool.QueryRow(ctx, `SELECT count(*) FROM deposit_observations WHERE chain_id=$1 AND status='confirmed'`,
+			s.chainID).Scan(&n)
+		return n == 3
+	})
+	time.Sleep(200 * time.Millisecond)
+	stop005()
+
+	var cpH int64
+	var cpHash string
+	if err := s.pool.QueryRow(ctx, `SELECT height, block_hash FROM indexer_checkpoint WHERE chain_id=$1`,
+		s.chainID).Scan(&cpH, &cpHash); err != nil {
+		t.Fatalf("read indexer_checkpoint: %v", err)
+	}
+	if cpH != int64(s.hTip) || cpHash != s.aHashes[s.hTip] {
+		t.Fatalf("002 checkpoint = (%d %s), want (%d %s)", cpH, cpHash, s.hTip, s.aHashes[s.hTip])
+	}
+	tipHash := s.aHashes[s.hTip]
+	for _, tc := range []struct {
+		h  uint64
+		tx common.Hash
+	}{
+		{s.hK, s.kTx}, {s.hC, s.cTx}, {s.hP, s.pTx},
+	} {
+		status, nullAt, tipN, thr, seq, gotTip, conf := confirmReadBasis(t, ctx, s.pool, s.chainID,
+			rrecHeaderHash(t, ctx, s, tc.h), strings.ToLower(tc.tx.Hex()))
+		wantConf := fmt.Sprintf("%d", s.hTip-tc.h+1)
+		if status != "confirmed" || nullAt || tipN != int64(s.hTip) || gotTip != tipHash ||
+			thr != int64(rrecThresholdN) || seq != 1 || conf != wantConf {
+			t.Fatalf("h=%d deep pre-fork basis = (%s null=%v tip %d %s N=%d conf=%s seq=%d), want confirmed tip(%d %s) N=%d conf=%s seq=1",
+				tc.h, status, nullAt, tipN, gotTip, thr, conf, seq, s.hTip, tipHash, rrecThresholdN, wantConf)
+		}
+	}
+}
+
+// rrecT29IndexHeaders runs the 002 header scan only (bound tip + local
+// history for the search; hold-path scenes need no observations).
+func rrecT29IndexHeaders(t *testing.T, s *rrecScene, start uint64) {
+	t.Helper()
+	sc, err := NewScanner(s.pool, s.client, s.lease, Config{
+		StartHeight: start, RPCTimeout: 2 * time.Second, PollInterval: 25 * time.Millisecond,
+		RetryInitial: 25 * time.Millisecond, RetryMax: 250 * time.Millisecond,
+	}, logscanLogger())
+	if err != nil {
+		t.Fatalf("NewScanner(): %v", err)
+	}
+	runScanTo(t, sc, s.hTip, 60*time.Second)
+}
+
+// rrecT29BlockCheckpoint reads the 002 checkpoint height + hash.
+func rrecT29BlockCheckpoint(t *testing.T, ctx context.Context, pool *pgxpool.Pool, chainID int64) (int64, string) {
+	t.Helper()
+	var h int64
+	var hash string
+	if err := pool.QueryRow(ctx, `SELECT height, block_hash FROM indexer_checkpoint WHERE chain_id=$1`,
+		chainID).Scan(&h, &hash); err != nil {
+		t.Fatalf("read indexer_checkpoint: %v", err)
+	}
+	return h, hash
+}
+
+// rrecT29EventDetail returns one recovery audit event detail.
+func rrecT29EventDetail(t *testing.T, ctx context.Context, pool *pgxpool.Pool, chainID int64, event string) string {
+	t.Helper()
+	var detail string
+	if err := pool.QueryRow(ctx, `SELECT detail FROM reorg_recovery_events WHERE chain_id=$1 AND event=$2`,
+		chainID, event).Scan(&detail); err != nil {
+		t.Fatalf("read %s detail: %v", event, err)
+	}
+	return detail
+}
+
+// rrecT29ZeroHistory asserts zero history revocations: no canonical flips,
+// no observation conversions.
+func rrecT29ZeroHistory(t *testing.T, ctx context.Context, pool *pgxpool.Pool, chainID int64, where string) {
+	t.Helper()
+	var noncanon, trans int
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM chain_blocks WHERE chain_id=$1 AND NOT canonical`,
+		chainID).Scan(&noncanon); err != nil || noncanon != 0 {
+		t.Fatalf("%s: non-canonical blocks = %d (err=%v), want 0 (no flips)", where, noncanon, err)
+	}
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM deposit_observation_transitions WHERE chain_id=$1`,
+		chainID).Scan(&trans); err != nil || trans != 0 {
+		t.Fatalf("%s: observation transitions = %d (err=%v), want 0 (no revocations)", where, trans, err)
+	}
+}
+
+// TestT029DepthBoundaryAndEvidence is T029 (FR-04/17, bound + reconcile +
+// unobtainable + bad-RPC): depth exactly D=25 fully recovers; depth D+1
+// refuses to reconcile_required with the searched range + both tip identities
+// + cause class and zero flips/transitions/releases over frozen checkpoints;
+// a fork point below the scan start holds with no head chase; a lagging chain
+// yields zero revocations + zero releases until evidence suffices, then
+// resumes to a full green release.
+func TestT029DepthBoundaryAndEvidence(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("allow-bound", func(t *testing.T) {
+		s := rrecSetup(t, "rrec-t029-bound")
+		rrecMineForkA(t, ctx, s)
+		rrecT29ExtendTip(t, ctx, s, 25)
+		rrecT29IndexDeep(t, ctx, s)
+		rrecForkB(t, ctx, s)
+		rrecSeedPauses(t, ctx, s)
+
+		ex := rrecExecutor(t, s.pool, s.lease, s)
+		row, cap := rrecDriveToReady(t, ctx, s.pool, ex, s.chainID)
+		if row.AncestorNumber == nil || *row.AncestorNumber != int64(s.hA) ||
+			row.AncestorHash == nil || *row.AncestorHash != s.aHashes[s.hA] {
+			t.Fatalf("ancestor = (%v %v), want (%d %s)", row.AncestorNumber, row.AncestorHash, s.hA, s.aHashes[s.hA])
+		}
+		if depth, err := reorgDepth(row.BoundOldNumber, *row.AncestorNumber); err != nil || depth != 25 {
+			t.Fatalf("depth = %d (err=%v), want exactly 25 (bound)", depth, err)
+		}
+		var flipped int64
+		if err := s.pool.QueryRow(ctx, `SELECT count(*) FROM chain_blocks WHERE chain_id=$1 AND number>$2 AND NOT canonical`,
+			s.chainID, int64(s.hA)).Scan(&flipped); err != nil || flipped != 25 {
+			t.Fatalf("flipped blocks = %d (err=%v), want 25 (100%% of the sweep)", flipped, err)
+		}
+		// (Post-replay the sweep carries the fork-B canonical rows alongside
+		// the retained fork-A rows, so per-height identity below owns the
+		// canonical proof — no zero-canonical assert here.)
+		// K ancestor-side untouched; C+P (both confirmed pre-fork) orphaned.
+		kObs := rrecReadObs(t, ctx, s.pool, s.chainID, s.kBH, strings.ToLower(s.kTx.Hex()))
+		if kObs.status != "confirmed" || kObs.orphanID != "" || !kObs.orphanedAtNull {
+			t.Fatalf("K = (%s orphan=%s), want (confirmed, untouched)", kObs.status, kObs.orphanID)
+		}
+		for _, tc := range []struct {
+			name string
+			bh   string
+			tx   common.Hash
+		}{
+			{"C", s.cBH, s.cTx}, {"P", s.pBH, s.pTx},
+		} {
+			if o := rrecReadObs(t, ctx, s.pool, s.chainID, tc.bh, strings.ToLower(tc.tx.Hex())); o.status != "orphaned" || o.orphanID != row.RecoveryID {
+				t.Fatalf("%s = (%s orphan=%s), want orphaned under this recovery", tc.name, o.status, o.orphanID)
+			}
+		}
+		if n := rrecTransitionCount(t, ctx, s.pool, s.chainID, "confirmed", "orphaned", row.RecoveryID); n != 2 {
+			t.Fatalf("confirmed->orphaned transitions = %d, want 2 (C+P)", n)
+		}
+		if n := rrecTransitionCount(t, ctx, s.pool, s.chainID, "pending", "orphaned", row.RecoveryID); n != 0 {
+			t.Fatalf("pending->orphaned transitions = %d, want 0", n)
+		}
+		rrecAssertFrontiers(t, row, s.hTip)
+		if n := rrecEventCount(t, ctx, s.pool, s.chainID, "reconcile_signaled"); n != 0 {
+			t.Fatalf("reconcile_signaled events = %d, want 0 (bound recovers, never holds)", n)
+		}
+		for h := s.hA + 1; h <= s.hTip; h++ {
+			var ch string
+			var total int
+			if err := s.pool.QueryRow(ctx, `SELECT hash FROM chain_blocks WHERE chain_id=$1 AND number=$2 AND canonical`,
+				s.chainID, int64(h)).Scan(&ch); err != nil || ch != s.bHashes[h] {
+				t.Fatalf("canonical[%d] = %s (err=%v), want fork-B %s", h, ch, err, s.bHashes[h])
+			}
+			if err := s.pool.QueryRow(ctx, `SELECT count(*) FROM chain_blocks WHERE chain_id=$1 AND number=$2`,
+				s.chainID, int64(h)).Scan(&total); err != nil || total != 2 {
+				t.Fatalf("total rows at %d = %d (err=%v), want 2 (A-retained + B-new)", h, total, err)
+			}
+		}
+		bObs := rrecReadObs(t, ctx, s.pool, s.chainID, s.bBH, strings.ToLower(s.bTx.Hex()))
+		if bObs.status != "pending" || bObs.blockNumber != int64(s.hA+1) || bObs.amount != "11" || bObs.version != 1 {
+			t.Fatalf("fork-B observation = %+v, want (pending @%d amount 11 v1)", bObs, s.hA+1)
+		}
+		id := rrecRelease(t, ctx, s.pool, ex, s.chainID, row, cap)
+		terminal := rrecT29EventDetail(t, ctx, s.pool, s.chainID, "auto_completed")
+		for _, want := range []string{
+			fmt.Sprintf("bound_old=%d:%s", s.hTip, s.aHashes[s.hTip]),
+			fmt.Sprintf("ancestor=%d:%s", s.hA, s.aHashes[s.hA]),
+			fmt.Sprintf("swept=%d-%d", s.hA+1, s.hTip),
+			"orphaned=2",
+			fmt.Sprintf("replayed=block:%d,log:%d,deposit:%d", s.hTip, s.hTip, s.hTip),
+			"version=1",
+		} {
+			if !strings.Contains(terminal, want) {
+				t.Fatalf("terminal detail missing %q: %q", want, terminal)
+			}
+		}
+		_ = id
+	})
+
+	t.Run("over-bound", func(t *testing.T) {
+		s := rrecSetup(t, "rrec-t029-over")
+		rrecMineForkA(t, ctx, s)
+		rrecT29ExtendTip(t, ctx, s, 26)
+		rrecT29IndexHeaders(t, s, 0)
+		rrecForkB(t, ctx, s)
+		rrecSeedPauses(t, ctx, s)
+
+		ex := rrecExecutor(t, s.pool, s.lease, s)
+		done, err := ex.tickIdle(ctx)
+		if err != nil || !done {
+			t.Fatalf("tickIdle() = (%v, %v), want (true, nil)", done, err)
+		}
+		preH, preHash := rrecT29BlockCheckpoint(t, ctx, s.pool, s.chainID)
+		row, _ := rrecRow(t, ctx, s.pool, s.chainID)
+		if row.Phase != reorgPhaseDetected {
+			t.Fatalf("phase = %q, want detected", row.Phase)
+		}
+		if err := ex.tickDetected(ctx, row); err != nil {
+			t.Fatalf("tickDetected(): %v", err)
+		}
+		row, _ = rrecRow(t, ctx, s.pool, s.chainID)
+		if row.Phase != reorgPhaseReconcileRequired {
+			t.Fatalf("phase = %q, want reconcile_required (bound+1 refuses)", row.Phase)
+		}
+		// Rich signal: cause class + searched range + bound tip + max depth;
+		// both tip identities ride the established event.
+		sig := rrecT29EventDetail(t, ctx, s.pool, s.chainID, "reconcile_signaled")
+		for _, want := range []string{
+			"cause=over_depth",
+			fmt.Sprintf("walked=%d-%d", int64(s.hTip)-25, int64(s.hTip)),
+			fmt.Sprintf("bound=%d:%s", s.hTip, s.aHashes[s.hTip]),
+			"max_depth=25",
+			"version=1",
+		} {
+			if !strings.Contains(sig, want) {
+				t.Fatalf("reconcile detail missing %q: %q", want, sig)
+			}
+		}
+		est := rrecT29EventDetail(t, ctx, s.pool, s.chainID, "established")
+		for _, want := range []string{
+			fmt.Sprintf("old_tip=%d:%s", s.hTip, s.aHashes[s.hTip]),
+			fmt.Sprintf("new_tip=%d:%s", s.hTip, s.bHashes[s.hTip]),
+		} {
+			if !strings.Contains(est, want) {
+				t.Fatalf("established detail missing %q: %q", want, est)
+			}
+		}
+		if n := rrecEventCount(t, ctx, s.pool, s.chainID, "reconcile_signaled"); n != 1 {
+			t.Fatalf("reconcile_signaled events = %d, want exactly 1", n)
+		}
+		// Zero flips / transitions / releases; checkpoints frozen (no head
+		// chase onto the live fork-B tip hash).
+		rrecT29ZeroHistory(t, ctx, s.pool, s.chainID, "over-bound hold")
+		if n := rrecEventCount(t, ctx, s.pool, s.chainID, "auto_completed"); n != 0 {
+			t.Fatalf("auto_completed events = %d, want 0 (held, never released)", n)
+		}
+		if gotH, gotHash := rrecT29BlockCheckpoint(t, ctx, s.pool, s.chainID); gotH != preH || gotHash != preHash {
+			t.Fatalf("checkpoint moved: (%d %s) vs (%d %s), want frozen", gotH, gotHash, preH, preHash)
+		}
+		if _, gotHash := rrecT29BlockCheckpoint(t, ctx, s.pool, s.chainID); gotHash != s.aHashes[s.hTip] {
+			t.Fatalf("checkpoint hash = %s, want fork-A %s (no head chase)", gotHash, s.aHashes[s.hTip])
+		}
+		if row.BlockFrontier != nil || row.LogFrontier != nil || row.DepositFrontier != nil {
+			t.Fatalf("frontiers moved: (%v %v %v), want all nil (zero progress)",
+				row.BlockFrontier, row.LogFrontier, row.DepositFrontier)
+		}
+		if st, v := AnnotateRecoveryHeight(row, false, int64(s.hTip)); st != RecoveryStatePausedReconcile || v != ValidityUnknownPaused {
+			t.Fatalf("held annotation = (%s %s), want (paused_reconcile unknown_paused)", st, v)
+		}
+	})
+
+	t.Run("unobtainable", func(t *testing.T) {
+		s := rrecSetup(t, "rrec-t029-unobtain")
+		rrecMineForkA(t, ctx, s)
+		// Genuinely late-started 002: the ancestor (hA) was never indexed,
+		// so the fork point sits below available history AND the scan start.
+		rrecT29IndexHeaders(t, s, s.hA+1)
+		rrecForkB(t, ctx, s)
+		rrecSeedPauses(t, ctx, s)
+
+		ex := rrecExecutor(t, s.pool, s.lease, s)
+		done, err := ex.tickIdle(ctx)
+		if err != nil || !done {
+			t.Fatalf("tickIdle() = (%v, %v), want (true, nil)", done, err)
+		}
+		preH, preHash := rrecT29BlockCheckpoint(t, ctx, s.pool, s.chainID)
+		if preHash != s.aHashes[s.hTip] {
+			t.Fatalf("pre-hold checkpoint hash = %s, want fork-A %s", preHash, s.aHashes[s.hTip])
+		}
+		row, _ := rrecRow(t, ctx, s.pool, s.chainID)
+		if err := ex.tickDetected(ctx, row); err != nil {
+			t.Fatalf("tickDetected(): %v", err)
+		}
+		row, _ = rrecRow(t, ctx, s.pool, s.chainID)
+		if row.Phase != reorgPhaseReconcileRequired {
+			t.Fatalf("phase = %q, want reconcile_required (unobtainable holds)", row.Phase)
+		}
+		sig := rrecT29EventDetail(t, ctx, s.pool, s.chainID, "reconcile_signaled")
+		for _, want := range []string{
+			"cause=below_scan_start",
+			fmt.Sprintf("start=%d", s.hA+1),
+			fmt.Sprintf("bound=%d:%s", s.hTip, s.aHashes[s.hTip]),
+			"version=1",
+		} {
+			if !strings.Contains(sig, want) {
+				t.Fatalf("reconcile detail missing %q: %q", want, sig)
+			}
+		}
+		rrecT29ZeroHistory(t, ctx, s.pool, s.chainID, "unobtainable hold")
+		if n := rrecEventCount(t, ctx, s.pool, s.chainID, "auto_completed"); n != 0 {
+			t.Fatalf("auto_completed events = %d, want 0 (held, never released)", n)
+		}
+		if gotH, gotHash := rrecT29BlockCheckpoint(t, ctx, s.pool, s.chainID); gotH != preH || gotHash != preHash {
+			t.Fatalf("checkpoint moved: (%d %s) vs (%d %s), want frozen (no head chase)", gotH, gotHash, preH, preHash)
+		}
+	})
+
+	t.Run("stalled-rpc", func(t *testing.T) {
+		s := rrecSetup(t, "rrec-t029-stall")
+		rrecMineForkA(t, ctx, s)
+		rrecIndexForkA(t, ctx, s)
+
+		// Lagging chain: revert to the ancestor, mine exactly one fork-B
+		// block, then freeze automining — bound tip (hTip) towers above the
+		// live tip (hA+1), so the ancestor search has insufficient evidence.
+		var ok bool
+		s.node.mustCall(t, &ok, "evm_revert", s.snapID)
+		if !ok {
+			t.Fatal("evm_revert refused the ancestor snapshot")
+		}
+		bTx, bH := s.node.sendTransferAt(t, s.tokenB)
+		s.bTx = bTx
+		if bH != s.hA+1 {
+			t.Fatalf("fork-B transfer height = %d, want %d", bH, s.hA+1)
+		}
+		s.bHashes[s.hA+1] = rrecHeaderHash(t, ctx, s, s.hA+1)
+		s.bBH = s.bHashes[s.hA+1]
+		if s.bHashes[s.hA+1] == s.aHashes[s.hA+1] {
+			t.Fatalf("fork-B hash at %d equals fork-A hash: no divergence", s.hA+1)
+		}
+		if got := rrecHeaderHash(t, ctx, s, s.hA); got != s.aHashes[s.hA] {
+			t.Fatalf("ancestor hash moved: %s vs %s", got, s.aHashes[s.hA])
+		}
+		rrecSetAutomine(t, s, false)
+		rrecSeedPauses(t, ctx, s)
+
+		ex := rrecExecutor(t, s.pool, s.lease, s)
+		done, err := ex.tickIdle(ctx)
+		if err != nil || !done {
+			t.Fatalf("tickIdle() = (%v, %v), want (true, nil)", done, err)
+		}
+		preCP := rrecReadCheckpoints(t, ctx, s.pool, s.chainID)
+
+		// While stalled the search holds inside a short bounded wait: the
+		// ancestor walk spends ~1s per undecidable height (backoff/poll
+		// waits), so a 4s window keeps it mid-descent with no terminal
+		// verdict possible — no error, no phase move, zero revocations,
+		// zero releases. (A longer stall would let the walk descend the
+		// intact prefix to below_scan_start and reconcile; the short
+		// window pins the pure-hold case, and the resume below proves
+		// the same recovery converges once evidence suffices.)
+		stalled, cancel := context.WithTimeout(ctx, 4*time.Second)
+		defer cancel()
+		row, _ := rrecRow(t, ctx, s.pool, s.chainID)
+		if err := ex.tickDetected(stalled, row); err != nil {
+			t.Fatalf("stalled tickDetected() = %v, want nil (evidence hold)", err)
+		}
+		row, _ = rrecRow(t, ctx, s.pool, s.chainID)
+		if row.Phase != reorgPhaseDetected {
+			t.Fatalf("stalled phase = %q, want detected (hold position)", row.Phase)
+		}
+		if n := rrecEventCount(t, ctx, s.pool, s.chainID, "ancestor_confirmed"); n != 0 {
+			t.Fatalf("ancestor_confirmed events while stalled = %d, want 0", n)
+		}
+		if n := rrecEventCount(t, ctx, s.pool, s.chainID, "reconcile_signaled"); n != 0 {
+			t.Fatalf("reconcile_signaled events while stalled = %d, want 0 (hold, not terminal)", n)
+		}
+		if n := rrecEventCount(t, ctx, s.pool, s.chainID, "auto_completed"); n != 0 {
+			t.Fatalf("auto_completed events while stalled = %d, want 0", n)
+		}
+		rrecT29ZeroHistory(t, ctx, s.pool, s.chainID, "stalled hold")
+		if got := rrecReadCheckpoints(t, ctx, s.pool, s.chainID); got != preCP {
+			t.Fatalf("checkpoints moved while stalled: %+v vs %+v, want frozen", got, preCP)
+		}
+
+		// Evidence suffices again: mine the rest of fork B and the SAME
+		// recovery converges to a full green release.
+		rrecSetAutomine(t, s, true)
+		s.node.mine(t, s.hTip-bH)
+		if got := s.node.blockNumber(t); got != s.hTip {
+			t.Fatalf("fork-B tip = %d, want %d", got, s.hTip)
+		}
+		for h := s.hA + 2; h <= s.hTip; h++ {
+			s.bHashes[h] = rrecHeaderHash(t, ctx, s, h)
+			if s.bHashes[h] == s.aHashes[h] {
+				t.Fatalf("fork-B hash at %d equals fork-A hash %s: no divergence", h, s.aHashes[h])
+			}
+		}
+		if got := rrecHeaderHash(t, ctx, s, s.hA); got != s.aHashes[s.hA] {
+			t.Fatalf("ancestor hash moved: %s vs %s", got, s.aHashes[s.hA])
+		}
+		row, cap := rrecDriveToReady(t, ctx, s.pool, ex, s.chainID)
+		if row.AncestorNumber == nil || *row.AncestorNumber != int64(s.hA) ||
+			row.AncestorHash == nil || *row.AncestorHash != s.aHashes[s.hA] {
+			t.Fatalf("ancestor = (%v %v), want (%d %s)", row.AncestorNumber, row.AncestorHash, s.hA, s.aHashes[s.hA])
+		}
+		rrecAssertFrontiers(t, row, s.hTip)
+		rrecRelease(t, ctx, s.pool, ex, s.chainID, row, cap)
+	})
+}

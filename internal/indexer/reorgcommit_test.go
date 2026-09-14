@@ -857,3 +857,993 @@ func TestReorgBackoffBounded(t *testing.T) {
 		}
 	}
 }
+
+// --- Batch D: T025/T026/T027 (SC-04/SC-05) ---------------------------------
+// ChainID reservation: 906001-906008 and 907231-907234 are taken above; the
+// three tests below own 906009 (T025), 906010 (T026), 906011+906012 (T027).
+// Every refusal asserts persistent state + audit + side effects, never a bare
+// error.
+
+// TestT025DualExecutorSingleAdvance: two executors race on the SAME position
+// (one confirm-ancestor slot in the detected phase) with separate *Lease
+// instances. The lease CAS admits exactly one holder; the holder advances the
+// phase exactly once while the loser fails safe on the lease verdict. The
+// loser then re-acquires after expiry, re-reads, and its retry is a clean
+// phase refusal — never a second advance. SC-04 green.
+func TestT025DualExecutorSingleAdvance(t *testing.T) {
+	pool := reorgTestPool(t)
+	defer pool.Close()
+	ctx := context.Background()
+	const chainID = int64(906009)
+
+	leaseA := newTestLease(t, pool, chainID, "t025-exec-a", 3*time.Second, time.Second)
+	leaseB := newTestLease(t, pool, chainID, "t025-exec-b", 3*time.Second, time.Second)
+	reorgSeedChain(t, ctx, pool, chainID, 10, 15, 10)
+
+	won, _, err := leaseA.Acquire(ctx)
+	if err != nil || !won {
+		t.Fatalf("executor A initial acquire = (%v, %v), want (true, nil)", won, err)
+	}
+	res := reorgEstablishOne(t, ctx, pool, leaseA, chainID, 15)
+	owned := RecoveryCapture{Seq: res.Seq, Owned: &RecoveryOwned{RecoveryID: res.RecoveryID}}
+	if n := reorgCount(t, ctx, pool, "reorg_recovery_events", chainID); n != 1 {
+		t.Fatalf("event rows after establish = %d, want 1", n)
+	}
+
+	// Let A's lease lapse (DB-clock expiry, polled — never a blind sleep) so
+	// the acquire race below starts from a free row.
+	waitUntil(t, time.Now().Add(30*time.Second), "executor A lease expiry", func() bool {
+		var expired bool
+		if err := pool.QueryRow(ctx, `SELECT expires_at < now() FROM indexer_lease WHERE chain_id = $1`, chainID).Scan(&expired); err != nil {
+			return false
+		}
+		return expired
+	})
+
+	// Race 1: both executors Acquire behind one barrier — the CAS admits
+	// exactly one holder.
+	type acquireOut struct {
+		name string
+		won  bool
+		err  error
+	}
+	start := make(chan struct{})
+	acqCh := make(chan acquireOut, 2)
+	go func() {
+		<-start
+		won, _, err := leaseA.Acquire(ctx)
+		acqCh <- acquireOut{name: "A", won: won, err: err}
+	}()
+	go func() {
+		<-start
+		won, _, err := leaseB.Acquire(ctx)
+		acqCh <- acquireOut{name: "B", won: won, err: err}
+	}()
+	close(start)
+	winners := map[string]bool{}
+	for i := 0; i < 2; i++ {
+		select {
+		case o := <-acqCh:
+			if o.err != nil {
+				t.Fatalf("executor %s acquire: %v", o.name, o.err)
+			}
+			winners[o.name] = o.won
+		case <-time.After(30 * time.Second):
+			t.Fatal("acquire race timed out waiting for both executors")
+		}
+	}
+	if (winners["A"] && winners["B"]) || (!winners["A"] && !winners["B"]) {
+		t.Fatalf("acquire race winners = %v, want exactly one holder", winners)
+	}
+	holder, loser := leaseA, leaseB
+	holderName, loserName := "A", "B"
+	if winners["B"] {
+		holder, loser = leaseB, leaseA
+		holderName, loserName = "B", "A"
+	}
+
+	// Race 2: both executors attempt the SAME confirm-ancestor slot behind one
+	// barrier. The holder advances; the dispossessed executor fails safe on
+	// the lease verdict before touching recovery state.
+	go2 := make(chan struct{})
+	confirmCh := make(chan error, 2)
+	go func() {
+		<-go2
+		confirmCh <- ConfirmRecoveryAncestor(ctx, pool, holder, chainID, owned, 14, depositBlockHash(14), "t025-race")
+	}()
+	go func() {
+		<-go2
+		confirmCh <- ConfirmRecoveryAncestor(ctx, pool, loser, chainID, owned, 14, depositBlockHash(14), "t025-race")
+	}()
+	close(go2)
+	var confirmErrs []error
+	for i := 0; i < 2; i++ {
+		select {
+		case err := <-confirmCh:
+			confirmErrs = append(confirmErrs, err)
+		case <-time.After(30 * time.Second):
+			t.Fatal("confirm race timed out waiting for both executors")
+		}
+	}
+	var nils, safe int
+	for _, err := range confirmErrs {
+		switch {
+		case err == nil:
+			nils++
+		case isLeaseLost(err) || isRecoveryGate(err):
+			safe++
+		default:
+			t.Fatalf("confirm race error = %v, want nil or lease/gate refusal", err)
+		}
+	}
+	if nils != 1 || safe != 1 {
+		t.Fatalf("confirm race = %d wins + %d safe losses, want exactly 1 + 1", nils, safe)
+	}
+
+	// Persistent effects of exactly one advance: phase moved once, exactly one
+	// ancestor_confirmed audit row, domain untouched, transitions empty.
+	var phase string
+	if err := pool.QueryRow(ctx, `SELECT phase FROM reorg_recovery WHERE chain_id = $1`, chainID).Scan(&phase); err != nil {
+		t.Fatalf("read phase: %v", err)
+	}
+	if phase != reorgPhaseAncestorConfirmed {
+		t.Fatalf("phase = %q, want ancestor_confirmed (single advance)", phase)
+	}
+	var confirmedEvents int64
+	if err := pool.QueryRow(ctx, `SELECT COUNT(*) FROM reorg_recovery_events WHERE chain_id = $1 AND event = 'ancestor_confirmed'`, chainID).Scan(&confirmedEvents); err != nil {
+		t.Fatalf("count ancestor_confirmed events: %v", err)
+	}
+	if confirmedEvents != 1 {
+		t.Fatalf("ancestor_confirmed events = %d, want 1 (never two advances)", confirmedEvents)
+	}
+	if n := reorgCount(t, ctx, pool, "deposit_observation_transitions", chainID); n != 0 {
+		t.Fatalf("transition rows = %d, want 0", n)
+	}
+	var canon int64
+	if err := pool.QueryRow(ctx, `SELECT COUNT(*) FROM chain_blocks WHERE chain_id = $1 AND canonical`, chainID).Scan(&canon); err != nil {
+		t.Fatalf("count canonical: %v", err)
+	}
+	if canon != 6 {
+		t.Fatalf("canonical rows = %d, want 6 (10..15 untouched)", canon)
+	}
+
+	// Loser re-reads after re-acquiring (holder's short lease lapses again)
+	// and retries: clean phase refusal, zero new audit rows, phase unmoved.
+	_ = holderName
+	waitUntil(t, time.Now().Add(30*time.Second), "holder lease expiry", func() bool {
+		var expired bool
+		if err := pool.QueryRow(ctx, `SELECT expires_at < now() FROM indexer_lease WHERE chain_id = $1`, chainID).Scan(&expired); err != nil {
+			return false
+		}
+		return expired
+	})
+	won, _, err = loser.Acquire(ctx)
+	if err != nil || !won {
+		t.Fatalf("loser %s re-acquire = (%v, %v), want (true, nil)", loserName, won, err)
+	}
+	fresh := testRecoveryCap(t, ctx, pool, chainID)
+	if fresh.Seq != res.Seq {
+		t.Fatalf("re-read version = %d, want active seq %d", fresh.Seq, res.Seq)
+	}
+	retryOwned := RecoveryCapture{Seq: res.Seq, Owned: &RecoveryOwned{RecoveryID: res.RecoveryID}}
+	if err := ConfirmRecoveryAncestor(ctx, pool, loser, chainID, retryOwned, 14, depositBlockHash(14), "t025-retry"); !isRecoveryGate(err) {
+		t.Fatalf("loser retry = %v, want clean phase refusal (never a second advance)", err)
+	}
+	if err := pool.QueryRow(ctx, `SELECT COUNT(*) FROM reorg_recovery_events WHERE chain_id = $1 AND event = 'ancestor_confirmed'`, chainID).Scan(&confirmedEvents); err != nil {
+		t.Fatalf("recount ancestor_confirmed events: %v", err)
+	}
+	if confirmedEvents != 1 {
+		t.Fatalf("ancestor_confirmed events after retry = %d, want 1", confirmedEvents)
+	}
+	if err := pool.QueryRow(ctx, `SELECT phase FROM reorg_recovery WHERE chain_id = $1`, chainID).Scan(&phase); err != nil {
+		t.Fatalf("reread phase: %v", err)
+	}
+	if phase != reorgPhaseAncestorConfirmed {
+		t.Fatalf("phase after retry = %q, want ancestor_confirmed (unmoved)", phase)
+	}
+}
+
+// TestT026DemandedInterleavingRealRelease: capture v -> establish v+1 ->
+// drive to complete_pending -> CompleteRecoveryVerify (REAL release, never a
+// manual DELETE) -> a stale ordinary commit with fully matching content is
+// REFUSED on version alone with zero writes and zero progress; the legal
+// pre-pause-then-establish order stays allowed. SC-05 green.
+func TestT026DemandedInterleavingRealRelease(t *testing.T) {
+	pool := reorgTestPool(t)
+	defer pool.Close()
+	ctx := context.Background()
+	const chainID = int64(906010)
+	lease := depositITLease(t, pool, chainID)
+	reorgSeedChain(t, ctx, pool, chainID, 10, 20, 10)
+	depositSeedHistory(t, ctx, pool, chainID, 1, 10, strings.Repeat("aa", 32))
+	if _, err := pool.Exec(ctx, `
+INSERT INTO deposit_checkpoint (chain_id, start_block, config_hash, next_block)
+VALUES ($1, 10, $2, 20)`, chainID, strings.Repeat("aa", 32)); err != nil {
+		t.Fatalf("seed deposit_checkpoint: %v", err)
+	}
+	affectedBH, affectedTx := depositBlockHash(17), depositTxHash(17, 0)
+	depositSeedObservation(t, ctx, pool, chainID, 17, affectedBH, affectedTx, 0, "50", 1)
+	keeperBH, keeperTx := depositBlockHash(14), depositTxHash(14, 0)
+	depositSeedObservation(t, ctx, pool, chainID, 14, keeperBH, keeperTx, 0, "7", 1)
+
+	sc := &Scanner{pool: pool, chainID: chainID, cfg: Config{StartHeight: 10}, lease: lease}
+	cap0 := testRecoveryCap(t, ctx, pool, chainID)
+
+	// Legal pre-pause order: the ordinary commit lands before any recovery.
+	if err := sc.commitBlock(ctx, blockWrite{number: 21, hash: depositBlockHash(21), parent: depositBlockHash(20)}, cap0); err != nil {
+		t.Fatalf("pre-pause commit: %v", err)
+	}
+	var preHeight int64
+	var preHash string
+	if err := pool.QueryRow(ctx, `SELECT height, block_hash FROM indexer_checkpoint WHERE chain_id = $1`, chainID).Scan(&preHeight, &preHash); err != nil {
+		t.Fatalf("read checkpoint after pre-pause commit: %v", err)
+	}
+	if preHeight != 21 || preHash != depositBlockHash(21) {
+		t.Fatalf("checkpoint = (%d %s), want (21 %s)", preHeight, preHash, depositBlockHash(21))
+	}
+
+	// Establish: v -> v+1.
+	res := reorgEstablishOne(t, ctx, pool, lease, chainID, 21)
+	if res.Seq != cap0.Seq+1 {
+		t.Fatalf("establish seq = %d, want cap0+1 = %d", res.Seq, cap0.Seq+1)
+	}
+	owned := RecoveryCapture{Seq: res.Seq, Owned: &RecoveryOwned{RecoveryID: res.RecoveryID}}
+
+	// Drive the mini-loop shape (establish -> confirm-ancestor -> invalidate
+	// -> rollback -> replay) to complete_pending. Sweep is [16,21]: the legal
+	// block 21 is inside the fork and gets replaced by replay.
+	if err := ConfirmRecoveryAncestor(ctx, pool, lease, chainID, owned, 15, depositBlockHash(15), "t026-loop"); err != nil {
+		t.Fatalf("confirm ancestor: %v", err)
+	}
+	if _, _, _, err := InvalidateRecoveryBlocks(ctx, pool, lease, chainID, owned); err != nil {
+		t.Fatalf("invalidate blocks: %v", err)
+	}
+	if _, err := InvalidateRecoveryObservations(ctx, pool, lease, chainID, owned); err != nil {
+		t.Fatalf("invalidate observations: %v", err)
+	}
+	for _, stream := range []RecoveryStream{RecoveryStreamBlock, RecoveryStreamLog, RecoveryStreamDeposit} {
+		if _, _, err := RollbackRecoveryCheckpoint(ctx, pool, lease, chainID, owned, stream); err != nil {
+			t.Fatalf("rollback %s: %v", stream, err)
+		}
+	}
+	newHash := func(n int64) string { return fmt.Sprintf("0x%064x", 0xe00e_0000+uint64(n)) }
+	newParent := func(h int64) string {
+		if h == 16 {
+			return depositBlockHash(15)
+		}
+		return newHash(h - 1)
+	}
+	var blocks []ReplayBlock
+	for h := int64(16); h <= 18; h++ {
+		blocks = append(blocks, ReplayBlock{Number: h, Hash: newHash(h), ParentHash: newParent(h)})
+	}
+	if err := ReplayRecoveryRange(ctx, pool, lease, chainID, owned, RecoveryStreamBlock, 16, 18, blocks, nil, nil); err != nil {
+		t.Fatalf("replay block [16,18]: %v", err)
+	}
+	var blocks2 []ReplayBlock
+	for h := int64(19); h <= 21; h++ {
+		blocks2 = append(blocks2, ReplayBlock{Number: h, Hash: newHash(h), ParentHash: newParent(h)})
+	}
+	if err := ReplayRecoveryRange(ctx, pool, lease, chainID, owned, RecoveryStreamBlock, 19, 21, blocks2, nil, nil); err != nil {
+		t.Fatalf("replay block [19,21]: %v", err)
+	}
+	if err := ReplayRecoveryRange(ctx, pool, lease, chainID, owned, RecoveryStreamLog, 16, 16, nil, nil, nil); err != nil {
+		t.Fatalf("replay log [16,16] empty: %v", err)
+	}
+	if err := ReplayRecoveryRange(ctx, pool, lease, chainID, owned, RecoveryStreamDeposit, 16, 16, nil, nil, nil); err != nil {
+		t.Fatalf("replay deposit [16,16] empty: %v", err)
+	}
+	if err := ReplayRecoveryRange(ctx, pool, lease, chainID, owned, RecoveryStreamLog, 17, 21, nil, nil, nil); err != nil {
+		t.Fatalf("replay log [17,21]: %v", err)
+	}
+	if err := ReplayRecoveryRange(ctx, pool, lease, chainID, owned, RecoveryStreamDeposit, 17, 21, nil, nil, nil); err != nil {
+		t.Fatalf("replay deposit [17,21]: %v", err)
+	}
+	var phase string
+	if err := pool.QueryRow(ctx, `SELECT phase FROM reorg_recovery WHERE chain_id = $1`, chainID).Scan(&phase); err != nil {
+		t.Fatalf("read phase: %v", err)
+	}
+	if phase != reorgPhaseCompletePending {
+		t.Fatalf("phase = %q after full replay, want complete_pending", phase)
+	}
+
+	// REAL release through CompleteRecoveryVerify (never a manual DELETE).
+	if err := CompleteRecoveryVerify(ctx, pool, lease, chainID, owned); err != nil {
+		t.Fatalf("complete (real release): %v", err)
+	}
+	if n := reorgCount(t, ctx, pool, "reorg_recovery", chainID); n != 0 {
+		t.Fatalf("recovery rows = %d after release, want 0", n)
+	}
+	var terminal string
+	if err := pool.QueryRow(ctx, `SELECT detail FROM reorg_recovery_events
+WHERE chain_id = $1 AND event = 'auto_completed'`, chainID).Scan(&terminal); err != nil {
+		t.Fatalf("read terminal event: %v", err)
+	}
+	for _, want := range []string{"swept=16-21", "version=1"} {
+		if !strings.Contains(terminal, want) {
+			t.Fatalf("terminal detail missing %q: %q", want, terminal)
+		}
+	}
+	eventsBefore := reorgCount(t, ctx, pool, "reorg_recovery_events", chainID)
+	transBefore := reorgCount(t, ctx, pool, "deposit_observation_transitions", chainID)
+	var tipHeight int64
+	var tipHash string
+	if err := pool.QueryRow(ctx, `SELECT height, block_hash FROM indexer_checkpoint WHERE chain_id = $1`, chainID).Scan(&tipHeight, &tipHash); err != nil {
+		t.Fatalf("read checkpoint after release: %v", err)
+	}
+
+	// The pre-round batch, fully content-matching (correct parent, next
+	// height), still refuses on version alone — and writes nothing.
+	if err := sc.commitBlock(ctx, blockWrite{number: uint64(tipHeight + 1), hash: depositBlockHash(22), parent: tipHash}, cap0); !isRecoveryGate(err) {
+		t.Fatalf("post-release stale commit = %v, want version refusal", err)
+	}
+	var n22 int64
+	if err := pool.QueryRow(ctx, `SELECT COUNT(*) FROM chain_blocks WHERE chain_id = $1 AND number = 22`, chainID).Scan(&n22); err != nil {
+		t.Fatalf("count height 22: %v", err)
+	}
+	if n22 != 0 {
+		t.Fatalf("height-22 rows = %d after refused commit, want 0 (zero writes)", n22)
+	}
+	var afterHeight int64
+	var afterHash string
+	if err := pool.QueryRow(ctx, `SELECT height, block_hash FROM indexer_checkpoint WHERE chain_id = $1`, chainID).Scan(&afterHeight, &afterHash); err != nil {
+		t.Fatalf("reread checkpoint: %v", err)
+	}
+	if afterHeight != tipHeight || afterHash != tipHash {
+		t.Fatalf("checkpoint moved to (%d %s), want still (%d %s) (zero progress)", afterHeight, afterHash, tipHeight, tipHash)
+	}
+	if n := reorgCount(t, ctx, pool, "reorg_recovery_events", chainID); n != eventsBefore {
+		t.Fatalf("event rows = %d after refused commit, want %d (refusal writes nothing)", n, eventsBefore)
+	}
+	if n := reorgCount(t, ctx, pool, "deposit_observation_transitions", chainID); n != transBefore {
+		t.Fatalf("transition rows = %d after refused commit, want %d", n, transBefore)
+	}
+	if n := reorgCount(t, ctx, pool, "reorg_recovery", chainID); n != 0 {
+		t.Fatalf("recovery rows = %d after refused commit, want 0", n)
+	}
+}
+
+// TestT027VersionRaces: post-establish old confirm commits succeed 0% with
+// zero writes; post-policy-switch old-policy confirms succeed 0% with the
+// policy version chain unmodified; every submit rolls back on re-read
+// mismatch (observation row + policy history unchanged).
+func TestT027VersionRaces(t *testing.T) {
+	pool := reorgTestPool(t)
+	defer pool.Close()
+	ctx := context.Background()
+
+	// Half 1: a confirm captured BEFORE establish refuses AFTER establish on
+	// version alone (recovery gate fires before any candidate/policy write).
+	const chainA, tip, n = int64(906011), uint64(30), uint64(4)
+	t023BulkSeedBase(t, ctx, pool, chainA, 10, tip)
+	aBH, aTx := depositBlockHash(20), depositTxHash(20, 0)
+	depositSeedObservation(t, ctx, pool, chainA, 20, aBH, aTx, 0, "7", 1)
+	cA, _, leaseA := t023BulkScanner(t, pool, chainA, n)
+	capOld := testRecoveryCap(t, ctx, pool, chainA)
+	resA := reorgEstablishOne(t, ctx, pool, leaseA, chainA, 30)
+	_ = resA
+	oldBasis := ConfirmBasis{
+		BlockHash: aBH, TxHash: aTx, LogIndex: 0, Height: 20,
+		TipNumber: tip, TipHash: depositBlockHash(tip), PolicySeq: 1, ThresholdN: n,
+	}
+	if err := cA.ConfirmDepositUnit(ctx, leaseA, oldBasis, capOld); !isRecoveryGate(err) {
+		t.Fatalf("post-establish old confirm = %v, want version (gate) refusal", err)
+	}
+	status, nullAt, tipN, thr, seq, gotTip, conf := confirmReadBasis(t, ctx, pool, chainA, aBH, aTx)
+	if status != "pending" || !nullAt || tipN != -1 || thr != -1 || seq != -1 || gotTip != "" || conf != "" {
+		t.Fatalf("half-1 zero-write violated: status=%s nullAt=%v tip=%d/%q N=%d conf=%q seq=%d",
+			status, nullAt, tipN, gotTip, thr, conf, seq)
+	}
+	if k := depositCountRows(t, ctx, pool, "confirmation_policy_history", chainA); k != 0 {
+		t.Fatalf("half-1 policy rows = %d, want 0 (refusal wrote nothing)", k)
+	}
+	if k := depositCountRows(t, ctx, pool, "deposit_observation_transitions", chainA); k != 0 {
+		t.Fatalf("half-1 transition rows = %d, want 0", k)
+	}
+	if k := reorgCount(t, ctx, pool, "reorg_recovery", chainA); k != 1 {
+		t.Fatalf("half-1 recovery rows = %d, want 1 (refusal moved nothing)", k)
+	}
+
+	// Half 2: after an authorized policy switch, a confirm computed under the
+	// OLD policy seq refuses on policy identity with the version chain
+	// byte-identical to its pre-submit shape.
+	const chainB = int64(906012)
+	t023BulkSeedBase(t, ctx, pool, chainB, 10, tip)
+	bBH, bTx := depositBlockHash(21), depositTxHash(21, 0)
+	depositSeedObservation(t, ctx, pool, chainB, 21, bBH, bTx, 0, "8", 1)
+	cBH, cTx := depositBlockHash(22), depositTxHash(22, 0)
+	depositSeedObservation(t, ctx, pool, chainB, 22, cBH, cTx, 0, "9", 1)
+	cB, _, leaseB := t023BulkScanner(t, pool, chainB, n)
+	rcapB := testRecoveryCap(t, ctx, pool, chainB)
+	if err := cB.ConfirmDepositUnit(ctx, leaseB, ConfirmBasis{
+		BlockHash: bBH, TxHash: bTx, LogIndex: 0, Height: 21,
+		TipNumber: tip, TipHash: depositBlockHash(tip), PolicySeq: 1, ThresholdN: n,
+	}, rcapB); err != nil {
+		t.Fatalf("bootstrap confirm h=21: %v", err)
+	}
+	swRes, err := AuthorizeConfirmationPolicy(ctx, pool, ConfirmAuthRequest{
+		ChainID: chainB, RequestID: "t027-sw-half2", ExpectedOldSeq: 1,
+		NewThresholdRaw: "20", Operator: "op-t027", Reason: "t027-version-race",
+	})
+	if err != nil {
+		t.Fatalf("AuthorizeConfirmationPolicy(): %v", err)
+	}
+	if swRes.PolicySeq != 2 || swRes.Threshold != 20 || swRes.Recorded {
+		t.Fatalf("switch result = %+v, want {PolicySeq:2 Threshold:20 Recorded:false}", swRes)
+	}
+	type policyRow struct {
+		seq, threshold int64
+	}
+	readPolicy := func() []policyRow {
+		rows, err := pool.Query(ctx, `SELECT policy_seq, threshold FROM confirmation_policy_history
+WHERE chain_id = $1 ORDER BY policy_seq`, chainB)
+		if err != nil {
+			t.Fatalf("read policy history: %v", err)
+		}
+		defer rows.Close()
+		var out []policyRow
+		for rows.Next() {
+			var r policyRow
+			if err := rows.Scan(&r.seq, &r.threshold); err != nil {
+				t.Fatalf("scan policy row: %v", err)
+			}
+			out = append(out, r)
+		}
+		if err := rows.Err(); err != nil {
+			t.Fatalf("policy rows: %v", err)
+		}
+		return out
+	}
+	before := readPolicy()
+	if len(before) != 2 || before[0] != (policyRow{1, 4}) || before[1] != (policyRow{2, 20}) {
+		t.Fatalf("policy chain pre-submit = %v, want [{1 4} {2 20}]", before)
+	}
+	staleBasis := ConfirmBasis{
+		BlockHash: cBH, TxHash: cTx, LogIndex: 0, Height: 22,
+		TipNumber: tip, TipHash: depositBlockHash(tip), PolicySeq: 1, ThresholdN: n,
+	}
+	err = cB.ConfirmDepositUnit(ctx, leaseB, staleBasis, rcapB)
+	var drift *ConfirmationDriftError
+	if !errors.As(err, &drift) {
+		t.Fatalf("old-policy confirm = %v, want ConfirmationDriftError refusal", err)
+	}
+	if after := readPolicy(); len(after) != len(before) || after[0] != before[0] || after[1] != before[1] {
+		t.Fatalf("policy chain post-submit = %v, want unchanged %v", after, before)
+	}
+	status, nullAt, tipN, thr, seq, gotTip, conf = confirmReadBasis(t, ctx, pool, chainB, cBH, cTx)
+	if status != "pending" || !nullAt || tipN != -1 || thr != -1 || seq != -1 || gotTip != "" || conf != "" {
+		t.Fatalf("half-2 zero-write violated: status=%s nullAt=%v tip=%d/%q N=%d conf=%q seq=%d",
+			status, nullAt, tipN, gotTip, thr, conf, seq)
+	}
+	if k := t023BulkStatusCount(t, ctx, pool, chainB, "confirmed"); k != 1 {
+		t.Fatalf("half-2 confirmed rows = %d, want 1 (h=21 only — stale submit converted nothing)", k)
+	}
+}
+
+// --- Batch D: T030/T031 (manual two-step auth; pause coexistence + tamper) -
+// ChainID reservation: 906001-906012 taken above; the two tests below own
+// 906013 (T030 early-reconcile refusal demo), 906014 (T030 full manual
+// success), 906015 (T031). Every refusal asserts persistent state + audit,
+// never a bare error.
+
+// reorgAuditSnap freezes the persistent tables any refusal must leave
+// untouched (recovery row + audit + transitions + observations + all three
+// pause tables).
+type reorgAuditSnap struct {
+	rec, ev, trans, obs, dpause, lpause, ipause int64
+}
+
+func reorgSnapAudit(t *testing.T, ctx context.Context, pool *pgxpool.Pool, chainID int64) reorgAuditSnap {
+	t.Helper()
+	return reorgAuditSnap{
+		rec:    reorgCount(t, ctx, pool, "reorg_recovery", chainID),
+		ev:     reorgCount(t, ctx, pool, "reorg_recovery_events", chainID),
+		trans:  reorgCount(t, ctx, pool, "deposit_observation_transitions", chainID),
+		obs:    reorgCount(t, ctx, pool, "deposit_observations", chainID),
+		dpause: reorgCount(t, ctx, pool, "deposit_pause", chainID),
+		lpause: reorgCount(t, ctx, pool, "log_pause", chainID),
+		ipause: reorgCount(t, ctx, pool, "indexer_pause", chainID),
+	}
+}
+
+func (s reorgAuditSnap) assertEqual(t *testing.T, got reorgAuditSnap, msg string) {
+	t.Helper()
+	if s != got {
+		t.Fatalf("%s: audit drift:\nbefore=%+v\n after=%+v (refusal must write nothing)", msg, s, got)
+	}
+}
+
+// t030SeedLoopBase plants the mini-loop base: canonical 10..20, history,
+// deposit_checkpoint, one affected (17) + one keeper (14) observation.
+func t030SeedLoopBase(t *testing.T, ctx context.Context, pool *pgxpool.Pool, chainID int64) {
+	t.Helper()
+	reorgSeedChain(t, ctx, pool, chainID, 10, 20, 10)
+	depositSeedHistory(t, ctx, pool, chainID, 1, 10, strings.Repeat("aa", 32))
+	if _, err := pool.Exec(ctx, `
+INSERT INTO deposit_checkpoint (chain_id, start_block, config_hash, next_block)
+VALUES ($1, 10, $2, 20)`, chainID, strings.Repeat("aa", 32)); err != nil {
+		t.Fatalf("seed deposit_checkpoint: %v", err)
+	}
+	depositSeedObservation(t, ctx, pool, chainID, 17, depositBlockHash(17), depositTxHash(17, 0), 0, "50", 1)
+	depositSeedObservation(t, ctx, pool, chainID, 14, depositBlockHash(14), depositTxHash(14, 0), 0, "7", 1)
+}
+
+// t030ReplayToComplete runs confirm-ancestor(15) -> invalidate -> rollback ->
+// full replay [16,20] on an established instance and demands complete_pending
+// (same sweep shape as TestReorgInvalidateRollbackReplayComplete).
+func t030ReplayToComplete(t *testing.T, ctx context.Context, pool *pgxpool.Pool, lease *Lease, chainID int64, owned RecoveryCapture) {
+	t.Helper()
+	if err := ConfirmRecoveryAncestor(ctx, pool, lease, chainID, owned, 15, depositBlockHash(15), "t030-loop"); err != nil {
+		t.Fatalf("confirm ancestor: %v", err)
+	}
+	if _, _, _, err := InvalidateRecoveryBlocks(ctx, pool, lease, chainID, owned); err != nil {
+		t.Fatalf("invalidate blocks: %v", err)
+	}
+	if _, err := InvalidateRecoveryObservations(ctx, pool, lease, chainID, owned); err != nil {
+		t.Fatalf("invalidate observations: %v", err)
+	}
+	for _, stream := range []RecoveryStream{RecoveryStreamBlock, RecoveryStreamLog, RecoveryStreamDeposit} {
+		if _, _, err := RollbackRecoveryCheckpoint(ctx, pool, lease, chainID, owned, stream); err != nil {
+			t.Fatalf("rollback %s: %v", stream, err)
+		}
+	}
+	newHash := func(n int64) string { return fmt.Sprintf("0x%064x", 0xe00e_0000+uint64(n)) }
+	newParent := func(h int64) string {
+		if h == 16 {
+			return depositBlockHash(15)
+		}
+		return newHash(h - 1)
+	}
+	var blocks []ReplayBlock
+	for h := int64(16); h <= 18; h++ {
+		blocks = append(blocks, ReplayBlock{Number: h, Hash: newHash(h), ParentHash: newParent(h)})
+	}
+	if err := ReplayRecoveryRange(ctx, pool, lease, chainID, owned, RecoveryStreamBlock, 16, 18, blocks, nil, nil); err != nil {
+		t.Fatalf("replay block [16,18]: %v", err)
+	}
+	var blocks2 []ReplayBlock
+	for h := int64(19); h <= 20; h++ {
+		blocks2 = append(blocks2, ReplayBlock{Number: h, Hash: newHash(h), ParentHash: newParent(h)})
+	}
+	if err := ReplayRecoveryRange(ctx, pool, lease, chainID, owned, RecoveryStreamBlock, 19, 20, blocks2, nil, nil); err != nil {
+		t.Fatalf("replay block [19,20]: %v", err)
+	}
+	if err := ReplayRecoveryRange(ctx, pool, lease, chainID, owned, RecoveryStreamLog, 16, 16, nil, nil, nil); err != nil {
+		t.Fatalf("replay log [16,16]: %v", err)
+	}
+	if err := ReplayRecoveryRange(ctx, pool, lease, chainID, owned, RecoveryStreamDeposit, 16, 16, nil, nil, nil); err != nil {
+		t.Fatalf("replay deposit [16,16]: %v", err)
+	}
+	if err := ReplayRecoveryRange(ctx, pool, lease, chainID, owned, RecoveryStreamLog, 17, 20, nil, nil, nil); err != nil {
+		t.Fatalf("replay log [17,20]: %v", err)
+	}
+	if err := ReplayRecoveryRange(ctx, pool, lease, chainID, owned, RecoveryStreamDeposit, 17, 20, nil, nil, nil); err != nil {
+		t.Fatalf("replay deposit [17,20]: %v", err)
+	}
+	var phase string
+	if err := pool.QueryRow(ctx, `SELECT phase FROM reorg_recovery WHERE chain_id = $1`, chainID).Scan(&phase); err != nil {
+		t.Fatalf("read phase: %v", err)
+	}
+	if phase != reorgPhaseCompletePending {
+		t.Fatalf("phase = %q after full replay, want complete_pending", phase)
+	}
+}
+
+// t030RefusedBlockCommit attempts the ordinary block commit with a fresh cap
+// and demands the recovery-gate refusal with zero progress and zero writes.
+func t030RefusedBlockCommit(t *testing.T, ctx context.Context, pool *pgxpool.Pool, lease *Lease, chainID int64) {
+	t.Helper()
+	sc := &Scanner{pool: pool, chainID: chainID, cfg: Config{StartHeight: 10}, lease: lease}
+	capFresh := testRecoveryCap(t, ctx, pool, chainID)
+	before := reorgSnapAudit(t, ctx, pool, chainID)
+	var hBefore int64
+	var bhBefore string
+	if err := pool.QueryRow(ctx, `SELECT height, block_hash FROM indexer_checkpoint WHERE chain_id = $1`, chainID).Scan(&hBefore, &bhBefore); err != nil {
+		t.Fatalf("read checkpoint: %v", err)
+	}
+	if err := sc.commitBlock(ctx, blockWrite{number: 21, hash: depositBlockHash(21), parent: depositBlockHash(20)}, capFresh); !isRecoveryGate(err) {
+		t.Fatalf("ordinary commit during active recovery = %v, want recovery-gate refusal", err)
+	}
+	before.assertEqual(t, reorgSnapAudit(t, ctx, pool, chainID), "ordinary-commit refusal")
+	var n21 int64
+	if err := pool.QueryRow(ctx, `SELECT COUNT(*) FROM chain_blocks WHERE chain_id = $1 AND number = 21`, chainID).Scan(&n21); err != nil {
+		t.Fatalf("count height 21: %v", err)
+	}
+	if n21 != 0 {
+		t.Fatalf("height-21 rows = %d after refused commit, want 0", n21)
+	}
+	var hAfter int64
+	var bhAfter string
+	if err := pool.QueryRow(ctx, `SELECT height, block_hash FROM indexer_checkpoint WHERE chain_id = $1`, chainID).Scan(&hAfter, &bhAfter); err != nil {
+		t.Fatalf("reread checkpoint: %v", err)
+	}
+	if hAfter != hBefore || bhAfter != bhBefore {
+		t.Fatalf("checkpoint moved to (%d %s), want still (%d %s)", hAfter, bhAfter, hBefore, bhBefore)
+	}
+}
+
+// TestT030ManualTwoStepAuth pins the Q2b manual path on real PG: repair
+// records without releasing (row + phase untouched, ordinary commits still
+// refused); release before completion-ready refuses with zero writes; the
+// full drive + reconcile + repair + release round succeeds atomically with
+// operator/time/evidence/cause in the terminal event; forged attempts
+// (empty operator/evidence/disposition, wrong phase, no active row) refuse
+// 100% with zero writes; the path invents no payment intents (every
+// non-recovery table frozen).
+func TestT030ManualTwoStepAuth(t *testing.T) {
+	pool := reorgTestPool(t)
+	defer pool.Close()
+	ctx := context.Background()
+
+	// Half 1 (906013): reconcile with NO completion work — repair records
+	// without releasing, release refuses on the unmet completion判据.
+	const chainR = int64(906013)
+	leaseR := depositITLease(t, pool, chainR)
+	reorgSeedChain(t, ctx, pool, chainR, 10, 20, 10)
+	resR := reorgEstablishOne(t, ctx, pool, leaseR, chainR, 20)
+	ownedR := RecoveryCapture{Seq: resR.Seq, Owned: &RecoveryOwned{RecoveryID: resR.RecoveryID}}
+	if err := SignalRecoveryReconcile(ctx, pool, leaseR, chainR, ownedR,
+		"over-deep", "1-20", "tip-diverged-beyond-depth-25"); err != nil {
+		t.Fatalf("signal reconcile: %v", err)
+	}
+	var phaseR string
+	if err := pool.QueryRow(ctx, `SELECT phase FROM reorg_recovery WHERE chain_id = $1`, chainR).Scan(&phaseR); err != nil {
+		t.Fatalf("read phase: %v", err)
+	}
+	if phaseR != reorgPhaseReconcileRequired {
+		t.Fatalf("phase = %q, want reconcile_required", phaseR)
+	}
+	const opR = "op-t030-repair"
+	evR := fmt.Sprintf("old_tip=20:%s new_tip=21:%s searched=1-20 cause=over-deep",
+		depositBlockHash(20), depositBlockHash(120))
+	dispR := "pending=none action=awaiting-manual-repair"
+	if err := AuthorizeRecoveryRepair(ctx, pool, chainR, opR, evR, dispR); err != nil {
+		t.Fatalf("repair: %v", err)
+	}
+	var repairDetail string
+	if err := pool.QueryRow(ctx, `SELECT detail FROM reorg_recovery_events
+WHERE chain_id = $1 AND event = 'repair_authorized'`, chainR).Scan(&repairDetail); err != nil {
+		t.Fatalf("read repair_authorized: %v", err)
+	}
+	for _, want := range []string{opR, evR, dispR} {
+		if !strings.Contains(repairDetail, want) {
+			t.Fatalf("repair detail missing %q: %q", want, repairDetail)
+		}
+	}
+	// established + reconcile_signaled + exactly one repair_authorized; the
+	// row stays in reconcile_required — confirm/sign/broadcast never released.
+	if n := reorgCount(t, ctx, pool, "reorg_recovery_events", chainR); n != 3 {
+		t.Fatalf("event rows = %d after repair, want 3 (repair writes exactly one)", n)
+	}
+	if err := pool.QueryRow(ctx, `SELECT phase FROM reorg_recovery WHERE chain_id = $1`, chainR).Scan(&phaseR); err != nil {
+		t.Fatalf("read phase: %v", err)
+	}
+	if phaseR != reorgPhaseReconcileRequired {
+		t.Fatalf("phase = %q after repair, want still reconcile_required (repair never releases)", phaseR)
+	}
+	if n := reorgCount(t, ctx, pool, "reorg_recovery", chainR); n != 1 {
+		t.Fatalf("recovery rows = %d after repair, want 1 (row stays)", n)
+	}
+	t030RefusedBlockCommit(t, ctx, pool, leaseR, chainR)
+
+	// Release BEFORE completion-ready refuses (no ancestor: completion判据
+	// unmet) with zero writes and no terminal event.
+	snapR := reorgSnapAudit(t, ctx, pool, chainR)
+	if err := AuthorizeRecoveryRelease(ctx, pool, chainR, opR, evR, dispR); !isRecoveryGate(err) {
+		t.Fatalf("early release = %v, want completion-gate refusal", err)
+	}
+	snapR.assertEqual(t, reorgSnapAudit(t, ctx, pool, chainR), "early-release refusal")
+	var nRel int64
+	if err := pool.QueryRow(ctx, `SELECT COUNT(*) FROM reorg_recovery_events
+WHERE chain_id = $1 AND event = 'released'`, chainR).Scan(&nRel); err != nil {
+		t.Fatalf("count released events: %v", err)
+	}
+	if nRel != 0 {
+		t.Fatalf("released events = %d after refused release, want 0", nRel)
+	}
+
+	// Forged step-1/step-2 attempts: empty operator/evidence/disposition are
+	// policy refusals with zero writes — 100% refused.
+	for _, tc := range []struct{ name, op, ev, disp string }{
+		{"repair-empty-operator", "", evR, dispR},
+		{"repair-empty-evidence", opR, "", dispR},
+		{"repair-empty-disposition", opR, evR, ""},
+	} {
+		snap := reorgSnapAudit(t, ctx, pool, chainR)
+		if err := AuthorizeRecoveryRepair(ctx, pool, chainR, tc.op, tc.ev, tc.disp); !errors.Is(err, ErrReorgPolicyRejected) {
+			t.Fatalf("%s = %v, want policy refusal", tc.name, err)
+		}
+		snap.assertEqual(t, reorgSnapAudit(t, ctx, pool, chainR), tc.name)
+	}
+	for _, tc := range []struct{ name, op, ev, disp string }{
+		{"release-empty-operator", "", evR, dispR},
+		{"release-empty-evidence", opR, "", dispR},
+		{"release-empty-disposition", opR, evR, ""},
+	} {
+		snap := reorgSnapAudit(t, ctx, pool, chainR)
+		if err := AuthorizeRecoveryRelease(ctx, pool, chainR, tc.op, tc.ev, tc.disp); !errors.Is(err, ErrReorgPolicyRejected) {
+			t.Fatalf("%s = %v, want policy refusal", tc.name, err)
+		}
+		snap.assertEqual(t, reorgSnapAudit(t, ctx, pool, chainR), tc.name)
+	}
+
+	// Half 2 (906014): the full manual success round with one INDEPENDENT
+	// stream pause that the release must not touch.
+	const chainS = int64(906014)
+	leaseS := depositITLease(t, pool, chainS)
+	t030SeedLoopBase(t, ctx, pool, chainS)
+	if _, err := pool.Exec(ctx, `
+INSERT INTO deposit_pause (chain_id, height, kind, detail)
+VALUES ($1, 11, 'chain_view_changed', 't030-independent-survivor')`, chainS); err != nil {
+		t.Fatalf("seed deposit_pause: %v", err)
+	}
+	resS := reorgEstablishOne(t, ctx, pool, leaseS, chainS, 20)
+	ownedS := RecoveryCapture{Seq: resS.Seq, Owned: &RecoveryOwned{RecoveryID: resS.RecoveryID}}
+	const opS = "op-t030-release"
+	evS := fmt.Sprintf("old_tip=20:%s new_tip=21:%s searched=1-20 cause=over-deep repaired-by=%s",
+		depositBlockHash(20), depositBlockHash(120), opR)
+	dispS := "orphaned=1 revived=0 replayed=block:20,log:20,deposit:20"
+	// Manual auth in the wrong phase (detected) refuses before any write.
+	snapW := reorgSnapAudit(t, ctx, pool, chainS)
+	if err := AuthorizeRecoveryRepair(ctx, pool, chainS, opS, evS, dispS); !isRecoveryGate(err) {
+		t.Fatalf("repair in detected phase = %v, want gate refusal", err)
+	}
+	snapW.assertEqual(t, reorgSnapAudit(t, ctx, pool, chainS), "wrong-phase repair")
+	if err := AuthorizeRecoveryRelease(ctx, pool, chainS, opS, evS, dispS); !isRecoveryGate(err) {
+		t.Fatalf("release in detected phase = %v, want gate refusal", err)
+	}
+	snapW.assertEqual(t, reorgSnapAudit(t, ctx, pool, chainS), "wrong-phase release")
+
+	t030ReplayToComplete(t, ctx, pool, leaseS, chainS, ownedS)
+	if err := SignalRecoveryReconcile(ctx, pool, leaseS, chainS, ownedS,
+		"over-deep", "1-20", "tip-diverged-beyond-depth-25"); err != nil {
+		t.Fatalf("signal reconcile: %v", err)
+	}
+	var phaseS string
+	if err := pool.QueryRow(ctx, `SELECT phase FROM reorg_recovery WHERE chain_id = $1`, chainS).Scan(&phaseS); err != nil {
+		t.Fatalf("read phase: %v", err)
+	}
+	if phaseS != reorgPhaseReconcileRequired {
+		t.Fatalf("phase = %q, want reconcile_required", phaseS)
+	}
+	if err := AuthorizeRecoveryRepair(ctx, pool, chainS, opS, evS, dispS); err != nil {
+		t.Fatalf("repair: %v", err)
+	}
+	if err := pool.QueryRow(ctx, `SELECT phase FROM reorg_recovery WHERE chain_id = $1`, chainS).Scan(&phaseS); err != nil {
+		t.Fatalf("read phase: %v", err)
+	}
+	if phaseS != reorgPhaseReconcileRequired {
+		t.Fatalf("phase = %q after repair, want still reconcile_required", phaseS)
+	}
+	t030RefusedBlockCommit(t, ctx, pool, leaseS, chainS)
+
+	// Release with re-verified completion: atomic-or-nothing (row gone AND
+	// terminal event present), operator/time/evidence/cause recorded, the
+	// independent pause row untouched, nothing else invented.
+	snapS := reorgSnapAudit(t, ctx, pool, chainS)
+	if err := AuthorizeRecoveryRelease(ctx, pool, chainS, opS, evS, dispS); err != nil {
+		t.Fatalf("release: %v", err)
+	}
+	if n := reorgCount(t, ctx, pool, "reorg_recovery", chainS); n != 0 {
+		t.Fatalf("recovery rows = %d after release, want 0", n)
+	}
+	var terminal string
+	var at time.Time
+	if err := pool.QueryRow(ctx, `SELECT detail, at FROM reorg_recovery_events
+WHERE chain_id = $1 AND event = 'released'`, chainS).Scan(&terminal, &at); err != nil {
+		t.Fatalf("read terminal event: %v", err)
+	}
+	for _, want := range []string{"event=released", opS, evS, dispS, "surviving_pauses=deposit_pause", "swept=16-20", "orphaned=1", "version=1"} {
+		if !strings.Contains(terminal, want) {
+			t.Fatalf("terminal detail missing %q: %q", want, terminal)
+		}
+	}
+	if at.IsZero() {
+		t.Fatalf("terminal event time is zero (operator/time must be recorded)")
+	}
+	var ph int64
+	var pkind, pdetail string
+	if err := pool.QueryRow(ctx, `SELECT height, kind, detail FROM deposit_pause WHERE chain_id = $1`, chainS).Scan(&ph, &pkind, &pdetail); err != nil {
+		t.Fatalf("read surviving deposit_pause: %v", err)
+	}
+	if ph != 11 || pkind != "chain_view_changed" || pdetail != "t030-independent-survivor" {
+		t.Fatalf("survivor = (%d %s %s), want (11 chain_view_changed t030-independent-survivor)", ph, pkind, pdetail)
+	}
+	got := reorgSnapAudit(t, ctx, pool, chainS)
+	if got.rec != 0 || got.ev != snapS.ev+1 || got.trans != snapS.trans || got.obs != snapS.obs ||
+		got.dpause != 1 || got.lpause != 0 || got.ipause != 0 {
+		t.Fatalf("post-release audit = %+v, want rec=0 ev=%d trans=%d obs=%d pauses=(1,0,0)",
+			got, snapS.ev+1, snapS.trans, snapS.obs)
+	}
+	// No payment-intent invention (011 owns that design): the manual path
+	// writes no pause audit, no policy history, no observation side effects.
+	if n := reorgCount(t, ctx, pool, "deposit_pause_audit", chainS); n != 0 {
+		t.Fatalf("deposit_pause_audit rows = %d, want 0 (release invents nothing)", n)
+	}
+	if n := reorgCount(t, ctx, pool, "confirmation_policy_history", chainS); n != 0 {
+		t.Fatalf("policy rows = %d, want 0 (release invents nothing)", n)
+	}
+
+	// Stateless reboot: the same release re-verifies from rebuilt DB state —
+	// no row, same refusal verdict, zero writes.
+	snapPost := reorgSnapAudit(t, ctx, pool, chainS)
+	if err := AuthorizeRecoveryRelease(ctx, pool, chainS, opS, evS, dispS); !isRecoveryGate(err) {
+		t.Fatalf("second release = %v, want no-row gate refusal", err)
+	}
+	snapPost.assertEqual(t, reorgSnapAudit(t, ctx, pool, chainS), "second-release refusal")
+	if _, active, err := captureRecoveryVersion(ctx, pool, chainS); err != nil || active {
+		t.Fatalf("rebuilt capture = (active=%v, err=%v), want inactive with no error", active, err)
+	}
+
+	// The surviving pause still stops ordinary confirmation work (zero writes).
+	depositSeedObservation(t, ctx, pool, chainS, 14, depositBlockHash(14), depositTxHash(14, 0), 1, "7", 1)
+	confirmSeedPolicyRow(t, ctx, pool, chainS, 1, 4, nil, "bootstrap", nil)
+	cS, err := NewConfirmationCommitter(pool, ConfirmationConfig{ChainID: chainS, ThresholdN: 4})
+	if err != nil {
+		t.Fatalf("NewConfirmationCommitter(): %v", err)
+	}
+	rcapS := testRecoveryCap(t, ctx, pool, chainS)
+	snapC := reorgSnapAudit(t, ctx, pool, chainS)
+	cerr := cS.ConfirmDepositUnit(ctx, leaseS, ConfirmBasis{
+		BlockHash: depositBlockHash(14), TxHash: depositTxHash(14, 0), LogIndex: 1, Height: 14,
+		TipNumber: 20, TipHash: depositBlockHash(20), PolicySeq: 1, ThresholdN: 4,
+	}, rcapS)
+	var paused *streamPauseError
+	if !errors.As(cerr, &paused) || paused.stream != "deposit_pause" {
+		t.Fatalf("post-release confirm = %v, want the deposit_pause stop", cerr)
+	}
+	snapC.assertEqual(t, reorgSnapAudit(t, ctx, pool, chainS), "surviving-pause stop")
+	var st string
+	if err := pool.QueryRow(ctx, `SELECT status FROM deposit_observations
+WHERE chain_id = $1 AND block_hash = $2 AND tx_hash = $3 AND log_index = 1`,
+		chainS, depositBlockHash(14), depositTxHash(14, 0)).Scan(&st); err != nil {
+		t.Fatalf("read fresh observation: %v", err)
+	}
+	if st != "pending" {
+		t.Fatalf("fresh observation status = %q, want pending (zero writes)", st)
+	}
+}
+
+// TestT031PauseCoexistenceAndTamper pins T031 on real PG: the release deletes
+// ONLY the recovery row — independent pauses in separate tables survive with
+// byte-identical content, ride the terminal event, and keep ordinary work
+// stopped; a fresh stream pause racing the release is freed for the recovery
+// cause only (its row intact); deleting a pause row under an ACTIVE recovery
+// row cannot smuggle ordinary commits past the recovery-row gate.
+func TestT031PauseCoexistenceAndTamper(t *testing.T) {
+	pool := reorgTestPool(t)
+	defer pool.Close()
+	ctx := context.Background()
+	const chainID = int64(906015)
+	lease := depositITLease(t, pool, chainID)
+	t030SeedLoopBase(t, ctx, pool, chainID)
+	// Two INDEPENDENT pauses in separate tables: the deposit-stream survivor
+	// and the indexer_pause tamper victim.
+	if _, err := pool.Exec(ctx, `
+INSERT INTO deposit_pause (chain_id, height, kind, detail)
+VALUES ($1, 11, 'chain_view_changed', 't031-independent-survivor')`, chainID); err != nil {
+		t.Fatalf("seed deposit_pause: %v", err)
+	}
+	forkB := fmt.Sprintf("0x%064x", 0xb00b_0000+11)
+	if _, err := pool.Exec(ctx, `
+INSERT INTO indexer_pause (chain_id, height, expected_hash, actual_hash, kind, detail)
+VALUES ($1, 11, $2, $3, 'hash_mismatch', 't031-tamper-victim')`,
+		chainID, depositBlockHash(11), forkB); err != nil {
+		t.Fatalf("seed indexer_pause: %v", err)
+	}
+	res := reorgEstablishOne(t, ctx, pool, lease, chainID, 20)
+	owned := RecoveryCapture{Seq: res.Seq, Owned: &RecoveryOwned{RecoveryID: res.RecoveryID}}
+	// Coexistence starts at establish: both causes ride the established event
+	// (readStreamPausesTx order: indexer, log, deposit) with no overwrite.
+	var estDetail string
+	if err := pool.QueryRow(ctx, `SELECT detail FROM reorg_recovery_events
+WHERE chain_id = $1 AND event = 'established'`, chainID).Scan(&estDetail); err != nil {
+		t.Fatalf("read established event: %v", err)
+	}
+	if !strings.Contains(estDetail, "pre_pauses=indexer_pause,deposit_pause") {
+		t.Fatalf("established detail missing coexistence evidence: %q", estDetail)
+	}
+	if n := reorgCount(t, ctx, pool, "deposit_pause", chainID); n != 1 {
+		t.Fatalf("deposit_pause rows after establish = %d, want 1 (no overwrite)", n)
+	}
+	if n := reorgCount(t, ctx, pool, "indexer_pause", chainID); n != 1 {
+		t.Fatalf("indexer_pause rows after establish = %d, want 1 (no overwrite)", n)
+	}
+
+	t030ReplayToComplete(t, ctx, pool, lease, chainID, owned)
+
+	// TAMPER half: with the recovery row ACTIVE, delete the indexer_pause row
+	// (operator error/tamper). The ordinary block commit must STILL refuse via
+	// the recovery-row gate — the pause deletion smuggles nothing.
+	if _, err := pool.Exec(ctx, `DELETE FROM indexer_pause WHERE chain_id = $1`, chainID); err != nil {
+		t.Fatalf("tamper-delete indexer_pause: %v", err)
+	}
+	t030RefusedBlockCommit(t, ctx, pool, lease, chainID)
+	var dh int64
+	var dkind, ddetail string
+	if err := pool.QueryRow(ctx, `SELECT height, kind, detail FROM deposit_pause WHERE chain_id = $1`, chainID).Scan(&dh, &dkind, &ddetail); err != nil {
+		t.Fatalf("read deposit_pause after tamper: %v", err)
+	}
+	if dh != 11 || dkind != "chain_view_changed" || ddetail != "t031-independent-survivor" {
+		t.Fatalf("survivor = (%d %s %s), want untouched (11 chain_view_changed t031-independent-survivor)", dh, dkind, ddetail)
+	}
+
+	// RACE half: a fresh stream pause lands between complete and release. The
+	// release frees the recovery cause only — the fresh row survives and rides
+	// the terminal event.
+	if _, err := pool.Exec(ctx, `
+INSERT INTO log_pause (chain_id, height, kind, detail)
+VALUES ($1, 12, 'chain_view_changed', 't031-race-fresh-pause')`, chainID); err != nil {
+		t.Fatalf("seed race log_pause: %v", err)
+	}
+	if err := SignalRecoveryReconcile(ctx, pool, lease, chainID, owned,
+		"over-deep", "1-20", "tip-diverged-beyond-depth-25"); err != nil {
+		t.Fatalf("signal reconcile: %v", err)
+	}
+	const opT = "op-t031-release"
+	evT := fmt.Sprintf("old_tip=20:%s new_tip=21:%s searched=1-20 cause=over-deep repaired-by=op-t031-repair",
+		depositBlockHash(20), depositBlockHash(120))
+	dispT := "orphaned=1 revived=0 replayed=block:20,log:20,deposit:20"
+	if err := AuthorizeRecoveryRepair(ctx, pool, chainID, opT, evT, dispT); err != nil {
+		t.Fatalf("repair: %v", err)
+	}
+	snapT := reorgSnapAudit(t, ctx, pool, chainID)
+	if err := AuthorizeRecoveryRelease(ctx, pool, chainID, opT, evT, dispT); err != nil {
+		t.Fatalf("release: %v", err)
+	}
+	// Release deleted ONLY the recovery row.
+	if n := reorgCount(t, ctx, pool, "reorg_recovery", chainID); n != 0 {
+		t.Fatalf("recovery rows = %d after release, want 0", n)
+	}
+	var terminal string
+	if err := pool.QueryRow(ctx, `SELECT detail FROM reorg_recovery_events
+WHERE chain_id = $1 AND event = 'released'`, chainID).Scan(&terminal); err != nil {
+		t.Fatalf("read terminal event: %v", err)
+	}
+	for _, want := range []string{"event=released", opT, evT, dispT, "surviving_pauses=log_pause,deposit_pause", "swept=16-20", "version=1"} {
+		if !strings.Contains(terminal, want) {
+			t.Fatalf("terminal detail missing %q: %q", want, terminal)
+		}
+	}
+	got := reorgSnapAudit(t, ctx, pool, chainID)
+	if got.rec != 0 || got.ev != snapT.ev+1 || got.trans != snapT.trans || got.obs != snapT.obs ||
+		got.dpause != 1 || got.lpause != 1 || got.ipause != 0 {
+		t.Fatalf("post-release audit = %+v, want rec=0 ev=%d pauses=(1,1,0)", got, snapT.ev+1)
+	}
+	if err := pool.QueryRow(ctx, `SELECT height, kind, detail FROM deposit_pause WHERE chain_id = $1`, chainID).Scan(&dh, &dkind, &ddetail); err != nil {
+		t.Fatalf("read surviving deposit_pause: %v", err)
+	}
+	if dh != 11 || dkind != "chain_view_changed" || ddetail != "t031-independent-survivor" {
+		t.Fatalf("deposit survivor = (%d %s %s), want byte-identical content", dh, dkind, ddetail)
+	}
+	var lh int64
+	var lkind, ldetail string
+	if err := pool.QueryRow(ctx, `SELECT height, kind, detail FROM log_pause WHERE chain_id = $1`, chainID).Scan(&lh, &lkind, &ldetail); err != nil {
+		t.Fatalf("read surviving log_pause: %v", err)
+	}
+	if lh != 12 || lkind != "chain_view_changed" || ldetail != "t031-race-fresh-pause" {
+		t.Fatalf("log survivor = (%d %s %s), want byte-identical content", lh, lkind, ldetail)
+	}
+	if n := reorgCount(t, ctx, pool, "deposit_pause_audit", chainID); n != 0 {
+		t.Fatalf("deposit_pause_audit rows = %d, want 0 (release invents nothing)", n)
+	}
+
+	// The survivors keep ordinary confirmation work stopped (zero writes).
+	depositSeedObservation(t, ctx, pool, chainID, 14, depositBlockHash(14), depositTxHash(14, 0), 1, "7", 1)
+	confirmSeedPolicyRow(t, ctx, pool, chainID, 1, 4, nil, "bootstrap", nil)
+	cT, err := NewConfirmationCommitter(pool, ConfirmationConfig{ChainID: chainID, ThresholdN: 4})
+	if err != nil {
+		t.Fatalf("NewConfirmationCommitter(): %v", err)
+	}
+	rcapT := testRecoveryCap(t, ctx, pool, chainID)
+	snapC := reorgSnapAudit(t, ctx, pool, chainID)
+	cerr := cT.ConfirmDepositUnit(ctx, lease, ConfirmBasis{
+		BlockHash: depositBlockHash(14), TxHash: depositTxHash(14, 0), LogIndex: 1, Height: 14,
+		TipNumber: 20, TipHash: depositBlockHash(20), PolicySeq: 1, ThresholdN: 4,
+	}, rcapT)
+	var paused *streamPauseError
+	if !errors.As(cerr, &paused) || paused.stream != "deposit_pause" {
+		t.Fatalf("post-release confirm = %v, want the deposit_pause stop", cerr)
+	}
+	snapC.assertEqual(t, reorgSnapAudit(t, ctx, pool, chainID), "surviving-pause stop")
+}
