@@ -45,6 +45,7 @@ const (
 	EnvDepositContracts      = "TXHARBOR_DEPOSIT_CONTRACTS"
 	EnvDepositWatchAddresses = "TXHARBOR_DEPOSIT_WATCH_ADDRESSES"
 	EnvDepositBatchBlocks    = "TXHARBOR_DEPOSIT_BATCH_BLOCKS"
+	EnvConfirmationDepth     = "TXHARBOR_CONFIRMATION_DEPTH"
 )
 
 // Defaults from data-model §1. Acceptance runs use these values (FR-013).
@@ -115,6 +116,9 @@ type Config struct {
 	DepositWatchAddresses []DepositEntry
 	DepositConfigHash     string
 	DepositBatchBlocks    uint64
+	// Confirmation tracking (005 FR-03/Q1): required positive threshold N
+	// in [1, MaxInt64] (BIGINT system range, no business cap, no default).
+	ConfirmationDepth uint64
 }
 
 // DepositEntry is one normalized `address[:effective]` configuration item: a
@@ -258,6 +262,16 @@ func Load(getenv Getenv) (*Config, error) {
 		}
 	}
 
+	// Confirmation tracking (005 FR-03/Q1): required positive threshold,
+	// no default; missing/non-integer/<1/out-of-system-range refuses startup.
+	if raw, err := require(getenv, EnvConfirmationDepth); err != nil {
+		errs = append(errs, err)
+	} else if n, err := parseConfirmationDepth(raw); err != nil {
+		errs = append(errs, invalid(EnvConfirmationDepth, "%v", err))
+	} else {
+		c.ConfirmationDepth = n
+	}
+
 	if raw, ok := getenv(EnvHTTPAddr); ok && raw != "" {
 		if err := validateHTTPAddr(raw); err != nil {
 			errs = append(errs, invalid(EnvHTTPAddr, "%v", err))
@@ -293,13 +307,13 @@ func Load(getenv Getenv) (*Config, error) {
 // one startup echo line (FR-003).
 func (c *Config) Summary() string {
 	return fmt.Sprintf(
-		"pg=%s rpc=%s chain_id=%d start_height=%d http_addr=%s startup_timeout=%s probe_interval=%s probe_timeout=%s shutdown_timeout=%s migrate_lock_timeout=%s index_rpc_timeout=%s index_poll_interval=%s index_retry_initial=%s index_retry_max=%s log_start_height=%d log_contracts=%d log_config_hash=%s log_batch_blocks=%d deposit_start_height=%d deposit_contracts=%d deposit_watch_addresses=%d deposit_config_hash=%s deposit_batch_blocks=%d",
+		"pg=%s rpc=%s chain_id=%d start_height=%d http_addr=%s startup_timeout=%s probe_interval=%s probe_timeout=%s shutdown_timeout=%s migrate_lock_timeout=%s index_rpc_timeout=%s index_poll_interval=%s index_retry_initial=%s index_retry_max=%s log_start_height=%d log_contracts=%d log_config_hash=%s log_batch_blocks=%d deposit_start_height=%d deposit_contracts=%d deposit_watch_addresses=%d deposit_config_hash=%s deposit_batch_blocks=%d confirmation_depth=%d",
 		logx.Redact(c.PGDSN), logx.Redact(c.RPCURL), c.ChainID, c.StartHeight, c.HTTPAddr,
 		c.StartupTimeout, c.ProbeInterval, c.ProbeTimeout, c.ShutdownTimeout, c.MigrateLockTimeout,
 		c.IndexRPCTimeout, c.IndexPollInterval, c.IndexRetryInitial, c.IndexRetryMax,
 		c.LogStartHeight, len(c.LogContracts), c.LogConfigHash, c.LogBatchBlocks,
 		c.DepositStartHeight, len(c.DepositContracts), len(c.DepositWatchAddresses),
-		c.DepositConfigHash, c.DepositBatchBlocks,
+		c.DepositConfigHash, c.DepositBatchBlocks, c.ConfirmationDepth,
 	)
 }
 
@@ -481,6 +495,23 @@ func parseChainID(raw string) (uint64, error) {
 		return 0, errors.New("must be a positive decimal integer (> 0)")
 	}
 	return id, nil
+}
+
+// parseConfirmationDepth accepts N in [1, MaxInt64]: the BIGINT storage
+// system range, not a business cap. Zero is refused as non-positive;
+// larger values are refused as out of system range.
+func parseConfirmationDepth(raw string) (uint64, error) {
+	n, err := strconv.ParseUint(raw, 10, 64)
+	if err != nil {
+		return 0, fmt.Errorf("%q is not a decimal integer", raw)
+	}
+	if n == 0 {
+		return 0, errors.New("must be a positive decimal integer (> 0)")
+	}
+	if n > 1<<63-1 {
+		return 0, fmt.Errorf("%q exceeds system-supported integer range (max 9223372036854775807)", raw)
+	}
+	return n, nil
 }
 
 func validateHTTPAddr(addr string) error {

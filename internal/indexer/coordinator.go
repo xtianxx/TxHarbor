@@ -53,7 +53,17 @@ func RunTrio(ctx context.Context, lease leaseSession, headerServe, logServe, dep
 	return runStreams(ctx, lease, []ServeFunc{headerServe, logServe, depositServe})
 }
 
-// runStreams is the shared acquisition loop behind RunPair/RunTrio.
+// RunQuatro is the four-stream service (005 confirmation tracking): one
+// lease acquisition loop and one heartbeat drive the header, log, deposit
+// and confirmation serve loops concurrently. Loss and terminal polarities
+// match RunPair; the confirmation loop joins the same cancellation fan-out,
+// so any loop's stop error or lease loss stops all four before any further
+// write.
+func RunQuatro(ctx context.Context, lease leaseSession, headerServe, logServe, depositServe, confirmServe ServeFunc) error {
+	return runStreams(ctx, lease, []ServeFunc{headerServe, logServe, depositServe, confirmServe})
+}
+
+// runStreams is the shared acquisition loop behind RunPair/RunTrio/RunQuatro.
 func runStreams(ctx context.Context, lease leaseSession, serves []ServeFunc) error {
 	if lease == nil {
 		return errors.New("indexer coordinator: nil lease")

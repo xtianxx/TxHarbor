@@ -26,6 +26,7 @@ func baseEnv() map[string]string {
 		EnvDepositStartHeight:    "0",
 		EnvDepositContracts:      "0x1111111111111111111111111111111111111111",
 		EnvDepositWatchAddresses: "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+		EnvConfirmationDepth:     "10",
 	}
 }
 
@@ -82,6 +83,9 @@ func TestLoadDefaults(t *testing.T) {
 	if cfg.LogBatchBlocks != DefaultLogBatchBlocks {
 		t.Errorf("LogBatchBlocks = %d, want default %d", cfg.LogBatchBlocks, DefaultLogBatchBlocks)
 	}
+	if cfg.ConfirmationDepth != 10 {
+		t.Errorf("ConfirmationDepth = %d, want 10", cfg.ConfirmationDepth)
+	}
 }
 
 func TestLoadCustomValues(t *testing.T) {
@@ -115,6 +119,7 @@ func TestLoadMissingRequiredNamesVariable(t *testing.T) {
 	for _, name := range []string{
 		EnvPGDSN, EnvRPCURL, EnvChainID, EnvStartHeight, EnvLogStartHeight, EnvLogContracts,
 		EnvDepositStartHeight, EnvDepositContracts, EnvDepositWatchAddresses,
+		EnvConfirmationDepth,
 	} {
 		t.Run(name, func(t *testing.T) {
 			env := baseEnv()
@@ -138,6 +143,7 @@ func TestLoadMissingAllReportsEveryVariable(t *testing.T) {
 	for _, name := range []string{
 		EnvPGDSN, EnvRPCURL, EnvChainID, EnvStartHeight, EnvLogStartHeight, EnvLogContracts,
 		EnvDepositStartHeight, EnvDepositContracts, EnvDepositWatchAddresses,
+		EnvConfirmationDepth,
 	} {
 		if !strings.Contains(err.Error(), name) {
 			t.Errorf("error %q does not name %s", err, name)
@@ -146,13 +152,79 @@ func TestLoadMissingAllReportsEveryVariable(t *testing.T) {
 }
 
 func TestLoadEmptyRequiredValueIsMissing(t *testing.T) {
-	for _, name := range []string{EnvChainID, EnvStartHeight} {
+	for _, name := range []string{EnvChainID, EnvStartHeight, EnvConfirmationDepth} {
 		t.Run(name, func(t *testing.T) {
 			env := baseEnv()
 			env[name] = ""
 			_, err := Load(fakeEnv(env))
 			if err == nil || !strings.Contains(err.Error(), name) {
 				t.Fatalf("expected missing %s error, got %v", name, err)
+			}
+		})
+	}
+}
+
+// TestLoadRejectsInvalidConfirmationDepth pins the 005 FR-03/Q1 refusal
+// matrix: the threshold is required with no default, and every illegal value
+// (missing, empty, non-integer, 0, negative, beyond uint64, beyond int64
+// system range) fails startup with an error naming the variable.
+func TestLoadRejectsInvalidConfirmationDepth(t *testing.T) {
+	cases := []struct {
+		name    string
+		mutate  func(map[string]string)
+		wantVar string
+	}{
+		{name: "missing", mutate: func(m map[string]string) { delete(m, EnvConfirmationDepth) }, wantVar: EnvConfirmationDepth},
+		{name: "empty", mutate: func(m map[string]string) { m[EnvConfirmationDepth] = "" }, wantVar: EnvConfirmationDepth},
+		{name: "non-integer", mutate: func(m map[string]string) { m[EnvConfirmationDepth] = "abc" }, wantVar: EnvConfirmationDepth},
+		{name: "float", mutate: func(m map[string]string) { m[EnvConfirmationDepth] = "1.5" }, wantVar: EnvConfirmationDepth},
+		{name: "zero", mutate: func(m map[string]string) { m[EnvConfirmationDepth] = "0" }, wantVar: EnvConfirmationDepth},
+		{name: "negative", mutate: func(m map[string]string) { m[EnvConfirmationDepth] = "-1" }, wantVar: EnvConfirmationDepth},
+		{name: "beyond uint64", mutate: func(m map[string]string) { m[EnvConfirmationDepth] = "18446744073709551616" }, wantVar: EnvConfirmationDepth},
+		{name: "beyond int64", mutate: func(m map[string]string) { m[EnvConfirmationDepth] = "9223372036854775808" }, wantVar: EnvConfirmationDepth},
+		{name: "max uint64", mutate: func(m map[string]string) { m[EnvConfirmationDepth] = "18446744073709551615" }, wantVar: EnvConfirmationDepth},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			env := baseEnv()
+			tc.mutate(env)
+			cfg, err := Load(fakeEnv(env))
+			if err == nil {
+				t.Fatalf("Load() with %s: expected error", tc.name)
+			}
+			if cfg != nil {
+				t.Fatalf("Load() returned config alongside error: %+v", cfg)
+			}
+			if !strings.Contains(err.Error(), tc.wantVar) {
+				t.Fatalf("error %q does not name %s", err, tc.wantVar)
+			}
+		})
+	}
+}
+
+func TestLoadAcceptsLegalConfirmationDepth(t *testing.T) {
+	for _, raw := range []string{"1", "10", "9223372036854775807"} {
+		t.Run(raw, func(t *testing.T) {
+			env := baseEnv()
+			env[EnvConfirmationDepth] = raw
+			cfg, err := Load(fakeEnv(env))
+			if err != nil {
+				t.Fatalf("Load() with %s=%q: unexpected error %v", EnvConfirmationDepth, raw, err)
+			}
+			var want uint64
+			switch raw {
+			case "1":
+				want = 1
+			case "10":
+				want = 10
+			default:
+				want = 1<<63 - 1
+			}
+			if cfg.ConfirmationDepth != want {
+				t.Fatalf("ConfirmationDepth = %d, want %d", cfg.ConfirmationDepth, want)
+			}
+			if !strings.Contains(cfg.Summary(), "confirmation_depth="+raw) {
+				t.Fatalf("summary %q does not echo confirmation_depth=%s", cfg.Summary(), raw)
 			}
 		})
 	}

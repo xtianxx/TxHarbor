@@ -14,11 +14,13 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/testcontainers/testcontainers-go"
 	"github.com/testcontainers/testcontainers-go/modules/postgres"
 	"github.com/testcontainers/testcontainers-go/wait"
 
 	"github.com/xtianxx/txharbor/internal/db"
+	"github.com/xtianxx/txharbor/internal/indexer"
 )
 
 // TestServeConfigErrorsEndToEnd covers US2 (SC-002): missing and invalid
@@ -36,6 +38,7 @@ func TestServeConfigErrorsEndToEnd(t *testing.T) {
 		"TXHARBOR_DEPOSIT_START_HEIGHT":    "0",
 		"TXHARBOR_DEPOSIT_CONTRACTS":       "0x1111111111111111111111111111111111111111:0",
 		"TXHARBOR_DEPOSIT_WATCH_ADDRESSES": "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:0",
+		"TXHARBOR_CONFIRMATION_DEPTH":      "10",
 		"TXHARBOR_HTTP_ADDR":               addr,
 	}
 	cases := []struct {
@@ -92,6 +95,7 @@ func TestServeRefusesUnmigratedDatabaseEndToEnd(t *testing.T) {
 			"TXHARBOR_DEPOSIT_START_HEIGHT":    "0",
 			"TXHARBOR_DEPOSIT_CONTRACTS":       "0x1111111111111111111111111111111111111111:0",
 			"TXHARBOR_DEPOSIT_WATCH_ADDRESSES": "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:0",
+			"TXHARBOR_CONFIRMATION_DEPTH":      "10",
 			"TXHARBOR_HTTP_ADDR":               addr,
 		}),
 		Stderr:  &stderr,
@@ -132,6 +136,7 @@ func TestServeWrongChainEndToEnd(t *testing.T) {
 			"TXHARBOR_DEPOSIT_START_HEIGHT":    "0",
 			"TXHARBOR_DEPOSIT_CONTRACTS":       "0x1111111111111111111111111111111111111111:0",
 			"TXHARBOR_DEPOSIT_WATCH_ADDRESSES": "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:0",
+			"TXHARBOR_CONFIRMATION_DEPTH":      "10",
 			"TXHARBOR_HTTP_ADDR":               freeAddr(t),
 		}),
 		Stderr:  &stderr,
@@ -260,6 +265,7 @@ func TestServeDepositLoopStartStop(t *testing.T) {
 				"TXHARBOR_DEPOSIT_START_HEIGHT":    "0",
 				"TXHARBOR_DEPOSIT_CONTRACTS":       asset + ":0",
 				"TXHARBOR_DEPOSIT_WATCH_ADDRESSES": watch + ":0",
+				"TXHARBOR_CONFIRMATION_DEPTH":      "10",
 				"TXHARBOR_HTTP_ADDR":               freeAddr(t),
 			}),
 			Signals: signals,
@@ -308,6 +314,90 @@ func TestServeDepositLoopStartStop(t *testing.T) {
 	}
 }
 
+// TestServeConfirmationDriftExitsNonZero is T031: it closes the T027
+// evidence-boundary gap at the serve level. After an authorized 10->25
+// switch (bootstrap row by SQL — the first policy row is not an
+// authorization request, and empty-table confirm-auth is refused per T024 —
+// then the real AuthorizeConfirmationPolicy carrier path), a real Serve()
+// started with the OLD N (TXHARBOR_CONFIRMATION_DEPTH=10) returns exit code
+// 1: the confirmation loop's startup mismatch error travels through the
+// RunQuatro fan-out into the serve.go:327-335 indexerErr → exitCode=1 path
+// (runbook §5 old-config-exit step, previously fan-out-point-proven only).
+func TestServeConfirmationDriftExitsNonZero(t *testing.T) {
+	testcontainers.SkipIfProviderIsNotHealthy(t)
+	ctx := context.Background()
+	pgCtr := startPostgresContainer(t)
+	anvilCtr := startAnvilContainer(t)
+	dsn := postgresDSN(t, pgCtr)
+	rpcURL := anvilURL(t, anvilCtr)
+
+	if err := db.MigrateUp(ctx, db.MigrateOptions{DSN: dsn, LockTimeout: 5 * time.Second, ConnectTimeout: 5 * time.Second}, io.Discard); err != nil {
+		t.Fatalf("migrate up: %v", err)
+	}
+
+	pool, err := pgxpool.New(ctx, dsn)
+	if err != nil {
+		t.Fatalf("open pool: %v", err)
+	}
+	defer pool.Close()
+	const chainID = int64(31337)
+	if _, err := pool.Exec(ctx, `INSERT INTO confirmation_policy_history
+		(chain_id, policy_seq, threshold, prev_seq, operator, reason, request_id, expected_old_seq)
+		VALUES ($1, 1, 10, NULL, 'bootstrap', 't031 bootstrap', NULL, 0)`, chainID); err != nil {
+		t.Fatalf("insert bootstrap policy row: %v", err)
+	}
+	if _, err := indexer.AuthorizeConfirmationPolicy(ctx, pool, indexer.ConfirmAuthRequest{
+		ChainID: chainID, RequestID: "t031-sw", ExpectedOldSeq: 1,
+		NewThresholdRaw: "25", Operator: "op-t031", Reason: "t031",
+	}); err != nil {
+		t.Fatalf("AuthorizeConfirmationPolicy(): %v", err)
+	}
+	// The switch ensures the indexer_lease row under the confirm-auth owner;
+	// expire it so Serve can acquire (takeover path): in production the old
+	// instances exit on the drift and their heartbeat stops, after which the
+	// lease lapses the same way. Precedent: deposit takeover tests expire the
+	// row with this exact UPDATE.
+	if _, err := pool.Exec(ctx, `UPDATE indexer_lease SET expires_at = now() - make_interval(secs => 1) WHERE chain_id = $1`, chainID); err != nil {
+		t.Fatalf("expire confirm-auth lease row: %v", err)
+	}
+
+	const asset = "0x1111111111111111111111111111111111111111"
+	const watch = "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	var stderr bytes.Buffer
+	done := make(chan int, 1)
+	go func() {
+		done <- Serve(ctx, Deps{
+			Getenv: envGetter(map[string]string{
+				"TXHARBOR_PG_DSN":                  dsn,
+				"TXHARBOR_RPC_URL":                 rpcURL,
+				"TXHARBOR_CHAIN_ID":                "31337",
+				"TXHARBOR_START_HEIGHT":            "0",
+				"TXHARBOR_LOG_START_HEIGHT":        "0",
+				"TXHARBOR_LOG_CONTRACTS":           asset,
+				"TXHARBOR_DEPOSIT_START_HEIGHT":    "0",
+				"TXHARBOR_DEPOSIT_CONTRACTS":       asset + ":0",
+				"TXHARBOR_DEPOSIT_WATCH_ADDRESSES": watch + ":0",
+				"TXHARBOR_CONFIRMATION_DEPTH":      "10",
+				"TXHARBOR_HTTP_ADDR":               freeAddr(t),
+			}),
+			Stderr:  &stderr,
+			Signals: make(chan os.Signal),
+		})
+	}()
+	select {
+	case code := <-done:
+		if code != 1 {
+			t.Fatalf("Serve() exit code = %d, want 1 (old-N drift after authorized switch)", code)
+		}
+	case <-time.After(120 * time.Second):
+		t.Fatal("Serve did not exit after the old-N drift (want exit 1)")
+	}
+	msg := stderr.String()
+	if !strings.Contains(msg, "indexer stopped") || !strings.Contains(msg, "confirmation config changed") {
+		t.Fatalf("stderr lacks the drift diagnosis (indexer stopped + confirmation config changed): %s", msg)
+	}
+}
+
 // TestServeDepositConfigRefusalEndToEnd is T018 exit-polarity: a blank deposit
 // whitelist refuses startup with a non-zero exit naming the variable.
 func TestServeDepositConfigRefusalEndToEnd(t *testing.T) {
@@ -321,6 +411,7 @@ func TestServeDepositConfigRefusalEndToEnd(t *testing.T) {
 		"TXHARBOR_LOG_CONTRACTS":           "0x1111111111111111111111111111111111111111",
 		"TXHARBOR_DEPOSIT_START_HEIGHT":    "0",
 		"TXHARBOR_DEPOSIT_WATCH_ADDRESSES": "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:0",
+		"TXHARBOR_CONFIRMATION_DEPTH":      "10",
 		"TXHARBOR_HTTP_ADDR":               addr,
 	}
 	var stderr bytes.Buffer

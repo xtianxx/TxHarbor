@@ -596,16 +596,63 @@ var (
 )
 
 // TestDepositWritePathConfinement is the T020 FR-13/14 negative assertion
-// (grep assertion): balance (amount) writes land only in deposit_observations,
-// observation rows are never updated or deleted, the only pending literal in
-// production code is the status constant, and no Go file outside
-// internal/indexer touches the observations table. The DB CHECK pins
-// status='pending' with a 'pending' default, so every written row is Pending
-// and stays Pending. It scans production source text, so a new write path
+// (grep assertion), extended by 005 T023 (partial: grep gate only; the
+// zero-row-rewrite behavior is proven by confirmcommit_integration_test.go
+// and confirmation_integration_test.go, not by this static scan):
+// balance (amount) writes land only in deposit_observations via exactly one
+// INSERT; observation rows are never deleted; the ONLY permitted UPDATE of
+// deposit_observations is the approved 005 confirmation transition in
+// confirmcommit.go (conditional Pending→Confirmed with the status='pending'
+// predicate and the seven approved SET assignments, data-model §提交协议
+// step 4); confirmation_policy_history is append-only (INSERT, never UPDATE),
+// with exactly two approved INSERT sites: the first-confirm bootstrap row in
+// confirmcommit.go and the authorized switch row in confirmauth.go (F-R1).
+// This gate is write-path regression protection, NOT database access
+// control: anyone holding the write DSN can technically write past it
+// (see runbook trust boundary); the gate only guarantees the approved
+// binary paths stay the sole code paths.
+// Pending literals are pinned per file so a new write path or predicate
 // fails loudly instead of slipping past the shape-pinning tests above.
 // Production SQL lives in raw string literals; the per-statement window ends
 // at the closing backtick (capped at 1500 bytes), so a window can never bleed
 // into neighboring Go code.
+var (
+	depositConfirmUpdateFile = "confirmcommit.go"
+	depositConfirmUpdateRe   = regexp.MustCompile(`(?i)\bUPDATE\s+deposit_observations\b`)
+	depositPolicyUpdateRe    = regexp.MustCompile(`(?i)\bUPDATE\s+confirmation_policy_history\b`)
+	depositConfirmSetRes     = []string{
+		`SET\s+status\s*=\s*'confirmed'`,
+		`confirmed_at\s*=\s*now\(\)`,
+		`confirm_tip_number\s*=`,
+		`confirm_tip_hash\s*=`,
+		`confirm_threshold\s*=`,
+		`confirmations\s*=`,
+		`confirm_policy_seq\s*=`,
+	}
+	depositConfirmPredicateRe = regexp.MustCompile(`(?i)\bAND\s+status\s*=\s*'pending'`)
+	depositSetStatusRe        = regexp.MustCompile(`(?i)\bstatus\s*=`)
+
+	// Approved INSERT sites into confirmation_policy_history (F-R1): the
+	// bootstrap row (first-confirm transaction) and the authorized switch
+	// row. A third INSERT site fails the gate; enforcement against
+	// out-of-binary writes is the DSN trust boundary, not this scan.
+	depositPolicyInsertAllow = map[string]int{
+		"confirmcommit.go": 1, // insertConfirmationBootstrapSQL
+		"confirmauth.go":   1, // authorized switch single-row INSERT
+	}
+
+	// Approved "pending" literal sites (comment-stripped bodies). A new
+	// literal anywhere else fails the gate.
+	depositDoublePendingAllow = map[string]int{
+		"depositcommit.go": 1, // depositObservationStatusPending const
+		"confirmcommit.go": 2, // candidate status comparisons (re-read guards)
+	}
+	depositSinglePendingAllow = map[string]int{
+		"confirmcommit.go": 1, // the conditional UPDATE predicate
+		"confirmscan.go":   2, // read-only candidate + count WHERE filters
+	}
+)
+
 func TestDepositWritePathConfinement(t *testing.T) {
 	pkgDir := depositSourceDir(t)
 	entries, err := os.ReadDir(pkgDir)
@@ -613,8 +660,10 @@ func TestDepositWritePathConfinement(t *testing.T) {
 		t.Fatalf("read package dir: %v", err)
 	}
 	amountInserts := 0
-	doublePending := 0
-	singlePending := 0
+	updateFiles := map[string]int{}
+	policyInserts := map[string]int{}
+	doublePending := map[string]int{}
+	singlePending := map[string]int{}
 	for _, e := range entries {
 		name := e.Name()
 		if e.IsDir() || !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") {
@@ -640,24 +689,94 @@ func TestDepositWritePathConfinement(t *testing.T) {
 				}
 				amountInserts++
 			}
+			if table == "confirmation_policy_history" {
+				policyInserts[name]++
+			}
 		}
-		if depositUpdateObsRe.MatchString(body) {
-			t.Errorf("%s: UPDATE of deposit_observations is forbidden (observations are append-only)", name)
+		if n := len(depositConfirmUpdateRe.FindAllStringIndex(body, -1)); n > 0 {
+			updateFiles[name] += n
+		}
+		if depositPolicyUpdateRe.MatchString(body) {
+			t.Errorf("%s: UPDATE of confirmation_policy_history is forbidden (policy is append-only)", name)
 		}
 		if depositDeleteObsRe.MatchString(body) {
 			t.Errorf("%s: DELETE FROM deposit_observations is forbidden", name)
 		}
-		doublePending += strings.Count(body, `"pending"`)
-		singlePending += strings.Count(body, `'pending'`)
+		doublePending[name] += strings.Count(body, `"pending"`)
+		singlePending[name] += strings.Count(body, `'pending'`)
 	}
 	if amountInserts != 1 {
 		t.Errorf("amount INSERT statements = %d, want exactly 1 (insertDepositObservationSQL)", amountInserts)
 	}
-	if doublePending != 1 {
-		t.Errorf(`"pending" literals = %d, want exactly 1 (depositObservationStatusPending)`, doublePending)
+	for name, want := range depositPolicyInsertAllow {
+		if got := policyInserts[name]; got != want {
+			t.Errorf("INSERT INTO confirmation_policy_history in %s = %d, want %d", name, got, want)
+		}
 	}
-	if singlePending != 0 {
-		t.Errorf(`'pending' literals = %d, want 0 (status rides the DB default)`, singlePending)
+	for name, got := range policyInserts {
+		if _, ok := depositPolicyInsertAllow[name]; !ok && got != 0 {
+			t.Errorf("unexpected INSERT INTO confirmation_policy_history in %s = %d, want 0", name, got)
+		}
+	}
+	// The single approved 005 write path: exactly one UPDATE of
+	// deposit_observations, in confirmcommit.go, carrying the
+	// status='pending' predicate and only the approved SET assignments.
+	if len(updateFiles) != 1 || updateFiles[depositConfirmUpdateFile] != 1 {
+		t.Errorf("UPDATE deposit_observations sites = %v, want exactly 1 in %s (confirmDepositObservationSQL)",
+			updateFiles, depositConfirmUpdateFile)
+	} else {
+		raw, err := os.ReadFile(filepath.Join(pkgDir, depositConfirmUpdateFile))
+		if err != nil {
+			t.Fatalf("read %s: %v", depositConfirmUpdateFile, err)
+		}
+		body := depositStripGoComments(string(raw))
+		loc := depositConfirmUpdateRe.FindStringIndex(body)
+		window := body[loc[0]:]
+		if k := strings.IndexByte(window, '`'); k >= 0 {
+			window = window[:k]
+		}
+		if len(window) > 1500 {
+			window = window[:1500]
+		}
+		if !depositConfirmPredicateRe.MatchString(window) {
+			t.Errorf("%s: approved UPDATE lacks the status='pending' predicate", depositConfirmUpdateFile)
+		}
+		for _, re := range depositConfirmSetRes {
+			if !regexp.MustCompile(re).MatchString(window) {
+				t.Errorf("%s: approved UPDATE lacks required assignment %s", depositConfirmUpdateFile, re)
+			}
+		}
+		setRegion := window
+		if k := strings.Index(strings.ToUpper(window), "WHERE"); k >= 0 {
+			setRegion = window[:k]
+		}
+		if n := len(depositSetStatusRe.FindAllStringIndex(setRegion, -1)); n != 1 {
+			t.Errorf("%s: SET region assigns status %d times, want exactly 1 (to 'confirmed')",
+				depositConfirmUpdateFile, n)
+		}
+		if strings.Contains(setRegion, "'pending'") {
+			t.Errorf("%s: SET region must not assign 'pending'", depositConfirmUpdateFile)
+		}
+	}
+	for name, want := range depositDoublePendingAllow {
+		if got := doublePending[name]; got != want {
+			t.Errorf(`%s: "pending" literals = %d, want %d`, name, got, want)
+		}
+	}
+	for name, got := range doublePending {
+		if _, ok := depositDoublePendingAllow[name]; !ok && got != 0 {
+			t.Errorf(`%s: unexpected "pending" literals = %d, want 0`, name, got)
+		}
+	}
+	for name, want := range depositSinglePendingAllow {
+		if got := singlePending[name]; got != want {
+			t.Errorf(`%s: 'pending' literals = %d, want %d`, name, got, want)
+		}
+	}
+	for name, got := range singlePending {
+		if _, ok := depositSinglePendingAllow[name]; !ok && got != 0 {
+			t.Errorf(`%s: unexpected 'pending' literals = %d, want 0`, name, got)
+		}
 	}
 	// Outside internal/indexer only the metrics name may mention the table.
 	root := filepath.Join(pkgDir, "..", "..")

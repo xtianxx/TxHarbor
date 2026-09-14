@@ -5,6 +5,7 @@
 //	txharbor serve            start the readiness/liveness HTTP service
 //	txharbor migrate up       apply pending database migrations
 //	txharbor migrate status   show current/pending migration versions
+//	txharbor confirm-auth     run one guarded confirmation-policy switch
 package main
 
 import (
@@ -37,6 +38,8 @@ func run(args []string) int {
 		return app.Serve(ctx, d)
 	case "migrate":
 		return app.Migrate(ctx, args[1:], d)
+	case "confirm-auth":
+		return app.ConfirmAuth(ctx, args[1:], d)
 	case "help", "-h", "--help":
 		usage(os.Stdout)
 		return 0
@@ -54,6 +57,7 @@ commands:
   serve             start the readiness/liveness HTTP service
   migrate up        apply pending database migrations
   migrate status    show applied/pending migration versions
+  confirm-auth      run one guarded confirmation-policy switch
   help              show this help
 `)
 }

@@ -239,6 +239,30 @@ func Serve(ctx context.Context, d Deps) int {
 	depositScanner.SetPauseObserver(func() {
 		m.ObserveDepositPause(chainID)
 	})
+	// The confirmation scanner converts eligible Pending rows (005): its
+	// frozen threshold N is compared against the effective policy row when
+	// the loop starts, and a mismatch refuses to scan and exits non-zero,
+	// exactly like the deposit scanner above. Confirmation authorization
+	// itself stays a privileged out-of-loop SQL operation.
+	confirmCfg := indexer.ConfirmationConfig{
+		ChainID:      chainID,
+		ThresholdN:   cfg.ConfirmationDepth,
+		PollInterval: cfg.IndexPollInterval,
+		RetryInitial: cfg.IndexRetryInitial,
+		RetryMax:     cfg.IndexRetryMax,
+	}
+	confirmCommitter, err := indexer.NewConfirmationCommitter(pool, confirmCfg)
+	if err != nil {
+		ethClient.Close()
+		pool.Close()
+		return fail("startup failed (confirmation indexer): %s", logx.Redact(err.Error()))
+	}
+	confirmationScanner, err := indexer.NewConfirmationScanner(pool, confirmCfg, confirmCommitter, m)
+	if err != nil {
+		ethClient.Close()
+		pool.Close()
+		return fail("startup failed (confirmation indexer): %s", logx.Redact(err.Error()))
+	}
 
 	srv := &http.Server{
 		Handler:           health.NewServer(agg, m.Handler()).Handler(),
@@ -258,6 +282,8 @@ func Serve(ctx context.Context, d Deps) int {
 	logObserver.observe()
 	depositObserver := &depositObserver{deposit: depositScanner, log: logScanner, m: m, chainID: chainID}
 	depositObserver.observe()
+	confirmationObserver := &confirmationObserver{confirm: confirmationScanner, m: m, chainID: chainID}
+	confirmationObserver.observe()
 
 	go runner.Run(runCtx)
 	serveErr := make(chan error, 1)
@@ -266,13 +292,16 @@ func Serve(ctx context.Context, d Deps) int {
 	indexerDone := make(chan struct{})
 	go func() {
 		// The coordinator owns the only acquisition loop and heartbeat and
-		// joins all three serve loops before it returns (research R1). The
-		// deposit loop adapts to the shared ServeFunc shape with the
-		// coordinator-held lease; authorization stays out of loop.
+		// joins all four serve loops before it returns (research R1). The
+		// deposit and confirmation loops adapt to the shared ServeFunc shape
+		// with the coordinator-held lease; authorization stays out of loop.
 		depositServe := func(loopCtx context.Context, checkLost func() error) error {
 			return depositScanner.ServeLoop(loopCtx, lease, checkLost)
 		}
-		indexerErr <- indexer.RunTrio(runCtx, lease, scanner.ServeLoop, logScanner.ServeLoop, depositServe)
+		confirmServe := func(loopCtx context.Context, checkLost func() error) error {
+			return confirmationScanner.ServeLoop(loopCtx, lease, checkLost)
+		}
+		indexerErr <- indexer.RunQuatro(runCtx, lease, scanner.ServeLoop, logScanner.ServeLoop, depositServe, confirmServe)
 		close(indexerDone)
 	}()
 	fmt.Fprintf(stdout, "txharbor serve: listening on %s\n", listener.Addr())
@@ -299,6 +328,7 @@ serveLoop:
 			observer.observe()    // capture the terminal state before teardown
 			logObserver.observe() // both loops are joined by the coordinator
 			depositObserver.observe()
+			confirmationObserver.observe()
 			if err != nil && !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) {
 				fmt.Fprintf(stderr, "txharbor serve: indexer stopped: %s\n", logx.Redact(err.Error()))
 				exitCode = 1
@@ -308,6 +338,7 @@ serveLoop:
 			observer.observe()
 			logObserver.observe()
 			depositObserver.observe()
+			confirmationObserver.observe()
 		}
 	}
 	cancel() // stop probe loop and indexer before releasing resources
@@ -481,6 +512,22 @@ func (o *depositObserver) observe() {
 		lag = logNext - next
 	}
 	o.m.ObserveDepositLag(o.chainID, lag, true)
+}
+
+// confirmationObserver mirrors the confirmation scanner's loop condition
+// into the metrics registry next to the header, log and deposit observers;
+// all four are sampled on the same ticker and once more when the
+// coordinator stops. Per-tick pending/lag/policy gauges are pushed by the
+// loop itself; the observer only re-samples the loop-condition state so the
+// terminal verdict is captured before teardown.
+type confirmationObserver struct {
+	confirm *indexer.ConfirmationScanner
+	m       *metrics.Metrics
+	chainID int64
+}
+
+func (o *confirmationObserver) observe() {
+	o.m.ObserveConfirmationState(o.chainID, o.confirm.ConfirmationState())
 }
 
 // runShutdown executes steps in order under one shared budget. Remaining
