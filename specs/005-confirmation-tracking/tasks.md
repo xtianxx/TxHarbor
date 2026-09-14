@@ -15,7 +15,7 @@ T000-P 关闭 → 方可谈生产接入就绪。本地验收通过不等于生�
 生产就绪额外依赖上游 003 E1（provider 附录）；005 自身零 RPC，但链头语义受 002 约束。
 T000-P 与偶发失败为历史遗留事项（见 review.md），与本阶段新增任务无关，不宣称已消除。
 
-- [ ] T000-L 本地实现前置检查（Anvil + DB 播种范围；满足即可关闭）
+- [x] T000-L 本地实现前置检查（Anvil + DB 播种范围；满足即可关闭）
   - 需求：plan 前置。依赖：无。
   - 内容：`Coordinator` 第四循环注册点形状确认（`coordinator.go` 现 `RunTrio` 三 serve，`runStreams/serveStreams` 已切片实现）；
     `serve.go` 接线位置确认（deposit 接线 `serve.go:217-277` 旁）；goose `000005` 在 `000004` 之后顺序与 `embed.go` 收录确认；
@@ -50,7 +50,7 @@ T000-L / T000-P 见上（本阶段即二者建档）。**Checkpoint**: 门禁状
 
 **⚠️ CRITICAL**: 本阶段完成前不得开始用户故事实现
 
-- [ ] T001 [P] 新增迁移 `migrations/000005_confirmation_tracking.sql`（策略历史表 + 观察行加列 + CHECK 拓宽 + 索引）及迁移测试
+- [x] T001 [P] 新增迁移 `migrations/000005_confirmation_tracking.sql`（策略历史表 + 观察行加列 + CHECK 拓宽 + 索引）及迁移测试
   - 需求：FR-05/FR-08，data-model Table 1–2。验收场景：quickstart D5（升级部分）。依赖：T000-L（本地范围）。
   - 内容（约束逐字落实）：`confirmation_policy_history` 主键 `(chain_id, policy_seq)`、`threshold CHECK (> 0)`、
     `UNIQUE (chain_id, request_id)`、首版本 NULL 单行 partial unique、`prev_seq` 自引 FK；
@@ -62,18 +62,18 @@ T000-L / T000-P 见上（本阶段即二者建档）。**Checkpoint**: 门禁状
     升级 DO 断言零非 pending 行；Down 按依赖逆序。
   - 完成条件：空库迁移、从 004 库升级、重复迁移三条件绿；上列约束逐项有断言；002/003/004 表定义零改动（diff 为证）。
   - 涉及文件：`migrations/000005_confirmation_tracking.sql`（新建），迁移测试落 `internal/db/` 既有迁移测试旁。
-- [ ] T002 [P] 配置 `TXHARBOR_CONFIRMATION_DEPTH` 读取与非法拒绝（`internal/config/config.go`、`internal/config/config_test.go`、`.env.example`）
+- [x] T002 [P] 配置 `TXHARBOR_CONFIRMATION_DEPTH` 读取与非法拒绝（`internal/config/config.go`、`internal/config/config_test.go`、`.env.example`）
   - 需求：FR-03（Q1）。验收场景：US2-非法阈值、quickstart D1（非法矩阵）。依赖：T000-L。
   - 内容：`require()` 缺失拒绝 + `parseConfirmationDepth`（`ParseUint` + `== 0` 拒绝 + `> MaxInt64` 按超系统范围拒绝，
     复用 `invalid()` 形态）；无默认值；`Summary()` 脱敏沿用；`.env.example` 增 Required 行（仿 `TXHARBOR_DEPOSIT_START_HEIGHT` 注释形态）。
   - 完成条件：缺失/空串/非整数/`0`/负数/超 uint64/超 int64 七类输入矩阵全拒绝且错误明确；合法值全集通过；`gofmt` 干净。
-- [ ] T003 [P] 安全数学与确认配置基座（`internal/indexer/confirm.go` 新建、`internal/indexer/confirm_test.go` 新建）
+- [x] T003 [P] 安全数学与确认配置基座（`internal/indexer/confirm.go` 新建、`internal/indexer/confirm_test.go` 新建）
   - 需求：FR-01/FR-03，research R1。验收场景：US2-1/2/3、quickstart D1（单元部分）。依赖：T000-L。
   - 内容：`ConfirmationConfig{ChainID int64, ThresholdN uint64, PollInterval/RetryInitial/RetryMax}` + 构造期校验；
     等价比较 `tip >= h && tip - h >= N - 1` 与规格公式逐值对照测试（含 N=1、N=MaxInt64、`tip < h` 两边皆假）；
     精确值饱和 guard 存在性测试（不可达防御）；`maxEligible` 上界函数。
   - 完成条件：对照矩阵全绿；`go test -race` 通过；无 int64/uint64 互转（审查门）。
-- [ ] T004 [P] 可观测 `confirmation_*` 组注册（`internal/metrics/metrics.go`、`internal/metrics/metrics_test.go`）
+- [x] T004 [P] 可观测 `confirmation_*` 组注册（`internal/metrics/metrics.go`、`internal/metrics/metrics_test.go`）
   - 需求：FR-11，contracts/observability.md。验收场景：US5-3（追溯计数侧）。依赖：T000-L。
   - 内容：`New` 内新增 gauges（pending/lag/state/policy_seq）+ counters（confirmed_total/skipped_total{below_depth}/
     transition_total{ok|stale|rejected}/policy_transition_total{ok|rejected}）；002/003/004 组零改名（diff 为证）。
@@ -89,25 +89,25 @@ T000-L / T000-P 见上（本阶段即二者建档）。**Checkpoint**: 门禁状
 
 **Independent Test**: Anvil 推进 canonical tip 越过阈值，每条达标 Pending 恰好一次转换，依据列可追溯（quickstart D1 主路径）
 
-- [ ] T010 [US1] 确认提交事务与策略 bootstrap（`internal/indexer/confirmcommit.go` 新建）
+- [x] T010 [US1] 确认提交事务与策略 bootstrap（`internal/indexer/confirmcommit.go` 新建）
   - 需求：FR-05/FR-07/FR-08，data-model §提交协议/§首确认协议。验收场景：US1-1/1-2、US4-1（收敛侧）。依赖：T001、T002、T003。
   - 内容：BEGIN→`writeGuard`→ensure lease→`FOR UPDATE`→独立重读（三暂停皆无 + lease 归属 + 策略(S,N) + tip(T,TH) +
     候选 pending + 哈希一致 + 等价式重算）→条件 UPDATE（`status='pending'` 谓词）+ 行数核对→COMMIT；
     首确认同事务 bootstrap `(chain_id,1)`（PK 冲突收敛）；提交未知按 PK 重读定性。
   - 完成条件：步骤与 data-model 逐项对应；失配路径全回滚零写入（单测或轻量 pg 断言）。
-- [ ] T011 [US1] 候选扫描与确认循环（`internal/indexer/confirmscan.go` 新建）
+- [x] T011 [US1] 候选扫描与确认循环（`internal/indexer/confirmscan.go` 新建）
   - 需求：FR-02/FR-06，research R4。验收场景：US3-3（等待侧）。依赖：T010（提交函数签名）。
   - 内容：`NewConfirmationScanner`（启动比较：阈值漂移拒绝，镜像 004）；每 tick 读 tip→`maxEligible`→partial 索引有序批量；
     tip 缺失/不可信→等待；退避复用 INDEX 三旋钮；`ConfirmationState()`/`ConfirmationProgress()` 原子快照（镜像 deposit 观测形态）。
     空状态断言（F3）：零候选时无策略行、无业务写入、可观测 state 为等待/运行空闲（非停止），首个达标转换时 bootstrap。
   - 完成条件：无 tip 零提交；正常滞后等待不记异常；快照与循环一致；空状态零行零写断言。
-- [ ] T012 [US1] 第四循环接线（`internal/indexer/coordinator.go`、`internal/app/serve.go`）
+- [x] T012 [US1] 第四循环接线（`internal/indexer/coordinator.go`、`internal/app/serve.go`）
   - 需求：FR-02，research R2/R4。验收场景：US1 独立测试前置。依赖：T011。
   - 内容：`RunTrio` 扩展第四确认循环（`runStreams` 切片复用，落点 `coordinator.go:52-57` 旁）；
     serve 构造确认 scanner→observer→循环注册（落点 `serve.go:217-277` 旁，header/log/deposit 行为不变）；
     授权切换保持 loop 外（注释明示）。
   - 完成条件：四循环并存启动；任一循环停止错误扇出行为不变（既有 coordinator 测试绿）。
-- [ ] T013 [US1] 集成：达阈值恰好一次转换（`internal/indexer/confirmation_integration_test.go` 新建）
+- [x] T013 [US1] 集成：达阈值恰好一次转换（`internal/indexer/confirmation_integration_test.go` 新建）
   - 需求：FR-01/05，SC-01。验收场景：US1-1/1-2、quickstart D1（主路径）。依赖：T012。
   - 内容：Anvil 预置 Pending→推进 tip 越过阈值→断言每条恰好一次 Confirmed + 六依据列精确 + `confirmed_total{ok}` +1；
     含旧 `version_seq`（004 收缩保留版本）观察：照常按 canonical + 阈值确认，不重审 004 版本语义，

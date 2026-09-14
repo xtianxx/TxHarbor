@@ -1,0 +1,504 @@
+//go:build integration
+
+// T013 [US1] threshold-crossing exactly-once conversion (quickstart D1 main
+// path, tasks.md lines 110-115): Anvil is the real chain truth, the real
+// wired confirmation stack (NewConfirmationCommitter +
+// NewConfirmationScanner.ServeLoop + metrics.New + acquired lease, mirroring
+// the serve.go/RunQuatro wiring) converts every eligible Pending exactly
+// once with all six basis columns exact.
+//
+// Method, recorded as required: Anvil (ghcr.io/foundry-rs/foundry:v1.8.1,
+// chain-id 31337) is mined for real; every chain_blocks row carries the real
+// Anvil header hash (fetched via HeaderByNumber, never forged), so the tip
+// the scanner reads IS the Anvil tip and the candidate gate adjudicates real
+// chain-view data. Pending observations use the documented direct seed
+// (depositSeedHistory + depositSeedObservation, the "upstream already
+// committed" prerequisite shape per research R9) because the 004 recognition
+// chain is already proven by TestDepositAnvilFullStackPending; re-running
+// 002/003/004 here would prove nothing new about confirmation. The
+// confirmation loop path itself is never faked.
+//
+// Flow (N=10): mine Anvil to head=18 (all three candidates at h=10,11,12
+// below depth: 9/8/7 < 10) -> run the real loop -> assert zero commits and
+// zero policy rows (bootstrap has not happened). Then mine to head=25
+// (confirmations 16/15/14), extend chain_blocks with the new real headers,
+// re-run the real loop -> each row converts exactly once with
+// confirmed_at non-null, tip == (25, anvilHeadHash), threshold == 10,
+// confirmations == tip-h+1 exact, policy_seq == 1 bootstrap;
+// confirmed_total{ok} and transition_total{ok} +1 per row. One observation
+// carries the old 004 version_seq=1 (carryover while history is at seq 2):
+// it confirms normally on canonical+threshold. Version-agnostic is NOT gate
+// bypass: the pause sub-case proves zero commits under a present pause row
+// (chain-view/policy pauses are covered by confirmcommit_integration_test.go
+// mismatch paths; the scanner halt on those is asserted here via the pause
+// representative).
+//
+// Empty-tip sub-case: a Pending row with no chain_blocks at all -> the loop
+// waits (state=1) with zero commits and zero policy rows.
+//
+// Append discipline: T016-T027 append below in order (-- T0xx banners --);
+// helpers are confirm13*-prefixed so later batches never collide.
+package indexer
+
+import (
+	"context"
+	"errors"
+	"math/big"
+	"strconv"
+	"testing"
+	"time"
+
+	"github.com/jackc/pgx/v5/pgxpool"
+
+	"github.com/xtianxx/txharbor/internal/eth"
+	"github.com/xtianxx/txharbor/internal/metrics"
+)
+
+// --- T013 helpers -----------------------------------------------------------
+
+// confirm13SeedCanonicalReal inserts chain_blocks rows carrying the caller's
+// hashes (real Anvil header hashes in this file) with exact parent linkage.
+func confirm13SeedCanonicalReal(t *testing.T, ctx context.Context, pool *pgxpool.Pool, chainID int64, hashes map[uint64]string, from, to uint64) {
+	t.Helper()
+	for n := from; n <= to; n++ {
+		h, ok := hashes[n]
+		if !ok {
+			t.Fatalf("no header hash for height %d", n)
+		}
+		parent := "0x0000000000000000000000000000000000000000000000000000000000000000"
+		if n > 0 {
+			p, ok := hashes[n-1]
+			if !ok {
+				t.Fatalf("no parent hash for height %d", n)
+			}
+			parent = p
+		}
+		if _, err := pool.Exec(ctx, `
+INSERT INTO chain_blocks (chain_id, number, hash, parent_hash, canonical)
+VALUES ($1, $2, $3, $4, $5)`, chainID, int64(n), h, parent, true); err != nil {
+			t.Fatalf("seed real chain_blocks %d/%d: %v", chainID, n, err)
+		}
+	}
+}
+
+// confirm13AnvilHashes fetches real header hashes for [from, to] from Anvil.
+func confirm13AnvilHashes(t *testing.T, ctx context.Context, client *eth.Client, from, to uint64) map[uint64]string {
+	t.Helper()
+	out := make(map[uint64]string, to-from+1)
+	for n := from; n <= to; n++ {
+		hdr, err := client.HeaderByNumber(ctx, new(big.Int).SetUint64(n))
+		if err != nil {
+			t.Fatalf("anvil header %d: %v", n, err)
+		}
+		out[n] = hashHex(hdr.Hash())
+	}
+	return out
+}
+
+// confirm13RunLoop starts the real ConfirmationScanner.ServeLoop and returns
+// a stop function that cancels it, joins it and fails on a non-nil return
+// (mirrors depositRunLoop; cancellation is the only clean exit here).
+func confirm13RunLoop(t *testing.T, parent context.Context, sc *ConfirmationScanner, lease *Lease) func() {
+	t.Helper()
+	loopCtx, cancel := context.WithCancel(parent)
+	done := make(chan error, 1)
+	go func() { done <- sc.ServeLoop(loopCtx, lease, nil) }()
+	stopped := false
+	stop := func() {
+		if stopped {
+			return
+		}
+		stopped = true
+		cancel()
+		select {
+		case err := <-done:
+			// A cancel racing an in-flight tick read surfaces as a
+			// context-canceled query error; serve.go treats
+			// context.Canceled/DeadlineExceeded as the clean shutdown
+			// polarity, and this helper follows it. (Batch A note:
+			// confirmscan.go returns the raw read error instead of nil
+			// when cancel lands mid-query; reported, not worked around
+			// beyond this polarity match.)
+			if err != nil && !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) {
+				t.Errorf("ServeLoop() = %v, want nil on cancellation", err)
+			}
+		case <-time.After(10 * time.Second):
+			t.Errorf("ServeLoop did not stop after cancellation")
+		}
+	}
+	t.Cleanup(stop)
+	return stop
+}
+
+// confirm13Counter reads one confirmation counter label set from a real
+// registry; an absent series reads as 0.
+func confirm13Counter(t *testing.T, m *metrics.Metrics, name string, want map[string]string) float64 {
+	t.Helper()
+	families, err := m.Gatherer().Gather()
+	if err != nil {
+		t.Fatalf("integrity check: %v", err)
+	}
+	for _, family := range families {
+		if family.GetName() != name {
+			continue
+		}
+		for _, metric := range family.GetMetric() {
+			labels := make(map[string]string, len(metric.GetLabel()))
+			for _, pair := range metric.GetLabel() {
+				labels[pair.GetName()] = pair.GetValue()
+			}
+			match := true
+			for k, v := range want {
+				if labels[k] != v {
+					match = false
+					break
+				}
+			}
+			if match {
+				return metric.GetCounter().GetValue()
+			}
+		}
+	}
+	return 0
+}
+
+// confirm13ChainLabel is the chain label value the registry exposes.
+func confirm13ChainLabel(chainID int64) map[string]string {
+	return map[string]string{"chain": strconv.FormatInt(chainID, 10)}
+}
+
+// confirm13ConfirmedAt reads the durable confirmed_at instant as text.
+func confirm13ConfirmedAt(t *testing.T, ctx context.Context, pool *pgxpool.Pool, chainID int64, bh, txHash string) string {
+	t.Helper()
+	var at string
+	if err := pool.QueryRow(ctx, `
+SELECT confirmed_at::text FROM deposit_observations
+WHERE chain_id = $1 AND block_hash = $2 AND tx_hash = $3 AND log_index = 0`,
+		chainID, bh, txHash).Scan(&at); err != nil {
+		t.Fatalf("read confirmed_at: %v", err)
+	}
+	return at
+}
+
+// confirm13Scanner builds the real wired stack: committer + scanner + lease.
+func confirm13Scanner(t *testing.T, pool *pgxpool.Pool, chainID int64, n uint64, m *metrics.Metrics) (*ConfirmationScanner, *Lease) {
+	t.Helper()
+	cfg := ConfirmationConfig{
+		ChainID:      chainID,
+		ThresholdN:   n,
+		PollInterval: 25 * time.Millisecond,
+		RetryInitial: 25 * time.Millisecond,
+		RetryMax:     250 * time.Millisecond,
+	}
+	committer, err := NewConfirmationCommitter(pool, cfg)
+	if err != nil {
+		t.Fatalf("NewConfirmationCommitter(): %v", err)
+	}
+	sc, err := NewConfirmationScanner(pool, cfg, committer, m)
+	if err != nil {
+		t.Fatalf("NewConfirmationScanner(): %v", err)
+	}
+	return sc, depositITLease(t, pool, chainID)
+}
+
+// --- T013 main path ---------------------------------------------------------
+
+// TestConfirmationThresholdCrossingExactlyOnce is T013 / quickstart D1 main
+// path (FR-01/05, SC-01): below-threshold patience, then threshold-crossing
+// exactly-once conversion with exact basis columns and counters.
+func TestConfirmationThresholdCrossingExactlyOnce(t *testing.T) {
+	dsn := startIndexerPostgres(t)
+	pool := openIndexerPool(t, dsn)
+	defer pool.Close()
+	ctx := context.Background()
+
+	node := logscanStartAnvilNode(t)
+	client, err := eth.Dial(ctx, node.url, 5*time.Second)
+	if err != nil {
+		t.Fatalf("dial anvil client: %v", err)
+	}
+	defer client.Close()
+
+	const chainID = scanChainID // 31337, matching the Anvil chain id
+	const n = uint64(10)
+
+	// Phase 0: mine Anvil to head=18 and reflect the real headers into
+	// chain_blocks. Candidates at h=10,11,12 sit at 9/8/7 confirmations.
+	node.mine(t, 18)
+	head := node.blockNumber(t)
+	if head < 18 {
+		t.Fatalf("anvil head = %d, want >= 18", head)
+	}
+	hashes := confirm13AnvilHashes(t, ctx, client, 0, head)
+	confirm13SeedCanonicalReal(t, ctx, pool, chainID, hashes, 0, head)
+
+	// 004 carryover shape: history at seq 2, one observation still on the
+	// old version_seq=1, two on the current version_seq=2.
+	const histA = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	const histB = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+	depositSeedHistory(t, ctx, pool, chainID, 1, 10, histA)
+	depositSeedHistoryVersion(t, ctx, pool, chainID, 2, 1, 10, histB, "t013-req")
+	type cand struct {
+		h          uint64
+		bh, txHash string
+		version    int64
+	}
+	seeds := []cand{
+		{10, "", depositTxHash(10, 0), 2},
+		{11, "", depositTxHash(11, 0), 2},
+		{12, "", depositTxHash(12, 0), 1}, // old version_seq carryover
+	}
+	for i, s := range seeds {
+		seeds[i].bh = hashes[s.h]
+		depositSeedObservation(t, ctx, pool, chainID, s.h, hashes[s.h], s.txHash, 0, "1", s.version)
+	}
+
+	m := metrics.New(func() bool { return true })
+	sc, lease := confirm13Scanner(t, pool, chainID, n, m)
+
+	// Phase 1: below threshold -> zero commits, zero policy rows (no
+	// bootstrap before the first eligible conversion).
+	stop := confirm13RunLoop(t, ctx, sc, lease)
+	time.Sleep(600 * time.Millisecond) // several 25ms poll ticks
+	for _, s := range seeds {
+		confirmAssertZeroWrite(t, ctx, pool, chainID, s.bh, s.txHash, 0)
+	}
+	if got := confirm13Counter(t, m, metrics.ConfirmationConfirmedMetricName, confirm13ChainLabel(chainID)); got != 0 {
+		t.Fatalf("%s = %v before threshold, want 0", metrics.ConfirmationConfirmedMetricName, got)
+	}
+	stop()
+
+	// Phase 2: advance the Anvil tip past the threshold (head=25 ->
+	// confirmations 16/15/14) and extend chain_blocks with the new real
+	// headers. The DB tip must equal the Anvil head exactly.
+	node.mine(t, 25-head)
+	tip := node.blockNumber(t)
+	if tip != 25 {
+		t.Fatalf("anvil head = %d, want exactly 25", tip)
+	}
+	for h := head + 1; h <= tip; h++ {
+		hashes[h] = confirm13AnvilHashes(t, ctx, client, h, h)[h]
+	}
+	confirm13SeedCanonicalReal(t, ctx, pool, chainID, hashes, head+1, tip)
+	tipHash := hashes[tip]
+	var dbTipHash string
+	if err := pool.QueryRow(ctx, `
+SELECT hash FROM chain_blocks WHERE chain_id = $1 AND canonical ORDER BY number DESC LIMIT 1`,
+		chainID).Scan(&dbTipHash); err != nil {
+		t.Fatalf("read db tip: %v", err)
+	}
+	if dbTipHash != tipHash {
+		t.Fatalf("db tip = %s, want anvil head %s", dbTipHash, tipHash)
+	}
+
+	// The same lease handle drives the second loop run, exactly as one
+	// process does after wiring (T007 precedent).
+	sc2cfg := ConfirmationConfig{
+		ChainID:      chainID,
+		ThresholdN:   n,
+		PollInterval: 25 * time.Millisecond,
+		RetryInitial: 25 * time.Millisecond,
+		RetryMax:     250 * time.Millisecond,
+	}
+	committer2, err := NewConfirmationCommitter(pool, sc2cfg)
+	if err != nil {
+		t.Fatalf("NewConfirmationCommitter(): %v", err)
+	}
+	sc2, err := NewConfirmationScanner(pool, sc2cfg, committer2, m)
+	if err != nil {
+		t.Fatalf("NewConfirmationScanner(): %v", err)
+	}
+	stop2 := confirm13RunLoop(t, ctx, sc2, lease)
+	waitUntil(t, time.Now().Add(30*time.Second), "all three candidates confirmed", func() bool {
+		var k int
+		if err := pool.QueryRow(ctx, `
+SELECT count(*) FROM deposit_observations WHERE chain_id = $1 AND status = 'confirmed'`,
+			chainID).Scan(&k); err != nil {
+			return false
+		}
+		return k == len(seeds)
+	})
+	time.Sleep(200 * time.Millisecond) // surface any erroneous extra write
+	stop2()
+
+	// Six basis columns exact per row (decimal-string compare for NUMERIC).
+	for _, s := range seeds {
+		status, nullAt, tipN, thr, seq, gotTipHash, conf :=
+			confirmReadBasis(t, ctx, pool, chainID, s.bh, s.txHash)
+		wantConf := strconv.FormatUint(tip-s.h+1, 10)
+		if status != "confirmed" || nullAt {
+			t.Fatalf("h=%d: status=%s nullAt=%v, want confirmed/non-null confirmed_at", s.h, status, nullAt)
+		}
+		if tipN != int64(tip) || gotTipHash != tipHash || thr != int64(n) || seq != 1 || conf != wantConf {
+			t.Fatalf("h=%d: basis = tip(%d %s) N=%d conf=%s seq=%d, want tip(%d %s) N=%d conf=%s seq=1",
+				s.h, tipN, gotTipHash, thr, conf, seq, tip, tipHash, n, wantConf)
+		}
+	}
+	// Old version_seq row confirms normally AND stays attributed to its
+	// 004 history version (004 semantics untouched, confirmation only
+	// gates on canonical + threshold).
+	var attributed int
+	if err := pool.QueryRow(ctx, `
+SELECT count(*) FROM deposit_observations o
+JOIN deposit_config_history h ON h.chain_id = o.chain_id AND h.version_seq = o.version_seq
+WHERE o.chain_id = $1 AND o.status = 'confirmed'`, chainID).Scan(&attributed); err != nil {
+		t.Fatalf("version attribution join: %v", err)
+	}
+	if attributed != len(seeds) {
+		t.Fatalf("observations attributed to a history version = %d, want %d", attributed, len(seeds))
+	}
+	// Bootstrap: exactly one policy row, operator bootstrap, request NULL.
+	if k := depositCountRows(t, ctx, pool, "confirmation_policy_history", chainID); k != 1 {
+		t.Fatalf("confirmation_policy_history rows = %d, want 1 (bootstrap on first conversion)", k)
+	}
+	var seq, thr int64
+	var op string
+	var reqID *string
+	if err := pool.QueryRow(ctx, `
+SELECT policy_seq, threshold, operator, request_id FROM confirmation_policy_history WHERE chain_id = $1`,
+		chainID).Scan(&seq, &thr, &op, &reqID); err != nil {
+		t.Fatalf("read bootstrap policy row: %v", err)
+	}
+	if seq != 1 || thr != int64(n) || op != "bootstrap" || reqID != nil {
+		t.Fatalf("bootstrap row = (%d %d %q %v), want (1 10 bootstrap NULL)", seq, thr, op, reqID)
+	}
+	// Counters: +1 per row on both the confirmed counter and the ok
+	// adjudication (contracts/observability.md).
+	chain := confirm13ChainLabel(chainID)
+	if got := confirm13Counter(t, m, metrics.ConfirmationConfirmedMetricName, chain); got != float64(len(seeds)) {
+		t.Fatalf("%s = %v, want %d", metrics.ConfirmationConfirmedMetricName, got, len(seeds))
+	}
+	okLabels := map[string]string{"chain": strconv.FormatInt(chainID, 10), "result": "ok"}
+	if got := confirm13Counter(t, m, metrics.ConfirmationTransitionMetricName, okLabels); got != float64(len(seeds)) {
+		t.Fatalf("%s{ok} = %v, want %d", metrics.ConfirmationTransitionMetricName, got, len(seeds))
+	}
+	// Contracts integrity check: zero confirmed rows may lack basis columns.
+	var incomplete int
+	if err := pool.QueryRow(ctx, `
+SELECT COUNT(*) FROM deposit_observations
+WHERE chain_id = $1 AND status = 'confirmed'
+  AND (confirmed_at IS NULL OR confirm_tip_number IS NULL OR confirm_tip_hash IS NULL
+       OR confirm_threshold IS NULL OR confirmations IS NULL OR confirm_policy_seq IS NULL)`,
+		chainID).Scan(&incomplete); err != nil {
+		t.Fatalf("integrity抽查: %v", err)
+	}
+	if incomplete != 0 {
+		t.Fatalf("incomplete confirmed rows = %d, want 0", incomplete)
+	}
+
+	// Exactly-once: a second loop run over the converted rows changes
+	// nothing (confirmed_at identical, counters frozen).
+	before := make(map[string]string, len(seeds))
+	for _, s := range seeds {
+		before[s.txHash] = confirm13ConfirmedAt(t, ctx, pool, chainID, s.bh, s.txHash)
+	}
+	sc3cfg := ConfirmationConfig{
+		ChainID:      chainID,
+		ThresholdN:   n,
+		PollInterval: 25 * time.Millisecond,
+		RetryInitial: 25 * time.Millisecond,
+		RetryMax:     250 * time.Millisecond,
+	}
+	committer3, err := NewConfirmationCommitter(pool, sc3cfg)
+	if err != nil {
+		t.Fatalf("NewConfirmationCommitter(): %v", err)
+	}
+	sc3, err := NewConfirmationScanner(pool, sc3cfg, committer3, m)
+	if err != nil {
+		t.Fatalf("NewConfirmationScanner(): %v", err)
+	}
+	stop3 := confirm13RunLoop(t, ctx, sc3, lease)
+	time.Sleep(500 * time.Millisecond)
+	stop3()
+	for _, s := range seeds {
+		if got := confirm13ConfirmedAt(t, ctx, pool, chainID, s.bh, s.txHash); got != before[s.txHash] {
+			t.Fatalf("h=%d: confirmed_at changed %s -> %s (repeat run rewrote first-seen facts)",
+				s.h, before[s.txHash], got)
+		}
+	}
+	if got := confirm13Counter(t, m, metrics.ConfirmationConfirmedMetricName, chain); got != float64(len(seeds)) {
+		t.Fatalf("%s after repeat run = %v, want still %d (exactly once)", metrics.ConfirmationConfirmedMetricName, got, len(seeds))
+	}
+	if got := confirm13Counter(t, m, metrics.ConfirmationTransitionMetricName, okLabels); got != float64(len(seeds)) {
+		t.Fatalf("%s{ok} after repeat run = %v, want still %d", metrics.ConfirmationTransitionMetricName, got, len(seeds))
+	}
+}
+
+// --- T013 pause gate --------------------------------------------------------
+
+// TestConfirmationPauseGateZeroCommits proves version-agnostic != gate
+// bypass: with a deposit_pause row present, the real loop halts with zero
+// commits (chain-view and policy-drift refusals are covered per-commit in
+// confirmcommit_integration_test.go; the pause representative proves the
+// scanner enforces gates instead of converting around them).
+func TestConfirmationPauseGateZeroCommits(t *testing.T) {
+	dsn := startIndexerPostgres(t)
+	pool := openIndexerPool(t, dsn)
+	defer pool.Close()
+	ctx := context.Background()
+
+	const chainID, h, tip, n = int64(31338), uint64(100), uint64(109), uint64(10)
+	depositSeedCanonical(t, ctx, pool, chainID, h, tip, true)
+	bh, txHash := confirmSeedPending(t, ctx, pool, chainID, h)
+	if _, err := pool.Exec(ctx, `
+INSERT INTO deposit_pause (chain_id, height, kind, detail) VALUES ($1, 10, 'upstream_gap', 't013')`,
+		chainID); err != nil {
+		t.Fatalf("seed deposit_pause: %v", err)
+	}
+
+	m := metrics.New(func() bool { return true })
+	sc, lease := confirm13Scanner(t, pool, chainID, n, m)
+
+	done := make(chan error, 1)
+	go func() { done <- sc.ServeLoop(ctx, lease, nil) }()
+	select {
+	case err := <-done:
+		var paused *streamPauseError
+		if !errors.As(err, &paused) || paused.stream != "deposit_pause" {
+			t.Fatalf("ServeLoop() = %v (%T), want *streamPauseError for deposit_pause", err, err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("ServeLoop did not halt on the present pause row")
+	}
+	if got := sc.ConfirmationState(); got != 3 {
+		t.Fatalf("ConfirmationState() = %d, want 3 (stopped)", got)
+	}
+	confirmAssertZeroWrite(t, ctx, pool, chainID, bh, txHash, 0)
+	if got := confirm13Counter(t, m, metrics.ConfirmationConfirmedMetricName, confirm13ChainLabel(chainID)); got != 0 {
+		t.Fatalf("%s under pause = %v, want 0", metrics.ConfirmationConfirmedMetricName, got)
+	}
+	rejected := map[string]string{"chain": strconv.FormatInt(chainID, 10), "result": "rejected"}
+	if got := confirm13Counter(t, m, metrics.ConfirmationTransitionMetricName, rejected); got != 1 {
+		t.Fatalf("%s{rejected} under pause = %v, want 1", metrics.ConfirmationTransitionMetricName, got)
+	}
+}
+
+// --- T013 empty tip ---------------------------------------------------------
+
+// TestConfirmationEmptyTipZeroCommits is the F3 empty-state assertion for
+// T013: a Pending row with no canonical tip at all -> the loop waits for a
+// trusted tip (state=1) with zero commits and zero policy rows.
+func TestConfirmationEmptyTipZeroCommits(t *testing.T) {
+	dsn := startIndexerPostgres(t)
+	pool := openIndexerPool(t, dsn)
+	defer pool.Close()
+	ctx := context.Background()
+
+	const chainID, h, n = int64(31339), uint64(50), uint64(10)
+	bh, txHash := confirmSeedPending(t, ctx, pool, chainID, h)
+	// No chain_blocks rows: the canonical tip is missing entirely.
+
+	m := metrics.New(func() bool { return true })
+	sc, lease := confirm13Scanner(t, pool, chainID, n, m)
+
+	stop := confirm13RunLoop(t, ctx, sc, lease)
+	time.Sleep(600 * time.Millisecond) // several 25ms poll ticks
+	if got := sc.ConfirmationState(); got != 1 {
+		t.Fatalf("ConfirmationState() = %d, want 1 (waiting for trusted tip)", got)
+	}
+	confirmAssertZeroWrite(t, ctx, pool, chainID, bh, txHash, 0)
+	if got := confirm13Counter(t, m, metrics.ConfirmationConfirmedMetricName, confirm13ChainLabel(chainID)); got != 0 {
+		t.Fatalf("%s with missing tip = %v, want 0", metrics.ConfirmationConfirmedMetricName, got)
+	}
+	stop()
+}

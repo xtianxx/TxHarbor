@@ -16,7 +16,9 @@
   （即 `N ≤ MaxInt64`），超出按"超出系统支持整数范围"拒绝——这是存储类型决定的系统范围，
   不是业务上限（Q1/Q2 禁止的业务上限仍不存在）。tip/h 来源列（`chain_blocks.number`、
   `deposit_observations.block_number`）均为 `BIGINT CHECK (>= 0)`，故可达域为 `[0, MaxInt64]`；
-  域内 `tip - h + 1 ≤ 2^63`，uint64 与 BIGINT 均精确，无截断。饱和输入（tip == MaxUint64）
+   域内 `tip - h + 1 ≤ 2^63`：精确确认数最大可达 2^63（tip=MaxInt64、h=0），uint64 可表示该端点，
+   `BIGINT`（int64，上限 2^63-1）容纳不了该端点，故审计列采用已定稿的 `NUMERIC` 列（OI-1 决议）；
+   端点之外的可达域公式值恒精确、无截断。饱和输入（tip == MaxUint64）
   在可达域外不可达（约束证据：上述两列的 `BIGINT` 类型 + `CHECK (>= 0)` + 行只源自 RPC 高度；
   见 `migrations/000002_chain_indexer.sql`、`000004_deposit_detection.sql`）。
 - **等价 vs 精确的分工**：门禁比较只用等价式（任意输入无溢出，含假设性 MaxUint64）；
@@ -123,8 +125,9 @@
 - **Decision**：仅新增 `confirmation_*` 组（gauges： pending 估计/滞后/state/policy_seq；counters：
   confirmed_total{ok}、skipped_total{reason}、transition_total{ok|stale|rejected}、policy_transition_total{ok|rejected}），
   结构化日志字段与诊断 SQL 见 contracts；002/003/004 指标名与语义冻结；`/readyz` 不翻转（镜像 004 R8）；
-  全部经 `logx.Redact`，金额十进制。`skipped` 仅计良性重估；停止经 state=3 + error 日志表达。
-- **Rationale**：FR-11 只要求进度/积压/滞后/暂停可见；skipped 计数使"跳过未确认"可观测而不 halt；transition 计数使
+   全部经 `logx.Redact`，金额十进制。`skipped` 仅计 `below_depth` 行级等待的重估；
+   引用缺失/哈希不一致按规格（FR-06/US3-2/Edge-170）属链视图异常 → 停止确认（state=3 + error 日志表达）。
+- **Rationale**：FR-11 只要求进度/积压/滞后/暂停可见；skipped 计数使"`below_depth` 行级等待"可观测而不 halt；transition 计数使
   stale/rejected 提交可审计。
 
 ## R9 — 006 交接契约（005 落定、006 消费）

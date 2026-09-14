@@ -30,17 +30,17 @@ func migrateUpAll(t *testing.T, dsn string) {
 	}
 }
 
-// migrateUpThrough applies embedded migrations up to maxVersion inclusive and
-// returns how many files that subset contains. Used to build a real "database
-// at 003" before testing the 004 upgrade.
-func migrateUpThrough(t *testing.T, dsn string, maxVersion int64) int {
+// migrationSubsetFS returns the embedded migrations up to maxVersion
+// inclusive as a standalone FS. Used to build a real "database at N" before
+// testing the N+1 upgrade, and to keep single-migration downgrade tests
+// isolated as later migrations are added.
+func migrationSubsetFS(t *testing.T, maxVersion int64) fstest.MapFS {
 	t.Helper()
 	files, err := MigrationFiles(Migrations)
 	if err != nil {
 		t.Fatalf("list embedded migrations: %v", err)
 	}
 	fsys := fstest.MapFS{}
-	applied := 0
 	for _, f := range files {
 		if f.Version > maxVersion {
 			continue
@@ -50,8 +50,17 @@ func migrateUpThrough(t *testing.T, dsn string, maxVersion int64) int {
 			t.Fatalf("read embedded %s: %v", f.Name, err)
 		}
 		fsys[f.Name] = &fstest.MapFile{Data: data}
-		applied++
 	}
+	return fsys
+}
+
+// migrateUpThrough applies embedded migrations up to maxVersion inclusive and
+// returns how many files that subset contains. Used to build a real "database
+// at 003" before testing the 004 upgrade.
+func migrateUpThrough(t *testing.T, dsn string, maxVersion int64) int {
+	t.Helper()
+	fsys := migrationSubsetFS(t, maxVersion)
+	applied := len(fsys)
 	opts := testMigrateOptions(dsn)
 	opts.FS = fsys
 	var out bytes.Buffer
@@ -470,8 +479,14 @@ func TestDepositMigrationIndexes(t *testing.T) {
 	if !strings.Contains(recipient, "(chain_id, recipient, block_number)") {
 		t.Errorf("deposit_observations_recipient_height_idx = %q, want (chain_id, recipient, block_number)", recipient)
 	}
-	if got := nonUniqueIndexCount(t, sqlDB, "deposit_observations"); got != 2 {
-		t.Errorf("deposit_observations secondary indexes = %d, want 2", got)
+	// 005 adds the pending-scan partial index on the same table; the count
+	// grows from 2 to 3 with no other change.
+	pending := indexDef(t, sqlDB, "deposit_observations_pending_height_idx")
+	if !strings.Contains(pending, "(chain_id, block_number)") || !strings.Contains(pending, "WHERE") {
+		t.Errorf("deposit_observations_pending_height_idx = %q, want (chain_id, block_number) partial index", pending)
+	}
+	if got := nonUniqueIndexCount(t, sqlDB, "deposit_observations"); got != 3 {
+		t.Errorf("deposit_observations secondary indexes = %d, want 3", got)
 	}
 	for _, table := range []string{
 		"deposit_config_history", "deposit_checkpoint", "deposit_pause", "deposit_pause_audit",
@@ -503,7 +518,15 @@ func TestDepositMigrationIndexes(t *testing.T) {
 func TestDepositMigrationDowngradeFrom004RemovesOnly004(t *testing.T) {
 	dsn := startPostgres(t)
 	ctx := context.Background()
-	migrateUpAll(t, dsn)
+	// Isolate the 004 downgrade on a through-004 database so later
+	// migrations (000005+) neither roll back here nor shift the counts.
+	fsys := migrationSubsetFS(t, 4)
+	opts := testMigrateOptions(dsn)
+	opts.FS = fsys
+	var out bytes.Buffer
+	if err := MigrateUp(ctx, opts, &out); err != nil {
+		t.Fatalf("MigrateUp(through 4) error = %v (output %q)", err, out.String())
+	}
 
 	sqlDB := openTestSQL(t, dsn)
 	blockHash := hash64("ab")
@@ -517,7 +540,8 @@ func TestDepositMigrationDowngradeFrom004RemovesOnly004(t *testing.T) {
 		(chain_id, version_seq, config_hash, start_block, assets, watches, replay_from, operator)
 		VALUES (1, 1, $1, 0, 'a', 'w', 0, 'bootstrap')`, configHash)
 
-	opts := testMigrateOptions(dsn)
+	opts = testMigrateOptions(dsn)
+	opts.FS = fsys
 	provider, err := newProvider(sqlDB, opts)
 	if err != nil {
 		t.Fatalf("newProvider: %v", err)
@@ -550,7 +574,7 @@ func TestDepositMigrationDowngradeFrom004RemovesOnly004(t *testing.T) {
 		t.Fatalf("002/003 data changed by DOWN: blocks=%d next=%d", blocks, nextBlock)
 	}
 
-	var out bytes.Buffer
+	out.Reset()
 	if err := MigrateStatus(ctx, opts, &out); err != nil {
 		t.Fatalf("MigrateStatus() after down error = %v", err)
 	}
@@ -559,9 +583,9 @@ func TestDepositMigrationDowngradeFrom004RemovesOnly004(t *testing.T) {
 	}
 
 	// Re-applying the migration behaves like the 003 upgrade again.
-	files, err := MigrationFiles(Migrations)
+	files, err := MigrationFiles(fsys)
 	if err != nil {
-		t.Fatalf("list embedded migrations: %v", err)
+		t.Fatalf("list subset migrations: %v", err)
 	}
 	out.Reset()
 	if err := MigrateUp(ctx, opts, &out); err != nil {

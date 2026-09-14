@@ -37,6 +37,15 @@ const (
 	DepositObservationsMetricName = "txharbor_deposit_observations_total"
 	DepositPauseMetricName        = "txharbor_deposit_pause_total"
 	DepositTransitionMetricName   = "txharbor_deposit_transition_total"
+
+	ConfirmationPendingMetricName          = "txharbor_confirmation_pending"
+	ConfirmationLagMetricName              = "txharbor_confirmation_lag_blocks"
+	ConfirmationStateMetricName            = "txharbor_confirmation_state"
+	ConfirmationPolicySeqMetricName        = "txharbor_confirmation_policy_seq"
+	ConfirmationConfirmedMetricName        = "txharbor_confirmation_confirmed_total"
+	ConfirmationSkippedMetricName          = "txharbor_confirmation_skipped_total"
+	ConfirmationTransitionMetricName       = "txharbor_confirmation_transition_total"
+	ConfirmationPolicyTransitionMetricName = "txharbor_confirmation_policy_transition_total"
 )
 
 // Metrics owns a private registry so multiple instances (tests, restarts of
@@ -60,6 +69,15 @@ type Metrics struct {
 	depositObservations *prometheus.CounterVec
 	depositPause        *prometheus.CounterVec
 	depositTransition   *prometheus.CounterVec
+
+	confirmationPending          *prometheus.GaugeVec
+	confirmationLag              *prometheus.GaugeVec
+	confirmationState            *prometheus.GaugeVec
+	confirmationPolicySeq        *prometheus.GaugeVec
+	confirmationConfirmed        *prometheus.CounterVec
+	confirmationSkipped          *prometheus.CounterVec
+	confirmationTransition       *prometheus.CounterVec
+	confirmationPolicyTransition *prometheus.CounterVec
 
 	handler http.Handler
 }
@@ -163,29 +181,79 @@ func New(ready func() bool) *Metrics {
 		Help: "Authorised deposit config transitions per chain; details live in deposit_config_history.",
 	}, []string{"chain", "result"})
 
+	confirmationPending := prometheus.NewGaugeVec(prometheus.GaugeOpts{
+		Name: ConfirmationPendingMetricName,
+		Help: "Unconfirmed pending estimate per chain; exposed as 0 while empty.",
+	}, []string{"chain"})
+
+	confirmationLag := prometheus.NewGaugeVec(prometheus.GaugeOpts{
+		Name: ConfirmationLagMetricName,
+		Help: "Confirmation lag in blocks per chain; absent while the tip is missing or nothing is confirmed.",
+	}, []string{"chain"})
+
+	confirmationState := prometheus.NewGaugeVec(prometheus.GaugeOpts{
+		Name: ConfirmationStateMetricName,
+		Help: "Confirmation scanner state per chain: 0=running, 1=waiting for trusted tip, 2=retrying, 3=stopped.",
+	}, []string{"chain"})
+
+	confirmationPolicySeq := prometheus.NewGaugeVec(prometheus.GaugeOpts{
+		Name: ConfirmationPolicySeqMetricName,
+		Help: "Effective confirmation policy_seq per chain; absent while no policy row exists.",
+	}, []string{"chain"})
+
+	confirmationConfirmed := prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: ConfirmationConfirmedMetricName,
+		Help: "Successful pending-to-confirmed transitions per chain; details live in the observation rows.",
+	}, []string{"chain"})
+
+	confirmationSkipped := prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: ConfirmationSkippedMetricName,
+		Help: "Benign below-depth re-estimates per chain; the row stays pending.",
+	}, []string{"chain", "reason"})
+
+	confirmationTransition := prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: ConfirmationTransitionMetricName,
+		Help: "Confirmation commit adjudications per chain: ok=committed, stale=under-lock mismatch rollback, rejected=drift/pause refusal.",
+	}, []string{"chain", "result"})
+
+	confirmationPolicyTransition := prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: ConfirmationPolicyTransitionMetricName,
+		Help: "Authorised confirmation policy transitions per chain; details live in confirmation_policy_history.",
+	}, []string{"chain", "result"})
+
 	registry.MustRegister(readyGauge, probeTotal,
 		indexerHeight, indexerState, indexerRPC, indexerPause,
 		logNext, logLag, logState, logRPC, logPause,
-		depositNext, depositLag, depositState, depositObservations, depositPause, depositTransition)
+		depositNext, depositLag, depositState, depositObservations, depositPause, depositTransition,
+		confirmationPending, confirmationLag, confirmationState, confirmationPolicySeq,
+		confirmationConfirmed, confirmationSkipped, confirmationTransition, confirmationPolicyTransition)
 	return &Metrics{
-		registry:            registry,
-		probeTotal:          probeTotal,
-		indexerHeight:       indexerHeight,
-		indexerState:        indexerState,
-		indexerRPC:          indexerRPC,
-		indexerPause:        indexerPause,
-		logNext:             logNext,
-		logLag:              logLag,
-		logState:            logState,
-		logRPC:              logRPC,
-		logPause:            logPause,
-		depositNext:         depositNext,
-		depositLag:          depositLag,
-		depositState:        depositState,
-		depositObservations: depositObservations,
-		depositPause:        depositPause,
-		depositTransition:   depositTransition,
-		handler:             promhttp.HandlerFor(registry, promhttp.HandlerOpts{}),
+		registry:                     registry,
+		probeTotal:                   probeTotal,
+		indexerHeight:                indexerHeight,
+		indexerState:                 indexerState,
+		indexerRPC:                   indexerRPC,
+		indexerPause:                 indexerPause,
+		logNext:                      logNext,
+		logLag:                       logLag,
+		logState:                     logState,
+		logRPC:                       logRPC,
+		logPause:                     logPause,
+		depositNext:                  depositNext,
+		depositLag:                   depositLag,
+		depositState:                 depositState,
+		depositObservations:          depositObservations,
+		depositPause:                 depositPause,
+		depositTransition:            depositTransition,
+		confirmationPending:          confirmationPending,
+		confirmationLag:              confirmationLag,
+		confirmationState:            confirmationState,
+		confirmationPolicySeq:        confirmationPolicySeq,
+		confirmationConfirmed:        confirmationConfirmed,
+		confirmationSkipped:          confirmationSkipped,
+		confirmationTransition:       confirmationTransition,
+		confirmationPolicyTransition: confirmationPolicyTransition,
+		handler:                      promhttp.HandlerFor(registry, promhttp.HandlerOpts{}),
 	}
 }
 
@@ -321,6 +389,66 @@ func (m *Metrics) ObserveDepositPause(chain int64) {
 // in the deposit_config_history rows, not in this counter.
 func (m *Metrics) ObserveDepositTransition(chain int64, result string) {
 	m.depositTransition.WithLabelValues(chainLabel(chain), result).Inc()
+}
+
+// ObserveConfirmationPending records the unconfirmed pending estimate for
+// chain. Empty is exposed as 0 (contracts/observability.md), never removed.
+func (m *Metrics) ObserveConfirmationPending(chain int64, pending uint64) {
+	m.confirmationPending.WithLabelValues(chainLabel(chain)).Set(float64(pending))
+}
+
+// ObserveConfirmationLag records the confirmation lag in blocks for chain.
+// ok=false means the tip is missing or nothing is confirmed yet: the series
+// is removed rather than zeroed.
+func (m *Metrics) ObserveConfirmationLag(chain int64, lag uint64, ok bool) {
+	if !ok {
+		m.confirmationLag.DeleteLabelValues(chainLabel(chain))
+		return
+	}
+	m.confirmationLag.WithLabelValues(chainLabel(chain)).Set(float64(lag))
+}
+
+// ObserveConfirmationState records the confirmation scanner state for chain:
+// 0 running, 1 waiting for trusted tip, 2 retrying, 3 stopped
+// (contracts/observability.md). Stopping must not flip readyz.
+func (m *Metrics) ObserveConfirmationState(chain int64, state int) {
+	m.confirmationState.WithLabelValues(chainLabel(chain)).Set(float64(state))
+}
+
+// ObserveConfirmationPolicySeq records the effective policy_seq for chain.
+// ok=false means no policy row exists yet: the series is removed rather than
+// zeroed.
+func (m *Metrics) ObserveConfirmationPolicySeq(chain int64, seq uint64, ok bool) {
+	if !ok {
+		m.confirmationPolicySeq.DeleteLabelValues(chainLabel(chain))
+		return
+	}
+	m.confirmationPolicySeq.WithLabelValues(chainLabel(chain)).Set(float64(seq))
+}
+
+// ObserveConfirmationConfirmed counts one successful pending-to-confirmed
+// transition for chain.
+func (m *Metrics) ObserveConfirmationConfirmed(chain int64) {
+	m.confirmationConfirmed.WithLabelValues(chainLabel(chain)).Inc()
+}
+
+// ObserveConfirmationSkipped counts one benign below-depth re-estimate for
+// chain; the row stays pending.
+func (m *Metrics) ObserveConfirmationSkipped(chain int64, reason string) {
+	m.confirmationSkipped.WithLabelValues(chainLabel(chain), reason).Inc()
+}
+
+// ObserveConfirmationTransition counts one commit adjudication by result:
+// ok|stale|rejected (contracts/observability.md).
+func (m *Metrics) ObserveConfirmationTransition(chain int64, result string) {
+	m.confirmationTransition.WithLabelValues(chainLabel(chain), result).Inc()
+}
+
+// ObserveConfirmationPolicyTransition counts one authorised policy transition
+// by result: ok|rejected (contracts/observability.md). Audit details live in
+// the confirmation_policy_history rows, not in this counter.
+func (m *Metrics) ObserveConfirmationPolicyTransition(chain int64, result string) {
+	m.confirmationPolicyTransition.WithLabelValues(chainLabel(chain), result).Inc()
 }
 
 // Deposit log events and their frozen structured field lists

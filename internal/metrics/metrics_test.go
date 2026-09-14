@@ -43,7 +43,11 @@ func TestRegistryExposesOnlyFoundationMetrics(t *testing.T) {
 			LogCheckpointNextMetricName, LogLagMetricName,
 			LogStateMetricName, LogRPCMetricName, LogPauseMetricName,
 			DepositNextMetricName, DepositLagMetricName, DepositStateMetricName,
-			DepositObservationsMetricName, DepositPauseMetricName, DepositTransitionMetricName:
+			DepositObservationsMetricName, DepositPauseMetricName, DepositTransitionMetricName,
+			ConfirmationPendingMetricName, ConfirmationLagMetricName,
+			ConfirmationStateMetricName, ConfirmationPolicySeqMetricName,
+			ConfirmationConfirmedMetricName, ConfirmationSkippedMetricName,
+			ConfirmationTransitionMetricName, ConfirmationPolicyTransitionMetricName:
 			return true
 		}
 		return strings.HasPrefix(name, "go_") || strings.HasPrefix(name, "process_")
@@ -352,6 +356,96 @@ func TestDepositLogContract(t *testing.T) {
 	}
 	if !strings.Contains(got, logx.Redacted) {
 		t.Fatalf("DepositLogRedact(%q) = %q, want %s", line, got, logx.Redacted)
+	}
+}
+
+// TestConfirmationMetricsContract covers the 005 observability contract: four
+// confirmation states, pending exposed as 0 while empty, lag/policy_seq
+// series absent while unready, the confirmed counter, the below_depth skipped
+// reason and the transition/policy-transition result classes.
+func TestConfirmationMetricsContract(t *testing.T) {
+	m := New(func() bool { return true })
+
+	for _, state := range []int{0, 1, 2, 3} {
+		m.ObserveConfirmationState(31337, state)
+		if got := gatherGauge(t, m, ConfirmationStateMetricName); got != float64(state) {
+			t.Fatalf("%s = %v, want %d", ConfirmationStateMetricName, got, state)
+		}
+	}
+
+	m.ObserveConfirmationPending(31337, 0)
+	if got := gatherGauge(t, m, ConfirmationPendingMetricName); got != 0 {
+		t.Fatalf("%s = %v, want 0 (empty exposed as 0)", ConfirmationPendingMetricName, got)
+	}
+	m.ObserveConfirmationPending(31337, 5)
+	if got := gatherGauge(t, m, ConfirmationPendingMetricName); got != 5 {
+		t.Fatalf("%s = %v, want 5", ConfirmationPendingMetricName, got)
+	}
+
+	m.ObserveConfirmationLag(31337, 7, true)
+	if got := gatherGauge(t, m, ConfirmationLagMetricName); got != 7 {
+		t.Fatalf("%s = %v, want 7", ConfirmationLagMetricName, got)
+	}
+	m.ObserveConfirmationLag(31337, 7, false)
+	if got := familyLen(t, m, ConfirmationLagMetricName); got != 0 {
+		t.Fatalf("unready checkpoint exposed %d %s series, want 0", got, ConfirmationLagMetricName)
+	}
+
+	m.ObserveConfirmationPolicySeq(31337, 3, true)
+	if got := gatherGauge(t, m, ConfirmationPolicySeqMetricName); got != 3 {
+		t.Fatalf("%s = %v, want 3", ConfirmationPolicySeqMetricName, got)
+	}
+	m.ObserveConfirmationPolicySeq(31337, 3, false)
+	if got := familyLen(t, m, ConfirmationPolicySeqMetricName); got != 0 {
+		t.Fatalf("empty policy exposed %d %s series, want 0", got, ConfirmationPolicySeqMetricName)
+	}
+
+	m.ObserveConfirmationConfirmed(31337)
+	m.ObserveConfirmationConfirmed(31337)
+	if got := gatherCounters(t, m, ConfirmationConfirmedMetricName)["chain=31337"]; got != 2 {
+		t.Fatalf("%s = %v, want 2", ConfirmationConfirmedMetricName, got)
+	}
+
+	m.ObserveConfirmationSkipped(31337, "below_depth")
+	if got := gatherCounters(t, m, ConfirmationSkippedMetricName)["chain=31337,reason=below_depth"]; got != 1 {
+		t.Fatalf("%s{below_depth} = %v, want 1", ConfirmationSkippedMetricName, got)
+	}
+
+	for _, result := range []string{"ok", "stale", "rejected"} {
+		m.ObserveConfirmationTransition(31337, result)
+	}
+	transitions := gatherCounters(t, m, ConfirmationTransitionMetricName)
+	for _, result := range []string{"ok", "stale", "rejected"} {
+		if got := transitions["chain=31337,result="+result]; got != 1 {
+			t.Fatalf("%s{result=%s} = %v, want 1 (all: %v)", ConfirmationTransitionMetricName, result, got, transitions)
+		}
+	}
+
+	for _, result := range []string{"ok", "rejected"} {
+		m.ObserveConfirmationPolicyTransition(31337, result)
+	}
+	policy := gatherCounters(t, m, ConfirmationPolicyTransitionMetricName)
+	for _, result := range []string{"ok", "rejected"} {
+		if got := policy["chain=31337,result="+result]; got != 1 {
+			t.Fatalf("%s{result=%s} = %v, want 1 (all: %v)", ConfirmationPolicyTransitionMetricName, result, got, policy)
+		}
+	}
+}
+
+// TestConfirmationStateDoesNotFlipReady freezes readyz semantics: the
+// confirmation stop state (state=3) must not change readiness, which only
+// reflects dependency health (contracts/observability.md).
+func TestConfirmationStateDoesNotFlipReady(t *testing.T) {
+	ready := true
+	m := New(func() bool { return ready })
+
+	m.ObserveConfirmationState(31337, 3)
+	if got := gatherGauge(t, m, ReadyMetricName); got != 1 {
+		t.Fatalf("txharbor_ready = %v with confirmation_state=3, want 1 (readyz frozen)", got)
+	}
+	ready = false
+	if got := gatherGauge(t, m, ReadyMetricName); got != 0 {
+		t.Fatalf("txharbor_ready = %v after dependency loss, want 0", got)
 	}
 }
 
