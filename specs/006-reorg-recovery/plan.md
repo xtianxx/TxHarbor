@@ -13,8 +13,9 @@ retaining them, converts affected deposits to Orphaned with evidence, rolls back
 checkpoints to guarded floors, replays from the ancestor under the recovery version, revives
 re-canonicalized observations to Pending for 005 to reconfirm, and releases only after re-verified
 completion (auto path) or authorized two-step reconciliation (manual path). Technical approach:
-reuse the single `indexer_lease` coordination discipline for every transaction; carry fencing in a
-new monotonic recovery-seq (+ pause-row primary stop with a recovery backstop in ordinary paths);
+reuses the single `indexer_lease` coordination discipline for every transaction; carry fencing in a
+new monotonic recovery-seq with the recovery row as the sole recovery authority (no pause-table
+writes — stream diagnoses stay intact);
 rework `chain_blocks` PK to hold both forks; model Orphaned as a third observation state with an
 append-only transition log. See research.md R1–R14 for decisions, data-model.md for schema and the
 per-transaction catalog.
@@ -78,7 +79,7 @@ violations introduced by the design.
 
 | Spec | Design | Validation |
 |------|--------|------------|
-| FR-01/02 (detect, establish+pause) | `establish` txn; R9 pause reuse | V3, V11 |
+| FR-01/02 (detect, establish+pause) | `establish` txn; R9 recovery-row authority | V3, V11 |
 | FR-03 (depth/config) | R3 math; R4 policy history; data-model Table 3 | V1, V2 |
 | FR-04 (unrecoverable→reconcile) | R5 search terminals; reconcile phase | V9, V10 |
 | FR-05/06/07 (invalidate+orphan+audit) | invalidate txns; Table 4 transitions | V3, V12 |
@@ -88,7 +89,7 @@ violations introduced by the design.
 | FR-12/13 (resume/unknown) | phases + frontiers; re-read-to-triage | V7, resume drill |
 | FR-14/15/20 (fencing/races) | R1 seq + R7 coverage bound | V6, V7 |
 | FR-16 (re-fork) | ancestor re-validation, no false release | V8 |
-| FR-17 (independent pauses) | release only owned rows; backstop design | V11 |
+| FR-17 (independent pauses) | release deletes recovery row only; survivors recorded | V11 |
 | FR-18/21/22 (query/audit/observe) | R11; contracts/observability.md | V11, V12 |
 | FR-19 (completion) | `complete_reverify`判据 re-read; ≠ live head | V8 |
 | FR-23 (auto/manual auth) | auto vs two-step manual txns; Q2b evidence | V7, V11 |
@@ -124,10 +125,10 @@ internal/indexer/
 ├── reorgcommit.go          # 006 transactions (establish/invalidate/rollback/replay/revive/release)
 ├── reorgpolicy.go          # depth-config bootstrap/change/verify (R4 shape)
 ├── reorgquery.go           # validity-annotated readers (R11)
-├── scanner.go              # EXTEND: sibling-aware insert/compare; recovery backstop recheck
-├── logscanner.go           # EXTEND: recovery backstop recheck
-├── depositcommit.go        # EXTEND: recovery backstop recheck (+006-owned re-read path)
-├── confirmcommit.go        # EXTEND: recovery backstop recheck; orphaned→stop routing note
+├── scanner.go              # EXTEND: sibling-aware insert/compare; recovery-state gate recheck
+├── logscanner.go           # EXTEND: recovery-state gate recheck
+├── depositcommit.go        # EXTEND: recovery-state gate recheck (+006-owned re-read path)
+├── confirmcommit.go        # EXTEND: recovery-state gate recheck; orphaned→stop routing note
 ├── lease.go                # reuse unchanged (single coordination row)
 └── coordinator.go          # reuse unchanged (RunQuatro + recovery loop wiring)
 
@@ -136,7 +137,7 @@ migrations/
 
 tests (per V-matrix; design only, not written here):
 ├── unit: depth math, guard matrices (go test)
-├── integration: txn rechecks, tamper backstop, cycles (real PostgreSQL)
+├── integration: txn rechecks, tamper resistance, cycles (real PostgreSQL)
 └── e2e: forks, crashes, races, pauses (Anvil)
 ```
 

@@ -25,15 +25,18 @@ Evidence base (read-only, no code modified):
   Fencing uses a new monotonic `reorg_recovery.recovery_seq` per chain, carried explicitly:
   006 transactions capture `(recovery_id, recovery_seq, phase)` outside the lock and recheck
   equality plus phase-allowance after the lock; ordinary 002/003/004/005 commit paths gain one
-  additional post-lock recheck — "no active recovery row, or active row is in a terminal released
-  phase" — next to their existing `leaseVerdictSQL` + pause checks.
+  additional post-lock recheck — "no active non-terminal recovery row" — next to their existing
+  `leaseVerdictSQL` + stream-pause checks. This ordinary-path check is the primary stop (the recovery
+  row is the sole recovery authority, research R9); the stream pause rows keep working unchanged as
+  the independent second signal.
 - **Rationale**: The existing single-lock discipline is proven (002 §concurrency argument, 003/004/005
   isomorphic protocols). A second coordination lock would create a lock-order ring with the four
   existing writers. The recovery-seq gives FR-14's "persistent version constraint" a concrete carrier.
-  Ordinary paths need the check as a **backstop, not the primary stop**: the primary stop is the
-  `indexer_pause` row 006 writes at establish (all four paths already refuse on it). The backstop
-  covers pause-row tampering (manual SQL delete bypassing 006) and restart-after-tamper, where the
-  recovery row (never manually cleared — only 006 release transactions delete it) still refuses.
+  Ordinary paths need the check as the **primary stop** (the recovery row is the sole recovery
+  authority per R9): it covers them even if stream pause rows are tampered with (manual SQL delete
+  bypassing all writers), and on restart-after-tamper the recovery row — never manually cleared,
+  only 006 release transactions delete it — still refuses. Stream pause rows remain the independent
+  second signal with their owners and merge semantics untouched.
 - **Alternatives considered**:
   - *Pause-rows only, no ordinary-path change*: rejected — leaves the tamper bypass open, and the
     task instruction explicitly forbids新增恢复入口却遗漏原写路径可绕过 ("no new entry while missing
@@ -42,6 +45,25 @@ Evidence base (read-only, no code modified):
     instance-failover mechanism; overloading it conflates "instance lost" with "chain forked",
     orphans legitimate heartbeats, and still leaves the same single lock-holder residual (see R7).
   - *New separate coordination table/lock*: rejected — lock-order ring risk with four existing writers.
+- **Atomicity proof (why check-then-act is closed, not "one more SELECT")**: the recovery-state
+  recheck lives **inside** each commit transaction **after** `lockCoordSQL ... FOR UPDATE` — the same
+  lease row `establish` must acquire. Check and write are therefore ordered by the lock, not by time:
+  - *I-A, ordinary first*: O holds lock → post-lock checks see no recovery row → writes → COMMIT →
+    releases; E then acquires, inserts recovery row. O's result is a legal pre-pause commit
+    (pause-effective point = establish COMMIT; nothing committed before it is revoked, only swept
+    for affectedness under full audit if inside the fork range).
+  - *I-B, establish first*: E commits recovery row; O acquires lock → post-lock recheck sees the
+    active row → refuses, zero writes.
+  - *Suspended-after-check worker*: it holds the lock while suspended, so establish blocks; on resume
+    it commits pre-pause (case I-A, legal) — it can never commit post-pause because any commit after
+    establish's COMMIT implies it acquired the lock after, hence saw the row.
+  - *The "row absent at check, establish inserts before my write" gap*: impossible — between O's
+    post-lock check and O's write there is no lock release; establish cannot interleave.
+  - *Lease fields' division of labor*: `owner_id`+`fencing_token` reject the previous holder's **next**
+    transaction after a takeover (in-transaction holder unaffected — same residual as above, covered
+    by sweep);   `expires_at` bounds staleness of a holder that stops heartbeating (DB `now()` clock only). Recovery-seq rejects post-establish stale **views**; lease rejects
+    post-takeover stale **holders**. Neither alone suffices; together with the shared lock they close
+    the window.
 
 ## R2 — `chain_blocks` must hold two rows per height: PK rework (resolves FR-24-storage)
 
@@ -62,6 +84,28 @@ Evidence base (read-only, no code modified):
     `canonicalBlockHashSQL` consumer would need UNION logic), doubles the identity model, and breaks
     the checkpoint FK story; more code, more risk, same guarantees.
   - *Do nothing, store only new fork*: rejected — same evidence destruction as in-place update.
+- **Full linkage (every touchpoint of the PK change)**:
+  - *FK*: `indexer_checkpoint (chain_id, height, block_hash)` → `UNIQUE (chain_id, number, hash)` —
+    retained verbatim, still unique, still enforced. No FK rewrite.
+  - *Upsert target*: `scanner.go:1025 insertBlockSQL ON CONFLICT (chain_id, number)` → retarget to
+    `(chain_id, number, hash)`: same number+hash = idempotent rescan (DO NOTHING, correct);
+    same number + different hash = new sibling row (no conflict) → sibling-detection logic decides
+    fork-evidence pause (ordinary path) vs 006-owned row (recovery path). This is the one 002 code
+    change the migration forces.
+  - *Canonical readers* (unchanged SQL, new determinism proof): `logscanner.go:1386
+    canonicalBlockHashSQL`, 005 `readConfirmationTipSQL` (canonical ORDER BY number DESC LIMIT 1),
+    005 candidate reference check, 004 `readjudicateCanonicalRange` — all filter `canonical` (+ height).
+    Uniqueness: partial UNIQUE guarantees ≤1 canonical row per height; existence: only asserted after
+    sweep+replay completion (release gate), never assumed mid-recovery. Height+hash binding is now
+    **stronger** than before (PK binds them; previously only the UNIQUE did).
+  - *Re-canonicalization order* (same old block canonical again): single txn —
+    flip new-fork row `canonical=false` FIRST, then old row `canonical=true`; each statement
+    individually satisfies the partial unique (no deferral needed); the transient zero-canonical state
+    is invisible inside the txn. Downstream validity across the flip: in-txn invisible + annotated
+    queries outside (R11), so no consumer observes the intermediate state.
+  - *Intermediate states generally*: old-canonical-revoked / new-canonical-effective / downstream-
+    effective are three separate commits (invalidate → replay → release); between them the recovery
+    row + annotated queries prevent any consumer from treating the mixture as complete.
 
 ## R3 — Depth formula, integer domain, boundary, safe arithmetic (resolves FR-24-math, Q1 detail)
 
@@ -146,18 +190,31 @@ Evidence base (read-only, no code modified):
     exceed statement timeouts.
   - *Separate 006 coordination lock*: rejected (R1).
 
-## R7 — Invalidation sweep coverage and the lock-holder residual (resolves FR-14/FR-20 honestly)
+## R7 — Residual classes, sweep isolation, late writes (resolves FR-14/FR-20 honestly)
 
-- **Decision**: Document and design for the residual: exactly one ordinary transaction — the one holding
-  the lease lock across establish — can commit a stale-view result after fork evidence exists.
-  Coverage rule: every invalidation sweep computes its range from **live tip at sweep execution**
-  (`[ancestor+1, max(persisted_tip_at_sweep)]`), never from values cached at establish; sweeps run
-  after establish while ordinary paths are stopped, so the residual (if any) is inside the range and
-  gets orphaned with full audit. Delayed-start old workers (start after establish) are refused by
-  pause rows primarily and by the recovery-seq backstop (R1). This is stated as the explicit bound on
-  FR-14, not hidden.
-- **Rationale**: Lease serialization makes "at most one" provable; live-range sweeps make it covered.
-  Claiming zero stale commits would be false.
+- **Decision**: Three classes, three treatments — stated exactly so "residual" can never be read as
+  "post-pause submits are possible":
+  - *Class 1 — legal pre-pause commits (including the single lock-holder across establish)*: committed
+    before pause-effective point (= establish COMMIT). Valid when written. Handled by **controlled
+    cleanup**: invalidation sweeps orphan affected rows with full audit. This is the ONLY residual,
+    and it is cleanup, not a violation.
+  - *Class 2 — unfinished recovery cleanup*: rows swept but replay incomplete. Handled by design:
+    frontiers + phase gate completion; queries annotate provisional (R11).
+  - *Class 3 — post-pause submits by old workers*: **impossible by construction**, not "compensated by
+    sweep". Any commit after establish's COMMIT acquired the lease after it, hence passed through the
+    post-lock recovery recheck and was refused. Recording it as a "risk" would be false; it is a
+    refused path, tested in V6/V11.
+  Coverage rule: every sweep computes its range from **live tip at sweep execution**
+  (`[ancestor+1, max(persisted_tip_at_sweep)]`), never from establish-cached values. Progress =
+  phase + per-stream frontiers persisted per batch; termination = swept coverage complete AND FR-19
+  re-verification passes — unprocessed ⇒ no release, by gate, not by convention. Late writes:
+  ordinary writes after sweep start are refused (Class 3 proof above); 006-owned writes advance
+  frontiers atomically in the same txn, so they are never "late". Sweeps never skip locked records:
+  they are range UPDATEs executed **under the lease lock**, not `SKIP LOCKED` scans — no record can
+  be concurrently written while a sweep runs.
+- **Rationale**: Lease serialization makes "at most one Class-1 straggler" provable; live-range sweeps
+  make it covered; the completion gate makes "unfinished ⇒ held" structural. Claiming zero pre-pause
+  stragglers would be false; claiming post-pause submits are possible would also be false.
 - **Alternatives considered**:
   - *Abort/kill in-flight ordinary txns at establish*: rejected — PostgreSQL has no safe "cancel the
     other guy's txn and be sure" primitive from app code without superuser `pg_cancel_backend`, which
@@ -188,24 +245,35 @@ Evidence base (read-only, no code modified):
   - *Delete orphaned rows, re-insert on revival*: rejected — breaks I1 audit continuity and the
     "不隐藏 Orphaned 历史" query rule.
 
-## R9 — Pause strategy (resolves FR-24-pause, Q3 wiring)
+## R9 — Pause carrier: recovery row is the sole recovery authority; 006 writes NO pause table (CORRECTED)
 
-- **Decision**: Establish writes `indexer_pause` (kind `hash_mismatch` with expected/actual = old-tip/new-tip
-  evidence, detail references `recovery_id`) — this single row stops 002/003/004/005 commits via their
-  existing gates, zero predicate changes needed for the primary stop. 006's own transactions bypass
-  the pause gate by asserting pause-row ownership (detail's recovery_id == captured recovery_id) plus
-  recovery-seq match — the same "privileged path skips verdict, still takes the lock" shape as the
-  004/005 auth transactions. `deposit_pause`/`log_pause` are NOT written by 006 for the recovery
-  itself (they belong to the 002/004 streams; 006 must not overwrite stream diagnoses); if a stream
-  pause already exists, establish records it as a precondition and ordinary-path refusal already holds.
-- **Rationale**: Reuses the proven cross-stream block (`indexer_pause` gates all four writers) instead of
-  adding a fifth pause table every writer must learn. Ownership-assertion bypass mirrors the reviewed
-  auth-path precedent.
+- **Decision**: `establish` writes **only** the `reorg_recovery` row (+ terminal-bound event row). It does
+  NOT write `indexer_pause`, `log_pause`, or `deposit_pause`. Ordinary commit paths stop via the
+  recovery-state recheck (the R1 check, now the gate rather than a "backstop"): active non-terminal
+  recovery row → refuse, alongside their unchanged stream-pause checks. 006's own transactions gate
+  on captured `(recovery_id, recovery_seq)` + phase allowance — there is **no pause to bypass and no
+  bypass flag any caller can pass**; only the enumerated 006 transaction functions carry a captured
+  seq, so ordinary callers cannot obtain "006 mode". `complete_reverify` / `auth_release` DELETE only
+  the recovery row (+ terminal event); they never touch stream pause rows. A recovery completing while
+  a stream pause exists releases the recovery cause only — ordinary processing stays stopped on the
+  stream pause, and the surviving pause is recorded in the terminal event (evidence, not a block).
+- **Rationale**: `indexer_pause` is a single row with first-wins `ON CONFLICT DO NOTHING`
+  (`scanner.go:1045` sole writer; `log_pause`/`deposit_pause` same shape). It cannot hold two
+  concurrent causes: a 006 write would either lose to (or destroy evidence of) the stream's own pause,
+  and a 006 release (`DELETE WHERE chain_id`) could delete a pause the stream still needs — exactly
+  the overwrite/clear/ignore hazards named in the review. Separate tables per cause coexist without
+  collision; the recovery row carries strictly more state (phase, frontiers, bound tip, policy) than a
+  pause row could. Stream pauses keep their owners, merge semantics (`deposit_pause` revision merge),
+  and release paths untouched.
 - **Alternatives considered**:
-  - *New `reorg_pause` table checked by all writers*: rejected — requires touching all four commit
-    paths' gate lists for the primary mechanism (more invasive than the R1 backstop single-check).
-  - *Write all three existing pause rows*: rejected — overwrites stream-owned diagnoses (`log_pause`,
-    `deposit_pause` carry stream-specific evidence and merge semantics).
+  - *006 writes `indexer_pause` with ownership bypass (previous revision)*: REJECTED on re-review —
+    fails cause coexistence (second cause lost to first-wins), fails safe release (DELETE by chain_id
+    cannot distinguish owners without fragile detail-matching), fails "independent causes survive".
+  - *Multi-row pause table (add cause column, change PK)*: rejected — rewrites three streams' pause
+    contracts (owners, merges, audits, startup readers in scanner/logscanner/serve) for zero gain over
+    the recovery row, which is needed anyway for phase/frontiers.
+  - *New `reorg_pause` table checked by all writers*: rejected (as before) — the recovery row already
+    is that table; a second one doubles reads per commit for nothing.
 
 ## R10 — Checkpoint rollback statements (resolves FR-24-progress)
 
@@ -258,6 +326,20 @@ Evidence base (read-only, no code modified):
   the whole migration (goose runs one txn); no partial state; re-run safe. 005 rows/columns untouched
   in meaning (only the two CHECK rewrites + additive nullable columns + new tables/indexes).
 - **Rationale**: Same migration discipline as the five predecessors; additive + assertion-guarded.
+- **Order, locks, outage boundary (complete)**:
+  - *Preconditions asserted first* (same txn, before DDL): single canonical per height (true by old PK,
+    asserted anyway — extends the 000005 guard idiom); zero rows outside `{pending,confirmed}` in
+    `deposit_observations` (000005 already guaranteed; re-asserted).
+  - *DDL order*: CREATE new unique index on `(chain_id, number, hash)` → DROP old PK → ADD new PK USING
+    the index → ADD partial unique `(chain_id, number) WHERE canonical` → CHECK rewrites (validated,
+    not `NOT VALID`, so existing rows are proven compliant) → new tables/indexes. One goose txn:
+    any failure rolls back everything; re-run safe.
+  - *Locks/downtime*: PK rebuild takes `ACCESS EXCLUSIVE` on `chain_blocks` — plan a maintenance
+    window; ordinary writers must be stopped (they are: recovery-style pause or deploy freeze).
+  - *Old binaries*: NOT runnable post-migration (`ON CONFLICT (chain_id, number)` target no longer
+    exists; insert path needs the sibling-aware rewrite) — explicit outage boundary: deploy 006 code
+    with the migration, no mixed-version fleet. Rollback = code + DB restore point together; live
+    downgrade of the DB alone is unsupported and stated as such.
 
 ## R14 — Verification strategy levels (resolves FR-24-verify; design only, nothing executed)
 

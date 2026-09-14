@@ -117,16 +117,16 @@ Notation: `L` = lease ownership recheck, `P` = pause/ownership recheck, `V` = re
 
 | Transaction | Post-lock rechecks | Write set | Post-commit invariant |
 |---|---|---|---|
-| `establish` | L + policy bind (env max_depth == effective row, else refuse) + no active recovery row (else converge) | INSERT recovery row (phase=detected, bound tip) + INSERT `indexer_pause` (hash_mismatch, detail→recovery_id) + event row | pause row exists; ordinary commits refused; exactly one active recovery |
+| `establish` | L + policy bind (env max_depth == effective row, else refuse) + no active recovery row (else converge) + record pre-existing stream pauses as precondition (never modify them) | INSERT recovery row (phase=detected, bound tip) + event row. Writes NO pause table (research R9) | recovery row exists; ordinary commits refused via recovery gate; stream diagnoses intact; exactly one active recovery |
 | `confirm_ancestor` | L + V + ancestor candidate re-verified (local+chain equality, continuity) + depth recompute ≤ bound | UPDATE phase→ancestor_confirmed + ancestor cols + event row | ancestor satisfies closed-bound formula |
 | `invalidate_blocks` | L + V + phase | UPDATE `chain_blocks SET canonical=false` over `[ancestor+1, sweep_tip]` where canonical (rowcount recorded) + event row | old fork rows retained non-canonical; single canonical per height preserved |
 | `invalidate_observations` | L + V + phase | UPDATE observations in swept range to `orphaned` + evidence cols + transition-log rows | affected Pending/Confirmed → Orphaned; ancestor-side rows untouched |
 | `rollback_block/log/deposit_checkpoint` | L + V + phase + exact current-position match | guarded next_block/floor move (`$to = max(ancestor+1, start)`) | floors respected; no forward jump of unprocessed positions |
 | `replay_range` (per stream) | L + V + phase + frontier match + coverage/canon proof over batch | new rows (new identities only) + frontier advance, same batch | idempotent; empty ranges advance legitimately |
 | `revive_observation` | L + V + phase + row still orphaned + block/log binding + history-semantics recheck | status→pending + transition-log row (Q4 six rules) | no duplicate observation; old basis retained |
-| `complete_reverify` (auto) | L + V + phase + ALL FR-19判据 re-read (ancestor, invalidation, conversions, rollback, replay coverage, reconfirmation) | DELETE recovery row + DELETE owned pause row + terminal event | only this recovery's cause released; independent pauses intact |
+| `complete_reverify` (auto) | L + V + phase + ALL FR-19判据 re-read (ancestor, invalidation, conversions, rollback, replay coverage, reconfirmation) | DELETE recovery row + terminal event (records surviving stream pauses as evidence). NEVER deletes stream pause rows | only this recovery's cause released; independent pauses intact and still stopping ordinary work |
 | `auth_enter_repair` (manual) | privilege (operator session) + Q2b evidence present + active row match | phase→repair-authorized marker + event row (NOT a release) | does not release confirm/sign/broadcast pauses |
-| `auth_release` (manual) | privilege + Q2b minimum evidence + disposition list all terminal + re-verify pass | DELETE recovery row + DELETE owned pause row + terminal event + audit | atomic-or-nothing; reboot re-verifies; independent pauses intact |
+| `auth_release` (manual) | privilege + Q2b minimum evidence + disposition list all terminal + re-verify pass | DELETE recovery row + terminal event (records surviving stream pauses). NEVER deletes stream pause rows | atomic-or-nothing; reboot re-verifies; independent pauses intact |
 
 Programmatic reconcile writes (evidence/progress/disposition during recovery) run as short txns under
 the same lock with V + permission rechecks; each audited; none can trigger a paused external action
@@ -136,15 +136,61 @@ or skip the completion gate (Q3).
 
 1. `scanner.go` insert/compare path: height-sibling aware (same height + different hash outside active
    recovery = fork evidence → existing hash_mismatch pause path; inside recovery = 006-owned rows).
+   Upsert target retargets to `(chain_id, number, hash)` with the migration (research R2 linkage).
 2. Four commit paths (`scanner.commitBlock`, `logscanner.commitLogRange`, `depositcommit.commitDepositUnit`,
    `confirmcommit.ConfirmDepositUnit`): add post-lock recovery-state recheck (active non-terminal row →
-   refuse) beside existing verdicts — backstop per research R1 (primary stop stays the pause rows).
+   refuse) beside existing verdicts — the gate (primary: recovery row; stream pause rows unchanged).
+   Startup/loop gating readers (`scanner.loadProgress`/loop, `logscanner.loadLogState`/loop, serve
+   health) read the recovery row the same way they read pause rows today.
 3. 004 re-read conflict rule (`storedStatus != 'pending'`): 006's own re-reads exempt rows under the
    captured recovery version; ordinary 004 path unchanged (stopped during recovery anyway).
 4. 005 candidate re-read (`neither pending nor confirmed`): orphaned rows route to ChainViewError-stop
    (behavior unchanged, now reachable — listed explicitly).
 5. `deposit_pause.kind` / `deposit_pause_audit.action` CHECKs: unchanged (006 writes no stream pauses,
-   no new audit actions — recovery audit lives in Table 2).
+   no new audit actions — recovery audit lives in `reorg_recovery_events`).
+
+## Re-canonicalization order (same old block canonical again)
+
+Single `revive_observation`-adjacent block txn (lease lock first, V + phase rechecks): flip the
+new-fork row `canonical=false` FIRST, then the old row `canonical=true`; each statement
+individually satisfies the partial unique (no deferral needed); the transient zero-canonical state
+is invisible inside the txn. Only after the block flip may `revive_observation` run for that height
+(same or later txn — the revive recheck reads the flip). Downstream validity across the flip:
+in-txn invisible + annotated queries outside (R11).
+
+## Observation field semantics (which columns mean what, per status)
+
+| status | confirm_* basis cols | orphaned_at / orphan_recovery_id / orphan_reason | Reader rule |
+|--------|---------------------|--------------------------------------------------|-------------|
+| pending (never confirmed) | all NULL | all NULL | candidate for 005 |
+| confirmed | full basis (effective) | all NULL | effective confirmation; traceable |
+| orphaned (was pending) | all NULL (never had basis) | all set (evidence) | NOT a candidate; history visible |
+| orphaned (was confirmed) | retained STALE basis (history only) | all set (evidence) | status governs: confirm_* MUST NOT be read as effective |
+| pending (revived) | retained OLD basis (history only) until reconfirmed | retained (history of the orphan episode) | candidate for 005; on reconfirm 005 overwrites confirm_* with the NEW basis (old basis survives only in transition log) |
+
+"005 数据含义不动" is not an excuse here: the rule is explicit — row confirm_* columns are
+*current-or-last* basis, historical truth lives in `deposit_observation_transitions.basis_snapshot`;
+readers MUST key effectiveness off `status`, never off column non-NULLness.
+
+## Worked example: Confirmed → Orphaned → Pending → Confirmed → Orphaned
+
+Identity `(c, bh_old, tx, li)`, recovery R1 (fork F1), recovery R2 (fork F2):
+
+1. `status=confirmed`, basis=B1, orphan cols NULL. No transition rows.
+2. R1 `invalidate_observations`: `status=orphaned`, basis=B1 retained, orphaned_at=t2,
+   orphan_recovery_id=R1. Transition row `(confirmed→orphaned, R1, snapshot=B1)`.
+3. Old block re-canonicalized; R1 `revive_observation`: `status=pending`, basis=B1 retained
+   (stale), orphan cols retained (episode history). Transition row `(orphaned→pending, R1,
+   snapshot=re-verify refs)`.
+4. 005 reconfirms (UNCHANGED path): `status=confirmed`, basis=B2 **overwrites** B1 in-row;
+   B1 survives in step-2 transition row + step-3 snapshot. No 005 code change.
+5. R2 fork hits the same height with `bh_new2`: new identity `(c, bh_new2, tx, li2?)` → separate row
+   (different source, FR-08 new-observation rule); old row `(c, bh_old, ...)` → `status=orphaned`
+   again (basis=B2 retained, orphan_recovery_id=R2). Transition row `(confirmed→orphaned, R2,
+   snapshot=B2)`. Both rows coexist; default views never merge them (FR-18).
+
+Repeat execution at any step: transition-log UNIQUE makes the second attempt a conflict → already
+recorded, zero new state (idempotent by storage, not by memory).
 
 ## Invariants ↔ constraints
 
@@ -152,7 +198,7 @@ or skip the completion gate (Q3).
 - Checkpoint always points at a persisted row: unchanged FK + exact guards + new rollback guards.
 - One valid observation per source identity: PK + transition-log UNIQUE + no-duplicate revival rule.
 - No observation without full batch atomicity: replay/revive txns keep write+frontier atomic.
-- Pause/version mismatch ⇒ zero ordinary commits: pause rows + recovery backstop recheck (tested).
+- Pause/version mismatch ⇒ zero ordinary commits: stream pause rows + recovery-state gate (tested).
 - First confirmation fact immutable: basis columns never cleared; transitions audited, never rewritten.
 
 ## Observability (OQ2 carriers — named, not deferred)

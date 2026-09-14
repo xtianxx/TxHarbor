@@ -10,8 +10,10 @@ and no bilateral conformance is claimed.
 
 Before any broadcast, signing, nonce allocation, or confirmation, the stage MUST observe,
 in one read sequence:
-1. No `indexer_pause` row for the chain (existing gate — reused, not new).
-2. No active `reorg_recovery` row for the chain, or active row in a released-terminal phase only.
+1. No stream pause rows for the chain (`indexer_pause` / `log_pause` / `deposit_pause` — owned by
+   their streams; 006 never writes or deletes them).
+2. No active `reorg_recovery` row for the chain, or active row in a released-terminal phase only
+   (the recovery authority; written and deleted only by 006 transactions).
 3. Its own stage gates (policy versions, independent pauses).
 
 Failure of (1) or (2) → refuse the action, record the refusal cause, do not queue-for-later
@@ -29,7 +31,7 @@ parameter-validated idempotent persistence (receive-only; MUST NOT trigger nonce
 ## What 006 guarantees to downstream
 
 - Pause rows + recovery row are durable and restart-persistent; release is atomic with re-verification.
-- Ordinary-path backstop (R1) means downstream cannot observe a "recovered" chain while 006 still
+- Recovery-state gate (R1) means downstream cannot observe a "recovered" chain while 006 still
   holds it, even if pause rows are tampered with.
 - Query validity annotation (observability.md) lets downstream distinguish current-effective from
   historical-confirmed results.
