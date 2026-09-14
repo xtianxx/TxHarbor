@@ -1775,6 +1775,214 @@ WHERE chain_id = $1 AND status = 'confirmed'
 
 // -- T023 --------------------------------------------------------------------
 
+// -- T027 --------------------------------------------------------------------
+
+// T027 [US5] drift exit + pause-row invariance + restart resume (FR-03/08 R7,
+// SC-07/SC-10, US5-5, quickstart D4 recovery side): the old-N process fails
+// loud after an authorized switch (drift error + state=3 + coordinator fan-out
+// to a non-nil return, which serve maps to a non-zero exit), the switch
+// itself leaves all three pause tables byte-unchanged, and a restart with the
+// new N resumes confirmation. Owns drift-exit + pause-invariance + resume
+// only: T025 owns the switch cycle, T015 the illegal-config matrix, T026 the
+// submit-side refusal.
+func confirm27Switch(t *testing.T, ctx context.Context, pool *pgxpool.Pool, chainID int64, newN int64) {
+	t.Helper()
+	res, err := AuthorizeConfirmationPolicy(ctx, pool, ConfirmAuthRequest{
+		ChainID: chainID, RequestID: "t027-sw", ExpectedOldSeq: 1,
+		NewThresholdRaw: strconv.FormatInt(newN, 10), Operator: "op-t027", Reason: "t027",
+	})
+	if err != nil {
+		t.Fatalf("AuthorizeConfirmationPolicy(): %v", err)
+	}
+	if res.PolicySeq != 2 || res.Threshold != newN || res.Recorded {
+		t.Fatalf("switch result = %+v, want {PolicySeq:2 Threshold:%d Recorded:false}", res, newN)
+	}
+}
+
+// TestConfirmationDriftExitLoudStop is T027(a): after an authorized 10->25
+// switch, the old-N (N=10) scanner's ServeLoop returns
+// *confirmationConfigMismatchError with state=3 and zero commits, and the
+// same error propagates through the RunQuatro coordinator fan-out as a
+// non-nil return.
+//
+// Exit-code boundary (explicit, not faked): a non-zero OS exit is produced by
+// Serve in internal/app/serve.go:327-335, which maps any non-nil indexerErr
+// from RunQuatro to exitCode 1. The indexer package cannot import app
+// (import cycle), and os.Exit cannot be asserted in-process, so this test
+// asserts everything up to that mapping — the error value reaching the
+// fan-out point — and cites the mapping. The Serve() int-code shape itself is
+// covered by TestServeRejects* in internal/app/serve_config_test.go.
+func TestConfirmationDriftExitLoudStop(t *testing.T) {
+	dsn := startIndexerPostgres(t)
+	pool := openIndexerPool(t, dsn)
+	defer pool.Close()
+	ctx := context.Background()
+
+	const chainID, h, tip, oldN, newN = int64(31352), uint64(100), uint64(109), uint64(10), int64(25)
+	depositSeedCanonical(t, ctx, pool, chainID, h, tip, true)
+	bh, txHash := confirmSeedPending(t, ctx, pool, chainID, h)
+	confirmSeedPolicyRow(t, ctx, pool, chainID, 1, int64(oldN), nil, "bootstrap", nil)
+
+	// Lease before the switch (T025 shape): the switch's ensure is
+	// INSERT..DO NOTHING, so a pre-acquired owner survives it; acquiring
+	// after would lose to the confirm-auth-owned row.
+	m := metrics.New(func() bool { return true })
+	sc, lease := confirm13Scanner(t, pool, chainID, oldN, m)
+	confirm27Switch(t, ctx, pool, chainID, newN)
+
+	done := make(chan error, 1)
+	go func() { done <- sc.ServeLoop(ctx, lease, nil) }()
+	select {
+	case err := <-done:
+		var mismatch *confirmationConfigMismatchError
+		if !errors.As(err, &mismatch) {
+			t.Fatalf("ServeLoop() = %v (%T), want *confirmationConfigMismatchError (old N after switch)", err, err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("old-N ServeLoop did not stop on the post-switch drift")
+	}
+	if got := sc.ConfirmationState(); got != 3 {
+		t.Fatalf("ConfirmationState() = %d, want 3 (stopped)", got)
+	}
+	confirmAssertZeroWrite(t, ctx, pool, chainID, bh, txHash, 2)
+	if got := confirm13Counter(t, m, metrics.ConfirmationConfirmedMetricName, confirm13ChainLabel(chainID)); got != 0 {
+		t.Fatalf("%s after drift = %v, want 0 (zero commits)", metrics.ConfirmationConfirmedMetricName, got)
+	}
+	rejected := map[string]string{"chain": strconv.FormatInt(chainID, 10), "result": "rejected"}
+	if got := confirm13Counter(t, m, metrics.ConfirmationTransitionMetricName, rejected); got != 1 {
+		t.Fatalf("%s{rejected} after drift = %v, want 1", metrics.ConfirmationTransitionMetricName, got)
+	}
+
+	// Coordinator fan-out: the drift error from the confirmation loop stops
+	// the whole process (coordinator.go serveStreams: any loop's stop error
+	// cancels every loop and is returned; serve maps non-nil to exit 1).
+	block := func(c context.Context, _ func() error) error {
+		<-c.Done()
+		return nil
+	}
+	confirmServe := func(loopCtx context.Context, checkLost func() error) error {
+		return sc.ServeLoop(loopCtx, lease, checkLost)
+	}
+	if err := RunQuatro(ctx, &fakeLease{}, block, block, block, confirmServe); err == nil {
+		t.Fatal("RunQuatro() = nil, want the drift error (process-failing fan-out)")
+	} else {
+		var mismatch *confirmationConfigMismatchError
+		if !errors.As(err, &mismatch) {
+			t.Fatalf("RunQuatro() = %v (%T), want *confirmationConfigMismatchError", err, err)
+		}
+	}
+}
+
+// TestConfirmationSwitchWritesZeroPauseRows is T027(b): the authorized switch
+// creates, deletes and clears zero pause rows — all three pause tables are
+// unchanged across it. The policy assertion (exactly one appended row) proves
+// the switch really landed, so the invariance is not vacuous.
+func TestConfirmationSwitchWritesZeroPauseRows(t *testing.T) {
+	dsn := startIndexerPostgres(t)
+	pool := openIndexerPool(t, dsn)
+	defer pool.Close()
+	ctx := context.Background()
+
+	const chainID, h, tip = int64(31353), uint64(100), uint64(109)
+	depositSeedCanonical(t, ctx, pool, chainID, h, tip, true)
+	bh, txHash := confirmSeedPending(t, ctx, pool, chainID, h)
+	confirmSeedPolicyRow(t, ctx, pool, chainID, 1, 10, nil, "bootstrap", nil)
+
+	tables := []string{"deposit_pause", "indexer_pause", "log_pause"}
+	before := make(map[string]int, len(tables))
+	for _, table := range tables {
+		before[table] = depositCountRows(t, ctx, pool, table, chainID)
+	}
+
+	confirm27Switch(t, ctx, pool, chainID, 25)
+
+	for _, table := range tables {
+		got := depositCountRows(t, ctx, pool, table, chainID)
+		if got != before[table] {
+			t.Fatalf("%s rows changed %d -> %d across the switch, want unchanged (zero created/deleted/cleared)",
+				table, before[table], got)
+		}
+		if got != 0 {
+			t.Fatalf("%s rows = %d, want 0 (switch writes zero pause rows)", table, got)
+		}
+	}
+	if k := depositCountRows(t, ctx, pool, "confirmation_policy_history", chainID); k != 2 {
+		t.Fatalf("confirmation_policy_history rows = %d, want 2 (switch landed exactly one row)", k)
+	}
+	confirmAssertZeroWrite(t, ctx, pool, chainID, bh, txHash, 2)
+}
+
+// TestConfirmationRestartNewNResumes is T027(c): after the authorized 10->25
+// switch, a restart with the new N (fresh scanner, N=25) recovers
+// confirmation — the pending eligible under the new threshold converts with
+// the new basis (threshold 25, seq 2), while the pending below the new
+// threshold stays pending. No T025 cycle or T015 matrix is re-tested here.
+func TestConfirmationRestartNewNResumes(t *testing.T) {
+	dsn := startIndexerPostgres(t)
+	pool := openIndexerPool(t, dsn)
+	defer pool.Close()
+	ctx := context.Background()
+
+	const chainID, h1, h2, tip, oldN, newN = int64(31354), uint64(100), uint64(125), uint64(130), uint64(10), uint64(25)
+	depositSeedCanonical(t, ctx, pool, chainID, h1, tip, true)
+	bh1, txHash1 := confirmSeedPending(t, ctx, pool, chainID, h1)
+	bh2, txHash2 := depositBlockHash(h2), depositTxHash(h2, 0)
+	depositSeedObservation(t, ctx, pool, chainID, h2, bh2, txHash2, 0, "1", 1)
+	confirmSeedPolicyRow(t, ctx, pool, chainID, 1, int64(oldN), nil, "bootstrap", nil)
+
+	// Scanner + lease before the switch (T025 shape); the restart only swaps
+	// the frozen N, the lease handle survives the switch untouched.
+	m := metrics.New(func() bool { return true })
+	sc, lease := confirm13Scanner(t, pool, chainID, newN, m)
+	confirm27Switch(t, ctx, pool, chainID, int64(newN))
+	stop := confirm13RunLoop(t, ctx, sc, lease)
+
+	// h1 sits at 31 confirmations (>= 25): poll until it converts. h2 sits
+	// at 6 (< 25) and must stay pending.
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		var status string
+		if err := pool.QueryRow(ctx, `
+SELECT status FROM deposit_observations
+WHERE chain_id = $1 AND block_hash = $2 AND tx_hash = $3 AND log_index = 0`,
+			chainID, bh1, txHash1).Scan(&status); err != nil {
+			t.Fatalf("poll h1 status: %v", err)
+		}
+		if status == "confirmed" {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("h1 status = %s after 10s under new N, want confirmed (resume made no progress)", status)
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	stop()
+	if got := sc.ConfirmationState(); got == 3 {
+		t.Fatal("new-N ConfirmationState() = 3 (stopped); the restart must not drift-stop on its own policy")
+	}
+
+	status1, nullAt1, tipN1, thr1, seq1, gotTipHash1, conf1 :=
+		confirmReadBasis(t, ctx, pool, chainID, bh1, txHash1)
+	if status1 != "confirmed" || nullAt1 {
+		t.Fatalf("h1 status=%s nullAt=%v, want confirmed/non-null confirmed_at", status1, nullAt1)
+	}
+	if tipN1 != int64(tip) || gotTipHash1 != depositBlockHash(tip) || thr1 != int64(newN) || seq1 != 2 || conf1 != "31" {
+		t.Fatalf("h1 basis = tip(%d %s) N=%d conf=%s seq=%d, want tip(%d %s) N=25 conf=31 seq=2",
+			tipN1, gotTipHash1, thr1, conf1, seq1, tip, depositBlockHash(tip))
+	}
+	status2, _, _, _, _, _, _ :=
+		confirmReadBasis(t, ctx, pool, chainID, bh2, txHash2)
+	if status2 != "pending" {
+		t.Fatalf("h2 status=%s, want pending (6 confirmations < new N=25)", status2)
+	}
+	if got := confirm13Counter(t, m, metrics.ConfirmationConfirmedMetricName, confirm13ChainLabel(chainID)); got != 1 {
+		t.Fatalf("%s after resume = %v, want 1 (exactly the eligible pending)", metrics.ConfirmationConfirmedMetricName, got)
+	}
+	if k := depositCountRows(t, ctx, pool, "confirmation_policy_history", chainID); k != 2 {
+		t.Fatalf("confirmation_policy_history rows = %d, want 2 (resume writes no policy row)", k)
+	}
+}
+
 // T023 [US4] no-rewrite regression (FR-05/I2, data-model Table 1 immutability
 // mechanism, US4-1 no-rewrite side, SC-08; quickstart D2/D5 behavioral half):
 // a confirmed row rejects every rewrite attempt with zero rows affected and

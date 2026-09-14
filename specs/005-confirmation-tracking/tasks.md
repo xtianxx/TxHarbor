@@ -203,7 +203,7 @@ T000-L / T000-P 见上（本阶段即二者建档）。**Checkpoint**: 门禁状
     `confirmed_at`/依据字节一致；`TestConfirmationIntegritySpotCheckSQL` 契约完整性 SQL 断言；grep 半侧复用 5d43e98 门禁+探针证据）。
     本任务全部完成条件满足，已勾选。
 
-- [ ] T033 [US4] 异配置首次竞争合法性（`internal/indexer/confirmation_race_integration_test.go` 增补）
+- [x] T033 [US4] 异配置首次竞争合法性（`internal/indexer/confirmation_race_integration_test.go` 增补）
   - 需求：FR-03/FR-08（Q2 单有效策略），data-model §首确认协议（分歧双首启）。验收场景：US4 并发类扩展、US5-5（漂移侧）。
     依赖：T026（同文件顺序追加，不可并行）。
   - 内容：双实例异 env N、零策略行同时启动→断言恰好一行 bootstrap（胜者 N 落定）；败者明确漂移错误停止、
@@ -212,6 +212,8 @@ T000-L / T000-P 见上（本阶段即二者建档）。**Checkpoint**: 门禁状
   - 暂缓记录（Batch D 范围核对）：依赖 T026（Batch E 文件 `confirmation_race_integration_test.go` 新建者）仍然存在，
     无解除依据；本次仅执行 T021–T023，T033 待 T026 落地后执行，不删除依赖、不提前启动 Batch E。
     Batch D 在 T033 关闭前不得宣称全部完成。
+  - 闭合记录（Batch E）：T026 已落地，依赖满足；T033 双顺序异配置首启验证 5/5 绿（恰好一行 bootstrap、败者精确漂移错误零转换、
+    胜者 seq 一致），本任务已勾选；Batch D 剩余项至此闭合。
 
 **Checkpoint**: US4 独立可测：任何重复/并发/崩溃下首次事实不变
 
@@ -223,30 +225,30 @@ T000-L / T000-P 见上（本阶段即二者建档）。**Checkpoint**: 门禁状
 
 **Independent Test**: 竞争注入 + 切换全周期集成全绿（quickstart D3/D4）
 
-- [ ] T024 [US5] 授权切换事务（`internal/indexer/confirmauth.go` 新建）
+- [x] T024 [US5] 授权切换事务（`internal/indexer/confirmauth.go` 新建）
   - 需求：FR-03（Q2），data-model §授权切换协议。验收场景：US5-4/5（入口侧）。依赖：T001、T010（策略读/守卫形态）。
   - 内容：DB 操作员直连 SQL 入口（无端点/服务/角色新增；载体沿用 004 T024 决议"受控 SQL 脚本"，
     见 `specs/004-deposit-detection/tasks.md:91`，本任务不重做选型）；锁内重验（max seq==expected_old_seq、新值合法且不同、有源版本）；
     单行 INSERT；request_id 同参返原/异参拒绝/未绑定重试；丢失响应重读定性；切换零暂停行写入（断言）。
   - 完成条件：守卫逐项有测试（单测或轻量 pg）；旁路不存在（入口唯一性审查）。
-- [ ] T025 [US5] 切换全周期集成 D4（`internal/indexer/confirmation_auth_integration_test.go` 新建）
+- [x] T025 [US5] 切换全周期集成 D4（`internal/indexer/confirmation_auth_integration_test.go` 新建）
   - 需求：FR-03，SC-10。验收场景：US2-4、US5-4、quickstart D4。依赖：T024。
   - 内容：降低重判全纳入（含切换点前 Pending，降低不批量直确；切换后以**小批量 LIMIT 多 tick 复核**既有 Pending 全纳入，
     无游标跳过）；提高不改写 Confirmed 且可追溯当时阈值；
     未授权漂移拒绝零破坏；切换失败无新行；未知结果 request_id 定性。
   - 完成条件：5 次固定批次全绿；小批量复核覆盖有断言。
-- [ ] T026 [P] [US5] 竞争注入：暂停/链视图/切换 mid-flight（`internal/indexer/confirmation_race_integration_test.go` 新建）
+- [x] T026 [P] [US5] 竞争注入：暂停/链视图/切换 mid-flight（`internal/indexer/confirmation_race_integration_test.go` 新建）
   - 需求：FR-06/07/08，SC-03/07。验收场景：US5-1、quickstart D3。依赖：T010、T024（与 T025 文件不同可并行）。
   - 内容：经**独立第二数据库连接**、以锁等待为同步点（禁固定 sleep 定时）注入三竞争，
     覆盖两种合法线性化顺序：(a) 竞争方先提交（暂停行/新 tip/新策略行落地）→确认方后获锁→重读失配回滚；
     (b) 确认方先持锁→竞争方阻塞→确认方按旧快照合法提交→竞争方继续。三竞争下旧结果提交成功率均为 0
     （`transition_total{stale}` +1，零状态变化）；时序覆盖 data-model 三情形。
   - 完成条件：5 次固定批次全绿；两种顺序各有断言；sleep 定时零使用（审查门）。
-- [ ] T027 [US5] 漂移退出与重启恢复（`internal/indexer/confirmation_integration_test.go` 增补）
+- [x] T027 [US5] 漂移退出与重启恢复（`internal/indexer/confirmation_integration_test.go` 增补）
   - 需求：FR-03/08（R7），SC-07。验收场景：US5-5、quickstart D4（恢复侧）。依赖：T024（同文件接 T023 顺序追加）。
   - 内容：旧 N 进程切换后漂移非零退出；断言切换未创建/删除/清除任何暂停行；新 N 重启恢复确认。
   - 完成条件：退出码与暂停行不变双断言绿。
-- [ ] T028 [US5] 审计追溯断言（`internal/indexer/confirmation_auth_integration_test.go` 增补）
+- [x] T028 [US5] 审计追溯断言（`internal/indexer/confirmation_auth_integration_test.go` 增补）
   - 需求：FR-09/11，SC-09。验收场景：US5-2/3。依赖：T025（同文件顺序追加）。
   - 内容：追溯 SQL 定位充值/区块/依据/时间；错误输出零凭据 + 零无限制转储（日志采样断言）；
     `policy_transition_total` 计数对照。
