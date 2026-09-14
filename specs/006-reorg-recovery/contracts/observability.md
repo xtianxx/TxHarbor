@@ -42,3 +42,32 @@ Every affected-range answer carries `(recovery_state, validity)`:
 `detail`/evidence columns: `recovery=<id> phase=<phase> range=<a-b> old_tip=<h:hash>
 ancestor=<h:hash> policy=<seq> version=<seq>` plus kind-specific refs. Key-value fragments,
 same shape as 003 `detail.class` / 004 pause detail conventions.
+
+## Runbook (T032)
+
+- `txharbor_reorg_active == 1` → zero-advance on 002/003/004/005 is expected
+  (pause-gated recovery), **non-paging**. Do not page on stopped
+  002/003/004/005 scanners while active.
+- `txharbor_reorg_reconcile_required == 1` → human attention. Paging follows
+  operator policy; it is NOT automatic.
+- `txharbor_reorg_depth > txharbor_reorg_bound` → alert (the alert rule lives
+  here in the runbook; the two gauges carry depth and bound separately).
+- Series mapping (contract → exposition, `txharbor_` prefix per repo shape):
+
+  | Contract identity | Exposition name |
+  |---|---|
+  | `reorg_active` | `txharbor_reorg_active` |
+  | `reorg_depth_vs_bound` | `txharbor_reorg_depth` + `txharbor_reorg_bound` |
+  | `reorg_frontier_lag` | `txharbor_reorg_frontier_lag` |
+  | `reorg_orphaned_total` | `txharbor_reorg_orphaned_total` |
+  | `reorg_revived_total` | `txharbor_reorg_revived_total` |
+  | `reorg_reconcile_required` | `txharbor_reorg_reconcile_required` |
+  | `reorg_evidence_wait_total` | `txharbor_reorg_evidence_wait_total` |
+
+- Redaction boundary (SC-12): heights/hashes/ranges/versions are retained in
+  metric Help strings and diagnostic detail; secrets/credentials/raw unbounded
+  responses are never emitted (funnel: `logx.Redact`).
+- Wiring note: the metrics surface + contract ship first. The recovery loop
+  (`RecoveryExecutor` in `internal/indexer/reorg.go`) receives no
+  `*metrics.Metrics` today, so loop wiring is unwired by design here — a
+  007-era concern, and only with zero constructor churn.

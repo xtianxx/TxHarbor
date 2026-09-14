@@ -46,6 +46,15 @@ const (
 	ConfirmationSkippedMetricName          = "txharbor_confirmation_skipped_total"
 	ConfirmationTransitionMetricName       = "txharbor_confirmation_transition_total"
 	ConfirmationPolicyTransitionMetricName = "txharbor_confirmation_policy_transition_total"
+
+	ReorgActiveMetricName       = "txharbor_reorg_active"
+	ReorgDepthMetricName        = "txharbor_reorg_depth"
+	ReorgBoundMetricName        = "txharbor_reorg_bound"
+	ReorgFrontierLagMetricName  = "txharbor_reorg_frontier_lag"
+	ReorgOrphanedMetricName     = "txharbor_reorg_orphaned_total"
+	ReorgRevivedMetricName      = "txharbor_reorg_revived_total"
+	ReorgReconcileMetricName    = "txharbor_reorg_reconcile_required"
+	ReorgEvidenceWaitMetricName = "txharbor_reorg_evidence_wait_total"
 )
 
 // Metrics owns a private registry so multiple instances (tests, restarts of
@@ -78,6 +87,26 @@ type Metrics struct {
 	confirmationSkipped          *prometheus.CounterVec
 	confirmationTransition       *prometheus.CounterVec
 	confirmationPolicyTransition *prometheus.CounterVec
+
+	// 006 reorg recovery surface (specs/006-reorg-recovery/contracts/
+	// observability.md). Contract-name -> exposition-name mapping:
+	//   reorg_active            -> txharbor_reorg_active
+	//   reorg_depth_vs_bound    -> txharbor_reorg_depth + txharbor_reorg_bound
+	//                              (two gauges; the depth>bound alert lives in
+	//                              the runbook, not in code)
+	//   reorg_frontier_lag      -> txharbor_reorg_frontier_lag
+	//   reorg_orphaned_total    -> txharbor_reorg_orphaned_total
+	//   reorg_revived_total     -> txharbor_reorg_revived_total
+	//   reorg_reconcile_required -> txharbor_reorg_reconcile_required
+	//   reorg_evidence_wait_total -> txharbor_reorg_evidence_wait_total
+	reorgActive       *prometheus.GaugeVec
+	reorgDepth        *prometheus.GaugeVec
+	reorgBound        *prometheus.GaugeVec
+	reorgFrontierLag  *prometheus.GaugeVec
+	reorgOrphaned     *prometheus.CounterVec
+	reorgRevived      *prometheus.CounterVec
+	reorgReconcile    *prometheus.GaugeVec
+	reorgEvidenceWait *prometheus.CounterVec
 
 	handler http.Handler
 }
@@ -221,12 +250,63 @@ func New(ready func() bool) *Metrics {
 		Help: "Authorised confirmation policy transitions per chain; details live in confirmation_policy_history.",
 	}, []string{"chain", "result"})
 
+	reorgActive := prometheus.NewGaugeVec(prometheus.GaugeOpts{
+		Name: ReorgActiveMetricName,
+		Help: "Reorg recovery active per chain: 1 while a recovery row exists, else 0.",
+	}, []string{"chain"})
+
+	reorgDepth := prometheus.NewGaugeVec(prometheus.GaugeOpts{
+		Name: ReorgDepthMetricName,
+		Help: "Reorg recovery depth per chain; alert when depth exceeds txharbor_reorg_bound (see runbook).",
+	}, []string{"chain"})
+
+	reorgBound := prometheus.NewGaugeVec(prometheus.GaugeOpts{
+		Name: ReorgBoundMetricName,
+		Help: "Reorg recovery bound per chain; alert when txharbor_reorg_depth exceeds bound (see runbook).",
+	}, []string{"chain"})
+
+	reorgFrontierLag := prometheus.NewGaugeVec(prometheus.GaugeOpts{
+		Name: ReorgFrontierLagMetricName,
+		Help: "Reorg frontier lag per chain and stream (block|log|deposit): swept_end minus frontier; absent while progress is empty.",
+	}, []string{"chain", "stream"})
+
+	reorgOrphaned := prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: ReorgOrphanedMetricName,
+		Help: "Reorg orphaned observations per chain; monotonic conversion counter.",
+	}, []string{"chain"})
+
+	reorgRevived := prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: ReorgRevivedMetricName,
+		Help: "Reorg revived observations per chain; monotonic conversion counter.",
+	}, []string{"chain"})
+
+	reorgReconcile := prometheus.NewGaugeVec(prometheus.GaugeOpts{
+		Name: ReorgReconcileMetricName,
+		Help: "Reorg reconcile required per chain: 1 while phase is reconcile_required, else 0.",
+	}, []string{"chain"})
+
+	// Evidence-wait class values are the executor's own cause classes
+	// (observed in internal/indexer/reorg.go chainBlock via eth.KindOf plus
+	// the hold/terminal paths, and internal/indexer/reorgcommit.go reconcile
+	// causes): transport, timeout, rate-limited, invalid-response (parse),
+	// chain-mismatch/contradictory, insufficient (hold), and the terminal
+	// reconcile causes over_depth, below_scan_start, local_exhausted,
+	// over-deep, ancestor-unobtainable, exhausted history. No new taxonomy
+	// is introduced here; class is a pass-through label like other result
+	// labels in this file.
+	reorgEvidenceWait := prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: ReorgEvidenceWaitMetricName,
+		Help: "Reorg evidence-insufficient waits per chain by executor cause class; never invalidates.",
+	}, []string{"chain", "class"})
+
 	registry.MustRegister(readyGauge, probeTotal,
 		indexerHeight, indexerState, indexerRPC, indexerPause,
 		logNext, logLag, logState, logRPC, logPause,
 		depositNext, depositLag, depositState, depositObservations, depositPause, depositTransition,
 		confirmationPending, confirmationLag, confirmationState, confirmationPolicySeq,
-		confirmationConfirmed, confirmationSkipped, confirmationTransition, confirmationPolicyTransition)
+		confirmationConfirmed, confirmationSkipped, confirmationTransition, confirmationPolicyTransition,
+		reorgActive, reorgDepth, reorgBound, reorgFrontierLag,
+		reorgOrphaned, reorgRevived, reorgReconcile, reorgEvidenceWait)
 	return &Metrics{
 		registry:                     registry,
 		probeTotal:                   probeTotal,
@@ -253,6 +333,14 @@ func New(ready func() bool) *Metrics {
 		confirmationSkipped:          confirmationSkipped,
 		confirmationTransition:       confirmationTransition,
 		confirmationPolicyTransition: confirmationPolicyTransition,
+		reorgActive:                  reorgActive,
+		reorgDepth:                   reorgDepth,
+		reorgBound:                   reorgBound,
+		reorgFrontierLag:             reorgFrontierLag,
+		reorgOrphaned:                reorgOrphaned,
+		reorgRevived:                 reorgRevived,
+		reorgReconcile:               reorgReconcile,
+		reorgEvidenceWait:            reorgEvidenceWait,
 		handler:                      promhttp.HandlerFor(registry, promhttp.HandlerOpts{}),
 	}
 }
@@ -449,6 +537,60 @@ func (m *Metrics) ObserveConfirmationTransition(chain int64, result string) {
 // the confirmation_policy_history rows, not in this counter.
 func (m *Metrics) ObserveConfirmationPolicyTransition(chain int64, result string) {
 	m.confirmationPolicyTransition.WithLabelValues(chainLabel(chain), result).Inc()
+}
+
+// ObserveReorgActive records whether a recovery row exists for chain: 1 while
+// present, else 0 (specs/006-reorg-recovery/contracts/observability.md).
+func (m *Metrics) ObserveReorgActive(chain int64, active bool) {
+	if !active {
+		m.reorgActive.WithLabelValues(chainLabel(chain)).Set(0)
+		return
+	}
+	m.reorgActive.WithLabelValues(chainLabel(chain)).Set(1)
+}
+
+// ObserveReorgDepthBound records the computed depth and bound for chain. The
+// depth>bound alert lives in the runbook, not in code.
+func (m *Metrics) ObserveReorgDepthBound(chain int64, depth, bound int64) {
+	m.reorgDepth.WithLabelValues(chainLabel(chain)).Set(float64(depth))
+	m.reorgBound.WithLabelValues(chainLabel(chain)).Set(float64(bound))
+}
+
+// ObserveReorgFrontierLag records swept_end minus frontier for chain and
+// stream (block|log|deposit). ok=false means empty progress: the series is
+// removed rather than zeroed.
+func (m *Metrics) ObserveReorgFrontierLag(chain int64, stream string, lag uint64, ok bool) {
+	if !ok {
+		m.reorgFrontierLag.DeleteLabelValues(chainLabel(chain), stream)
+		return
+	}
+	m.reorgFrontierLag.WithLabelValues(chainLabel(chain), stream).Set(float64(lag))
+}
+
+// ObserveReorgOrphaned counts one orphaned observation conversion for chain.
+func (m *Metrics) ObserveReorgOrphaned(chain int64) {
+	m.reorgOrphaned.WithLabelValues(chainLabel(chain)).Inc()
+}
+
+// ObserveReorgRevived counts one revived observation conversion for chain.
+func (m *Metrics) ObserveReorgRevived(chain int64) {
+	m.reorgRevived.WithLabelValues(chainLabel(chain)).Inc()
+}
+
+// ObserveReorgReconcile records whether chain sits in reconcile_required: 1
+// while held, else 0.
+func (m *Metrics) ObserveReorgReconcile(chain int64, required bool) {
+	if !required {
+		m.reorgReconcile.WithLabelValues(chainLabel(chain)).Set(0)
+		return
+	}
+	m.reorgReconcile.WithLabelValues(chainLabel(chain)).Set(1)
+}
+
+// ObserveReorgEvidenceWait counts one evidence-insufficient wait for chain by
+// executor cause class (see the reorgEvidenceWait comment at construction).
+func (m *Metrics) ObserveReorgEvidenceWait(chain int64, class string) {
+	m.reorgEvidenceWait.WithLabelValues(chainLabel(chain), class).Inc()
 }
 
 // Deposit log events and their frozen structured field lists

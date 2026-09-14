@@ -55,3 +55,31 @@ response loss: assert re-read-to-triage outcome matches persisted state in all t
 
 All assertions green at its level; the 100%/zero-count criteria from SC-01–SC-12 apply
 as mapped above — any deviation is a failure, not a note.
+
+## Execution Log (opened by T036 — this task CREATES the record, it is NOT a pass claim)
+
+V12 completed with the T034 full run (see V12 row). Production
+readiness (T000-P) stays open — nothing here claims it. The T002 gate (`451c7f9`,
+PR #7 checks + main run 34805751040) verified 005 evidence and belongs to 005,
+not 006 — it is not a 006 validation result. Results below are local branch runs
+only; no remote-CI 006 run is claimed. Durations were not recorded per scenario
+in the batch reports, so duration reads "not recorded" throughout.
+
+| Scenario | Level | Command | Commit / workspace | Scope | Result |
+|----------|-------|---------|--------------------|-------|--------|
+| V1 | U | `make test` | `b43bfe3` (Batch B), branch `006-reorg-recovery` | `internal/indexer/reorgpolicy_test.go` (T018: bound-ancestor math, closed bound, MaxInt64 tip, config refusal) | PASS, duration not recorded |
+| V2 | I | `make test-integration` | `b43bfe3` (Batch B) + follow-up `6a6fbc4` (B1/B3/B4: required capture, assembly fail-loud, serve wiring) | `internal/indexer/reorgcommit_test.go` (T019: per-txn guard matrix + seq-exhaustion snapshot) on real PG | PASS, duration not recorded |
+| V3 | E | `make test-integration` | `5eb6552` (Batch C) | `reorg_recovery_integration_test.go` (T020 US1 close-loop: pause, Orphaned conversion, replay, reconfirm, SC-01) | PASS, duration not recorded |
+| V4-shape | E | `make test-integration` | `5eb6552` (Batch C) | `reorg_recovery_integration_test.go` (T022: empty / new-deposit / re-mined index+content / re-canonicalized same-hash; SC-02) | PASS, duration not recorded |
+| V4-tail | I | `make test-integration` | `5eb6552` (Batch C) | `reorgcommit_test.go` (T023 bulk-orphan: status filter, one-tick halt, zero structural stall) | PASS, duration not recorded |
+| V5 | E | `make test-integration` | `5eb6552` (Batch C) | `reorg_recovery_integration_test.go` (T024: skew rollback, start floors, empty-range advance; SC-03) | PASS, duration not recorded |
+| V6 | I+E | `make test-integration` | `6aa8140` (Batch D) | `reorgcommit_test.go` + Anvil delay run (T025 converge SC-04; T026 stale-worker + demanded interleaving REFUSED on version alone, SC-05) | PASS, duration not recorded |
+| V7-race | I | `make test-integration` | `6aa8140` (Batch D) | `reorgcommit_test.go` (T027 confirm/policy version races, post-establish + post-switch old results 0%; SC-06) | PASS, duration not recorded |
+| V7-crash | I+E | `make test-integration` | `6aa8140` (Batch D) | `reorg_recovery_integration_test.go` (T028 phase-pair crash drill: exactly-once release, monotonic frontiers, 3-way commit-response triage; SC-07) | PASS, duration not recorded |
+| V8 | E | `make test-integration` | `6aa8140` (Batch D) | `reorg_recovery_integration_test.go` (T028 re-fork mid-replay: no false release, ancestor re-validation; SC-08) | PASS, duration not recorded |
+| V9 | E | `make test-integration` | `6aa8140` (Batch D) | `reorg_recovery_integration_test.go` (T029 bound / bound+1 / unobtainable ancestor; SC-09) | PASS, duration not recorded |
+| V10 | E | `make test-integration` | `6aa8140` (Batch D) | `reorg_recovery_integration_test.go` (T029 dead/lagging/contradictory RPC: zero revocations, zero releases; SC-10) | PASS, duration not recorded |
+| V11-auth | I | `make test-integration` | `6aa8140` (Batch D) | `reorgcommit_test.go` (T030 two-step manual auth, forged attempts refused; SC-11) | PASS, duration not recorded |
+| V11-coexist | I | `make test-integration` | `6aa8140` (Batch D) | `reorgcommit_test.go` (T031 pause coexistence + tamper backstop; SC-10/11) | PASS, duration not recorded |
+| V12 | I | `make test`, `make test-integration` | Batch E T034 full run on branch `006-reorg-recovery` (workspace at Batch E commit; see T034 evidence below) | full 002–005 suites on migrated DB + T035 audit cross-check (SC-12) | PASS — `make test`: 8 pkgs ok, 0 FAIL; `make test-integration` (`go test -tags integration -count=1 -timeout 20m ./...`): all pkgs ok (indexer ~775s, db ~82s, health ~16s, app ~32s), EXIT=0. First full run exposed 3 stale-test failures (not product regressions): 2× 005-era db migration tests vs approved 000006 deltas + 1× 005-era health fixture missing required `TXHARBOR_REORG_MAX_DEPTH`; all fixed test-side, then full green. 005 data/meaning intact; every conversion traceable via T035 |
+| Resume drill | E | `make test-integration` | `5eb6552` (T021 spot) + `6aa8140` (T028 full) | T021 proved kill-9-between-US1-phases resume + one lost-response re-read triage; T028 proved kill-9 between EVERY phase pair (exactly-once release, monotonic frontiers) + all three commit-response outcomes (committed / uncommitted / unknown-at-crash) | PASS (spot + full as stated; full E2E drill via T028), duration not recorded |

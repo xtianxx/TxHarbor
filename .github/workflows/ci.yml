@@ -4,6 +4,15 @@
 # steps by design.
 #
 # Local and CI share the same entry points: every job runs a Makefile target.
+#
+# 006 reorg-recovery validation order (T036, pinned quickstart entries, no new
+# make target): U (`make test`, incl. race) -> I/E (`make test-integration`,
+# Docker daemon, testcontainers self-provision postgres:18 + Anvil foundry
+# chain-31337). Fault injection rides the same entry as test capabilities, not
+# new infra: kill -9 at phase points, proxy RPC faults, DB-now() clock
+# control, dual-executor launch, delayed worker release. Scenario order:
+# V1 (U) -> V2 (I) -> V3/V4/V5/V6/V7/V8/V9/V10/V11 (I/E) -> V12 full
+# regression (pending T034). The `needs` pin below wires U before I/E.
 name: CI
 
 on:
@@ -72,6 +81,8 @@ jobs:
     name: integration tests (Docker)
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    # 006 order wire (T036): I/E runs only after U is green.
+    needs: [lint, build, unit]
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-go@v7

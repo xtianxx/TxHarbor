@@ -1847,3 +1847,363 @@ WHERE chain_id = $1 AND event = 'released'`, chainID).Scan(&terminal); err != ni
 	}
 	snapC.assertEqual(t, reorgSnapAudit(t, ctx, pool, chainID), "surviving-pause stop")
 }
+
+// ChainID reservation: 906001-906015 taken above (mini-loop, guards,
+// depth, T023 bulk, T025-T027, T030-T031); this test owns 906016 (T035).
+
+// TestT035AuditCompleteness pins audit completeness on real PG
+// (FR-07/21/22, V12-audit, SC-12) with rowcount assertions throughout.
+func TestT035AuditCompleteness(t *testing.T) {
+	pool := reorgTestPool(t)
+	defer pool.Close()
+	ctx := context.Background()
+	const chainID = int64(906016)
+	lease := depositITLease(t, pool, chainID)
+	reorgSeedChain(t, ctx, pool, chainID, 10, 20, 10)
+	depositSeedHistory(t, ctx, pool, chainID, 1, 10, strings.Repeat("aa", 32))
+	if _, err := pool.Exec(ctx, `
+INSERT INTO deposit_checkpoint (chain_id, start_block, config_hash, next_block)
+VALUES ($1, 10, $2, 20)`, chainID, strings.Repeat("aa", 32)); err != nil {
+		t.Fatalf("seed deposit_checkpoint: %v", err)
+	}
+	oldBH16, oldTx16 := depositBlockHash(16), depositTxHash(16, 0)
+	oldBH18, oldTx18 := depositBlockHash(18), depositTxHash(18, 0)
+	keeperBH, keeperTx := depositBlockHash(14), depositTxHash(14, 0)
+	depositSeedObservation(t, ctx, pool, chainID, 16, oldBH16, oldTx16, 0, "50", 1)
+	depositSeedObservation(t, ctx, pool, chainID, 18, oldBH18, oldTx18, 0, "51", 1)
+	depositSeedObservation(t, ctx, pool, chainID, 14, keeperBH, keeperTx, 0, "7", 1)
+	depositSeedSourceRow(t, ctx, pool, chainID, 16, oldBH16, oldTx16, 0)
+
+	// One ex-Confirmed observation via the real committer (N=4, tip 20).
+	c, err := NewConfirmationCommitter(pool, ConfirmationConfig{ChainID: chainID, ThresholdN: 4})
+	if err != nil {
+		t.Fatalf("NewConfirmationCommitter(): %v", err)
+	}
+	rcap0 := testRecoveryCap(t, ctx, pool, chainID)
+	if err := c.ConfirmDepositUnit(ctx, lease, ConfirmBasis{
+		BlockHash: oldBH16, TxHash: oldTx16, LogIndex: 0, Height: 16,
+		TipNumber: 20, TipHash: depositBlockHash(20), PolicySeq: 1, ThresholdN: 4,
+	}, rcap0); err != nil {
+		t.Fatalf("seed ex-confirmed confirm: %v", err)
+	}
+	status, nullAt, tipN, thr, seq, gotTip, conf := confirmReadBasis(t, ctx, pool, chainID, oldBH16, oldTx16)
+	if status != "confirmed" || nullAt || tipN != 20 || gotTip != depositBlockHash(20) || thr != 4 || seq != 1 || conf != "5" {
+		t.Fatalf("old basis = (%s null=%v tip %d %s N=%d conf=%s seq=%d), want confirmed tip(20 %s) N=4 conf=5 seq=1",
+			status, nullAt, tipN, gotTip, thr, conf, seq, depositBlockHash(20))
+	}
+
+	// ---- Cycle 1: invalidate -> same-hash revive at 16 -> new-hash replay
+	// 17..20 linked onto restored 16 -> release.
+	res1 := reorgEstablishOne(t, ctx, pool, lease, chainID, 20)
+	rec1 := res1.RecoveryID
+	owned1 := RecoveryCapture{Seq: res1.Seq, Owned: &RecoveryOwned{RecoveryID: rec1}}
+	if err := ConfirmRecoveryAncestor(ctx, pool, lease, chainID, owned1, 15, depositBlockHash(15), "t035-c1"); err != nil {
+		t.Fatalf("c1 confirm ancestor: %v", err)
+	}
+	from, to, flipped, err := InvalidateRecoveryBlocks(ctx, pool, lease, chainID, owned1)
+	if err != nil {
+		t.Fatalf("c1 invalidate blocks: %v", err)
+	}
+	if from != 16 || to != 20 || flipped != 5 {
+		t.Fatalf("c1 sweep = [%d,%d] flipped %d; want [16,20] x5", from, to, flipped)
+	}
+	orphaned, err := InvalidateRecoveryObservations(ctx, pool, lease, chainID, owned1)
+	if err != nil {
+		t.Fatalf("c1 invalidate observations: %v", err)
+	}
+	if orphaned != 2 {
+		t.Fatalf("c1 orphaned = %d, want 2 (ex-confirmed 16 + pending 18)", orphaned)
+	}
+	var keeperStatus string
+	if err := pool.QueryRow(ctx, `SELECT status FROM deposit_observations
+WHERE chain_id = $1 AND block_hash = $2`, chainID, keeperBH).Scan(&keeperStatus); err != nil {
+		t.Fatalf("read keeper: %v", err)
+	}
+	if keeperStatus != "pending" {
+		t.Fatalf("keeper = %s, want pending (ancestor-side untouched)", keeperStatus)
+	}
+	// Both conversions audited under rec1 with old source identity + old basis.
+	var c1trans int64
+	if err := pool.QueryRow(ctx, `SELECT COUNT(*) FROM deposit_observation_transitions
+WHERE chain_id = $1 AND recovery_id = $2`, chainID, rec1).Scan(&c1trans); err != nil {
+		t.Fatalf("count c1 transitions: %v", err)
+	}
+	if c1trans != 2 {
+		t.Fatalf("c1 transitions = %d, want 2", c1trans)
+	}
+	var fromSt16, snap16 string
+	if err := pool.QueryRow(ctx, `SELECT from_status, basis_snapshot FROM deposit_observation_transitions
+WHERE chain_id = $1 AND block_hash = $2 AND recovery_id = $3`, chainID, oldBH16, rec1).Scan(&fromSt16, &snap16); err != nil {
+		t.Fatalf("read c1 h16 transition: %v", err)
+	}
+	if fromSt16 != "confirmed" || !strings.Contains(snap16, depositBlockHash(20)) {
+		t.Fatalf("c1 h16 transition = (%s %q), want (confirmed + old tip %s)", fromSt16, snap16, depositBlockHash(20))
+	}
+	for _, stream := range []RecoveryStream{RecoveryStreamBlock, RecoveryStreamLog, RecoveryStreamDeposit} {
+		if _, _, err := RollbackRecoveryCheckpoint(ctx, pool, lease, chainID, owned1, stream); err != nil {
+			t.Fatalf("c1 rollback %s: %v", stream, err)
+		}
+	}
+	newHash := func(n int64) string { return fmt.Sprintf("0x%064x", 0xe00e_0000+uint64(n)) }
+	// Same-hash prefix is height 16 only: new 17 links onto restored old 16.
+	newParent := func(h int64) string {
+		if h == 17 {
+			return oldBH16
+		}
+		return newHash(h - 1)
+	}
+	var blocks []ReplayBlock
+	for h := int64(17); h <= 20; h++ {
+		blocks = append(blocks, ReplayBlock{Number: h, Hash: newHash(h), ParentHash: newParent(h)})
+	}
+	var obsBefore int64
+	if err := pool.QueryRow(ctx, `SELECT COUNT(*) FROM deposit_observations WHERE chain_id = $1`, chainID).Scan(&obsBefore); err != nil {
+		t.Fatalf("count observations: %v", err)
+	}
+	if err := RecanonicalizeRecoveryBlock(ctx, pool, lease, chainID, owned1, 16, oldBH16); err != nil {
+		t.Fatalf("c1 recanonicalize 16: %v", err)
+	}
+	if err := ReviveRecoveryObservation(ctx, pool, lease, chainID, owned1, oldBH16, oldTx16, 0, "t035-same-hash"); err != nil {
+		t.Fatalf("c1 revive h16: %v", err)
+	}
+	var revStatus, revOrphan string
+	if err := pool.QueryRow(ctx, `SELECT status, COALESCE(orphan_recovery_id, '') FROM deposit_observations
+WHERE chain_id = $1 AND block_hash = $2`, chainID, oldBH16).Scan(&revStatus, &revOrphan); err != nil {
+		t.Fatalf("read revived h16: %v", err)
+	}
+	if revStatus != "pending" || revOrphan != rec1 {
+		t.Fatalf("revived h16 = (%s %s), want (pending %s)", revStatus, revOrphan, rec1)
+	}
+	var obsAfter int64
+	if err := pool.QueryRow(ctx, `SELECT COUNT(*) FROM deposit_observations WHERE chain_id = $1`, chainID).Scan(&obsAfter); err != nil {
+		t.Fatalf("recount observations: %v", err)
+	}
+	if obsAfter != obsBefore {
+		t.Fatalf("observations %d -> %d across revive, want unchanged (reuse in place)", obsBefore, obsAfter)
+	}
+	if err := ReplayRecoveryRange(ctx, pool, lease, chainID, owned1, RecoveryStreamBlock, 16, 20, blocks, nil, nil); err != nil {
+		t.Fatalf("c1 replay block [16,20]: %v", err)
+	}
+	if err := ReplayRecoveryRange(ctx, pool, lease, chainID, owned1, RecoveryStreamLog, 16, 20, nil, nil, nil); err != nil {
+		t.Fatalf("c1 replay log [16,20]: %v", err)
+	}
+	if err := ReplayRecoveryRange(ctx, pool, lease, chainID, owned1, RecoveryStreamDeposit, 16, 20, nil, nil, nil); err != nil {
+		t.Fatalf("c1 replay deposit [16,20]: %v", err)
+	}
+	var phase string
+	if err := pool.QueryRow(ctx, `SELECT phase FROM reorg_recovery WHERE chain_id = $1`, chainID).Scan(&phase); err != nil {
+		t.Fatalf("read phase: %v", err)
+	}
+	if phase != reorgPhaseCompletePending {
+		t.Fatalf("phase = %q after full replay, want complete_pending", phase)
+	}
+	if err := CompleteRecoveryVerify(ctx, pool, lease, chainID, owned1); err != nil {
+		t.Fatalf("c1 complete: %v", err)
+	}
+	if n := reorgCount(t, ctx, pool, "reorg_recovery", chainID); n != 0 {
+		t.Fatalf("recovery rows = %d after release, want 0", n)
+	}
+	var terminal string
+	if err := pool.QueryRow(ctx, `SELECT detail FROM reorg_recovery_events
+WHERE chain_id = $1 AND event = 'auto_completed'`, chainID).Scan(&terminal); err != nil {
+		t.Fatalf("read terminal event: %v", err)
+	}
+	for _, want := range []string{"orphaned=2", "revived=1", "surviving_pauses=none", "swept=16-20", "version=1"} {
+		if !strings.Contains(terminal, want) {
+			t.Fatalf("terminal detail missing %q: %q", want, terminal)
+		}
+	}
+	// 006 wrote no pause rows anywhere in the loop.
+	if got := reorgSnapAudit(t, ctx, pool, chainID); got.dpause != 0 || got.lpause != 0 || got.ipause != 0 {
+		t.Fatalf("pause rows = %+v after cycle 1, want all zero", got)
+	}
+
+	// ---- (i) every Orphaned row traces to old source + old basis + audit.
+	rows, err := pool.Query(ctx, `SELECT block_hash, tx_hash, log_index, orphan_recovery_id FROM deposit_observations
+WHERE chain_id = $1 AND status = 'orphaned'`, chainID)
+	if err != nil {
+		t.Fatalf("read orphaned rows: %v", err)
+	}
+	type orphanKey struct {
+		bh, tx string
+		idx    int64
+		rec    string
+	}
+	var orphans []orphanKey
+	for rows.Next() {
+		var o orphanKey
+		if err := rows.Scan(&o.bh, &o.tx, &o.idx, &o.rec); err != nil {
+			rows.Close()
+			t.Fatalf("scan orphan: %v", err)
+		}
+		orphans = append(orphans, o)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		t.Fatalf("iterate orphans: %v", err)
+	}
+	if len(orphans) != 1 || orphans[0].bh != oldBH18 || orphans[0].rec != rec1 {
+		t.Fatalf("orphaned rows = %+v, want exactly [(old18 %s)]", orphans, rec1)
+	}
+	for _, o := range orphans {
+		var snap, fromSt, tRec string
+		if err := pool.QueryRow(ctx, `SELECT from_status, basis_snapshot, recovery_id FROM deposit_observation_transitions
+WHERE chain_id = $1 AND block_hash = $2 AND tx_hash = $3 AND log_index = $4 AND to_status = 'orphaned'`,
+			chainID, o.bh, o.tx, o.idx).Scan(&fromSt, &snap, &tRec); err != nil {
+			t.Fatalf("orphan %s transition: %v", o.bh, err)
+		}
+		if tRec != rec1 {
+			t.Fatalf("orphan %s transition recovery = %s, want %s", o.bh, tRec, rec1)
+		}
+		var evDetail string
+		if err := pool.QueryRow(ctx, `SELECT detail FROM reorg_recovery_events
+WHERE chain_id = $1 AND recovery_id = $2 AND event = 'observations_invalidated'`, chainID, rec1).Scan(&evDetail); err != nil {
+			t.Fatalf("orphan audit event: %v", err)
+		}
+		if !strings.Contains(evDetail, "orphaned=2") {
+			t.Fatalf("orphan event detail missing orphaned=2: %q", evDetail)
+		}
+	}
+
+	// ---- (ii) revived ex-Confirmed row reconfirms on the new basis only.
+	rcapNew := testRecoveryCap(t, ctx, pool, chainID)
+	if err := c.ConfirmDepositUnit(ctx, lease, ConfirmBasis{
+		BlockHash: oldBH16, TxHash: oldTx16, LogIndex: 0, Height: 16,
+		TipNumber: 20, TipHash: newHash(20), PolicySeq: 1, ThresholdN: 4,
+	}, rcapNew); err != nil {
+		t.Fatalf("new-basis reconfirm: %v", err)
+	}
+	nStatus, nNull, nTipN, nThr, nSeq, nTipH, nConf := confirmReadBasis(t, ctx, pool, chainID, oldBH16, oldTx16)
+	if nStatus != "confirmed" || nNull || nTipN != 20 || nTipH != newHash(20) || nThr != 4 || nSeq != 1 || nConf != "5" {
+		t.Fatalf("new basis = (%s null=%v tip %d %s N=%d conf=%s seq=%d), want confirmed tip(20 %s) N=4 conf=5 seq=1",
+			nStatus, nNull, nTipN, nTipH, nThr, nConf, nSeq, newHash(20))
+	}
+	if nTipH == depositBlockHash(20) {
+		t.Fatalf("new confirm tip = old tip hash (must be the new-chain hash)")
+	}
+	var oldTipConfirms int64
+	if err := pool.QueryRow(ctx, `SELECT COUNT(*) FROM deposit_observations
+WHERE chain_id = $1 AND status = 'confirmed' AND confirm_tip_hash = $2`, chainID, depositBlockHash(20)).Scan(&oldTipConfirms); err != nil {
+		t.Fatalf("count old-tip confirms: %v", err)
+	}
+	if oldTipConfirms != 0 {
+		t.Fatalf("confirmed rows on old tip = %d, want 0 (old basis lives only in transition snapshots)", oldTipConfirms)
+	}
+
+	// ---- (iii) second Confirmed->Orphaned->Pending cycle; both cycles kept.
+	res2, err := EstablishRecovery(ctx, pool, lease, EstablishRequest{
+		ChainID:      chainID,
+		OldTipNumber: 20, OldTipHash: newHash(20),
+		NewTipNumber: 21, NewTipHash: fmt.Sprintf("0x%064x", 0xf001_0000+21),
+		DetectedHeight: 20, EnvMaxDepthRaw: reorgTestDepth,
+	})
+	if err != nil {
+		t.Fatalf("c2 establish: %v", err)
+	}
+	rec2 := res2.RecoveryID
+	if rec2 == rec1 {
+		t.Fatalf("c2 recovery id reused %s (must be a fresh round)", rec1)
+	}
+	owned2 := RecoveryCapture{Seq: res2.Seq, Owned: &RecoveryOwned{RecoveryID: rec2}}
+	// Refusal leg with zero-write proof: ordinary gate under the active row.
+	snapRef := reorgSnapAudit(t, ctx, pool, chainID)
+	rtx, err := pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin refusal probe: %v", err)
+	}
+	if _, err := recheckRecoveryGate(ctx, rtx, chainID, testRecoveryCap(t, ctx, pool, chainID)); !isRecoveryGate(err) {
+		_ = rtx.Rollback(ctx)
+		t.Fatalf("ordinary gate under active c2 row = %v, want refusal", err)
+	}
+	_ = rtx.Rollback(ctx)
+	snapRef.assertEqual(t, reorgSnapAudit(t, ctx, pool, chainID), "c2 ordinary-gate refusal")
+	if err := ConfirmRecoveryAncestor(ctx, pool, lease, chainID, owned2, 15, depositBlockHash(15), "t035-c2"); err != nil {
+		t.Fatalf("c2 confirm ancestor: %v", err)
+	}
+	from2, to2, flipped2, err := InvalidateRecoveryBlocks(ctx, pool, lease, chainID, owned2)
+	if err != nil {
+		t.Fatalf("c2 invalidate blocks: %v", err)
+	}
+	if from2 != 16 || to2 != 20 || flipped2 != 5 {
+		t.Fatalf("c2 sweep = [%d,%d] flipped %d; want [16,20] x5", from2, to2, flipped2)
+	}
+	orphaned2, err := InvalidateRecoveryObservations(ctx, pool, lease, chainID, owned2)
+	if err != nil {
+		t.Fatalf("c2 invalidate observations: %v", err)
+	}
+	if orphaned2 != 1 {
+		t.Fatalf("c2 orphaned = %d, want 1 (reconfirmed 16 only)", orphaned2)
+	}
+	var c2obs int64
+	if err := pool.QueryRow(ctx, `SELECT COUNT(*) FROM deposit_observations WHERE chain_id = $1`, chainID).Scan(&c2obs); err != nil {
+		t.Fatalf("count observations: %v", err)
+	}
+	if err := RecanonicalizeRecoveryBlock(ctx, pool, lease, chainID, owned2, 16, oldBH16); err != nil {
+		t.Fatalf("c2 recanonicalize 16: %v", err)
+	}
+	if err := ReviveRecoveryObservation(ctx, pool, lease, chainID, owned2, oldBH16, oldTx16, 0, "t035-c2-16"); err != nil {
+		t.Fatalf("c2 revive h16: %v", err)
+	}
+	var c2obsAfter int64
+	if err := pool.QueryRow(ctx, `SELECT COUNT(*) FROM deposit_observations WHERE chain_id = $1`, chainID).Scan(&c2obsAfter); err != nil {
+		t.Fatalf("recount observations: %v", err)
+	}
+	if c2obsAfter != c2obs {
+		t.Fatalf("observations %d -> %d across c2 revive, want unchanged", c2obs, c2obsAfter)
+	}
+	// h16: BOTH Confirmed->Orphaned->Pending cycles fully ordered, no overwrite.
+	t16, err := pool.Query(ctx, `SELECT from_status, to_status, recovery_id FROM deposit_observation_transitions
+WHERE chain_id = $1 AND block_hash = $2 AND tx_hash = $3 AND log_index = 0 ORDER BY at, recovery_id`, chainID, oldBH16, oldTx16)
+	if err != nil {
+		t.Fatalf("read h16 transitions: %v", err)
+	}
+	var got16 [][3]string
+	for t16.Next() {
+		var f, s, r string
+		if err := t16.Scan(&f, &s, &r); err != nil {
+			t16.Close()
+			t.Fatalf("scan h16 transition: %v", err)
+		}
+		got16 = append(got16, [3]string{f, s, r})
+	}
+	t16.Close()
+	if len(got16) != 4 || got16[0] != [3]string{"confirmed", "orphaned", rec1} ||
+		got16[1] != [3]string{"orphaned", "pending", rec1} ||
+		got16[2] != [3]string{"confirmed", "orphaned", rec2} ||
+		got16[3] != [3]string{"orphaned", "pending", rec2} {
+		t.Fatalf("h16 transitions = %v, want 4 ordered legs across rec1+rec2", got16)
+	}
+
+	// ---- (iv) post-release lineage: rec1's row is gone, its audit resolves.
+	var rec1rows int64
+	if err := pool.QueryRow(ctx, `SELECT COUNT(*) FROM reorg_recovery WHERE chain_id = $1 AND recovery_id = $2`,
+		chainID, rec1).Scan(&rec1rows); err != nil {
+		t.Fatalf("count rec1 row: %v", err)
+	}
+	if rec1rows != 0 {
+		t.Fatalf("rec1 recovery rows = %d, want 0 (released)", rec1rows)
+	}
+	var lineage int64
+	if err := pool.QueryRow(ctx, `
+SELECT COUNT(*) FROM deposit_observations o
+JOIN deposit_observation_transitions t ON t.chain_id = o.chain_id
+  AND t.block_hash = o.block_hash AND t.tx_hash = o.tx_hash AND t.log_index = o.log_index
+  AND t.recovery_id = o.orphan_recovery_id
+JOIN reorg_recovery_events e ON e.chain_id = o.chain_id
+  AND e.recovery_id = o.orphan_recovery_id AND e.event = 'observations_invalidated'
+WHERE o.chain_id = $1 AND o.status = 'orphaned' AND o.orphan_recovery_id = $2`,
+		chainID, rec1).Scan(&lineage); err != nil {
+		t.Fatalf("post-release lineage join: %v", err)
+	}
+	if lineage != 1 {
+		t.Fatalf("post-release lineage rows = %d, want 1 (old18 -> transition -> event, row deleted)", lineage)
+	}
+	var rec1trans int64
+	if err := pool.QueryRow(ctx, `SELECT COUNT(*) FROM deposit_observation_transitions
+WHERE chain_id = $1 AND recovery_id = $2`, chainID, rec1).Scan(&rec1trans); err != nil {
+		t.Fatalf("count rec1 transitions: %v", err)
+	}
+	if rec1trans != 3 {
+		t.Fatalf("rec1 transitions = %d, want 3 (2 orphan + 1 revive, surviving release)", rec1trans)
+	}
+}
