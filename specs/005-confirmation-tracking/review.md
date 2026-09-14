@@ -50,3 +50,11 @@
 
 - Q1（非法阈值处理）已裁决：选项 A（必填无默认值，拒绝不静默纠正；不设业务上限，表示范围与安全运算留 plan；不预先授权运行时变更，允许变更时非法变更拒绝、原策略保持）。已写入 spec `## Clarifications`、`FR-03` 与 Edge Cases；`checklists/requirements.md` 按 clarify 规则仅切换标记——"无 NEEDS CLARIFICATION 标记"项仍有 1 处剩余故保持未勾选，文件其余内容（含 Notes 中"2 处"字样）暂未动，待澄清全部闭合后再刷新。
 - Q2（阈值变更允许性与生效规则）已裁决：选项 A + 补充语义（受控授权、重启漂移同属变更、单有效版本、旧结果不得提交、新阈值向前适用于全部未确认 Pending、降低不批量确认、Confirmed 永不改写且保留当时阈值/版本/依据、006 职责不变、失败无部分生效、机制留 plan）。已写入 spec `## Clarifications`、`FR-03`、US2 场景 4、US5 场景 5、Edge Cases、Non-Goals、SC-10；两项歧义闭合，标记清零。
+
+## 六、计划进展（2026-09-14 plan）
+
+- plan 产物：`plan.md`（技术上下文/章程门/结构/关键流程/覆盖矩阵/006 交接）、`research.md`（R1–R9）、
+  `data-model.md`（迁移 `000005` + 三版本 + 提交/首确认/切换协议 + 时序论证）、`contracts/observability.md`
+  （`confirmation_*` 组）、`quickstart.md`（D1–D5）。upstream 语义零改动；`requirements.md` Notes 与场景计数已同步澄清后事实。
+- 章程门：初检与设计后复检均通过，无豁免（见 plan.md）。评审结论：设计评审通过，非实现验证。
+- 阻塞：无；满足进入 `/speckit.tasks` 的计划条件（本次不进入）。
