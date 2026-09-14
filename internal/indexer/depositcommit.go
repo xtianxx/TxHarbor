@@ -190,17 +190,13 @@ func (s *DepositScanner) commitDepositUnit(
 	batch depositBatch,
 	captured *depositProgress,
 	a, b uint64,
-	rc ...RecoveryCapture,
+	rcap RecoveryCapture,
 ) error {
 	if lease == nil {
 		return errors.New("deposit commit: nil lease")
 	}
 	if u == nil {
 		return errors.New("deposit commit: nil unit")
-	}
-	rcap, err := resolveRecoveryCapture(ctx, s.pool, s.cfg.ChainID, rc)
-	if err != nil {
-		return err
 	}
 	first := captured == nil
 	if first {

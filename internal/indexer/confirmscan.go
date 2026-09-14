@@ -51,7 +51,7 @@ type confirmationMetrics interface {
 // confirmationCommitter commits one captured candidate. It is satisfied by
 // *ConfirmationCommitter; tests substitute a scripted fake.
 type confirmationCommitter interface {
-	ConfirmDepositUnit(ctx context.Context, lease *Lease, basis ConfirmBasis, rc ...RecoveryCapture) error
+	ConfirmDepositUnit(ctx context.Context, lease *Lease, basis ConfirmBasis, rcap RecoveryCapture) error
 }
 
 // confirmationQuerier is satisfied by *pgxpool.Pool: the tick reads run

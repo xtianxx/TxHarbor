@@ -1772,22 +1772,6 @@ WHERE chain_id = $1 AND recovery_id = $2 AND recovery_seq = $3`
 	}
 }
 
-// resolveRecoveryCapture returns the caller-passed capture, or captures on
-// demand at commit entry. Serve loops always pass the pre-inputs capture
-// (capture-first discipline); the on-demand path serves direct unit-test
-// calls outside a serve loop, where no concurrent recovery can interleave
-// between the read and the commit in-test.
-func resolveRecoveryCapture(ctx context.Context, q depositQuerier, chainID int64, rc []RecoveryCapture) (RecoveryCapture, error) {
-	if len(rc) > 0 {
-		return rc[0], nil
-	}
-	cap, _, err := captureRecoveryVersion(ctx, q, chainID)
-	if err != nil {
-		return RecoveryCapture{}, err
-	}
-	return cap, nil
-}
-
 // isRecoveryGate reports the 006 recovery-state refusal for loop
 // classification (loops handle it exactly like a stale basis: re-read state,
 // start a new batch — never re-label old results).

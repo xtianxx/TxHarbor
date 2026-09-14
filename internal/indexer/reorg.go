@@ -627,6 +627,12 @@ func (e *RecoveryExecutor) replayStream(ctx context.Context, row *RecoveryRow, c
 	var err2 error
 	logs, observations, err2 = e.assembleLogsAndDeposits(ctx, from, to)
 	if err2 != nil {
+		if errors.Is(err2, errRecoveryAssemblyHold) {
+			// Hold: frontier, checkpoints and events stay untouched; the
+			// next tick re-walks the same range. Never paper over the gap
+			// with an empty ReplayRecoveryRange.
+			return nil
+		}
 		return err2
 	}
 	// Deposit stream carries no block rows (coverage proves on headers).
@@ -675,6 +681,12 @@ func (e *RecoveryExecutor) recanonicalizeHeight(ctx context.Context, row *Recove
 	return nil
 }
 
+// errRecoveryAssemblyHold marks an assembly-level hold: the range is
+// well-formed but currently unprovable (no deposit version bound at a logged
+// height), so the tick must skip ReplayRecoveryRange for the range and
+// re-walk it next tick — never advance a frontier over missing data.
+var errRecoveryAssemblyHold = errors.New("recovery assembly hold")
+
 // assembleLogsAndDeposits fetches new-chain logs over [from,to] (Transfer
 // topic, no address pre-filter — historical matching decides) and
 // re-identifies deposits under the per-height historical version semantics.
@@ -685,7 +697,11 @@ func (e *RecoveryExecutor) assembleLogsAndDeposits(ctx context.Context, from, to
 		Topics:    [][]common.Hash{{eth.TransferSig}},
 	})
 	if err != nil {
-		return nil, nil, nil // evidence hold: skip log/deposit assembly this tick
+		// Fail loud: the tick fails and the range is retried next tick
+		// instead of advancing frontiers over zero rows. (Class 3 — RPC
+		// success with silently omitted logs — stays a recorded non-goal:
+		// undetectable here by construction, not handled.)
+		return nil, nil, fmt.Errorf("recovery log assembly: FilterLogs [%d,%d]: %w", from, to, err)
 	}
 	var logs []ReplayLog
 	byHeight := map[int64][]depositSourceLog{}
@@ -717,8 +733,17 @@ func (e *RecoveryExecutor) assembleLogsAndDeposits(ctx context.Context, from, to
 	var observations []ReplayObservation
 	for h, rows := range byHeight {
 		match, versionSeq, ok, err := e.historicalMatch(ctx, h)
-		if err != nil || !ok {
-			continue // no version bound at h yet: skip (executor retries)
+		if err != nil {
+			return nil, nil, fmt.Errorf("recovery deposit assembly: historicalMatch height %d: %w", h, err)
+		}
+		if !ok {
+			// Hold, never skip: no version is bound at h yet, so the
+			// height's observations are unprovable this tick. The first
+			// version's start_block normally covers every replayable
+			// height, making this unreachable in practice — hold anyway
+			// rather than silently dropping the height while the deposit
+			// frontier still advances past it.
+			return nil, nil, fmt.Errorf("%w: no deposit version bound at height %d", errRecoveryAssemblyHold, h)
 		}
 		batch, err := parseDepositLogs(match, rows)
 		if err != nil {

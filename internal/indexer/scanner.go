@@ -642,14 +642,11 @@ func (e *hashMismatchError) Error() string {
 // re-fetches the same height and the exact guard settles what actually
 // committed, making reprocessing idempotent (FR-07/FR-13).
 //
-// rc carries the loop's pre-inputs recovery capture (006 capture-first
-// discipline); direct callers omit it and the commit captures at entry
-// (see resolveRecoveryCapture).
-func (s *Scanner) commitBlock(ctx context.Context, w blockWrite, rc ...RecoveryCapture) error {
-	rcap, err := resolveRecoveryCapture(ctx, s.pool, s.chainID, rc)
-	if err != nil {
-		return err
-	}
+// rcap carries the loop's pre-inputs recovery capture (006 capture-first
+// discipline); it is a required parameter — there is no commit-entry
+// fallback, so a recovery that establishes and releases between input-read
+// and commit stays visible as a version mismatch.
+func (s *Scanner) commitBlock(ctx context.Context, w blockWrite, rcap RecoveryCapture) error {
 	if w.first && w.number != s.cfg.StartHeight {
 		return errStaleState
 	}

@@ -39,6 +39,7 @@ func TestServeConfigErrorsEndToEnd(t *testing.T) {
 		"TXHARBOR_DEPOSIT_CONTRACTS":       "0x1111111111111111111111111111111111111111:0",
 		"TXHARBOR_DEPOSIT_WATCH_ADDRESSES": "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:0",
 		"TXHARBOR_CONFIRMATION_DEPTH":      "10",
+		"TXHARBOR_REORG_MAX_DEPTH":         "100",
 		"TXHARBOR_HTTP_ADDR":               addr,
 	}
 	cases := []struct {
@@ -96,6 +97,7 @@ func TestServeRefusesUnmigratedDatabaseEndToEnd(t *testing.T) {
 			"TXHARBOR_DEPOSIT_CONTRACTS":       "0x1111111111111111111111111111111111111111:0",
 			"TXHARBOR_DEPOSIT_WATCH_ADDRESSES": "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:0",
 			"TXHARBOR_CONFIRMATION_DEPTH":      "10",
+			"TXHARBOR_REORG_MAX_DEPTH":         "100",
 			"TXHARBOR_HTTP_ADDR":               addr,
 		}),
 		Stderr:  &stderr,
@@ -137,6 +139,7 @@ func TestServeWrongChainEndToEnd(t *testing.T) {
 			"TXHARBOR_DEPOSIT_CONTRACTS":       "0x1111111111111111111111111111111111111111:0",
 			"TXHARBOR_DEPOSIT_WATCH_ADDRESSES": "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:0",
 			"TXHARBOR_CONFIRMATION_DEPTH":      "10",
+			"TXHARBOR_REORG_MAX_DEPTH":         "100",
 			"TXHARBOR_HTTP_ADDR":               freeAddr(t),
 		}),
 		Stderr:  &stderr,
@@ -266,6 +269,7 @@ func TestServeDepositLoopStartStop(t *testing.T) {
 				"TXHARBOR_DEPOSIT_CONTRACTS":       asset + ":0",
 				"TXHARBOR_DEPOSIT_WATCH_ADDRESSES": watch + ":0",
 				"TXHARBOR_CONFIRMATION_DEPTH":      "10",
+				"TXHARBOR_REORG_MAX_DEPTH":         "100",
 				"TXHARBOR_HTTP_ADDR":               freeAddr(t),
 			}),
 			Signals: signals,
@@ -378,6 +382,7 @@ func TestServeConfirmationDriftExitsNonZero(t *testing.T) {
 				"TXHARBOR_DEPOSIT_CONTRACTS":       asset + ":0",
 				"TXHARBOR_DEPOSIT_WATCH_ADDRESSES": watch + ":0",
 				"TXHARBOR_CONFIRMATION_DEPTH":      "10",
+				"TXHARBOR_REORG_MAX_DEPTH":         "100",
 				"TXHARBOR_HTTP_ADDR":               freeAddr(t),
 			}),
 			Stderr:  &stderr,
@@ -412,6 +417,7 @@ func TestServeDepositConfigRefusalEndToEnd(t *testing.T) {
 		"TXHARBOR_DEPOSIT_START_HEIGHT":    "0",
 		"TXHARBOR_DEPOSIT_WATCH_ADDRESSES": "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:0",
 		"TXHARBOR_CONFIRMATION_DEPTH":      "10",
+		"TXHARBOR_REORG_MAX_DEPTH":         "100",
 		"TXHARBOR_HTTP_ADDR":               addr,
 	}
 	var stderr bytes.Buffer

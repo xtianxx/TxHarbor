@@ -30,6 +30,19 @@ func reorgTestPool(t *testing.T) *pgxpool.Pool {
 	return pool
 }
 
+// testRecoveryCap captures the recovery version for a direct test commit.
+// Call it before the test builds its batch inputs (006 capture-first
+// discipline for calls outside serve loops); the commit then rechecks this
+// version under the lock instead of capturing at entry.
+func testRecoveryCap(t *testing.T, ctx context.Context, pool *pgxpool.Pool, chainID int64) RecoveryCapture {
+	t.Helper()
+	cap, _, err := captureRecoveryVersion(ctx, pool, chainID)
+	if err != nil {
+		t.Fatalf("capture recovery version: %v", err)
+	}
+	return cap
+}
+
 func reorgCount(t *testing.T, ctx context.Context, pool *pgxpool.Pool, table string, chainID int64) int64 {
 	t.Helper()
 	var n int64
@@ -380,13 +393,13 @@ func TestReorgPostReleaseStaleRefusal(t *testing.T) {
 		t.Fatalf("capture: %v", err)
 	}
 	// Legal pre-pause order: the ordinary commit lands before any recovery.
-	if err := sc.commitBlock(ctx, blockWrite{number: 12, hash: depositBlockHash(12), parent: depositBlockHash(11)}); err != nil {
+	if err := sc.commitBlock(ctx, blockWrite{number: 12, hash: depositBlockHash(12), parent: depositBlockHash(11)}, cap0); err != nil {
 		t.Fatalf("pre-pause commit: %v", err)
 	}
 	res := reorgEstablishOne(t, ctx, pool, lease, chainID, 12)
 	_ = res
 	// Post-establish ordinary submit (even an idempotent rescan) refuses.
-	if err := sc.commitBlock(ctx, blockWrite{number: 12, hash: depositBlockHash(12), parent: depositBlockHash(11)}); !isRecoveryGate(err) {
+	if err := sc.commitBlock(ctx, blockWrite{number: 12, hash: depositBlockHash(12), parent: depositBlockHash(11)}, cap0); !isRecoveryGate(err) {
 		t.Fatalf("post-establish rescan = %v, want gate refusal", err)
 	}
 	// Simulate the release row-removal (terminal event omitted: this probes

@@ -132,7 +132,17 @@ internal/indexer/
 ├── depositcommit.go        # EXTEND: recovery-state gate recheck (+006-owned re-read path)
 ├── confirmcommit.go        # EXTEND: recovery-state gate recheck; orphaned→stop routing note
 ├── lease.go                # reuse unchanged (single coordination row)
-└── coordinator.go          # reuse unchanged (RunQuatro + recovery loop wiring)
+├── coordinator.go          # RunQuatroPlusRecovery five-stream entry (T017; no new lock order)
+└── ...
+
+internal/app/serve.go      # EXTEND (T017a): parse TXHARBOR_REORG_MAX_DEPTH raw +
+                           # TXHARBOR_REORG_REPLAY_BATCH (INDEX timing triple reused),
+                           # fail()-path Q1 refusal, fifth stream via NewRecoveryLoop,
+                           # RunQuatroPlusRecovery under the shared loop/heartbeat,
+                           # LoadRecoveryState/AnnotateRecoveryHeight observer with
+                           # zero readiness effect
+internal/config/config.go  # EXTEND (T017a): ReorgMaxDepthRaw passthrough +
+                           # ReorgReplayBatch knob (default 500) + Summary echo
 
 migrations/
 └── 000006_reorg_recovery.sql  # new tables + chain_blocks PK rework + CHECK rewrites (R13)

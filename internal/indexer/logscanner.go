@@ -1044,11 +1044,7 @@ func validConfigHash(s string) bool {
 // write protocol step by step. There is no special case for an uncertain
 // COMMIT: the next iteration re-reads the durable state and the exact guard
 // settles what actually committed (FR-16/OQ2).
-func (s *LogScanner) commitLogRange(ctx context.Context, a, b uint64, first bool, coverage map[uint64]string, rows []logRow, rc ...RecoveryCapture) error {
-	rcap, err := resolveRecoveryCapture(ctx, s.pool, s.chainID, rc)
-	if err != nil {
-		return err
-	}
+func (s *LogScanner) commitLogRange(ctx context.Context, a, b uint64, first bool, coverage map[uint64]string, rows []logRow, rcap RecoveryCapture) error {
 	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{})
 	if err != nil {
 		return fmt.Errorf("begin log transaction: %w", err)

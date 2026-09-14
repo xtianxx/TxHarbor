@@ -102,6 +102,14 @@ func Serve(ctx context.Context, d Deps) int {
 		return 1
 	}
 
+	// 006 recovery depth (FR-03/Q1): refuse before opening any listener or
+	// connection. The raw string rides cfg unvalidated so a missing/zero/
+	// negative/non-integer/out-of-representation depth refuses here, on the
+	// same fail() path as every other startup failure.
+	if _, err := indexer.ParseReorgMaxDepth(cfg.ReorgMaxDepthRaw); err != nil {
+		return fail("startup failed (recovery): invalid %s %q: %s", config.EnvReorgMaxDepth, cfg.ReorgMaxDepthRaw, logx.Redact(err.Error()))
+	}
+
 	pool, err := db.OpenPool(startupCtx, cfg.PGDSN, cfg.ProbeTimeout)
 	if err != nil {
 		return fail("startup failed (database): %s", logx.Redact(err.Error()))
@@ -263,6 +271,17 @@ func Serve(ctx context.Context, d Deps) int {
 		pool.Close()
 		return fail("startup failed (confirmation indexer): %s", logx.Redact(err.Error()))
 	}
+	// The recovery executor (006) joins the same coordinator as the fifth
+	// stream: same lease acquisition loop, same heartbeat, same ServeFunc
+	// shape. Timing reuses the INDEX triple and the replay cap comes from
+	// config (research R5 — no new knob names); the depth already refused
+	// above, and NewRecoveryLoop re-validates without I/O.
+	recoveryServe, err := indexer.NewRecoveryLoop(pool, lease, headerRPC, logRPC{client: ethClient, m: m}, buildRecoveryConfig(cfg, chainID))
+	if err != nil {
+		ethClient.Close()
+		pool.Close()
+		return fail("startup failed (recovery): %s", logx.Redact(err.Error()))
+	}
 
 	srv := &http.Server{
 		Handler:           health.NewServer(agg, m.Handler()).Handler(),
@@ -284,6 +303,33 @@ func Serve(ctx context.Context, d Deps) int {
 	depositObserver.observe()
 	confirmationObserver := &confirmationObserver{confirm: confirmationScanner, m: m, chainID: chainID}
 	confirmationObserver.observe()
+	// Recovery state rides the same sample points through the approved
+	// readers, never through readiness: see recoveryObserver.
+	recoveryRead := func(ctx context.Context) (indexer.RecoveryState, indexer.Validity, bool) {
+		row, err := indexer.LoadRecoveryState(ctx, pool, chainID)
+		if err != nil {
+			slog.Warn("recovery state read failed; keeping last observed",
+				"error", logx.Redact(err.Error()))
+			return "", "", false
+		}
+		var released bool
+		if row == nil {
+			released, err = indexer.RecoveryReleased(ctx, pool, chainID)
+			if err != nil {
+				slog.Warn("recovery release read failed; keeping last observed",
+					"error", logx.Redact(err.Error()))
+				return "", "", false
+			}
+		}
+		var height int64
+		if h, _, ok := scanner.Checkpoint(); ok {
+			height = int64(h)
+		}
+		state, validity := indexer.AnnotateRecoveryHeight(row, released, height)
+		return state, validity, true
+	}
+	recoveryObserver := &recoveryObserver{read: recoveryRead}
+	recoveryObserver.observe(runCtx)
 
 	go runner.Run(runCtx)
 	serveErr := make(chan error, 1)
@@ -292,16 +338,17 @@ func Serve(ctx context.Context, d Deps) int {
 	indexerDone := make(chan struct{})
 	go func() {
 		// The coordinator owns the only acquisition loop and heartbeat and
-		// joins all four serve loops before it returns (research R1). The
-		// deposit and confirmation loops adapt to the shared ServeFunc shape
-		// with the coordinator-held lease; authorization stays out of loop.
+		// joins all five serve loops before it returns (research R1). The
+		// deposit, confirmation and recovery loops adapt to the shared
+		// ServeFunc shape with the coordinator-held lease; authorization
+		// stays out of loop.
 		depositServe := func(loopCtx context.Context, checkLost func() error) error {
 			return depositScanner.ServeLoop(loopCtx, lease, checkLost)
 		}
 		confirmServe := func(loopCtx context.Context, checkLost func() error) error {
 			return confirmationScanner.ServeLoop(loopCtx, lease, checkLost)
 		}
-		indexerErr <- indexer.RunQuatro(runCtx, lease, scanner.ServeLoop, logScanner.ServeLoop, depositServe, confirmServe)
+		indexerErr <- runServiceStreams(runCtx, lease, scanner.ServeLoop, logScanner.ServeLoop, depositServe, confirmServe, recoveryServe)
 		close(indexerDone)
 	}()
 	fmt.Fprintf(stdout, "txharbor serve: listening on %s\n", listener.Addr())
@@ -326,9 +373,10 @@ serveLoop:
 			break serveLoop
 		case err := <-indexerErr:
 			observer.observe()    // capture the terminal state before teardown
-			logObserver.observe() // both loops are joined by the coordinator
+			logObserver.observe() // all loops are joined by the coordinator
 			depositObserver.observe()
 			confirmationObserver.observe()
+			recoveryObserver.observe(runCtx)
 			if err != nil && !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) {
 				fmt.Fprintf(stderr, "txharbor serve: indexer stopped: %s\n", logx.Redact(err.Error()))
 				exitCode = 1
@@ -339,6 +387,7 @@ serveLoop:
 			logObserver.observe()
 			depositObserver.observe()
 			confirmationObserver.observe()
+			recoveryObserver.observe(runCtx)
 		}
 	}
 	cancel() // stop probe loop and indexer before releasing resources
@@ -528,6 +577,64 @@ type confirmationObserver struct {
 
 func (o *confirmationObserver) observe() {
 	o.m.ObserveConfirmationState(o.chainID, o.confirm.ConfirmationState())
+}
+
+// buildRecoveryConfig maps the serve configuration onto the recovery
+// executor: the raw Q1 depth plus the shared INDEX timing triple and the
+// replay cap (research R5). Pure so lifecycle tests pin the mapping.
+func buildRecoveryConfig(cfg *config.Config, chainID int64) indexer.RecoveryConfig {
+	return indexer.RecoveryConfig{
+		ChainID:          chainID,
+		MaxDepthRaw:      cfg.ReorgMaxDepthRaw,
+		PollInterval:     cfg.IndexPollInterval,
+		RetryInitial:     cfg.IndexRetryInitial,
+		RetryMax:         cfg.IndexRetryMax,
+		ReplayHeights:    int(cfg.ReorgReplayBatch),
+		BlockStartHeight: cfg.StartHeight,
+	}
+}
+
+// coordinatorLease is the acquisition/heartbeat surface the five-stream
+// service needs; *indexer.Lease implements it, lifecycle tests substitute
+// a scripted fake.
+type coordinatorLease interface {
+	Acquire(ctx context.Context) (bool, int64, error)
+	Heartbeat(ctx context.Context) error
+}
+
+// runServiceStreams starts the four ordinary loops plus the recovery loop
+// under the single shared lease acquisition loop and heartbeat (006
+// T017a): it is indexer.RunQuatroPlusRecovery with the serve-path argument
+// order fixed, so lifecycle tests drive the startup-path wiring with fakes
+// instead of re-testing the coordinator itself.
+func runServiceStreams(ctx context.Context, lease coordinatorLease, header, log, deposit, confirm, recovery indexer.ServeFunc) error {
+	return indexer.RunQuatroPlusRecovery(ctx, lease, header, log, deposit, confirm, recovery)
+}
+
+// recoveryObserver samples the durable recovery row through the approved
+// readers (LoadRecoveryState/AnnotateRecoveryHeight): recovery activity,
+// chain pauses, and result validity stay three separate signals — this
+// observer only logs recovery-state transitions and never touches the
+// readiness aggregate, so an active recovery cannot flip service readiness
+// by itself. Read failures keep the last observed state for the next tick.
+type recoveryObserver struct {
+	read         func(ctx context.Context) (indexer.RecoveryState, indexer.Validity, bool)
+	last         indexer.RecoveryState
+	lastValidity indexer.Validity
+	sampled      bool
+}
+
+func (o *recoveryObserver) observe(ctx context.Context) {
+	state, validity, ok := o.read(ctx)
+	if !ok {
+		return
+	}
+	if !o.sampled || state != o.last || validity != o.lastValidity {
+		slog.Info("recovery state",
+			"recovery_state", string(state),
+			"validity", string(validity))
+	}
+	o.last, o.lastValidity, o.sampled = state, validity, true
 }
 
 // runShutdown executes steps in order under one shared budget. Remaining

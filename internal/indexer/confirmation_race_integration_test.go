@@ -166,6 +166,7 @@ func TestConfirmationRacePauseMidFlight(t *testing.T) {
 		m := metrics.New(func() bool { return true })
 
 		const chainID, h, tip, n = int64(301), uint64(100), uint64(109), uint64(10)
+		rcap := testRecoveryCap(t, ctx, pool, chainID)
 		bh, txHash, basis, lease := race26SeedBase(t, ctx, pool, chainID, h, tip, n)
 		hold := race26BeginHolder(t, ctx, pool, chainID)
 
@@ -205,7 +206,7 @@ INSERT INTO deposit_pause (chain_id, height, kind, detail) VALUES ($1, 10, 'upst
 		race26WaitBlocked(t, ctx, pool, "race26-pause-a-racer", "pause racer to park on the coordination lock")
 
 		confDone := make(chan outcome, 1)
-		go func() { confDone <- outcome{err: confirmer.ConfirmDepositUnit(ctx, lease, basis)} }()
+		go func() { confDone <- outcome{err: confirmer.ConfirmDepositUnit(ctx, lease, basis, rcap)} }()
 		race26WaitBlocked(t, ctx, pool, "race26-pause-a-conf", "confirmer to park on the coordination lock")
 
 		if err := hold.Rollback(ctx); err != nil {
@@ -228,7 +229,7 @@ INSERT INTO deposit_pause (chain_id, height, kind, detail) VALUES ($1, 10, 'upst
 		}
 		// Caller rereads and re-decides: a fresh submit still sees the
 		// pause and stays stopped with zero further change.
-		if err := confirmer.ConfirmDepositUnit(ctx, lease, basis); !errors.As(err, &paused) {
+		if err := confirmer.ConfirmDepositUnit(ctx, lease, basis, rcap); !errors.As(err, &paused) {
 			t.Fatalf("reread ConfirmDepositUnit() = %v, want *streamPauseError (still stopped)", err)
 		}
 		confirmAssertZeroWrite(t, ctx, pool, chainID, bh, txHash, 1)
@@ -242,6 +243,7 @@ INSERT INTO deposit_pause (chain_id, height, kind, detail) VALUES ($1, 10, 'upst
 		_ = metrics.New(func() bool { return true })
 
 		const chainID, h, tip, n = int64(302), uint64(100), uint64(109), uint64(10)
+		rcap := testRecoveryCap(t, ctx, pool, chainID)
 		bh, txHash, basis, lease := race26SeedBase(t, ctx, pool, chainID, h, tip, n)
 		hold := race26BeginHolder(t, ctx, pool, chainID)
 
@@ -254,7 +256,7 @@ INSERT INTO deposit_pause (chain_id, height, kind, detail) VALUES ($1, 10, 'upst
 
 		type outcome struct{ err error }
 		confDone := make(chan outcome, 1)
-		go func() { confDone <- outcome{err: confirmer.ConfirmDepositUnit(ctx, lease, basis)} }()
+		go func() { confDone <- outcome{err: confirmer.ConfirmDepositUnit(ctx, lease, basis, rcap)} }()
 		race26WaitBlocked(t, ctx, pool, "race26-pause-b-conf", "confirmer to park on the coordination lock")
 
 		racerDone := make(chan outcome, 1)
@@ -304,7 +306,7 @@ INSERT INTO deposit_pause (chain_id, height, kind, detail) VALUES ($1, 10, 'upst
 		}
 		// Old-basis replay after the pause: refused, winner basis intact.
 		var paused *streamPauseError
-		if err := confirmer.ConfirmDepositUnit(ctx, lease, basis); !errors.As(err, &paused) {
+		if err := confirmer.ConfirmDepositUnit(ctx, lease, basis, rcap); !errors.As(err, &paused) {
 			t.Fatalf("replay ConfirmDepositUnit() = %v, want *streamPauseError", err)
 		}
 		after, _, tipN2, _, _, _, _ := confirmReadBasis(t, ctx, pool, chainID, bh, txHash)
@@ -333,6 +335,7 @@ func TestConfirmationRaceTipAdvanceMidFlight(t *testing.T) {
 
 		const chainID, h, tip, n = int64(303), uint64(100), uint64(109), uint64(10)
 		const newTip = tip + 1
+		rcap := testRecoveryCap(t, ctx, pool, chainID)
 		bh, txHash, basis, lease := race26SeedBase(t, ctx, pool, chainID, h, tip, n)
 		hold := race26BeginHolder(t, ctx, pool, chainID)
 
@@ -378,7 +381,7 @@ VALUES ($1, $2, $3, $4, true)`,
 		race26WaitBlocked(t, ctx, pool, "race26-tip-a-racer", "tip racer to park on the coordination lock")
 
 		confDone := make(chan outcome, 1)
-		go func() { confDone <- outcome{err: confirmer.ConfirmDepositUnit(ctx, lease, basis)} }()
+		go func() { confDone <- outcome{err: confirmer.ConfirmDepositUnit(ctx, lease, basis, rcap)} }()
 		race26WaitBlocked(t, ctx, pool, "race26-tip-a-conf", "confirmer to park on the coordination lock")
 
 		if err := hold.Rollback(ctx); err != nil {
@@ -408,7 +411,7 @@ VALUES ($1, $2, $3, $4, true)`,
 		}
 		fresh := basis
 		fresh.TipNumber, fresh.TipHash = newTip, depositBlockHash(newTip)
-		if err := confirmer.ConfirmDepositUnit(ctx, lease, fresh); err != nil {
+		if err := confirmer.ConfirmDepositUnit(ctx, lease, fresh, rcap); err != nil {
 			t.Fatalf("fresh-basis ConfirmDepositUnit(): %v", err)
 		}
 		status, _, tipN, _, _, _, conf := confirmReadBasis(t, ctx, pool, chainID, bh, txHash)
@@ -425,6 +428,7 @@ VALUES ($1, $2, $3, $4, true)`,
 
 		const chainID, h, tip, n = int64(304), uint64(100), uint64(109), uint64(10)
 		const newTip = tip + 1
+		rcap := testRecoveryCap(t, ctx, pool, chainID)
 		bh, txHash, basis, lease := race26SeedBase(t, ctx, pool, chainID, h, tip, n)
 		hold := race26BeginHolder(t, ctx, pool, chainID)
 
@@ -437,7 +441,7 @@ VALUES ($1, $2, $3, $4, true)`,
 
 		type outcome struct{ err error }
 		confDone := make(chan outcome, 1)
-		go func() { confDone <- outcome{err: confirmer.ConfirmDepositUnit(ctx, lease, basis)} }()
+		go func() { confDone <- outcome{err: confirmer.ConfirmDepositUnit(ctx, lease, basis, rcap)} }()
 		race26WaitBlocked(t, ctx, pool, "race26-tip-b-conf", "confirmer to park on the coordination lock")
 
 		racerDone := make(chan outcome, 1)
@@ -489,7 +493,7 @@ VALUES ($1, $2, $3, $4, true)`,
 		}
 		// Old-basis replay after the tip move: refused, winner basis intact.
 		var chainView *ConfirmationChainViewError
-		if err := confirmer.ConfirmDepositUnit(ctx, lease, basis); !errors.As(err, &chainView) {
+		if err := confirmer.ConfirmDepositUnit(ctx, lease, basis, rcap); !errors.As(err, &chainView) {
 			t.Fatalf("replay ConfirmDepositUnit() = %v, want *ConfirmationChainViewError", err)
 		}
 		after, _, tipN2, _, seq2, _, conf2 := confirmReadBasis(t, ctx, pool, chainID, bh, txHash)
@@ -518,6 +522,7 @@ func TestConfirmationRacePolicySwitchMidFlight(t *testing.T) {
 		m := metrics.New(func() bool { return true })
 
 		const chainID, h, tip, n = int64(305), uint64(100), uint64(109), uint64(10)
+		rcap := testRecoveryCap(t, ctx, pool, chainID)
 		bh, txHash, basis, lease := race26SeedBase(t, ctx, pool, chainID, h, tip, n)
 		hold := race26BeginHolder(t, ctx, pool, chainID)
 
@@ -544,7 +549,7 @@ func TestConfirmationRacePolicySwitchMidFlight(t *testing.T) {
 
 		type commitOutcome struct{ err error }
 		confDone := make(chan commitOutcome, 1)
-		go func() { confDone <- commitOutcome{err: confirmer.ConfirmDepositUnit(ctx, lease, basis)} }()
+		go func() { confDone <- commitOutcome{err: confirmer.ConfirmDepositUnit(ctx, lease, basis, rcap)} }()
 		race26WaitBlocked(t, ctx, pool, "race26-pol-a-conf", "confirmer to park on the coordination lock")
 
 		if err := hold.Rollback(ctx); err != nil {
@@ -569,7 +574,7 @@ func TestConfirmationRacePolicySwitchMidFlight(t *testing.T) {
 		}
 		// Caller rereads and re-decides: the old basis stays refused, the
 		// effective policy is the racer's row.
-		if err := confirmer.ConfirmDepositUnit(ctx, lease, basis); !errors.As(err, &drift) {
+		if err := confirmer.ConfirmDepositUnit(ctx, lease, basis, rcap); !errors.As(err, &drift) {
 			t.Fatalf("reread ConfirmDepositUnit() = %v, want *ConfirmationDriftError", err)
 		}
 		confirmAssertZeroWrite(t, ctx, pool, chainID, bh, txHash, 2)
@@ -582,6 +587,7 @@ func TestConfirmationRacePolicySwitchMidFlight(t *testing.T) {
 		ctx := context.Background()
 
 		const chainID, h, tip, n = int64(306), uint64(100), uint64(109), uint64(10)
+		rcap := testRecoveryCap(t, ctx, pool, chainID)
 		bh, txHash, basis, lease := race26SeedBase(t, ctx, pool, chainID, h, tip, n)
 		hold := race26BeginHolder(t, ctx, pool, chainID)
 
@@ -594,7 +600,7 @@ func TestConfirmationRacePolicySwitchMidFlight(t *testing.T) {
 
 		type commitOutcome struct{ err error }
 		confDone := make(chan commitOutcome, 1)
-		go func() { confDone <- commitOutcome{err: confirmer.ConfirmDepositUnit(ctx, lease, basis)} }()
+		go func() { confDone <- commitOutcome{err: confirmer.ConfirmDepositUnit(ctx, lease, basis, rcap)} }()
 		race26WaitBlocked(t, ctx, pool, "race26-pol-b-conf", "confirmer to park on the coordination lock")
 
 		type switchOutcome struct {
@@ -633,7 +639,7 @@ func TestConfirmationRacePolicySwitchMidFlight(t *testing.T) {
 		// Old-config resubmission after the switch: drift-refused, zero
 		// state change, effective policy untouched (timing case 3).
 		var drift *ConfirmationDriftError
-		if err := confirmer.ConfirmDepositUnit(ctx, lease, basis); !errors.As(err, &drift) {
+		if err := confirmer.ConfirmDepositUnit(ctx, lease, basis, rcap); !errors.As(err, &drift) {
 			t.Fatalf("old-config ConfirmDepositUnit() = %v, want *ConfirmationDriftError", err)
 		}
 		after, _, tipN2, _, seq2, _, conf2 := confirmReadBasis(t, ctx, pool, chainID, bh, txHash)
@@ -661,6 +667,7 @@ func TestConfirmationRaceDoubleConfirmConverges(t *testing.T) {
 	ctx := context.Background()
 
 	const chainID, h, tip, n = int64(307), uint64(100), uint64(109), uint64(10)
+	rcap := testRecoveryCap(t, ctx, pool, chainID)
 	bh, txHash, basis, lease := race26SeedBase(t, ctx, pool, chainID, h, tip, n)
 	c, err := NewConfirmationCommitter(pool, ConfirmationConfig{ChainID: chainID, ThresholdN: n})
 	if err != nil {
@@ -672,7 +679,7 @@ func TestConfirmationRaceDoubleConfirmConverges(t *testing.T) {
 	for range 2 {
 		go func() {
 			<-start
-			results <- c.ConfirmDepositUnit(ctx, lease, basis)
+			results <- c.ConfirmDepositUnit(ctx, lease, basis, rcap)
 		}()
 	}
 	close(start)
@@ -712,6 +719,7 @@ func TestConfirmationRaceOldConfigWorkerDriftStops(t *testing.T) {
 	const chainID, h, tip, n = int64(308), uint64(100), uint64(109), uint64(10)
 	const newN = uint64(20)
 	const newTip = uint64(119)
+	rcap := testRecoveryCap(t, ctx, pool, chainID)
 	bh, txHash, basis, lease := race26SeedBase(t, ctx, pool, chainID, h, tip, n)
 
 	res, err := AuthorizeConfirmationPolicy(ctx, pool, ConfirmAuthRequest{
@@ -732,7 +740,7 @@ func TestConfirmationRaceOldConfigWorkerDriftStops(t *testing.T) {
 	}
 	oldLease := lease
 	var drift *ConfirmationDriftError
-	if err := oldWorker.ConfirmDepositUnit(ctx, oldLease, basis); !errors.As(err, &drift) {
+	if err := oldWorker.ConfirmDepositUnit(ctx, oldLease, basis, rcap); !errors.As(err, &drift) {
 		t.Fatalf("old-config ConfirmDepositUnit() = %v (%T), want *ConfirmationDriftError", err, err)
 	}
 	confirmAssertZeroWrite(t, ctx, pool, chainID, bh, txHash, 2)
@@ -770,7 +778,7 @@ func TestConfirmationRaceOldConfigWorkerDriftStops(t *testing.T) {
 	}
 	fresh := ConfirmBasis{BlockHash: bh, TxHash: txHash, LogIndex: 0, Height: h,
 		TipNumber: newTip, TipHash: depositBlockHash(newTip), PolicySeq: 2, ThresholdN: newN}
-	if err := newWorker.ConfirmDepositUnit(ctx, lease, fresh); err != nil {
+	if err := newWorker.ConfirmDepositUnit(ctx, lease, fresh, rcap); err != nil {
 		t.Fatalf("new-config ConfirmDepositUnit(): %v", err)
 	}
 	status, _, tipN, thr, seq, _, conf := confirmReadBasis(t, ctx, pool, chainID, bh, txHash)
@@ -840,6 +848,7 @@ func race33DivergentFirstStart(t *testing.T, tag string, chainID int64, winnerN,
 	if err != nil {
 		t.Fatalf("NewConfirmationCommitter(loser N=%d): %v", loserN, err)
 	}
+	rcap := testRecoveryCap(t, ctx, pool, chainID)
 	winnerBasis := ConfirmBasis{BlockHash: bh, TxHash: txHash, LogIndex: 0, Height: h,
 		TipNumber: tip, TipHash: depositBlockHash(tip), PolicySeq: 1, ThresholdN: winnerN}
 	loserBasis := ConfirmBasis{BlockHash: bh, TxHash: txHash, LogIndex: 0, Height: h,
@@ -847,11 +856,11 @@ func race33DivergentFirstStart(t *testing.T, tag string, chainID int64, winnerN,
 
 	type outcome struct{ err error }
 	winnerDone := make(chan outcome, 1)
-	go func() { winnerDone <- outcome{err: winner.ConfirmDepositUnit(ctx, lease, winnerBasis)} }()
+	go func() { winnerDone <- outcome{err: winner.ConfirmDepositUnit(ctx, lease, winnerBasis, rcap)} }()
 	race26WaitBlocked(t, ctx, pool, "race33-"+tag+"-winner", "winner to park on the coordination lock")
 
 	loserDone := make(chan outcome, 1)
-	go func() { loserDone <- outcome{err: loser.ConfirmDepositUnit(ctx, lease, loserBasis)} }()
+	go func() { loserDone <- outcome{err: loser.ConfirmDepositUnit(ctx, lease, loserBasis, rcap)} }()
 	race26WaitBlocked(t, ctx, pool, "race33-"+tag+"-loser", "loser to park on the coordination lock")
 
 	if err := hold.Rollback(ctx); err != nil {
@@ -909,7 +918,7 @@ WHERE chain_id = $1 AND status = 'confirmed' AND confirm_threshold = $2`,
 	// with zero state change (never silently follows the new policy).
 	loserBasis2 := loserBasis
 	loserBasis2.BlockHash, loserBasis2.TxHash, loserBasis2.Height = bh2, txHash2, h2
-	if err := loser.ConfirmDepositUnit(ctx, lease, loserBasis2); !errors.As(err, &drift) {
+	if err := loser.ConfirmDepositUnit(ctx, lease, loserBasis2, rcap); !errors.As(err, &drift) {
 		t.Fatalf("loser resubmit ConfirmDepositUnit() = %v, want *ConfirmationDriftError", err)
 	}
 	confirmAssertZeroWrite(t, ctx, pool, chainID, bh2, txHash2, 1)
@@ -918,7 +927,7 @@ WHERE chain_id = $1 AND status = 'confirmed' AND confirm_threshold = $2`,
 	// consistency): converts with (1, winnerN), row count stays 1.
 	winnerBasis2 := winnerBasis
 	winnerBasis2.BlockHash, winnerBasis2.TxHash, winnerBasis2.Height = bh2, txHash2, h2
-	if err := winner.ConfirmDepositUnit(ctx, lease, winnerBasis2); err != nil {
+	if err := winner.ConfirmDepositUnit(ctx, lease, winnerBasis2, rcap); err != nil {
 		t.Fatalf("winner follow-up ConfirmDepositUnit(): %v", err)
 	}
 	status2, _, tipN2, convThr2, convSeq2, _, conf2 := confirmReadBasis(t, ctx, pool, chainID, bh2, txHash2)

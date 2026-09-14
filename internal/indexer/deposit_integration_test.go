@@ -650,6 +650,7 @@ func TestDepositCommitFirstUnitAtomic(t *testing.T) {
 
 	sc := depositITScanner(t, pool, cfg)
 	lease := depositITLease(t, pool, cfg.ChainID)
+	rcap := testRecoveryCap(t, ctx, sc.pool, sc.cfg.ChainID)
 	unit, batch, progress := depositITPrepareUnit(t, ctx, sc, 10, 20)
 	if progress != nil {
 		t.Fatalf("progress = %+v, want empty (first unit)", progress)
@@ -657,7 +658,7 @@ func TestDepositCommitFirstUnitAtomic(t *testing.T) {
 	if len(batch.matched) != 1 || batch.zero != 1 || batch.nomatch != 1 {
 		t.Fatalf("batch = matched %d zero %d nomatch %d, want 1/1/1", len(batch.matched), batch.zero, batch.nomatch)
 	}
-	if err := sc.commitDepositUnit(ctx, lease, unit, batch, progress, 10, 20); err != nil {
+	if err := sc.commitDepositUnit(ctx, lease, unit, batch, progress, 10, 20, rcap); err != nil {
 		t.Fatalf("commitDepositUnit(): %v", err)
 	}
 
@@ -733,11 +734,12 @@ func TestDepositCommitAdvanceExactGuard(t *testing.T) {
 
 	sc := depositITScanner(t, pool, cfg)
 	lease := depositITLease(t, pool, cfg.ChainID)
+	rcap := testRecoveryCap(t, ctx, sc.pool, sc.cfg.ChainID)
 	unit, batch, captured := depositITPrepareUnit(t, ctx, sc, 10, 20)
 	if captured == nil || captured.nextBlock != 10 || captured.versionSeq != 1 {
 		t.Fatalf("captured progress = %+v, want next 10 version 1", captured)
 	}
-	if err := sc.commitDepositUnit(ctx, lease, unit, batch, captured, 10, 20); err != nil {
+	if err := sc.commitDepositUnit(ctx, lease, unit, batch, captured, 10, 20, rcap); err != nil {
 		t.Fatalf("first advance: %v", err)
 	}
 	if _, _, next, ok := depositCheckpointState(t, ctx, pool, cfg.ChainID); !ok || next != 21 {
@@ -750,7 +752,7 @@ func TestDepositCommitAdvanceExactGuard(t *testing.T) {
 	// Replay the same unit with the captured basis: the durable next_block is
 	// 21, so the exact guard refuses and nothing is written twice.
 	unit2, batch2, _ := depositITPrepareUnit(t, ctx, sc, 10, 20)
-	err := sc.commitDepositUnit(ctx, lease, unit2, batch2, captured, 10, 20)
+	err := sc.commitDepositUnit(ctx, lease, unit2, batch2, captured, 10, 20, rcap)
 	if !errors.Is(err, errStaleState) {
 		t.Fatalf("stale replay = %v, want errStaleState", err)
 	}
@@ -783,11 +785,12 @@ func TestDepositCommitConfigMismatch(t *testing.T) {
 	cfg.ConfigHash = strings.Repeat("bb", 32)
 	sc := depositITScanner(t, pool, cfg)
 	lease := depositITLease(t, pool, cfg.ChainID)
+	rcap := testRecoveryCap(t, ctx, sc.pool, sc.cfg.ChainID)
 	unit, batch, captured := depositITPrepareUnit(t, ctx, sc, 10, 20)
 	if captured == nil || captured.configHash != dbHash {
 		t.Fatalf("captured = %+v, want hash %s", captured, dbHash)
 	}
-	err := sc.commitDepositUnit(ctx, lease, unit, batch, captured, 10, 20)
+	err := sc.commitDepositUnit(ctx, lease, unit, batch, captured, 10, 20, rcap)
 	var mismatch *depositConfigMismatchError
 	if !errors.As(err, &mismatch) {
 		t.Fatalf("commit = %v (%T), want *depositConfigMismatchError", err, err)
@@ -820,6 +823,7 @@ func TestDepositCommitVersionIsolationLoopback(t *testing.T) {
 
 	sc := depositITScanner(t, pool, cfg)
 	lease := depositITLease(t, pool, cfg.ChainID)
+	rcap := testRecoveryCap(t, ctx, sc.pool, sc.cfg.ChainID)
 	unit, batch, captured := depositITPrepareUnit(t, ctx, sc, 10, 20)
 	if captured == nil || captured.versionSeq != 2 {
 		t.Fatalf("captured = %+v, want version_seq 2", captured)
@@ -828,7 +832,7 @@ func TestDepositCommitVersionIsolationLoopback(t *testing.T) {
 	// The H1 loopback: a newer version with identical content arrives while the
 	// unit result is in flight.
 	depositSeedHistoryVersion(t, ctx, pool, cfg.ChainID, 3, 2, 10, cfg.ConfigHash, "req-3")
-	err := sc.commitDepositUnit(ctx, lease, unit, batch, captured, 10, 20)
+	err := sc.commitDepositUnit(ctx, lease, unit, batch, captured, 10, 20, rcap)
 	if !errors.Is(err, errDepositVersionMismatch) {
 		t.Fatalf("commit = %v, want errDepositVersionMismatch", err)
 	}
@@ -870,11 +874,12 @@ func TestDepositCommitReplayConvergesOriginalVersion(t *testing.T) {
 
 	sc := depositITScanner(t, pool, cfg)
 	lease := depositITLease(t, pool, cfg.ChainID)
+	rcap := testRecoveryCap(t, ctx, sc.pool, sc.cfg.ChainID)
 	unit, batch, captured := depositITPrepareUnit(t, ctx, sc, 10, 20)
 	if captured == nil || captured.versionSeq != 2 {
 		t.Fatalf("captured = %+v, want version_seq 2", captured)
 	}
-	if err := sc.commitDepositUnit(ctx, lease, unit, batch, captured, 10, 20); err != nil {
+	if err := sc.commitDepositUnit(ctx, lease, unit, batch, captured, 10, 20, rcap); err != nil {
 		t.Fatalf("commitDepositUnit(): %v", err)
 	}
 
@@ -931,11 +936,12 @@ func TestDepositCommitConflictRollsBackWholeBatch(t *testing.T) {
 
 	sc := depositITScanner(t, pool, cfg)
 	lease := depositITLease(t, pool, cfg.ChainID)
+	rcap := testRecoveryCap(t, ctx, sc.pool, sc.cfg.ChainID)
 	unit, batch, captured := depositITPrepareUnit(t, ctx, sc, 10, 20)
 	if len(batch.matched) != 2 {
 		t.Fatalf("matched = %d, want 2", len(batch.matched))
 	}
-	err := sc.commitDepositUnit(ctx, lease, unit, batch, captured, 10, 20)
+	err := sc.commitDepositUnit(ctx, lease, unit, batch, captured, 10, 20, rcap)
 	var conflict *depositIdentityConflictError
 	if !errors.As(err, &conflict) {
 		t.Fatalf("commit = %v (%T), want *depositIdentityConflictError", err, err)
@@ -978,8 +984,9 @@ func TestDepositCommitCorruptOneSidedState(t *testing.T) {
 
 		sc := depositITScanner(t, pool, cfg)
 		lease := depositITLease(t, pool, cfg.ChainID)
+		rcap := testRecoveryCap(t, ctx, sc.pool, sc.cfg.ChainID)
 		unit, batch := depositITReadUnit(t, ctx, sc, 10, 20)
-		err := sc.commitDepositUnit(ctx, lease, unit, batch, nil, 10, 20)
+		err := sc.commitDepositUnit(ctx, lease, unit, batch, nil, 10, 20, rcap)
 		var corrupt *depositCorruptStateError
 		if !errors.As(err, &corrupt) {
 			t.Fatalf("commit = %v (%T), want *depositCorruptStateError", err, err)
@@ -1005,8 +1012,9 @@ func TestDepositCommitCorruptOneSidedState(t *testing.T) {
 
 		sc := depositITScanner(t, pool, cfg)
 		lease := depositITLease(t, pool, cfg.ChainID)
+		rcap := testRecoveryCap(t, ctx, sc.pool, sc.cfg.ChainID)
 		unit, batch := depositITReadUnit(t, ctx, sc, 10, 20)
-		err := sc.commitDepositUnit(ctx, lease, unit, batch, nil, 10, 20)
+		err := sc.commitDepositUnit(ctx, lease, unit, batch, nil, 10, 20, rcap)
 		var corrupt *depositCorruptStateError
 		if !errors.As(err, &corrupt) {
 			t.Fatalf("commit = %v (%T), want *depositCorruptStateError", err, err)
@@ -1038,11 +1046,12 @@ func TestDepositCommitCanonicalRevertAborts(t *testing.T) {
 
 	sc := depositITScanner(t, pool, cfg)
 	lease := depositITLease(t, pool, cfg.ChainID)
+	rcap := testRecoveryCap(t, ctx, sc.pool, sc.cfg.ChainID)
 	unit, batch, captured := depositITPrepareUnit(t, ctx, sc, 10, 20)
 	if _, err := pool.Exec(ctx, `UPDATE chain_blocks SET canonical = FALSE WHERE chain_id = $1 AND number = 15`, cfg.ChainID); err != nil {
 		t.Fatalf("flip canonical: %v", err)
 	}
-	err := sc.commitDepositUnit(ctx, lease, unit, batch, captured, 10, 20)
+	err := sc.commitDepositUnit(ctx, lease, unit, batch, captured, 10, 20, rcap)
 	var cv *chainViewError
 	if !errors.As(err, &cv) {
 		t.Fatalf("commit = %v (%T), want *chainViewError", err, err)
@@ -1074,11 +1083,12 @@ func TestDepositCommitEmptyIntervalAdvances(t *testing.T) {
 
 	sc := depositITScanner(t, pool, cfg)
 	lease := depositITLease(t, pool, cfg.ChainID)
+	rcap := testRecoveryCap(t, ctx, sc.pool, sc.cfg.ChainID)
 	unit, batch, captured := depositITPrepareUnit(t, ctx, sc, 10, 20)
 	if len(unit.rows) != 0 || len(batch.matched) != 0 {
 		t.Fatalf("empty interval returned %d rows / %d matched", len(unit.rows), len(batch.matched))
 	}
-	if err := sc.commitDepositUnit(ctx, lease, unit, batch, captured, 10, 20); err != nil {
+	if err := sc.commitDepositUnit(ctx, lease, unit, batch, captured, 10, 20, rcap); err != nil {
 		t.Fatalf("commitDepositUnit(): %v", err)
 	}
 	if _, _, next, _ := depositCheckpointState(t, ctx, pool, cfg.ChainID); next != 21 {
@@ -1106,12 +1116,13 @@ func TestDepositCommitUnknownOutcomeRereadsDB(t *testing.T) {
 
 	sc := depositITScanner(t, pool, cfg)
 	lease := depositITLease(t, pool, cfg.ChainID)
+	rcap := testRecoveryCap(t, ctx, sc.pool, sc.cfg.ChainID)
 	unit, batch, captured := depositITPrepareUnit(t, ctx, sc, 10, 20)
 	if captured != nil {
 		t.Fatalf("captured = %+v, want empty progress", captured)
 	}
 	drop.arm.Store(true)
-	if err := sc.commitDepositUnit(ctx, lease, unit, batch, captured, 10, 20); err != nil {
+	if err := sc.commitDepositUnit(ctx, lease, unit, batch, captured, 10, 20, rcap); err != nil {
 		t.Fatalf("uncertain commit = %v, want nil after the durable re-read", err)
 	}
 	if got := drop.dropped.Load(); got != 1 {
@@ -1127,7 +1138,7 @@ func TestDepositCommitUnknownOutcomeRereadsDB(t *testing.T) {
 	// The old captured basis is now behind the durable state; a replay is
 	// abandoned (version isolation), never committed twice.
 	unit2, batch2, _ := depositITPrepareUnit(t, ctx, sc, 10, 20)
-	err := sc.commitDepositUnit(ctx, lease, unit2, batch2, captured, 10, 20)
+	err := sc.commitDepositUnit(ctx, lease, unit2, batch2, captured, 10, 20, rcap)
 	if !errors.Is(err, errDepositVersionMismatch) {
 		t.Fatalf("stale replay after uncertain commit = %v, want errDepositVersionMismatch", err)
 	}
@@ -1408,7 +1419,7 @@ func TestDepositCommitReverifiesUnderLock(t *testing.T) {
 	defer pool.Close()
 	ctx := context.Background()
 
-	prepare := func(t *testing.T, chainID int64) (*DepositScanner, *Lease, *depositUnit, depositBatch, *depositProgress) {
+	prepare := func(t *testing.T, chainID int64) (*DepositScanner, *Lease, *depositUnit, depositBatch, *depositProgress, RecoveryCapture) {
 		t.Helper()
 		cfg := depositITConfig(t, chainID, testContractA)
 		depositSeedCanonical(t, ctx, pool, cfg.ChainID, 10, 20, true)
@@ -1419,8 +1430,9 @@ func TestDepositCommitReverifiesUnderLock(t *testing.T) {
 			common.HexToAddress(testContractA), common.HexToAddress(testContractB), common.HexToAddress(depositWatchAddr), big.NewInt(1))
 		sc := depositITScanner(t, pool, cfg)
 		lease := depositITLease(t, pool, cfg.ChainID)
+		rcap := testRecoveryCap(t, ctx, sc.pool, sc.cfg.ChainID)
 		unit, batch, captured := depositITPrepareUnit(t, ctx, sc, 10, 20)
-		return sc, lease, unit, batch, captured
+		return sc, lease, unit, batch, captured, rcap
 	}
 	assertAborted := func(t *testing.T, chainID int64) {
 		t.Helper()
@@ -1433,11 +1445,11 @@ func TestDepositCommitReverifiesUnderLock(t *testing.T) {
 	}
 
 	t.Run("upstream_watermark_lowered", func(t *testing.T) {
-		sc, lease, unit, batch, captured := prepare(t, 58)
+		sc, lease, unit, batch, captured, rcap := prepare(t, 58)
 		if _, err := pool.Exec(ctx, `UPDATE log_checkpoint SET next_block = 15 WHERE chain_id = $1`, int64(58)); err != nil {
 			t.Fatalf("lower watermark: %v", err)
 		}
-		err := sc.commitDepositUnit(ctx, lease, unit, batch, captured, 10, 20)
+		err := sc.commitDepositUnit(ctx, lease, unit, batch, captured, 10, 20, rcap)
 		if !errors.Is(err, errDepositCoverageLost) {
 			t.Fatalf("commit = %v, want errDepositCoverageLost", err)
 		}
@@ -1445,11 +1457,11 @@ func TestDepositCommitReverifiesUnderLock(t *testing.T) {
 	})
 
 	t.Run("upstream_row_deleted", func(t *testing.T) {
-		sc, lease, unit, batch, captured := prepare(t, 59)
+		sc, lease, unit, batch, captured, rcap := prepare(t, 59)
 		if _, err := pool.Exec(ctx, `DELETE FROM log_checkpoint WHERE chain_id = $1`, int64(59)); err != nil {
 			t.Fatalf("delete upstream row: %v", err)
 		}
-		err := sc.commitDepositUnit(ctx, lease, unit, batch, captured, 10, 20)
+		err := sc.commitDepositUnit(ctx, lease, unit, batch, captured, 10, 20, rcap)
 		if !errors.Is(err, errDepositCoverageLost) {
 			t.Fatalf("commit = %v, want errDepositCoverageLost", err)
 		}
@@ -1457,13 +1469,13 @@ func TestDepositCommitReverifiesUnderLock(t *testing.T) {
 	})
 
 	t.Run("pause_row_added", func(t *testing.T) {
-		sc, lease, unit, batch, captured := prepare(t, 60)
+		sc, lease, unit, batch, captured, rcap := prepare(t, 60)
 		if _, err := pool.Exec(ctx, `
 INSERT INTO deposit_pause (chain_id, height, kind, detail) VALUES ($1, 10, 'chain_view_changed', 'test')`,
 			int64(60)); err != nil {
 			t.Fatalf("insert deposit pause: %v", err)
 		}
-		err := sc.commitDepositUnit(ctx, lease, unit, batch, captured, 10, 20)
+		err := sc.commitDepositUnit(ctx, lease, unit, batch, captured, 10, 20, rcap)
 		var paused *streamPauseError
 		if !errors.As(err, &paused) || paused.stream != "deposit_pause" {
 			t.Fatalf("commit = %v (%T), want deposit_pause streamPauseError", err, err)
@@ -1995,6 +2007,7 @@ func TestDepositCommitReplayFullyDuplicateConverges(t *testing.T) {
 
 	sc := depositITScanner(t, pool, cfg)
 	lease := depositITLease(t, pool, chainID)
+	rcap := testRecoveryCap(t, ctx, sc.pool, sc.cfg.ChainID)
 	unit, batch, captured := depositITPrepareUnit(t, ctx, sc, 10, 20)
 	if captured == nil || captured.versionSeq != 2 {
 		t.Fatalf("captured = %+v, want version_seq 2", captured)
@@ -2002,7 +2015,7 @@ func TestDepositCommitReplayFullyDuplicateConverges(t *testing.T) {
 	if len(batch.matched) != 2 {
 		t.Fatalf("matched = %d, want 2", len(batch.matched))
 	}
-	if err := sc.commitDepositUnit(ctx, lease, unit, batch, captured, 10, 20); err != nil {
+	if err := sc.commitDepositUnit(ctx, lease, unit, batch, captured, 10, 20, rcap); err != nil {
 		t.Fatalf("replay commit: %v", err)
 	}
 
@@ -2094,11 +2107,12 @@ func TestDepositCommitFieldConflictFailsWholeBatch(t *testing.T) {
 
 			sc := depositITScanner(t, pool, cfg)
 			lease := depositITLease(t, pool, chainID)
+			rcap := testRecoveryCap(t, ctx, sc.pool, sc.cfg.ChainID)
 			unit, batch, captured := depositITPrepareUnit(t, ctx, sc, 10, 20)
 			if len(batch.matched) != 2 {
 				t.Fatalf("matched = %d, want 2", len(batch.matched))
 			}
-			err := sc.commitDepositUnit(ctx, lease, unit, batch, captured, 10, 20)
+			err := sc.commitDepositUnit(ctx, lease, unit, batch, captured, 10, 20, rcap)
 			var conflict *depositIdentityConflictError
 			if !errors.As(err, &conflict) {
 				t.Fatalf("commit = %v (%T), want *depositIdentityConflictError", err, err)
@@ -2553,10 +2567,11 @@ func TestDepositCommitUnknownOutcomeVerdicts(t *testing.T) {
 		faultPool := depositOpenFaultPool(t, dsn, fault)
 		sc := depositITScanner(t, faultPool, cfg)
 		lease := depositITLease(t, pool, chainID)
+		rcap := testRecoveryCap(t, ctx, sc.pool, sc.cfg.ChainID)
 		unit, batch, captured := depositITPrepareUnit(t, ctx, sc, 10, 20)
 
 		fault.armSQL(depositFaultCommit, true, false)
-		err := sc.commitDepositUnit(ctx, lease, unit, batch, captured, 10, 20)
+		err := sc.commitDepositUnit(ctx, lease, unit, batch, captured, 10, 20, rcap)
 		if err != nil {
 			t.Fatalf("commit = %v, want nil (the re-read must accept the landed COMMIT)", err)
 		}
@@ -2573,7 +2588,7 @@ func TestDepositCommitUnknownOutcomeVerdicts(t *testing.T) {
 		// refused by the version/progress adjudication, so no path can
 		// generate a second time.
 		unit2, batch2, _ := depositITPrepareUnit(t, ctx, sc, 10, 20)
-		err = sc.commitDepositUnit(ctx, lease, unit2, batch2, captured, 10, 20)
+		err = sc.commitDepositUnit(ctx, lease, unit2, batch2, captured, 10, 20, rcap)
 		if !errors.Is(err, errDepositVersionMismatch) {
 			t.Fatalf("stale replay = %v, want errDepositVersionMismatch", err)
 		}
@@ -2589,6 +2604,7 @@ func TestDepositCommitUnknownOutcomeVerdicts(t *testing.T) {
 		faultPool := depositOpenFaultPool(t, dsn, fault)
 		sc := depositITScanner(t, faultPool, cfg)
 		lease := depositITLease(t, pool, chainID)
+		rcap := testRecoveryCap(t, ctx, sc.pool, sc.cfg.ChainID)
 		unit, batch, captured := depositITPrepareUnit(t, ctx, sc, 10, 20)
 
 		// Close before forwarding: PostgreSQL never sees the COMMIT and the
@@ -2596,7 +2612,7 @@ func TestDepositCommitUnknownOutcomeVerdicts(t *testing.T) {
 		// treated as success, and must not be assumed to be a rollback either:
 		// the verdict comes from the durable re-read.
 		fault.armSQL(depositFaultCommit, false, false)
-		err := sc.commitDepositUnit(ctx, lease, unit, batch, captured, 10, 20)
+		err := sc.commitDepositUnit(ctx, lease, unit, batch, captured, 10, 20, rcap)
 		if err == nil {
 			t.Fatal("commit = nil, want an explicit unknown-outcome error (a connection error is not proof of rollback)")
 		}
@@ -2619,7 +2635,7 @@ func TestDepositCommitUnknownOutcomeVerdicts(t *testing.T) {
 		if captured2 != nil {
 			t.Fatalf("captured = %+v, want empty progress (nothing committed)", captured2)
 		}
-		if err := sc2.commitDepositUnit(ctx, lease, unit2, batch2, captured2, 10, 20); err != nil {
+		if err := sc2.commitDepositUnit(ctx, lease, unit2, batch2, captured2, 10, 20, rcap); err != nil {
 			t.Fatalf("retry commit: %v", err)
 		}
 		if _, _, next, ok := depositCheckpointState(t, ctx, pool, chainID); !ok || next != 21 {
@@ -4446,12 +4462,13 @@ func TestDepositPauseConcurrency(t *testing.T) {
 			common.HexToAddress(testContractA), common.HexToAddress(testContractB), common.HexToAddress(depositWatchAddr), big.NewInt(1))
 		sc := depositITScanner(t, pool, cfg)
 		lease := depositITLease(t, pool, chainID)
+		rcap := testRecoveryCap(t, ctx, sc.pool, sc.cfg.ChainID)
 		unit, batch, captured := depositITPrepareUnit(t, ctx, sc, 10, 20)
 		if _, err := pool.Exec(ctx, `UPDATE chain_blocks SET canonical = FALSE WHERE chain_id = $1 AND number = 15`, chainID); err != nil {
 			t.Fatalf("flip canonical: %v", err)
 		}
 		// The batch transaction itself rolls back with zero pause writes.
-		if err := sc.commitDepositUnit(ctx, lease, unit, batch, captured, 10, 20); !isChainView(err) {
+		if err := sc.commitDepositUnit(ctx, lease, unit, batch, captured, 10, 20, rcap); !isChainView(err) {
 			t.Fatalf("commit = %v, want a chain-view abort", err)
 		}
 		if _, ok := depositReadPause(t, ctx, pool, chainID); ok {
@@ -4515,6 +4532,7 @@ func TestDepositDualWorkers(t *testing.T) {
 		if err != nil {
 			t.Fatalf("NewLease(worker-b): %v", err)
 		}
+		rcap := testRecoveryCap(t, ctx, scA.pool, scA.cfg.ChainID)
 		unitA, batchA, capturedA := depositITPrepareUnit(t, ctx, scA, 10, 20)
 		unitB, batchB, capturedB := depositITPrepareUnit(t, ctx, scB, 10, 20)
 		gate := make(chan struct{})
@@ -4524,14 +4542,14 @@ func TestDepositDualWorkers(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			<-gate
-			errs[0] = scA.commitDepositUnit(ctx, leaseA, unitA, batchA, capturedA, 10, 20)
+			errs[0] = scA.commitDepositUnit(ctx, leaseA, unitA, batchA, capturedA, 10, 20, rcap)
 		}()
 		go func() {
 			defer wg.Done()
 			<-gate
 			// Worker B never acquired: it races only with what it captured.
 			// Either it wins the bootstrap or it loses with zero writes.
-			errs[1] = scB.commitDepositUnit(ctx, leaseB, unitB, batchB, capturedB, 10, 20)
+			errs[1] = scB.commitDepositUnit(ctx, leaseB, unitB, batchB, capturedB, 10, 20, rcap)
 		}()
 		close(gate)
 		wg.Wait()
@@ -4569,6 +4587,7 @@ func TestDepositDualWorkers(t *testing.T) {
 		scA := depositITScanner(t, poolA, cfg)
 		scB := depositITScanner(t, poolB, cfg)
 		leaseA := depositITLease(t, poolA, chainID)
+		rcap := testRecoveryCap(t, ctx, scA.pool, scA.cfg.ChainID)
 		unitA, batchA, capturedA := depositITPrepareUnit(t, ctx, scA, 10, 20)
 		// Worker B takes over while A holds a prepared unit, then commits.
 		if _, err := poolA.Exec(ctx, `UPDATE indexer_lease SET expires_at = now() - make_interval(secs => 1) WHERE chain_id = $1`, chainID); err != nil {
@@ -4576,12 +4595,12 @@ func TestDepositDualWorkers(t *testing.T) {
 		}
 		leaseB := depositITLease(t, poolB, chainID)
 		unitB, batchB, capturedB := depositITPrepareUnit(t, ctx, scB, 10, 20)
-		if err := scB.commitDepositUnit(ctx, leaseB, unitB, batchB, capturedB, 10, 20); err != nil {
+		if err := scB.commitDepositUnit(ctx, leaseB, unitB, batchB, capturedB, 10, 20, rcap); err != nil {
 			t.Fatalf("worker B commit: %v", err)
 		}
 		// A's delayed commit presents an old token against B's row: fenced
 		// with zero writes.
-		if err := scA.commitDepositUnit(ctx, leaseA, unitA, batchA, capturedA, 10, 20); !errors.Is(err, ErrLeaseLost) {
+		if err := scA.commitDepositUnit(ctx, leaseA, unitA, batchA, capturedA, 10, 20, rcap); !errors.Is(err, ErrLeaseLost) {
 			t.Fatalf("delayed commit = %v, want ErrLeaseLost", err)
 		}
 		if _, _, next, ok := depositCheckpointState(t, ctx, poolB, chainID); !ok || next != 21 {
@@ -4598,13 +4617,14 @@ func TestDepositDualWorkers(t *testing.T) {
 		cfg := depositITConfig(t, chainID, testContractA)
 		sc := depositITScanner(t, poolA, cfg)
 		lease := depositITLease(t, poolA, chainID)
+		rcap := testRecoveryCap(t, ctx, sc.pool, sc.cfg.ChainID)
 		unit, batch, captured := depositITPrepareUnit(t, ctx, sc, 10, 20)
-		if err := sc.commitDepositUnit(ctx, lease, unit, batch, captured, 10, 20); err != nil {
+		if err := sc.commitDepositUnit(ctx, lease, unit, batch, captured, 10, 20, rcap); err != nil {
 			t.Fatalf("first commit: %v", err)
 		}
 		// The same prepared triple resubmitted against moved progress is
 		// refused by version isolation with zero new writes.
-		if err := sc.commitDepositUnit(ctx, lease, unit, batch, captured, 10, 20); !errors.Is(err, errDepositVersionMismatch) {
+		if err := sc.commitDepositUnit(ctx, lease, unit, batch, captured, 10, 20, rcap); !errors.Is(err, errDepositVersionMismatch) {
 			t.Fatalf("resubmission = %v, want errDepositVersionMismatch", err)
 		}
 		if n := depositCountRows(t, ctx, poolB, "deposit_observations", chainID); n != 1 {

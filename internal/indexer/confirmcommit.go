@@ -126,10 +126,11 @@ func parseNumericConfirmations(s string) (uint64, error) {
 // bootstrap row land in one short transaction. basis carries the captured
 // (T, TH, S, N); the caller must hold the lease.
 //
-// rc carries the loop's pre-inputs recovery capture (006 capture-first
-// discipline); direct callers omit it and the commit captures at entry
-// (see resolveRecoveryCapture).
-func (c *ConfirmationCommitter) ConfirmDepositUnit(ctx context.Context, lease *Lease, basis ConfirmBasis, rc ...RecoveryCapture) error {
+// rcap carries the loop's pre-inputs recovery capture (006 capture-first
+// discipline); it is a required parameter — there is no commit-entry
+// fallback, so a recovery that establishes and releases between input-read
+// and commit stays visible as a version mismatch.
+func (c *ConfirmationCommitter) ConfirmDepositUnit(ctx context.Context, lease *Lease, basis ConfirmBasis, rcap RecoveryCapture) error {
 	if lease == nil {
 		return errors.New("confirmation commit: nil lease")
 	}
@@ -144,10 +145,6 @@ func (c *ConfirmationCommitter) ConfirmDepositUnit(ctx context.Context, lease *L
 	if basis.PolicySeq < 1 {
 		return &ConfirmationDriftError{detail: fmt.Sprintf(
 			"captured policy_seq=%d is not a version identity", basis.PolicySeq)}
-	}
-	rcap, err := resolveRecoveryCapture(ctx, c.pool, c.cfg.ChainID, rc)
-	if err != nil {
-		return err
 	}
 
 	// Step 1: BEGIN with the shared statement guard; zero external calls

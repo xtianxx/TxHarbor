@@ -68,10 +68,11 @@ VALUES ($1, $2, $3, $4, TRUE), ($5, $6, $7, $8, TRUE)`,
 		t.Fatalf("ExactConfirmations(MaxInt64,0) = %d, want 2^63", exact)
 	}
 
+	rcap := testRecoveryCap(t, ctx, pool, chainID)
 	c, lease := confirmCommitter(t, pool, chainID, n)
 	basis := ConfirmBasis{BlockHash: bh, TxHash: txHash, Height: h,
 		TipNumber: tip, TipHash: tipHash, PolicySeq: 1, ThresholdN: n}
-	if err := c.ConfirmDepositUnit(ctx, lease, basis); err != nil {
+	if err := c.ConfirmDepositUnit(ctx, lease, basis, rcap); err != nil {
 		t.Fatalf("ConfirmDepositUnit(): %v", err)
 	}
 
@@ -186,10 +187,11 @@ VALUES ($1, $2, $3, $4, TRUE), ($5, $6, $7, $8, TRUE)`,
 	bh, txHash := confirmSeedPending(t, ctx, pool, chainID, 0)
 	confirmSeedPolicyRow(t, ctx, pool, chainID, 1, 1, nil, "bootstrap", nil)
 
+	rcap := testRecoveryCap(t, ctx, pool, chainID)
 	c, lease := confirmCommitter(t, pool, chainID, 1)
 	saturated := ConfirmBasis{BlockHash: bh, TxHash: txHash, Height: 0,
 		TipNumber: maxU, TipHash: tipHash, PolicySeq: 1, ThresholdN: 1}
-	if err := c.ConfirmDepositUnit(ctx, lease, saturated); err == nil {
+	if err := c.ConfirmDepositUnit(ctx, lease, saturated, rcap); err == nil {
 		t.Fatal("ConfirmDepositUnit(saturated tip basis) = nil error, want refusal")
 	}
 	confirmAssertZeroWrite(t, ctx, pool, chainID, bh, txHash, 1)
