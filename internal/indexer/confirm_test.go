@@ -129,3 +129,52 @@ func TestNewConfirmationConfigValidation(t *testing.T) {
 		})
 	}
 }
+
+// TestConfirmationReachedBoundaryMatrix is the T014 US2 decision matrix
+// (FR-01, research R1复核后; US2-1/2/3, SC-01/02): N-1 stays, N/N+1 convert;
+// N=1 with tip==h confirms with exactly 1; N=MaxInt64 is eligible only at the
+// unreachable endpoint and never达标 at practical heights; tip<h is both-false.
+// Every row is driven through the real gate predicate ConfirmationReached and
+// cross-checked against the spec formula via ExactConfirmations. Saturation
+// guard existence stays owned by T003 (TestExactConfirmationsSaturationGuard)
+// and is only referenced, not duplicated, here.
+func TestConfirmationReachedBoundaryMatrix(t *testing.T) {
+	const maxN = uint64(1<<63 - 1)
+	cases := []struct {
+		name      string
+		tip, h, n uint64
+		wantGate  bool
+		wantExact uint64
+	}{
+		{"N=10 conf=9 stays", 108, 100, 10, false, 9},
+		{"N=10 conf=10 converts", 109, 100, 10, true, 10},
+		{"N=10 conf=11 converts", 110, 100, 10, true, 11},
+		{"N=1 tip==h conf=1 converts", 7, 7, 1, true, 1},
+		{"N=MaxInt64 practical never达标", 1000000, 0, maxN, false, 1000001},
+		{"N=MaxInt64 conf=10 practical never达标", 1000000, 999991, maxN, false, 10},
+		{"N=MaxInt64 endpoint eligible", maxN - 1, 0, maxN, true, maxN},
+		{"tip<h both-false", 50, 100, 10, false, 0},
+		{"tip<h N=1 both-false", 6, 7, 1, false, 0},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := ConfirmationReached(c.tip, c.h, c.n); got != c.wantGate {
+				t.Fatalf("ConfirmationReached(%d,%d,%d) = %v, want %v",
+					c.tip, c.h, c.n, got, c.wantGate)
+			}
+			exact, err := ExactConfirmations(c.tip, c.h)
+			if err != nil {
+				t.Fatalf("ExactConfirmations(%d,%d) error = %v", c.tip, c.h, err)
+			}
+			if exact != c.wantExact {
+				t.Fatalf("ExactConfirmations(%d,%d) = %d, want %d",
+					c.tip, c.h, exact, c.wantExact)
+			}
+			// 逐值对照: gate must equal (exact >= N) on every row.
+			if want := exact >= c.n; want != c.wantGate {
+				t.Fatalf("gate/spec mismatch at tip=%d h=%d N=%d: gate=%v exact=%d",
+					c.tip, c.h, c.n, c.wantGate, exact)
+			}
+		})
+	}
+}

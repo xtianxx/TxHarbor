@@ -100,6 +100,27 @@ func confirmNumericConfirmations(v uint64) pgtype.Numeric {
 	return pgtype.Numeric{Int: new(big.Int).SetUint64(v), Exp: 0, Valid: true}
 }
 
+// parseNumericConfirmations decodes the exact decimal text of the NUMERIC
+// confirmations column back to uint64 (data-model §确认数计算, OI-1; the read
+// half of confirmNumericConfirmations): base-10 only, no int64/float64
+// transit. Non-integers (10.5, 1e3), negatives and values above MaxUint64 are
+// internal errors, never silent clamps.
+func parseNumericConfirmations(s string) (uint64, error) {
+	for i := 0; i < len(s); i++ {
+		if s[i] < '0' || s[i] > '9' {
+			return 0, fmt.Errorf("confirmations %q is not a base-10 integer", s)
+		}
+	}
+	v, ok := new(big.Int).SetString(s, 10)
+	if !ok {
+		return 0, fmt.Errorf("confirmations %q is not a base-10 integer", s)
+	}
+	if !v.IsUint64() {
+		return 0, fmt.Errorf("confirmations %q exceeds uint64 range", s)
+	}
+	return v.Uint64(), nil
+}
+
 // ConfirmDepositUnit commits one Pending -> Confirmed conversion atomically:
 // the conditional UPDATE plus, on the first confirmation, the policy
 // bootstrap row land in one short transaction. basis carries the captured

@@ -502,3 +502,220 @@ func TestConfirmationEmptyTipZeroCommits(t *testing.T) {
 	}
 	stop()
 }
+
+// --- T016 boundary matrix ---------------------------------------------------
+
+// TestConfirmationBoundaryMatrixN10 is T016 / quickstart D1 boundary (FR-01,
+// SC-01): with N=10 and the Anvil tip fixed, confirmations 9/10/11 hold,
+// convert, convert. Each conversion carries the exact basis columns and
+// converts exactly once. US2-4 switch re-judgment is T025 scope: this test
+// asserts only pre-switch behavior under the single wired threshold.
+func TestConfirmationBoundaryMatrixN10(t *testing.T) {
+	dsn := startIndexerPostgres(t)
+	pool := openIndexerPool(t, dsn)
+	defer pool.Close()
+	ctx := context.Background()
+
+	node := logscanStartAnvilNode(t)
+	client, err := eth.Dial(ctx, node.url, 5*time.Second)
+	if err != nil {
+		t.Fatalf("dial anvil client: %v", err)
+	}
+	defer client.Close()
+
+	const chainID = scanChainID // 31337, matching the Anvil chain id
+	const n = uint64(10)
+
+	// Fixed tip=20: h=12 sits at 9 confirmations (N-1, holds), h=11 at 10
+	// (N, converts), h=10 at 11 (N+1, converts).
+	node.mine(t, 20)
+	tip := node.blockNumber(t)
+	if tip != 20 {
+		t.Fatalf("anvil head = %d, want exactly 20", tip)
+	}
+	hashes := confirm13AnvilHashes(t, ctx, client, 0, tip)
+	confirm13SeedCanonicalReal(t, ctx, pool, chainID, hashes, 0, tip)
+
+	const hist = "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+	depositSeedHistory(t, ctx, pool, chainID, 1, 10, hist)
+	type cand struct {
+		h          uint64
+		bh, txHash string
+	}
+	seeds := []cand{
+		{12, "", depositTxHash(12, 0)}, // 9 confirmations: holds
+		{11, "", depositTxHash(11, 0)}, // 10 confirmations: converts
+		{10, "", depositTxHash(10, 0)}, // 11 confirmations: converts
+	}
+	for i, s := range seeds {
+		seeds[i].bh = hashes[s.h]
+		depositSeedObservation(t, ctx, pool, chainID, s.h, hashes[s.h], s.txHash, 0, "1", 1)
+	}
+	tipHash := hashes[tip]
+
+	m := metrics.New(func() bool { return true })
+	sc, lease := confirm13Scanner(t, pool, chainID, n, m)
+
+	stop := confirm13RunLoop(t, ctx, sc, lease)
+	waitUntil(t, time.Now().Add(30*time.Second), "N/N+1 candidates confirmed", func() bool {
+		var k int
+		if err := pool.QueryRow(ctx, `
+SELECT count(*) FROM deposit_observations WHERE chain_id = $1 AND status = 'confirmed'`,
+			chainID).Scan(&k); err != nil {
+			return false
+		}
+		return k >= 2
+	})
+	time.Sleep(300 * time.Millisecond) // surface any erroneous extra write (N-1 must never convert)
+	stop()
+
+	// N-1 holds: still pending with zero conversion facts. The policy table
+	// holds exactly the bootstrap row written by the two conversions.
+	confirmAssertZeroWrite(t, ctx, pool, chainID, seeds[0].bh, seeds[0].txHash, 1)
+	var pending int
+	if err := pool.QueryRow(ctx, `
+SELECT count(*) FROM deposit_observations WHERE chain_id = $1 AND status = 'pending'`,
+		chainID).Scan(&pending); err != nil {
+		t.Fatalf("count pending: %v", err)
+	}
+	if pending != 1 {
+		t.Fatalf("pending rows = %d, want 1 (the N-1 candidate)", pending)
+	}
+
+	// N and N+1 convert with the exact basis columns (decimal-string
+	// compare for NUMERIC, mirroring T013).
+	for _, s := range seeds[1:] {
+		status, nullAt, tipN, thr, seq, gotTipHash, conf :=
+			confirmReadBasis(t, ctx, pool, chainID, s.bh, s.txHash)
+		wantConf := strconv.FormatUint(tip-s.h+1, 10)
+		if status != "confirmed" || nullAt {
+			t.Fatalf("h=%d: status=%s nullAt=%v, want confirmed/non-null confirmed_at", s.h, status, nullAt)
+		}
+		if tipN != int64(tip) || gotTipHash != tipHash || thr != int64(n) || seq != 1 || conf != wantConf {
+			t.Fatalf("h=%d: basis = tip(%d %s) N=%d conf=%s seq=%d, want tip(%d %s) N=%d conf=%s seq=1",
+				s.h, tipN, gotTipHash, thr, conf, seq, tip, tipHash, n, wantConf)
+		}
+	}
+
+	// Counters: +1 per conversion on both the confirmed counter and the ok
+	// adjudication (contracts/observability.md).
+	chain := confirm13ChainLabel(chainID)
+	if got := confirm13Counter(t, m, metrics.ConfirmationConfirmedMetricName, chain); got != 2 {
+		t.Fatalf("%s = %v, want 2", metrics.ConfirmationConfirmedMetricName, got)
+	}
+	okLabels := map[string]string{"chain": strconv.FormatInt(chainID, 10), "result": "ok"}
+	if got := confirm13Counter(t, m, metrics.ConfirmationTransitionMetricName, okLabels); got != 2 {
+		t.Fatalf("%s{ok} = %v, want 2", metrics.ConfirmationTransitionMetricName, got)
+	}
+
+	// Exactly-once: a second loop run changes nothing (confirmed_at
+	// identical, counters frozen).
+	before := make(map[string]string, len(seeds[1:]))
+	for _, s := range seeds[1:] {
+		before[s.txHash] = confirm13ConfirmedAt(t, ctx, pool, chainID, s.bh, s.txHash)
+	}
+	sc2cfg := ConfirmationConfig{
+		ChainID:      chainID,
+		ThresholdN:   n,
+		PollInterval: 25 * time.Millisecond,
+		RetryInitial: 25 * time.Millisecond,
+		RetryMax:     250 * time.Millisecond,
+	}
+	committer2, err := NewConfirmationCommitter(pool, sc2cfg)
+	if err != nil {
+		t.Fatalf("NewConfirmationCommitter(): %v", err)
+	}
+	sc2, err := NewConfirmationScanner(pool, sc2cfg, committer2, m)
+	if err != nil {
+		t.Fatalf("NewConfirmationScanner(): %v", err)
+	}
+	stop2 := confirm13RunLoop(t, ctx, sc2, lease)
+	time.Sleep(500 * time.Millisecond)
+	stop2()
+	for _, s := range seeds[1:] {
+		if got := confirm13ConfirmedAt(t, ctx, pool, chainID, s.bh, s.txHash); got != before[s.txHash] {
+			t.Fatalf("h=%d: confirmed_at changed %s -> %s (repeat run rewrote first-seen facts)",
+				s.h, before[s.txHash], got)
+		}
+	}
+	confirmAssertZeroWrite(t, ctx, pool, chainID, seeds[0].bh, seeds[0].txHash, 1)
+	if got := confirm13Counter(t, m, metrics.ConfirmationConfirmedMetricName, chain); got != 2 {
+		t.Fatalf("%s after repeat run = %v, want still 2 (exactly once)", metrics.ConfirmationConfirmedMetricName, got)
+	}
+	if got := confirm13Counter(t, m, metrics.ConfirmationTransitionMetricName, okLabels); got != 2 {
+		t.Fatalf("%s{ok} after repeat run = %v, want still 2", metrics.ConfirmationTransitionMetricName, got)
+	}
+}
+
+// TestConfirmationBoundaryN1TipEqualsHeight is T016 / quickstart D1 (FR-01,
+// SC-02): with N=1 and the Anvil tip exactly at the candidate height,
+// confirmations == 1 and the row converts exactly once with the exact basis
+// columns.
+func TestConfirmationBoundaryN1TipEqualsHeight(t *testing.T) {
+	dsn := startIndexerPostgres(t)
+	pool := openIndexerPool(t, dsn)
+	defer pool.Close()
+	ctx := context.Background()
+
+	node := logscanStartAnvilNode(t)
+	client, err := eth.Dial(ctx, node.url, 5*time.Second)
+	if err != nil {
+		t.Fatalf("dial anvil client: %v", err)
+	}
+	defer client.Close()
+
+	const chainID = scanChainID // 31337, matching the Anvil chain id
+	const n = uint64(1)
+
+	// tip == h == 5: confirmations = 5-5+1 = 1 = N, converts.
+	node.mine(t, 5)
+	tip := node.blockNumber(t)
+	if tip != 5 {
+		t.Fatalf("anvil head = %d, want exactly 5", tip)
+	}
+	const h = uint64(5)
+	hashes := confirm13AnvilHashes(t, ctx, client, 0, tip)
+	confirm13SeedCanonicalReal(t, ctx, pool, chainID, hashes, 0, tip)
+
+	const hist = "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+	depositSeedHistory(t, ctx, pool, chainID, 1, h, hist)
+	bh := hashes[h]
+	txHash := depositTxHash(h, 0)
+	depositSeedObservation(t, ctx, pool, chainID, h, bh, txHash, 0, "1", 1)
+	tipHash := hashes[tip]
+
+	m := metrics.New(func() bool { return true })
+	sc, lease := confirm13Scanner(t, pool, chainID, n, m)
+
+	stop := confirm13RunLoop(t, ctx, sc, lease)
+	waitUntil(t, time.Now().Add(30*time.Second), "N=1 candidate confirmed", func() bool {
+		var k int
+		if err := pool.QueryRow(ctx, `
+SELECT count(*) FROM deposit_observations WHERE chain_id = $1 AND status = 'confirmed'`,
+			chainID).Scan(&k); err != nil {
+			return false
+		}
+		return k >= 1
+	})
+	time.Sleep(200 * time.Millisecond) // surface any erroneous extra write
+	stop()
+
+	status, nullAt, tipN, thr, seq, gotTipHash, conf :=
+		confirmReadBasis(t, ctx, pool, chainID, bh, txHash)
+	if status != "confirmed" || nullAt {
+		t.Fatalf("status=%s nullAt=%v, want confirmed/non-null confirmed_at", status, nullAt)
+	}
+	if tipN != int64(tip) || gotTipHash != tipHash || thr != 1 || seq != 1 || conf != "1" {
+		t.Fatalf("basis = tip(%d %s) N=%d conf=%s seq=%d, want tip(%d %s) N=1 conf=1 seq=1",
+			tipN, gotTipHash, thr, conf, seq, tip, tipHash)
+	}
+
+	chain := confirm13ChainLabel(chainID)
+	if got := confirm13Counter(t, m, metrics.ConfirmationConfirmedMetricName, chain); got != 1 {
+		t.Fatalf("%s = %v, want 1", metrics.ConfirmationConfirmedMetricName, got)
+	}
+	okLabels := map[string]string{"chain": strconv.FormatInt(chainID, 10), "result": "ok"}
+	if got := confirm13Counter(t, m, metrics.ConfirmationTransitionMetricName, okLabels); got != 1 {
+		t.Fatalf("%s{ok} = %v, want 1", metrics.ConfirmationTransitionMetricName, got)
+	}
+}

@@ -124,19 +124,19 @@ T000-L / T000-P 见上（本阶段即二者建档）。**Checkpoint**: 门禁状
 
 **Independent Test**: 边界矩阵 + 非法矩阵全绿；MaxInt64+1 表示决议落地（quickstart D1 全量）
 
-- [ ] T014 [P] [US2] 等价式边界单元测试（`internal/indexer/confirm_test.go` 增补）
+- [x] T014 [P] [US2] 等价式边界单元测试（`internal/indexer/confirm_test.go` 增补）
   - 需求：FR-01，research R1（复核后）。验收场景：US2-1/2/3。依赖：T003（不同文件？同文件增补→仅依赖 T003；与 T015/T016 文件不同可并行）。
   - 内容：N-1/N/N+1 判定矩阵、N=1 且 tip==h、N=MaxInt64、`tip<h` 全假。
   - 完成条件：矩阵全绿（含 `-race`）。
-- [ ] T015 [P] [US2] 非法配置启动拒绝矩阵（`internal/config/config_test.go` 增补 + `internal/app/serve_config_test.go` 增补）
+- [x] T015 [P] [US2] 非法配置启动拒绝矩阵（`internal/config/config_test.go` 增补 + `internal/app/serve_config_test.go` 增补）
   - 需求：FR-03（Q1）。验收场景：US2-非法阈值边角、US5-5（漂移侧）。依赖：T002。
   - 内容：七类非法输入启动失败断言（错误明确、无默认、无静默修正）；重启异 N 漂移拒绝断言。
   - 完成条件：矩阵全绿；进程非零退出有断言。
-- [ ] T016 [US2] Anvil 边界矩阵（`internal/indexer/confirmation_integration_test.go` 增补）
+- [x] T016 [US2] Anvil 边界矩阵（`internal/indexer/confirmation_integration_test.go` 增补）
   - 需求：FR-01，SC-01/02。验收场景：US2-1/2/3、quickstart D1。依赖：T013（同文件顺序追加）。
   - 内容：确认数 9/10/11（N=10）分别保持/转换/转换；N=1 tip==h 转换；US2-4 切换重判移交 T025（本任务只断言切换前行为）。
   - 完成条件：5 次固定批次全绿。
-- [ ] T017 [US2] 2^63 精确审计路径验证（OI-1 已决议：NUMERIC；`migrations/000005_confirmation_tracking.sql` 落定 + 审计断言）
+- [x] T017 [US2] 2^63 精确审计路径验证（OI-1 已决议：NUMERIC；`migrations/000005_confirmation_tracking.sql` 落定 + 审计断言）
   - 需求：FR-01/05，data-model Table 1/§确认数计算。验收场景：quickstart D1（整数边界）。依赖：T001（同文件顺序修订）。
   - 内容（决议，无二选一）：`confirmations` 列为 `NUMERIC` 精确整数（OI-1 关闭）；
     Go↔SQL 经十进制字符串（uint64→decimal→NUMERIC，镜像 `depositNumericAmount`；禁 int64/float64 中转）；

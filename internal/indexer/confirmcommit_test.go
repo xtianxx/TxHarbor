@@ -61,6 +61,35 @@ func TestConfirmNumericConfirmationsExact(t *testing.T) {
 	}
 }
 
+// TestParseNumericConfirmations pins the NUMERIC read half
+// (decimal-string -> uint64, no int64/float64 transit), including the 2^63
+// OI-1 audit value and the non-integer/over-range refusals.
+func TestParseNumericConfirmations(t *testing.T) {
+	for _, c := range []struct {
+		in   string
+		want uint64
+	}{
+		{"0", 0},
+		{"1", 1},
+		{"10", 10},
+		{"9223372036854775807", uint64(1<<63 - 1)},
+		{"9223372036854775808", uint64(1) << 63},
+		{"18446744073709551615", ^uint64(0)},
+	} {
+		if got, err := parseNumericConfirmations(c.in); err != nil || got != c.want {
+			t.Fatalf("parseNumericConfirmations(%q) = (%d, %v), want (%d, nil)", c.in, got, err, c.want)
+		}
+	}
+	for _, bad := range []string{
+		"", "abc", " 10", "10 ", "10.5", "10.0", "-1", "-0",
+		"1e3", "0x10", "18446744073709551616", "99999999999999999999999999",
+	} {
+		if got, err := parseNumericConfirmations(bad); err == nil {
+			t.Fatalf("parseNumericConfirmations(%q) = %d, want refusal", bad, got)
+		}
+	}
+}
+
 // TestConfirmDepositUnitPreTransactionGuards pins the refusals issued before
 // any statement runs (nil lease, foreign captured N): no pool is touched, so
 // a pool-less committer suffices.
