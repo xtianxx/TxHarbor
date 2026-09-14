@@ -87,6 +87,12 @@
 （`config.Load` 全量校验，命令实际只用 PGDSN + ChainID；`--operator`
 记名义身份，执行者是持 DSN 运行该二进制的 DB operator，与 migrate 同信任）。
 
+信任边界（F-R2，如实声明，非新增机制）：当前模型以写 DSN 的访问权作为数据库操作信任边界；
+serve 与 confirm-auth 未通过独立数据库角色隔离。持有写 DSN 的主体技术上能够直接写数据库、
+绕过应用事务守卫；受控 CLI 与"禁止裸 SQL"约定是操作纪律，不是数据库强制限制。
+`--operator` 为调用方声明的审计标签，不是已认证身份；`request_id` 用于请求关联与幂等定性，
+不能单独证明实际操作者身份。审计追溯靠 history 行的 operator/reason/request_id/expected_old_seq 列。
+
 1. 启动与 N（required-N）：`TXHARBOR_CONFIRMATION_DEPTH` 必填正整数
    `[1, MaxInt64]`，无默认值；缺失/非法一律启动拒绝、零确认提交
    （D1 + T015 拒绝矩阵）。首次启动策略表为空是 pre-bootstrap（非错误）：

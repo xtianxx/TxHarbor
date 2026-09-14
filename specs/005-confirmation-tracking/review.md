@@ -230,3 +230,14 @@
 （设计文档冻结、F1–F10 已 remediation、30 任务映射/证据闭合、残留项显式化），
 形式条件差 T032 自身关闭一事（即本节被接受 + orchestrator 勾选 T029–T032）。
 本步不执行 analyze、不宣称 analyze 通过、不宣称生产就绪、不宣称远程 CI 状态。
+
+## §十一 — 合并前审查 F-R1/F-R2 闭合记录（只读审查后最小修正）
+
+- F-R1（策略 INSERT 静态门禁）：`TestDepositWritePathConfinement` 追加 pin——
+  `confirmation_policy_history` 的 INSERT 恰为两处（`confirmcommit.go` bootstrap +
+  `confirmauth.go` switch 各 1），第三处即失败；探针文件验证拦截后删除、无残留。
+  门禁注释明示其为写路径回归保护、非数据库权限隔离。
+- F-R2（授权与审计边界如实化）：runbook 操作员入口处补信任边界段——写 DSN 访问权即信任边界，
+  serve 与 confirm-auth 无独立数据库角色隔离；持写 DSN 者技术上可直写绕过守卫；
+  `--operator` 为声明审计标签非认证身份；`request_id` 只做关联与幂等。
+  已批准模型不变（无新角色/认证/裁剪）；DSN 直写能力仍然存在，特此记录，不宣称消除。

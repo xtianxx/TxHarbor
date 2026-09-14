@@ -604,7 +604,13 @@ var (
 // deposit_observations is the approved 005 confirmation transition in
 // confirmcommit.go (conditional Pending→Confirmed with the status='pending'
 // predicate and the seven approved SET assignments, data-model §提交协议
-// step 4); confirmation_policy_history is append-only (INSERT, never UPDATE).
+// step 4); confirmation_policy_history is append-only (INSERT, never UPDATE),
+// with exactly two approved INSERT sites: the first-confirm bootstrap row in
+// confirmcommit.go and the authorized switch row in confirmauth.go (F-R1).
+// This gate is write-path regression protection, NOT database access
+// control: anyone holding the write DSN can technically write past it
+// (see runbook trust boundary); the gate only guarantees the approved
+// binary paths stay the sole code paths.
 // Pending literals are pinned per file so a new write path or predicate
 // fails loudly instead of slipping past the shape-pinning tests above.
 // Production SQL lives in raw string literals; the per-statement window ends
@@ -626,6 +632,15 @@ var (
 	depositConfirmPredicateRe = regexp.MustCompile(`(?i)\bAND\s+status\s*=\s*'pending'`)
 	depositSetStatusRe        = regexp.MustCompile(`(?i)\bstatus\s*=`)
 
+	// Approved INSERT sites into confirmation_policy_history (F-R1): the
+	// bootstrap row (first-confirm transaction) and the authorized switch
+	// row. A third INSERT site fails the gate; enforcement against
+	// out-of-binary writes is the DSN trust boundary, not this scan.
+	depositPolicyInsertAllow = map[string]int{
+		"confirmcommit.go": 1, // insertConfirmationBootstrapSQL
+		"confirmauth.go":   1, // authorized switch single-row INSERT
+	}
+
 	// Approved "pending" literal sites (comment-stripped bodies). A new
 	// literal anywhere else fails the gate.
 	depositDoublePendingAllow = map[string]int{
@@ -646,6 +661,7 @@ func TestDepositWritePathConfinement(t *testing.T) {
 	}
 	amountInserts := 0
 	updateFiles := map[string]int{}
+	policyInserts := map[string]int{}
 	doublePending := map[string]int{}
 	singlePending := map[string]int{}
 	for _, e := range entries {
@@ -673,6 +689,9 @@ func TestDepositWritePathConfinement(t *testing.T) {
 				}
 				amountInserts++
 			}
+			if table == "confirmation_policy_history" {
+				policyInserts[name]++
+			}
 		}
 		if n := len(depositConfirmUpdateRe.FindAllStringIndex(body, -1)); n > 0 {
 			updateFiles[name] += n
@@ -688,6 +707,16 @@ func TestDepositWritePathConfinement(t *testing.T) {
 	}
 	if amountInserts != 1 {
 		t.Errorf("amount INSERT statements = %d, want exactly 1 (insertDepositObservationSQL)", amountInserts)
+	}
+	for name, want := range depositPolicyInsertAllow {
+		if got := policyInserts[name]; got != want {
+			t.Errorf("INSERT INTO confirmation_policy_history in %s = %d, want %d", name, got, want)
+		}
+	}
+	for name, got := range policyInserts {
+		if _, ok := depositPolicyInsertAllow[name]; !ok && got != 0 {
+			t.Errorf("unexpected INSERT INTO confirmation_policy_history in %s = %d, want 0", name, got)
+		}
 	}
 	// The single approved 005 write path: exactly one UPDATE of
 	// deposit_observations, in confirmcommit.go, carrying the
