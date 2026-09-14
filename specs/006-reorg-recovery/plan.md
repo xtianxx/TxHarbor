@@ -6,8 +6,10 @@
 
 ## Summary
 
-When a proven fork appears, 006 persists a versioned recovery instance, stops the chain's
-confirmations and all withdrawal broadcasts via the existing `indexer_pause` gate, finds the common
+When a proven fork appears, 006 persists a versioned recovery instance as the sole recovery
+authority (writing no pause table — R9), which stops the chain's confirmations and all
+withdrawal broadcasts through the recovery-state gate on every ordinary commit path while
+pre-existing stream pause rows stay independently in force, finds the common
 ancestor by read-only suffix walk within the bound depth, flips old-fork rows non-canonical while
 retaining them, converts affected deposits to Orphaned with evidence, rolls back the three stream
 checkpoints to guarded floors, replays from the ancestor under the recovery version, revives

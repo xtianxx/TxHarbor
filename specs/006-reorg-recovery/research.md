@@ -176,13 +176,37 @@ Evidence base (read-only, no code modified):
     needed is a continuous suffix; linear walk also yields the full evidence trail for audit).
   - *Search inside the establish transaction*: rejected — holds the global coordination lock across
     bounded-but-many RPC calls, stalling all writers; violates the short-txn discipline.
+- **Timing parameters (spec Assumptions compliance — 初值/上限/抖动/等待间隔具此，不留实现自定)**:
+  006 introduces no new timing primitive and no new knob names. All waits reuse the proven shapes:
+  `newBackoff` capped exponential (`scanner.go:886-921`: double per attempt capped at max, ±25%
+  jitter per `jitter()`, quantum floor) and the `loopTimings` clamp (`confirmscan.go:356-372`:
+  non-positive cfg → defaults, `retryMax < retryInitial` → `retryMax = retryInitial`, so an unchanged
+  tip never hot-spins). Default triple reused verbatim (`depositscanner.go:664-666`):
+  poll = 1s, retryInitial = 200ms, retryMax = 30s.
+
+  | Parameter | 初值 (unit) | Range / limit | Backoff / jitter / wait | Illegal handling | Runtime adjustable? | Basis | Verified by |
+  |---|---|---|---|---|---|---|---|
+  | Ancestor-search evidence retry (retryable class: transport/timeout/rate-limit/parse) | initial 200ms, max 30s | per-attempt wait ∈ [initial, max], attempts unbounded only while evidence stays insufficient AND recovery stays active | ×2 capped exponential, ±25% jitter, `reset()` on success | non-positive → defaults; max<initial → max=initial (loopTimings clamp) | No (startup cfg; restart to change) | 003 taxonomy + shared primitive | T010 implements reuse; primitive covered by existing `TestBackoffGrowthCapAndReset`; bounded behavior under faults in T019 |
+  | Evidence-insufficient hold (contradictory/insufficient responses) | wait (no retry) | open-ended hold, NOT a retry loop | no backoff (nothing to back off — no request is repeated on a timer) | n/a | No | FR-04/FR-10 + SC-10 (zero releases until evidence suffices); manual reconcile path is the escape hatch | T029 (V9/V10) |
+  | Recovery-loop poll (frontier/re-verify waits) | 1s | same clamp as above | one poll wait, never tight-loop | non-positive → 1s default | No | deposit precedent | T010, T019 |
+  | `replay_range` batch size | one frontier-advance txn per stream range (range-derived, not row-count-targeted) | hard bound = 5s `SET LOCAL statement_timeout` per 006 txn (R6, inherited writeGuard); `RowsAffected` recorded per batch | n/a (size enforced by timeout + rowcounts, not by sleeping) | oversized range ⇒ txn hits timeout ⇒ whole batch rolls back, frontier unmoved, retried as smaller ranges | No | R6 per-txn shape; VI atomic boundaries | T011 implements; T019 rowcounts; T020–T024 E2E |
+  | DB statement timeout | 5s (`SET LOCAL` in every 006 txn) | fixed | n/a | n/a (constant) | No | inherited writeGuard | T019 |
+  | RPC transport timeout | no new value | caller ctx per call | existing `eth` wrapper `KindOf` classification unchanged (transport/timeout/rate-limit/invalid-response/chain-mismatch) | n/a | n/a | 002 precedent; 006 issues zero RPC inside any DB txn (R6) | unchanged paths, T034 regression |
+
+  No-loss/no-misderive correspondence (spec-mandated): bounded waits never skip heights — sweeps are
+  range-UPDATEs under the lease lock and frontiers persist per committed batch, so waiting longer can
+  only delay, never omit (FR-11/FR-12); mis-derivation is prevented by the version gate, not by timing
+  (R7 — a fast stale worker is refused exactly like a slow one). No parameter here touches recovery
+  authority, completion判据, or authorization: depth bound (Q1), auto/manual release (Q2a/Q2b), and
+  the operation matrix (Q3) are unaffected by any tuning choice above — hence no new business-permission
+  decision is introduced by this table (reported explicitly, not assumed).
 
 ## R6 — Transaction list and per-txn shape (resolves FR-24-txn, OQ3-serialization)
 
 - **Decision**: Every 006 transaction follows the 5-step shape (BEGIN → ensure lease → FOR UPDATE →
   independent post-lock rechecks → writes with `RowsAffected` checks → COMMIT; `SET LOCAL
   statement_timeout='5s'`). Full per-transaction read/write/lock/version tables go in data-model.md;
-  the list: `establish` (recovery row + indexer_pause row + policy bind), `invalidate_blocks`
+  the list: `establish` (recovery row + policy bind; writes NO pause table — R9), `invalidate_blocks`
   (canonical=false flip over swept range), `invalidate_observations` (→orphaned + evidence),
   `rollback_block_checkpoint`, `rollback_log_checkpoint`, `rollback_deposit_checkpoint`,
   `replay_range` (per-stream, idempotent), `revive_observation` (orphaned→pending, Q4 rules),

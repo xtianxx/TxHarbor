@@ -40,6 +40,13 @@ reuse `indexer_lease` as the single coordination row (research R1); decisions in
   executors can never collide with round-2 values, and deletes cannot resurrect old versions.
   (A SEQUENCE object is deliberately not used: rollback of a failed establish must not burn fencing
   versions outside the audited event stream; per-chain event volume is tiny so MAX is cheap.)
+- Exact boundary (no "saturated" hand-waving): the last usable version is MaxInt64−1 =
+  9223372036854775806. With events MAX at that value the next `establish` computes MaxInt64, fails
+  the `< 9223372036854775807` assert (and would independently fail the column
+  `CHECK (recovery_seq < 9223372036854775807)`), and refuses with zero writes — no recovery row, no
+  event row, no frontier movement, no wrap, no reuse. Unreachable in practice (tens of rows per
+  recovery); the exactness is what T019 pins, not a capacity claim. Supported range is unchanged:
+  1 … MaxInt64−1, never 0, never MaxInt64, never reset.
 - `CHECK (ancestor_number IS NULL) = (ancestor_hash IS NULL)`; when set,
   `CHECK (bound_old_number - ancestor_number >= 0 AND bound_old_number - ancestor_number <= max_depth)`.
 

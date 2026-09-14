@@ -6,12 +6,23 @@ Design-only validation plan. Nothing below is recorded as executed or passed. Ea
 to spec acceptance (A#), FRs, and SCs. Levels: U = unit (no DB/chain), I = integration (real
 PostgreSQL, controlled fake RPC), E = end-to-end (Anvil + real DB).
 
-## Environment
+## Environment (pinned executable entries — no new make target, Makefile untouched)
 
-- `make test` (U), `make test-integration` (I, real PostgreSQL), Anvil E2E harness (E, deterministic
-  chains + scripted forks). Fault injection: kill -9 at named points, proxy RPC failures/delays/
+- U: `make test` (= `go test -count=1 -timeout 5m ./...`, no Docker required).
+- I/E: `make test-integration` (= `go test -tags integration -count=1 -timeout 20m ./...`, requires a
+  Docker daemon). Tests self-provision their chain and DB via testcontainers — postgres:18
+  (`startIndexerPostgres` precedent: lease/confirm-commit/auth integration files) and Anvil
+  (foundry `v1.8.1`, `--host 0.0.0.0 --port 8545 --chain-id 31337` precedent:
+  `logscan_integration_test.go:692-713`); manual equivalent is `docker compose up -d postgres anvil`
+  per `compose.yaml` (postgres 18.6 + anvil, both on 127.0.0.1 only). New 006 files
+  (`reorgcommit_test.go` for I, `reorg_recovery_integration_test.go` for E) ride this same entry with
+  `//go:build integration` + the same helpers — the 005 precedent (`confirmation_integration_test.go`
+  header: "Anvil is the real chain truth") is the pattern to copy, not a new harness to invent.
+- Fault injection around the same entry: kill -9 at named phase points, proxy RPC failures/delays/
   contradictions, clock control via DB `now()` (never app clock), dual-executor launch, delayed
   worker release.
+- Fail-exit: any non-zero `go test` exit fails the gate; `-count=1` defeats the test cache so CI
+  always executes instead of reporting a cached pass.
 
 ## Scenario matrix (run order: U → I → E)
 
