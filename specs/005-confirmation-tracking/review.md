@@ -58,3 +58,25 @@
   （`confirmation_*` 组）、`quickstart.md`（D1–D5）。upstream 语义零改动；`requirements.md` Notes 与场景计数已同步澄清后事实。
 - 章程门：初检与设计后复检均通过，无豁免（见 plan.md）。评审结论：设计评审通过，非实现验证。
 - 阻塞：无；满足进入 `/speckit.tasks` 的计划条件（本次不进入）。
+
+## 七、plan 定向复核（2026-09-14 plan 内复核，非完整重跑）
+
+- Q1 公式与范围：疑点为饱和值审计精确性与 Go/DB 表示一致。证据：tip/h 来源列 `BIGINT CHECK (>=0)`
+  （000002/000004 迁移）→可达域 `[0, MaxInt64]`；结论：门禁改用等价式 `tip>=h && tip-h>=N-1`
+  （数学等价，任意输入无溢出），N 可达域 `[1, MaxInt64]`（BIGINT 即系统范围，非业务上限），
+  饱和 guard 仅纵深防御、触发按内部错误拒绝。修正：research R1、data-model §确认数计算、quickstart D1。
+  未改规格公式（等价式仅实现形式），Q1/Q2 未重开。
+- Q2 策略初始化与切换：疑点为无充值确立、双首启 race、入口权限、丢失响应、旧 worker 恢复。
+  证据：004 首单元/PK 串行化、`serve.go:212-235` 特权 loop 外授权、`coordinator.go:106-174` 任一错全停扇出、
+  004 request_id 绑定规则。结论：机制完整，缺的是 005 落地文字。修正：data-model §首确认协议
+  （无充值长期无行 + 分歧双首启胜者落定/败者大声停 + 胜负不决正确性）、§授权切换协议（入口=DB 操作员直连 SQL、
+  守卫全在事务内无旁路 + 丢失响应按 request_id 重读定性）、§切换后恢复程序（整进程退出范围 + 零暂停行 +
+  发版重启 runbook）。未扩展通用配置平台。
+- Q3 跳过分类：疑点为跳过与停止边界及饿死。证据：spec FR-06/US3（行级"不得提交" vs 循环级"停止确认"）、
+  chain_blocks 不可变（pre-006）。结论：行级跳过（`below_depth` 正常 / `noncanonical` 防御，不建暂停行）
+  与循环级停止（暂停/tip/漂移/失权）互不代替；批量选择、逐行独立事务；单调性无饿死证明。
+  修正：data-model §候选分类、contracts skipped 原因二分、research R5 指针、quickstart D5 滞留用例。
+- Q4 审计与 006 边界：疑点为不可改写执行体与 orphaned 含义。证据：004 append-only 应用断言先例。
+  结论：应用谓词 + 零行断言 + 抽查 SQL，无触发器；依据列任何阶段不得改写删除；005 DDL 无 `'orphaned'`
+  占位，"预留"纯属设计说明。修正：data-model §Table 1、§006 预留，research R6，plan 交接节。
+- 本次复核未发现须改变已批准业务语义的问题；spec 未动。验证场景同步至 quickstart D1/D5。

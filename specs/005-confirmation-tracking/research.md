@@ -6,21 +6,32 @@
 本文件记录 plan 全部技术选择的 Decision / Rationale / Alternatives。所有复用位置均指仓库当前 `005-confirmation-tracking`
 分支（基于 `origin/main` `fd45e8b`）的真实文件与行号特征；缺口与新增能力逐项列出。
 
-## R1 — 确认数安全计算（uint64 全程无符号）
+## R1 — 确认数安全计算（uint64 全程无符号；等价比较消溢出）
 
-- **Decision**：阈值 N、链头高度 tip、充值高度 h 全程 Go `uint64`；确认数函数为
-  `confirmations(tip, h) = 0 (tip < h)；else d = tip - h, d == MaxUint64 ? MaxUint64 : d + 1`；
-  确认判定为 `confirmations >= N`（N ≥ 1 已由配置校验保证）。SQL 侧不做减法：候选上界在 Go 侧算出
-  `maxEligible = (tip + 1 >= N) ? tip + 1 - N : 无候选`（`tip + 1` 仅 tip == MaxUint64 时饱和为 MaxUint64），
-  以 `block_number <= maxEligible` 做索引查询。
-- **Rationale**：`tip - h` 在 tip ≥ h 时永不下溢；唯一的溢出点是 `d + 1` 当 `d == math.MaxUint64`
- （即 tip == MaxUint64 且 h == 0），饱和处理使函数全定义域安全。N=1 且 tip == h 时得 1，符合规格。
-  无符号全程避免 int64/uint64 互转的符号陷阱；与既有 `DepositConfig.StartBlock uint64` /
-  `next_block uint64` 口径一致（`internal/indexer/depositscanner.go:36-57`）。
+- **Decision**：阈值 N、链头高度 tip、充值高度 h 全程 Go `uint64`；达标判定使用与规格公式数学等价、
+  但无溢出点的形式：`tip >= h && tip - h >= N - 1`（N ≥ 1 已由配置校验保证，故 `N - 1` 安全；
+  前件成立故减法安全）。精确确认数（展示/审计用）仍按规格公式 `tip - h + 1` 计算，
+  末端保留饱和 guard（`d == MaxUint64` 时饱和）仅作纵深防御。
+- **表示对齐（Go ↔ DB，无业务上限）**：N 经 `ParseUint` 解析后必须能存入 `BIGINT`
+  （即 `N ≤ MaxInt64`），超出按"超出系统支持整数范围"拒绝——这是存储类型决定的系统范围，
+  不是业务上限（Q1/Q2 禁止的业务上限仍不存在）。tip/h 来源列（`chain_blocks.number`、
+  `deposit_observations.block_number`）均为 `BIGINT CHECK (>= 0)`，故可达域为 `[0, MaxInt64]`；
+  域内 `tip - h + 1 ≤ 2^63`，uint64 与 BIGINT 均精确，无截断。饱和输入（tip == MaxUint64）
+  在可达域外不可达（约束证据：上述两列的 `BIGINT` 类型 + `CHECK (>= 0)` + 行只源自 RPC 高度；
+  见 `migrations/000002_chain_indexer.sql`、`000004_deposit_detection.sql`）。
+- **等价 vs 精确的分工**：门禁比较只用等价式（任意输入无溢出，含假设性 MaxUint64）；
+  审计列存精确值（可达域内恒精确）；饱和值永不作为精确确认数展示或审计——若 guard 被触发，
+  按内部错误拒绝提交（不可达断言，单元测覆盖存在性，集成不模拟）。
+- **Rationale**：`tip - h` 在 tip ≥ h 时永不下溢；等价式彻底消除 `+1` 溢出点，比"饱和后比较"更干净。
+  N=1 且 tip == h 时 `tip - h(0) >= 0` 成立，符合规格。无符号全程避免 int64/uint64 互转的符号陷阱；
+  与既有 `DepositConfig.StartBlock uint64` / `next_block uint64` 口径一致
+  （`internal/indexer/depositscanner.go:36-57`）。候选上界沿用 `block_number <= maxEligible` 索引查询
+  （`maxEligible = tip + 1 - N`，`tip + 1 < N` 即无候选；tip == MaxUint64 时饱和，同属不可达防御）。
 - **Alternatives considered**：
   - int64 高度：与现有 uint64 进度口径冲突，且负值无意义，拒绝。
-  - `big.Int`：金额需要，高度不需要；块高度在 uint64 内是工程现实（EVM 高度增长到 2^64 需数十亿年），拒绝。
+  - `big.Int`：金额需要，高度不需要；可达域 `[0, MaxInt64]` 内 uint64 精确且零分配，拒绝。
   - SQL 内联 `tip - block_number + 1`：pg bigint 是 int64，语义与 Go 侧两套，易分叉；查询只做 `<=` 比较，拒绝。
+  - 饱和值参与比较/审计：把防御值当精确值使用，违反审计精确性，拒绝（本决策的反例）。
 
 ## R2 — 复用地图（真实位置；缺口单列）
 
@@ -71,6 +82,8 @@
 - **Rationale**：004 Table 3 的首胜/累积合并/修订语义（Q8）是充值流专用的，005 写入会破坏其不变量；
   005 无游标故无需 durable 停止位即可保证"不越过"（无位可越）；读多写少使跳过重评估廉价（只读索引查询，无写放大）。
   006 未来可通过既有暂停行 halt 确认提交（门禁已含），交接无需新表。
+  行级/循环级分类、无饿死论证见 data-model §候选分类；`skipped` 原因二分
+  （`below_depth` 正常竞态 / `noncanonical` 防御告警）见 contracts。
 - **Alternatives considered**：
   - 新建 `confirmation_pause(+audit)`：+2 表 + 跨组件语义，与"最小迁移"冲突；且 005 的停止条件均可由既有行 + 循环等待表达，拒绝。
   - 复用 `deposit_pause` 加 kind：破坏 004 累积合并与审计归属（detail 版本段按 deposit seq 打标），拒绝。
@@ -81,6 +94,8 @@
  （`confirm_tip_number/hash`、`confirm_threshold`、`confirmations`、`confirm_policy_seq`，后者 FK 到策略历史），
   CHECK 约束保证 pending 行依据全空、confirmed 行依据全非空且不可变（仅 `status='pending'` 行可写，见 data-model）。
   006 未来以自有迁移加入 `'orphaned'`（与 004 留给 005 的扩展位同构）。
+  不可改写执行机制：全写语句恒带 `status = 'pending'` 谓词 + 改写尝试零行断言 + 完整性抽查 SQL，
+  无触发器（触发器是 006 的障碍物，应用谓词对其零约束）；006 保留契约见 data-model §Table 1。
 - **Rationale**：观察行已是来源身份的唯一载体（PK），转换是同行状态推进；side-table 需第二套身份 + 一致性证明，
   无收益。依据列即审计（单语句原子写，无审计表仍满足"转换与审计原子化"）。
 - **Alternatives considered**：
@@ -93,6 +108,9 @@
    loud 停止（非零退出，镜像 004 serve.go:212-235 的拒绝形态），绝不提交旧结果、不静默跟随新策略。
   部署程序在授权成功后以新 env N 重启 worker（标准发版流程）；新 worker 启动比较通过即恢复。
   "不永久停摆"由"旧 worker 大声停 + 新配置重启即恢复"保证，而非旧 worker 自适应（自适应=绕过授权，违反 Q2）。
+  退出范围与重启步骤见 data-model §切换后恢复程序：漂移错误经既有扇出语义（`coordinator.go:106-174`）
+  使整进程非零退出（非暂停行，故他循环不被"阻止"，只随进程退出而停，各自进度 durable 重启即续）；
+  runbook 为授权成功→全舰队更新 env N→逐实例重启。
 - **Rationale**：Q2 单有效版本 + 拒绝未授权漂移的直接推论；004 对 env 漂移同样拒绝而非跟随（`depositConfigMismatchError`，
   `depositcommit.go:69-71,206-210`）。
 - **Alternatives considered**：worker 自动采纳库内新阈值：等价于无授权运行时变更，违反 Q2，拒绝。

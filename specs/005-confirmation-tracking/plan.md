@@ -165,6 +165,7 @@ Coordinator 取 lease（获胜/旁观）→ 胜出期间四 serveLoop 并存（�
 - 暂停门禁：确认提交要求 `deposit_pause`/`indexer_pause`/`log_pause` 皆无 → 006 以暂停行 halt 确认，无需新表。
 - 锁顺序：一切写事务首锁 `indexer_lease` 行 → 006 恢复事务遵守同一顺序即无死锁环。
 - 审计输入：观察行依据六列 + 策略版本链 → 006 重验/Orphaned 判定/再确认的输入；005 不写恢复行。
+  保留契约：依据列任何阶段不得改写删除（含 006），Orphaned 标记只改 `status`；005 DDL 无 `'orphaned'` 占位。
 - 006 自有迁移拓宽 `status` 加入 `'orphaned'`；不得修改 005 列语义。
 
 ## Complexity Tracking
