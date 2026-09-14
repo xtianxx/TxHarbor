@@ -194,6 +194,11 @@ T000-L / T000-P 见上（本阶段即二者建档）。**Checkpoint**: 门禁状
   - 内容：改写 confirmed 行尝试影响 0 行；全仓库 005 写路径仅提交事务一条 UPDATE（含 `status='pending'` 谓词，
     grep 门禁记入完成证据）；完整性抽查 SQL 断言。
   - 完成条件：回归绿；写路径清单与代码一致（审查签字记入提交信息或 review 增补）。
+  - 部分完成记录（Batch A 回归闭合，不关闭本任务、不进入 Batch D）：grep 门禁子项已落地——
+    `TestDepositWritePathConfinement` 精确扩展为仅允许 `confirmcommit.go` 中一条
+    `UPDATE deposit_observations`（`status='pending'` 谓词 + 七项批准 SET 赋值 + SET 区单次 status 赋值），
+    `confirmation_policy_history` 禁 UPDATE，pending 字面量按文件 pin；拦截能力已用探针文件验证。
+    剩余子项（改写零行回归以 T010/T013 既有断言为证据，待 Batch D 复核）未动。
 
 - [ ] T033 [US4] 异配置首次竞争合法性（`internal/indexer/confirmation_race_integration_test.go` 增补）
   - 需求：FR-03/FR-08（Q2 单有效策略），data-model §首确认协议（分歧双首启）。验收场景：US4 并发类扩展、US5-5（漂移侧）。
