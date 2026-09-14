@@ -38,7 +38,7 @@ type confirmFakeCommitter struct {
 	fn    func(call int, basis ConfirmBasis) error
 }
 
-func (f *confirmFakeCommitter) ConfirmDepositUnit(_ context.Context, _ *Lease, basis ConfirmBasis) error {
+func (f *confirmFakeCommitter) ConfirmDepositUnit(_ context.Context, _ *Lease, basis ConfirmBasis, _ ...RecoveryCapture) error {
 	f.calls = append(f.calls, basis)
 	if f.fn == nil {
 		return nil

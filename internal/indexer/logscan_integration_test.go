@@ -322,7 +322,7 @@ func logscanSeedBlocks(t *testing.T, ctx context.Context, pool *pgxpool.Pool, ch
 	for _, r := range rows {
 		if _, err := tx.Exec(ctx, `
 INSERT INTO chain_blocks (chain_id, number, hash, parent_hash)
-VALUES ($1, $2, $3, $4) ON CONFLICT (chain_id, number) DO NOTHING`,
+VALUES ($1, $2, $3, $4) ON CONFLICT (chain_id, number, hash) DO NOTHING`,
 			chainID, int64(r.number), r.hash, r.parent); err != nil {
 			t.Fatalf("seed chain_blocks at %d: %v", r.number, err)
 		}

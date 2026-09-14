@@ -618,9 +618,15 @@ var (
 // into neighboring Go code.
 var (
 	depositConfirmUpdateFile = "confirmcommit.go"
-	depositConfirmUpdateRe   = regexp.MustCompile(`(?i)\bUPDATE\s+deposit_observations\b`)
-	depositPolicyUpdateRe    = regexp.MustCompile(`(?i)\bUPDATE\s+confirmation_policy_history\b`)
-	depositConfirmSetRes     = []string{
+	// Approved 006 write path (T011, specs/006-reorg-recovery FR-05/06/08):
+	// exactly two UPDATEs of deposit_observations in reorgcommit.go — the
+	// orphan invalidation and the in-place revive — each with its exact
+	// guard. Any third site, or a guard change, fails the gate.
+	depositReorgUpdateFile  = "reorgcommit.go"
+	depositReorgUpdateCount = 2
+	depositConfirmUpdateRe  = regexp.MustCompile(`(?i)\bUPDATE\s+deposit_observations\b`)
+	depositPolicyUpdateRe   = regexp.MustCompile(`(?i)\bUPDATE\s+confirmation_policy_history\b`)
+	depositConfirmSetRes    = []string{
 		`SET\s+status\s*=\s*'confirmed'`,
 		`confirmed_at\s*=\s*now\(\)`,
 		`confirm_tip_number\s*=`,
@@ -646,9 +652,11 @@ var (
 	depositDoublePendingAllow = map[string]int{
 		"depositcommit.go": 1, // depositObservationStatusPending const
 		"confirmcommit.go": 2, // candidate status comparisons (re-read guards)
+		"reorgcommit.go":   3, // revive repeat-convergence check + transition args (orphaned→pending)
 	}
 	depositSinglePendingAllow = map[string]int{
 		"confirmcommit.go": 1, // the conditional UPDATE predicate
+		"reorgcommit.go":   5, // orphan/invalidate predicates, revive SET+guard, read-only proofs
 		"confirmscan.go":   2, // read-only candidate + count WHERE filters
 	}
 )
@@ -721,7 +729,10 @@ func TestDepositWritePathConfinement(t *testing.T) {
 	// The single approved 005 write path: exactly one UPDATE of
 	// deposit_observations, in confirmcommit.go, carrying the
 	// status='pending' predicate and only the approved SET assignments.
-	if len(updateFiles) != 1 || updateFiles[depositConfirmUpdateFile] != 1 {
+	// Plus the approved 006 pair (see depositReorgUpdateFile): the orphan
+	// invalidation and the in-place revive, nowhere else.
+	if len(updateFiles) != 2 || updateFiles[depositConfirmUpdateFile] != 1 ||
+		updateFiles[depositReorgUpdateFile] != depositReorgUpdateCount {
 		t.Errorf("UPDATE deposit_observations sites = %v, want exactly 1 in %s (confirmDepositObservationSQL)",
 			updateFiles, depositConfirmUpdateFile)
 	} else {
@@ -756,6 +767,25 @@ func TestDepositWritePathConfinement(t *testing.T) {
 		}
 		if strings.Contains(setRegion, "'pending'") {
 			t.Errorf("%s: SET region must not assign 'pending'", depositConfirmUpdateFile)
+		}
+	}
+	// The approved 006 pair (T011): the orphan invalidation assigns
+	// 'orphaned' only over the pending/confirmed predicate, and the revive
+	// assigns 'pending' only under the orphaned + recovery-identity guard.
+	// Anything else in reorgcommit.go fails the gate.
+	rawReorg, err := os.ReadFile(filepath.Join(pkgDir, depositReorgUpdateFile))
+	if err != nil {
+		t.Fatalf("read %s: %v", depositReorgUpdateFile, err)
+	}
+	bodyReorg := depositStripGoComments(string(rawReorg))
+	for _, want := range []string{
+		`SET status = 'orphaned'`,
+		`status IN ('pending', 'confirmed')`,
+		`SET status = 'pending'`,
+		`status = 'orphaned' AND orphan_recovery_id`,
+	} {
+		if !strings.Contains(bodyReorg, want) {
+			t.Errorf("%s: approved 006 UPDATE lacks %q", depositReorgUpdateFile, want)
 		}
 	}
 	for name, want := range depositDoublePendingAllow {

@@ -273,6 +273,32 @@ func (s *LogScanner) ServeLoop(ctx context.Context, checkLost func() error) erro
 			return err
 		}
 
+		// 006 loop gate (T014): capture the recovery version BEFORE batch
+		// inputs and never start a batch under an active recovery row.
+		rcap, active, err := captureRecoveryVersion(ctx, s.pool, s.chainID)
+		if err != nil {
+			if ctx.Err() != nil {
+				return nil
+			}
+			d := back.next()
+			s.setState(StateRetrying, "recovery_capture")
+			s.logger.Warn("recovery capture failed; retrying",
+				"chain_id", s.chainID, "retry_in", d, "error", logx.Redact(err.Error()))
+			if !s.wait(ctx, d) {
+				return nil
+			}
+			continue
+		}
+		if active {
+			s.setState(StateWaiting, "recovery_active")
+			s.logger.Debug("recovery active; ordinary log indexing waits",
+				"chain_id", s.chainID, "recovery_seq", rcap.Seq)
+			if !s.wait(ctx, s.cfg.PollInterval) {
+				return nil
+			}
+			continue
+		}
+
 		a := s.cfg.StartBlock
 		first := true
 		if cp != nil {
@@ -440,7 +466,7 @@ func (s *LogScanner) ServeLoop(ctx context.Context, checkLost func() error) erro
 			return fmt.Errorf("validate logs [%d,%d]: %w", a, b, err)
 		}
 
-		err = s.commitLogRange(ctx, a, b, first, coverage, rows)
+		err = s.commitLogRange(ctx, a, b, first, coverage, rows, rcap)
 		switch {
 		case err == nil:
 			if first {
@@ -474,10 +500,12 @@ func (s *LogScanner) ServeLoop(ctx context.Context, checkLost func() error) erro
 			return fmt.Errorf("%w: durable log pause row present", errPaused)
 		case errors.Is(err, ErrLeaseLost):
 			return err
-		case errors.Is(err, errStaleState):
+		case errors.Is(err, errStaleState) || isRecoveryGate(err):
 			// A concurrent writer (or an uncertain commit from the previous
-			// iteration) moved the durable state. Re-read and continue
-			// idempotently; the exact guard decides what actually committed.
+			// iteration) moved the durable state — or a recovery version
+			// moved under us. Re-read and continue idempotently; the exact
+			// guard (or a fresh capture upstream) decides what actually
+			// committed.
 			old := cp
 			ncp, nlp, nip, rerr := s.loadLogStateRetry(ctx)
 			if rerr != nil {
@@ -1016,7 +1044,11 @@ func validConfigHash(s string) bool {
 // write protocol step by step. There is no special case for an uncertain
 // COMMIT: the next iteration re-reads the durable state and the exact guard
 // settles what actually committed (FR-16/OQ2).
-func (s *LogScanner) commitLogRange(ctx context.Context, a, b uint64, first bool, coverage map[uint64]string, rows []logRow) error {
+func (s *LogScanner) commitLogRange(ctx context.Context, a, b uint64, first bool, coverage map[uint64]string, rows []logRow, rc ...RecoveryCapture) error {
+	rcap, err := resolveRecoveryCapture(ctx, s.pool, s.chainID, rc)
+	if err != nil {
+		return err
+	}
 	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{})
 	if err != nil {
 		return fmt.Errorf("begin log transaction: %w", err)
@@ -1066,6 +1098,11 @@ func (s *LogScanner) commitLogRange(ctx context.Context, a, b uint64, first bool
 	}
 	if err != nil {
 		return fmt.Errorf("lease verdict: %w", err)
+	}
+	// 006 recovery gate (T014): same capture/commit-triple/refuse-whole-batch
+	// discipline as T013, against log_checkpoint + canonical re-adjudication.
+	if _, err := recheckRecoveryGate(ctx, tx, s.chainID, rcap); err != nil {
+		return err
 	}
 	if first {
 		// First interval: no log_checkpoint row may exist at all (a concurrent

@@ -325,6 +325,32 @@ func (s *Scanner) ServeLoop(ctx context.Context, checkLost func() error) error {
 			return err
 		}
 
+		// 006 loop gate (T013): capture the recovery version BEFORE batch
+		// inputs and never start a batch under an active recovery row.
+		rcap, active, err := captureRecoveryVersion(ctx, s.pool, s.chainID)
+		if err != nil {
+			if ctx.Err() != nil {
+				return nil
+			}
+			d := back.next()
+			s.setState(StateRetrying, "recovery_capture")
+			s.logger.Warn("recovery capture failed; retrying",
+				"chain_id", s.chainID, "retry_in", d, "error", logx.Redact(err.Error()))
+			if !s.wait(ctx, d) {
+				return nil
+			}
+			continue
+		}
+		if active {
+			s.setState(StateWaiting, "recovery_active")
+			s.logger.Debug("recovery active; ordinary indexing waits",
+				"chain_id", s.chainID, "recovery_seq", rcap.Seq)
+			if !s.wait(ctx, pairPollInterval) {
+				return nil
+			}
+			continue
+		}
+
 		// Expected height and continuity anchor (FR-02/FR-05): the first
 		// block after an empty progress is S (no S-1 read, no parent check);
 		// afterwards it is checkpoint height + 1 and the parent must equal the
@@ -381,7 +407,7 @@ func (s *Scanner) ServeLoop(ctx context.Context, checkLost func() error) error {
 			})
 		}
 
-		err = s.commitBlock(ctx, blockWrite{number: n, hash: hash, parent: parentHash, first: first})
+		err = s.commitBlock(ctx, blockWrite{number: n, hash: hash, parent: parentHash, first: first}, rcap)
 		var hm *hashMismatchError
 		switch {
 		case err == nil:
@@ -419,10 +445,13 @@ func (s *Scanner) ServeLoop(ctx context.Context, checkLost func() error) error {
 			return fmt.Errorf("%w: durable pause row present", errPaused)
 		case errors.Is(err, ErrLeaseLost):
 			return err
-		case errors.Is(err, errStaleState):
+		case errors.Is(err, errStaleState) || isRecoveryGate(err):
 			// A concurrent writer (or an uncertain commit from the previous
-			// iteration) changed the durable state. Re-read it and continue
-			// idempotently; the exact guard decides what actually committed.
+			// iteration) changed the durable state — or a recovery version
+			// moved under us. Re-read and continue idempotently; the exact
+			// guard (or a fresh capture upstream) decides what actually
+			// committed. Recomputation starts a new batch, never re-labels
+			// old results.
 			old := cp
 			ncp, np, rerr := s.loadProgressRetry(ctx)
 			if rerr != nil {
@@ -612,7 +641,15 @@ func (e *hashMismatchError) Error() string {
 // There is no special case for an uncertain COMMIT: the next iteration
 // re-fetches the same height and the exact guard settles what actually
 // committed, making reprocessing idempotent (FR-07/FR-13).
-func (s *Scanner) commitBlock(ctx context.Context, w blockWrite) error {
+//
+// rc carries the loop's pre-inputs recovery capture (006 capture-first
+// discipline); direct callers omit it and the commit captures at entry
+// (see resolveRecoveryCapture).
+func (s *Scanner) commitBlock(ctx context.Context, w blockWrite, rc ...RecoveryCapture) error {
+	rcap, err := resolveRecoveryCapture(ctx, s.pool, s.chainID, rc)
+	if err != nil {
+		return err
+	}
 	if w.first && w.number != s.cfg.StartHeight {
 		return errStaleState
 	}
@@ -661,6 +698,13 @@ func (s *Scanner) commitBlock(ctx context.Context, w blockWrite) error {
 	if err != nil {
 		return fmt.Errorf("lease verdict: %w", err)
 	}
+	// 006 recovery gate (T013): capture-first/commit-triple beside the
+	// existing verdicts. An ordinary batch refuses on any active row or
+	// version mismatch with zero writes and zero progress, even on full
+	// content coincidence; recomputation starts a new batch upstream.
+	if _, err := recheckRecoveryGate(ctx, tx, s.chainID, rcap); err != nil {
+		return err
+	}
 	if w.first {
 		// First block: no checkpoint row may exist at all, and the number is
 		// S (checked above); no parent check for this boundary (FR-05).
@@ -695,20 +739,10 @@ func (s *Scanner) commitBlock(ctx context.Context, w blockWrite) error {
 		return fmt.Errorf("re-read block hashes: %w", err)
 	}
 	if len(storedHashes) != 1 || storedHashes[0] != w.hash {
-		// Sibling fork evidence at this height (T008). Ordinary path:
-		// route to the preserved hash_mismatch pause below. Rows under an
-		// active 006 recovery belong to 006 (its replay owns those rows;
-		// the full ordinary-path gate lands in T013) — the ordinary path
-		// writes no pause here and advances no checkpoint, only steps back
-		// to re-read (errStaleState).
-		var one int
-		rerr := tx.QueryRow(ctx, recoveryActiveSQL, s.chainID).Scan(&one)
-		if rerr == nil {
-			return errStaleState
-		}
-		if !errors.Is(rerr, pgx.ErrNoRows) {
-			return fmt.Errorf("recovery-state verdict: %w", rerr)
-		}
+		// Sibling fork evidence at this height (T008): the recovery gate
+		// above already refused every batch under an active recovery, so
+		// reaching here means the ordinary path owns this evidence — route
+		// to the preserved hash_mismatch pause.
 		stored, qerr := canonicalHashAtHeight(ctx, tx, s.chainID, w.number, storedHashes, w.hash)
 		if qerr != nil {
 			return qerr
@@ -1100,12 +1134,6 @@ ON CONFLICT (chain_id, number, hash) DO NOTHING`
 	// partial UNIQUE guarantees at most one row; no row means no canonical
 	// view is effective there).
 	canonicalHashSQL = `SELECT hash FROM chain_blocks WHERE chain_id = $1 AND number = $2 AND canonical`
-
-	// recoveryActiveSQL is the T008 read of the 006 recovery authority: any
-	// row means an active recovery owns sibling rows at every height. The
-	// full capture/commit-triple gate on this read lands in T013; here it
-	// only separates the ordinary pause route from 006-owned rows.
-	recoveryActiveSQL = `SELECT 1 FROM reorg_recovery WHERE chain_id = $1`
 
 	insertCheckpointSQL = `
 INSERT INTO indexer_checkpoint (chain_id, height, block_hash, start_height)
