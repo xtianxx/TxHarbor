@@ -13,7 +13,7 @@
 
 ## Requirement Completeness
 
-- [ ] No [NEEDS CLARIFICATION] markers remain — 剩余 2 处（FR-03：非法阈值处理；FR-03：阈值变更允许性与生效规则），属现有文档未确定策略，按任务指令标为待澄清、不静默选择。clarify 步骤再裁决，本步骤保留。
+- [x] No [NEEDS CLARIFICATION] markers remain — 剩余 2 处（FR-03：非法阈值处理；FR-03：阈值变更允许性与生效规则），属现有文档未确定策略，按任务指令标为待澄清、不静默选择。clarify 步骤再裁决，本步骤保留。
 - [x] Requirements are testable and unambiguous — FR-01–FR-12 均为 MUST/MUST NOT 可测断言；公式下界、边界闭区间、哈希比对、提交复核均可测（SC-01–SC-09 对应）。
 - [x] Success criteria are measurable — SC-01–SC-09 均为 100%/恒为 1/恒为 0 的可计数断言。
 - [x] Success criteria are technology-agnostic (no implementation details) — 成功标准只谈状态结果与可追溯性，未提语言、框架、数据库与工具。
