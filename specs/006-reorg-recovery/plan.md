@@ -165,6 +165,31 @@ state without breaking their stream contracts; see R1/R2/R8 alternatives rejecte
 - Missing live implementation evidence does not block this technical plan (instruction), but tasks/
   implementation MUST re-verify FR-25 items before touching 005-owned paths.
 
+## Batch A evidence ledger (2026-09-14, branch `006-reorg-recovery`)
+
+Recorded by T001–T005; nothing here claims 005 acceptance or production readiness.
+
+- T001: `a73e31b` in ancestry (`merge-base --is-ancestor` OK); `specs/005-confirmation-tracking/`
+  spec/plan/tasks present; `migrations/000005_confirmation_tracking.sql` present;
+  002–004 spec dirs present. No 005 file modified.
+- T002: evidence sources present as files (`confirmation_*_test.go`,
+  `confirmcommit_test.go`, `confirmauth_integration_test.go`, `ci.yml`); their
+  execution/pass evidence was NOT produced in this batch — recorded as
+  missing-with-handling: T016/T034 stay blocked (plus story phases via unclosed
+  Phase 2). 005 tasks show 29/30 checked with only T000-P open, but that box
+  count is not scored as gate-passed here.
+- T003: T000-P stays open per 005 spec Assumptions + 005 tasks `T000-P` unchecked;
+  open neither proves nor disproves local acceptance; production readiness stays
+  out of 006 scope. No task conflates T000-P with local preconditions.
+- T004: pinned entries recorded available — U `make test`; I/E
+  `make test-integration` (Docker daemon OK; testcontainers self-provision
+  postgres:18 + Anvil foundry v1.8.1 chain-31337; compose stack is a manual-debug
+  aid only, never consumed by automated tests). Execution itself is future work.
+- T005: `migrations/000001_baseline.sql` through `000005_confirmation_tracking.sql`
+  present in sequence; `migrations/embed.go` auto-includes `*.sql`, so the new
+  `000006` file needs no embed change. Migrate role unchanged (same DB operator
+  shape as 000002–000005).
+
 ## Readability follow-up (checklist remainder from clarify)
 
 The requirements checklist still lists two partial items (non-technical-stakeholder wording).

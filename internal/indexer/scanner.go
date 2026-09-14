@@ -595,7 +595,9 @@ type blockWrite struct {
 }
 
 // hashMismatchError reports that the same height is already stored with a
-// different hash (FR-12 first arm).
+// different hash (FR-12 first arm). Post-006-migration a height may hold a
+// non-canonical sibling; stored then names the canonical hash at the height
+// (the view the chain diverged from), never an arbitrary sibling.
 type hashMismatchError struct {
 	stored string
 	actual string
@@ -680,16 +682,37 @@ func (s *Scanner) commitBlock(ctx context.Context, w blockWrite) error {
 		}
 	}
 
-	// Step 5: write the block, re-read the same height inside the transaction
-	// and never trust in-memory knowledge (FR-07: idempotent convergence).
+	// Step 5: write the block sibling-aware (006 R2 linkage), re-read the
+	// same height inside the transaction and never trust in-memory knowledge
+	// (FR-07: idempotent convergence). Same number+hash is an idempotent
+	// rescan (DO NOTHING, correct); same number + different hash inserts a
+	// sibling row (no conflict) as fork evidence for the adjudication below.
 	if _, err := tx.Exec(ctx, insertBlockSQL, s.chainID, w.number, w.hash, w.parent); err != nil {
 		return fmt.Errorf("insert block: %w", err)
 	}
-	var stored string
-	if err := tx.QueryRow(ctx, blockHashSQL, s.chainID, w.number).Scan(&stored); err != nil {
-		return fmt.Errorf("re-read block hash: %w", err)
+	storedHashes, err := queryBlockHashes(ctx, tx, s.chainID, w.number)
+	if err != nil {
+		return fmt.Errorf("re-read block hashes: %w", err)
 	}
-	if stored != w.hash {
+	if len(storedHashes) != 1 || storedHashes[0] != w.hash {
+		// Sibling fork evidence at this height (T008). Ordinary path:
+		// route to the preserved hash_mismatch pause below. Rows under an
+		// active 006 recovery belong to 006 (its replay owns those rows;
+		// the full ordinary-path gate lands in T013) — the ordinary path
+		// writes no pause here and advances no checkpoint, only steps back
+		// to re-read (errStaleState).
+		var one int
+		rerr := tx.QueryRow(ctx, recoveryActiveSQL, s.chainID).Scan(&one)
+		if rerr == nil {
+			return errStaleState
+		}
+		if !errors.Is(rerr, pgx.ErrNoRows) {
+			return fmt.Errorf("recovery-state verdict: %w", rerr)
+		}
+		stored, qerr := canonicalHashAtHeight(ctx, tx, s.chainID, w.number, storedHashes, w.hash)
+		if qerr != nil {
+			return qerr
+		}
 		return &hashMismatchError{stored: stored, actual: w.hash}
 	}
 
@@ -710,6 +733,50 @@ func (s *Scanner) commitBlock(ctx context.Context, w blockWrite) error {
 		return fmt.Errorf("commit block %d: %w", w.number, err)
 	}
 	return nil
+}
+
+// queryBlockHashes lists every stored hash at a height in hash order.
+// Callers run it inside their write transaction so the snapshot includes
+// the row just written above.
+func queryBlockHashes(ctx context.Context, tx pgx.Tx, chainID int64, number uint64) ([]string, error) {
+	rows, err := tx.Query(ctx, siblingHashesSQL, chainID, number)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []string
+	for rows.Next() {
+		var h string
+		if err := rows.Scan(&h); err != nil {
+			return nil, err
+		}
+		out = append(out, h)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+// canonicalHashAtHeight names the stored hash a same-height divergence is
+// reported against: the canonical hash when one is effective, otherwise the
+// first foreign hash from the in-txn sibling list (no extra read needed).
+func canonicalHashAtHeight(ctx context.Context, tx pgx.Tx, chainID int64, number uint64, siblings []string, actual string) (string, error) {
+	var stored string
+	err := tx.QueryRow(ctx, canonicalHashSQL, chainID, number).Scan(&stored)
+	switch {
+	case err == nil:
+		return stored, nil
+	case errors.Is(err, pgx.ErrNoRows):
+		for _, h := range siblings {
+			if h != actual {
+				return h, nil
+			}
+		}
+		return actual, nil
+	default:
+		return "", fmt.Errorf("re-read canonical hash: %w", err)
+	}
 }
 
 // pauseInfo describes one divergence to persist.
@@ -802,7 +869,7 @@ func (s *Scanner) commitPause(ctx context.Context, p pauseInfo) error {
 	switch p.kind {
 	case pauseHashMismatch:
 		var stored string
-		err := tx.QueryRow(ctx, blockHashSQL, s.chainID, p.height).Scan(&stored)
+		err := tx.QueryRow(ctx, canonicalHashSQL, s.chainID, p.height).Scan(&stored)
 		if errors.Is(err, pgx.ErrNoRows) || (err == nil && (stored != p.expected || stored == p.actual)) {
 			return errStaleState
 		}
@@ -1022,9 +1089,23 @@ WHERE chain_id = $1 AND height = $2 AND block_hash = $3`
 	insertBlockSQL = `
 INSERT INTO chain_blocks (chain_id, number, hash, parent_hash)
 VALUES ($1, $2, $3, $4)
-ON CONFLICT (chain_id, number) DO NOTHING`
+ON CONFLICT (chain_id, number, hash) DO NOTHING`
 
-	blockHashSQL = `SELECT hash FROM chain_blocks WHERE chain_id = $1 AND number = $2`
+	// siblingHashesSQL lists every stored hash at a height (post-006 the PK
+	// holds both forks). Rows arrive in hash order so the single-row case
+	// is deterministic.
+	siblingHashesSQL = `SELECT hash FROM chain_blocks WHERE chain_id = $1 AND number = $2 ORDER BY hash`
+
+	// canonicalHashSQL reads the single canonical hash at a height (the
+	// partial UNIQUE guarantees at most one row; no row means no canonical
+	// view is effective there).
+	canonicalHashSQL = `SELECT hash FROM chain_blocks WHERE chain_id = $1 AND number = $2 AND canonical`
+
+	// recoveryActiveSQL is the T008 read of the 006 recovery authority: any
+	// row means an active recovery owns sibling rows at every height. The
+	// full capture/commit-triple gate on this read lands in T013; here it
+	// only separates the ordinary pause route from 006-owned rows.
+	recoveryActiveSQL = `SELECT 1 FROM reorg_recovery WHERE chain_id = $1`
 
 	insertCheckpointSQL = `
 INSERT INTO indexer_checkpoint (chain_id, height, block_hash, start_height)

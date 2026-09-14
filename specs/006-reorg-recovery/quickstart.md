@@ -13,8 +13,11 @@ PostgreSQL, controlled fake RPC), E = end-to-end (Anvil + real DB).
   Docker daemon). Tests self-provision their chain and DB via testcontainers — postgres:18
   (`startIndexerPostgres` precedent: lease/confirm-commit/auth integration files) and Anvil
   (foundry `v1.8.1`, `--host 0.0.0.0 --port 8545 --chain-id 31337` precedent:
-  `logscan_integration_test.go:692-713`); manual equivalent is `docker compose up -d postgres anvil`
-  per `compose.yaml` (postgres 18.6 + anvil, both on 127.0.0.1 only). New 006 files
+   `logscan_integration_test.go:692-713`); `docker compose up -d postgres anvil`
+   per `compose.yaml` (postgres 18.6 + anvil, both on 127.0.0.1 only) is a manual-debug aid only —
+   NOT an automated-test equivalent entry. Automated I/E tests run exclusively via
+   `make test-integration` with testcontainer-provisioned endpoints and never consume the fixed
+   endpoints of a manual compose stack. New 006 files
   (`reorgcommit_test.go` for I, `reorg_recovery_integration_test.go` for E) ride this same entry with
   `//go:build integration` + the same helpers — the 005 precedent (`confirmation_integration_test.go`
   header: "Anvil is the real chain truth") is the pattern to copy, not a new harness to invent.
