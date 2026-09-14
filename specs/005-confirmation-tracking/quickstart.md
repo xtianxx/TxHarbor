@@ -71,3 +71,68 @@
   kill 恢复、D3 暂停/重组/切换注入、D4 全周期、D5 升级与重启。Anvil 重组模拟以"新 canonical 块推进 +
   暂停行插入"表达；超深重组与祖先搜索属 006，不在本阶段验证。
 - 本步不运行实现测试；以上为方案，真实命令与断言由 tasks 固定。本设计评审结论不是实现验证。
+
+## §切换 runbook（T029，FR-03/Q2 操作步骤）
+
+本节每一步均有实现/测试证据，不引入新语义。唯一操作入口是：
+
+`txharbor confirm-auth --request-id ID --expected-old-seq S --new-threshold N --operator OP --reason R`
+
+（T029 carrier；裸 psql INSERT 禁止——old-seq 检查、Q1 解析、request_id 定性
+全部在 `AuthorizeConfirmationPolicy` 同一事务内执行，旁路即无守卫；
+证据 `internal/indexer/confirmauth.go` T024 + `internal/app/confirmauth.go`）。
+退出码：0 提交或同意图已记录（stdout
+`ok policy_seq=<seq> threshold=<N> recorded=<bool>`）；1 拒绝/失败
+（stderr 已脱敏）；2 用法错误。用 serve 同一份 env 文件运行
+（`config.Load` 全量校验，命令实际只用 PGDSN + ChainID；`--operator`
+记名义身份，执行者是持 DSN 运行该二进制的 DB operator，与 migrate 同信任）。
+
+1. 启动与 N（required-N）：`TXHARBOR_CONFIRMATION_DEPTH` 必填正整数
+   `[1, MaxInt64]`，无默认值；缺失/非法一律启动拒绝、零确认提交
+   （D1 + T015 拒绝矩阵）。首次启动策略表为空是 pre-bootstrap（非错误）：
+   首行只能由 first-confirm 事务建，空表上 confirm-auth 拒绝
+   （T024 `TestConfirmAuthEmptyTableRefused`）；tip 缺失则等待
+   （state=1，D5）。不要手动插首行。
+2. 分歧首启对账（两实例带不同 N 同时首启）：恰好一方 bootstrap `(1, N)`
+   落地，败方 drift 拒绝并 loud 停止、零转换（T033
+   `TestConfirmationRaceDivergentFirstStart_N10Wins/N20Wins`）。对账：
+   以策略 SQL 查赢家——
+   `SELECT policy_seq, threshold, prev_seq, operator, reason, request_id,
+   expected_old_seq, created_at FROM confirmation_policy_history
+   WHERE chain_id = $1 ORDER BY policy_seq`（T028 version-chain SQL；
+   有效策略 = max seq 行）。赢家 N 若非预期，用第 3 步授权切换纠正
+   （T033 注释：wrong-N winner 由 T029 路径纠正），不要直接改库。
+3. 受控切换（常规 N 变更）：(a) 读当前 max seq——
+   `SELECT policy_seq, threshold FROM confirmation_policy_history
+   WHERE chain_id = $1 ORDER BY policy_seq DESC LIMIT 1`；
+   (b) 以该 seq 为 `--expected-old-seq`、全新 `request_id` 运行
+   confirm-auth；(c) stdout 含 `ok` 后验行（第 2 步 SQL：新行
+   seq=max+1、prev_seq=旧值、operator/reason/request_id/expected_old_seq
+   齐备；T024 happy-path 断言形状）；(d) 全舰队更新
+   `TXHARBOR_CONFIRMATION_DEPTH`=新 N；(e) 逐实例重启（rolling，一次一台）。
+   拒绝（S 过期/空授权 H'==H/非法值）：`policy_transition_total{rejected}`+1、
+   无新行、无部分生效（T025 phase d）；失败不绑定 ID，修正参数换新
+   request_id 重试（T024 可重试断言）。
+4. 未知结果规则（INSERT 后断连）：先按 `(chain_id, request_id)` 重读定性，
+   永不换 ID 重试——COMMIT 已落地返原结果（`recorded=true`，不重执行），
+   未落地则 ID 未绑定、原参数重试即为一次新切换；换不同意图复用 ID 直接
+   拒绝、零状态变化（T025 phase e；分类 SQL：
+   `SELECT policy_seq, prev_seq, threshold, operator, reason, expected_old_seq
+   FROM confirmation_policy_history WHERE chain_id = $1 AND request_id = $2`）。
+   回滚 = 以当前 max seq 为旧值再做一次授权切换（新 request_id）；没有别的
+   回滚路径。
+5. 旧配置退出与新配置重启：切换后旧 N 进程 `ServeLoop` 返回 drift 错误、
+   state=3、零提交，经 `RunQuatro` 上浮由 serve 映射为非零退出
+   （T027 `TestConfirmationDriftExitLoudStop` +
+   `internal/app/serve.go:327-335`）；这是预期行为，不要"抢救"旧进程。
+   切换本身不建/删/改任何暂停行（T027 pause-invariance：
+   deposit_pause/indexer_pause/log_pause 三表不变）；新 N 重启后恢复确认
+   （T027 owns drift-exit + pause-invariance + resume，见 tasks T027）。
+6. 审计追溯（T028，逐字 contracts/observability.md 诊断 SQL）：Converted 行
+   定位——deposit→block→依据→时间的 10 列 trace SQL；完整性 SQL
+  （basis 六列 + confirmed_at 零缺失）；策略侧 version-chain SQL（第 2 步）。
+   错误输出零凭据、零无限制转储；计数器对账：
+   `policy_transition_total{ok}` == 切换次数、`{rejected}` == 失败尝试。
+   与 004 授权手册的职责边界：004 管 deposit 配置授权，005 confirm-auth
+   只管确认阈值；confirm 切换不写 deposit 观察行、不碰三流暂停行
+   （T024 zero-write + zero-pause 断言）。

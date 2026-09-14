@@ -120,3 +120,113 @@
   `.github/workflows/ci.yml:71-92`。
 - F11：无需修改。
 - 剩余问题：无新增阻塞；F4 判定链已完整引用规格原文，复分析可直接复核。
+
+## 十、T032 tasks 自检结论（2026-09-14，Batch F docs-only；仅声明，不执行 analyze）
+
+本节为 tasks.md T032 要求的自检证据（review.md 增补）。方法：只读核验
+（tasks.md 全文复核 + grep 实测 + 工作树 diff 清单），未改生产代码与测试、
+未勾选任何任务、未运行测试、未提交。以下逐项给结论。
+
+- (a) 格式检查：结论——通过（有三处生成时即存在的形态例外，非回归）。
+  实测：任务定义行 30 行（`^- [.] T` 实测 30 匹配，与 §八 F8 修后计数一致）；
+  `需求：` 30 处、`依赖：` 30 处、`完成条件：` 30 处全覆盖；
+  `验收场景：` 27 处，缺失 3 项为 T000-L/T000-P（门禁建档任务，验收即完成条件本身，
+  用"内容"代替场景）与 T032（自检任务自身，验收即本节结论），三者生成时即此形态；
+  文件归属除 T001 有显式"涉及文件："行外，其余均内嵌于任务标题括号
+  （如"（`internal/indexer/confirmcommit.go` 新建）"），T031 为指南式全量执行无独立涉及文件
+  （属任务性质，非遗漏）。ID 唯一：T000-L/T000-P/T001–T004/T010–T028/T029–T032/T033
+  无重复、无缺号（T005–T009 等间隙为编号规则预留，见 tasks.md 格式节，已文档化）。
+  [P] 标记 9 处（T001/T002/T003/T004/T014/T015/T026/T029/T030）：T001–T004/T014/T015/T026
+  均为跨文件且前置依赖已完成（生成时 T020 已去 [P]，与 T014 同文件 `confirm_test.go` 冲突）；
+  T029/T030 为文档/CI 独立文件。未发现同文件链成员带 [P]。
+- (b) 依赖 DAG 无环：结论——通过，7 条同文件链与声明依赖一致（1 处需精确表述）。
+  实测链：`confirm_test.go` T003→T014→T020（依赖行 T014→T003、T020→T014）；
+  `confirmscan.go` T011→T018（T018→T011）；集成主文件
+  T013→T016→T019→T021→T022→T023→T027（依赖行逐级 T016→T013、T019→T018、
+  T021→T013、T022→T021、T023→T022 均同文件顺序）；
+  唯一例外：T027 声明依赖为 T024（US5 切换语义前置），其"接 T023 顺序追加"为文件位置约束
+  （tasks.md 任务链节原文"同文件接 T023 顺序追加"），位置链与依赖边共同无环；
+  `confirmation_auth_integration_test.go` T025→T028（T028→T025）；
+  `config_test.go`/`serve_config_test.go` T002→T015；迁移文件 T001→T017；
+  race 文件 T026（dep T010+T024，与 T025 文件不同可并行）→T033（dep T026）。
+  无反向边、无自环。
+- (c) 覆盖复核：结论——通过，12 FR / 10 SC / 18 场景映射与生成时一致，无掉线。
+  FR 表 12 行、SC 表 10 行逐行有任务（T033 已进入 FR-03/FR-08 行，F2 落地）；
+  场景映射 15 条目共 18 项（US1-1/1-2=2、US2-1/2/3=3、US2-4=1、US3-1…US3-4=4、
+  US4-1/2/3=3、异配置首启=1、US5-1=1、US5-2/3=2、US5-4=1、US5-5=1）逐项有任务；
+  T033 暂缓→闭合记录完整（Batch D 暂缓注记 + Batch E 闭合注记，tasks.md T033 行内）；
+  US2-4→T025 移交成立（T016"切换重判移交 T025" + T025 验收场景含 US2-4 + T025 含降低重判全纳入）。
+  生成时预告的"T020-de-P 等"与终态一致（T020 终态无 [P]，§八自检注记吻合）。
+- (d) 文件冲突检查：结论——通过，共享文件均有全序，无不兼容并写。
+  共享文件与顺序：`confirmation_integration_test.go`（T013→T016→T019→T021→T022→T023→T027，
+  另 T027(a) 与 serve 侧新测试分属不同包）；`confirmation_auth_integration_test.go`
+  （T025→T028）；`confirm_test.go`（T003→T014→T020）；`confirmscan.go`（T011→T018）；
+  `config_test.go` + `serve_config_test.go`（T002→T015）；
+  `migrations/000005_confirmation_tracking.sql`（T001 建表→T017 NUMERIC 决议修订）；
+  `confirmation_race_integration_test.go`（T026 新建→T033 同文件追加）；
+  `confirmauth.go`（T024 新建；T025/T026/T028 仅经其公开守卫调用，无并写）。
+  工作树未提交改动（`git status`：M 6 项 + 新文件 `internal/app/confirmauth*.go` 3 项）分属
+  Batch F 范围（runbook/confirm-auth 子命令/serve 漂移测试/旧 harness 补 env），
+  与已关闭批次文件无语义冲突（见 (j)）。
+- (e) OI-1 关闭：结论——关闭成立，无复开依据。`confirmations NUMERIC`
+  （`migrations/000005_confirmation_tracking.sql:19` 注释决议 + `:58` 列定义
+  `NUMERIC CHECK (>=0 且 =floor(自身))`）；落地任务 T001（列定义）+ T017（极值审计）均已勾选；
+  审计测试文件 `internal/indexer/confirmnumeric_integration_test.go` 存在。
+- (f) 残留事项：T000-P 保持 open（生产门禁，tasks.md:25 未勾选）；
+  上游 003 E1 保持 open（tasks.md Open Issues 节声明，005 不代关）；
+  偶发本地失败（004 遗留）原因仍未知——本次 Batch A–E + T031 全量未观察到新偶发失败
+  （声明：本步未运行测试，该"无新失败"转述自 orchestrator 全量记录，见 (j)；未知项不因成功而关闭，
+  按文件头 Tests 纪律仍为未解决事项）；T023 已关闭（勾选 + Batch D 闭合记录，
+  三路径 0 行断言 + 完整性 SQL + 5d43e98 门禁探针证据）；N1：仓库内无名为 N1 的跟踪项
+  （tasks.md/review.md/quickstart.md/plan.md/data-model.md/research.md 全文 grep 仅命中
+  quickstart:98 处 T033 测试名 `…_N10Wins/N20Wins`，非跟踪项），按 orchestrator 口径记"关闭"，
+  无仓库证据可引——若 N1 另有所指，需 orchestrator 补编号来源后重核。
+- (g) 任务计数对账：结论——终态 30 定义行中 25 勾选、5 未勾选，与分支现实一致。
+  已勾选 25：T000-L + T001–T004（4）+ T010–T013（4）+ T014–T017（4）+ T018–T020（3）
+  + T021–T023/T033（4）+ T024–T028（5）。未勾选 5（逐项列出，不静默丢弃）：
+  T000-P（open，见 (f)）、T029/T030/T031（实现与证据已在工作树，见 (j)，勾选权属 orchestrator，
+  本步按禁令不勾选）、T032（即本任务，本文档增补落地后仍待 orchestrator 关闭）。
+  Batch A–E 无遗留未勾选项（T033 随 Batch E 闭合）；生成时"全 `- [ ]`"注记（tasks.md:407）
+  为设计阶段历史陈述，终态以本条对账为准。
+- (h) 006 交接完整：结论—— intact，无 006 代码。暂停门禁（三暂停行提交前重读复核，T010/T026）、
+  锁序（lease/writeGuard/`FOR UPDATE`/独立重读，data-model §提交协议）、依据列
+  （六依据列 + `confirmed_at`，§Table 1 保留契约"MUST NOT 被 UPDATE/DELETE（含 006）"）均未动；
+  005 代码无 `'orphaned'` 语义实现（`internal/` 全文 grep 仅两处否定性断言：
+  迁移测试 forbidden-list 与 `confirmscan_test.go:296` 非法状态拒绝用例，均为"不得出现"证明）；
+  005 DDL 无 `'orphaned'` 占位（data-model §006 预留节：拓宽 CHECK 属 006 自有迁移职责）。
+- (i) T027 边界：结论——两级证据各证其事，不互相代替。fan-out 点级：
+  `TestConfirmationDriftExitLoudStop`（T027(a)，`confirmation_integration_test.go:1815`）
+  证明旧 N 进程切换后 `ServeLoop` 返回 `*confirmationConfigMismatchError`（state=3、零提交），
+  且该错误值到达 `RunQuatro` fan-out 点（注释明示：import cycle 使 indexer 包无法导入 app，
+  `os.Exit` 无法进程内断言，故止于 fan-out 点并引用映射）；serve 级：
+  新测试 `TestServeConfirmationDriftExitsNonZero`（`serve_integration_test.go:326`）
+  证明真实 `Serve()` 在旧 N 下经 `serve.go:327-335` 的 indexerErr→exitCode=1 路径返回退出码 1，
+  闭合 T027"退出码"断言的 serve 侧缺口。暂停行不变（pause-invariance）与新 N 重启恢复仍由 T027(a) 侧覆盖。
+- (j) T031 全量记录：结论——工作树证据与 orchestrator 全量口径一致（本步未独立运行测试，
+  以下转述 + 工作树实证，不冒充亲测）。`git log` 含 Batch A–E + T023 门禁 + F1–F10 remediation
+  提交链（`2b1a65b`→`dcb7233`）；工作树未提交部分即 T029–T031 增量：
+  quickstart §切换 runbook（T029，`quickstart.md:75-138`：唯一入口 `txharbor confirm-auth`、
+  退出码 0/1/2、分歧首启对账、切换 5 步、未知结果规则、旧配置退出、新配置重启、审计追溯，
+  每步引测试证据，无新语义）；confirm-auth 子命令（`internal/app/confirmauth.go` 新建 +
+  `cmd/txharbor/main.go` 接线 + 单测/集成测试 3 个）；serve 漂移 exit-1 测试（见 (i)）。
+  found-and-fixed：旧 harness 缺 `TXHARBOR_CONFIRMATION_DEPTH`（T002 新增必填项后，
+  004 时代 harness 未跟进）——工作树 diff 实证 3 文件共 +7 行
+  （`migrate_concurrent_integration_test.go:59` cliEnv、`flip_integration_test.go:63` serve env、
+  `serve_integration_test.go` 5 处 env map）；
+  全仓现 7 处 harness env 携带该变量（上 2 处 + `serve_integration_test.go` 5 处含新测试 2 处）。
+  unit/race/integration/lint 全绿与 `make test-integration` 7:34 全绿为 orchestrator 全量口径，
+  本步仅记录不复证；T031/T029/T030 勾选待 orchestrator。
+- (k) 写路径清单 vs 门禁一致性：结论——一致，INSERT 载体为批准的算子入口。
+  005 写路径：`deposit_observations` 唯一 UPDATE 在 `confirmcommit.go:463`
+  （`status='pending'` 谓词 + 七项批准 SET，`TestDepositWritePathConfinement` 全仓 grep 半侧 pin）；
+  `confirmation_policy_history` INSERT-only（载体 `confirmauth.go:411`，
+  经 `AuthorizeConfirmationPolicy` 守卫事务；门禁禁其 UPDATE）；
+  批准的算子入口即 `confirm-auth` 子命令（`internal/app/confirmauth.go` 头注释明示
+  "A bare psql INSERT is forbidden … the only binary path"，runbook §引用为唯一入口），
+  与 T024"无端点/服务/角色新增、DB 操作员直连"决议一致（子命令是该直连的二进制载体，非新服务）。
+  门禁 pin UPDATE/DELETE、INSERT 载体文档化——与 data-model §Table 1 执行机制一致。
+
+**analyze 条件声明（仅声明）**：进入 `/speckit.analyze` 的实质条件已齐
+（设计文档冻结、F1–F10 已 remediation、30 任务映射/证据闭合、残留项显式化），
+形式条件差 T032 自身关闭一事（即本节被接受 + orchestrator 勾选 T029–T032）。
+本步不执行 analyze、不宣称 analyze 通过、不宣称生产就绪、不宣称远程 CI 状态。

@@ -56,6 +56,7 @@ func cliEnv(dsn string, lockTimeout time.Duration) []string {
 		"TXHARBOR_DEPOSIT_START_HEIGHT=0",
 		"TXHARBOR_DEPOSIT_CONTRACTS=0x1111111111111111111111111111111111111111:0",
 		"TXHARBOR_DEPOSIT_WATCH_ADDRESSES=0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:0",
+		"TXHARBOR_CONFIRMATION_DEPTH=10",
 		fmt.Sprintf("TXHARBOR_MIGRATE_LOCK_TIMEOUT=%s", lockTimeout),
 	)
 }

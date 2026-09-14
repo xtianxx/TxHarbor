@@ -262,20 +262,20 @@ T000-L / T000-P 见上（本阶段即二者建档）。**Checkpoint**: 门禁状
 
 **Purpose**: 运行手册、CI 接入、全量验证、复核记录
 
-- [ ] T029 [P] 切换运维手册（`specs/005-confirmation-tracking/quickstart.md` 增补 §切换 runbook）
+- [x] T029 [P] 切换运维手册（`specs/005-confirmation-tracking/quickstart.md` 增补 §切换 runbook）
   - 需求：FR-03（Q2 runbook）。验收场景：US5-5。依赖：T025（写实）。
   - 内容：授权→全舰队更新 env→逐实例重启步骤；旧进程退出预期；回滚（再次授权切换）路径；与 004 授权手册的职责边界。
   - 完成条件：步骤与 T025 验证行为一致；无新业务语义。
-- [ ] T030 [P] CI 接入核验（`.github/workflows/ci.yml`、`Makefile`；收窄：不新建 job）
+- [x] T030 [P] CI 接入核验（`.github/workflows/ci.yml`、`Makefile`；收窄：不新建 job）
   - 需求：章程 X/XI。验收场景：全部分层。依赖：无（读现有写法后核验；与各任务文件不同可并行，但生效需测试存在）。
   - 内容：核验现有 CI 确实包含新增测试：`make test-integration`（testcontainers）自动覆盖全部 `-tags integration` 新增用例，
     无需新 job；仅在缺口处最小增补；`gofmt`/`vet` 门禁沿用；单元（含 `-race`）常驻门禁不变。
   - 完成条件：核验结论有记录（需新建 job 则说明理由，否则零新增）；本地 `make test test-race` 绿（含新增单元）。
-- [ ] T031 全量 quickstart 验证（D1–D5 + 偶发批次纪律）
+- [x] T031 全量 quickstart 验证（D1–D5 + 偶发批次纪律）
   - 需求：SC-01–SC-10。验收场景：全部 18 项。依赖：T013–T028（全部故事完成）。
   - 内容：按 quickstart D1–D5 执行；时序敏感项 5 次固定批次；任一失败留痕（不豁免、不自动关闭）。
   - 完成条件：全绿或失败清单（含证据）移交；T000-P 保持 open 声明。
-- [ ] T032 复核记录与 tasks 自检证据（`specs/005-confirmation-tracking/review.md` 增补）
+- [x] T032 复核记录与 tasks 自检证据（`specs/005-confirmation-tracking/review.md` 增补）
   - 需求：本 tasks 步骤自检。依赖：T031。
   - 内容：任务格式/依赖环/覆盖/文件冲突检查结论；OI-1 与残留事项状态；是否具备 analyze 条件（本步仅声明，不执行 analyze）。
   - 完成条件：自检项逐项有结论；无依据新增任务为零（或逐项说明来源）。
