@@ -23,9 +23,10 @@ emitted). No new metric system, no new log pipeline.
 - `reorg_reconcile_required{chain_id}` — 1 while phase = reconcile_required.
 - `reorg_evidence_wait_total{chain_id,class}` — evidence-insufficient waits by class
   (transport/timeout/rate-limit/parse vs contradictory/insufficient).
-- Existing 002/003/004/005 metrics keep their meaning; during recovery their "stopped" state is
-  expected (pause-gated), not an alert — runbooks must not page on zero-advance while
-  `reorg_active == 1`.
+- Existing 002/003/004/005 metrics keep their meaning; during recovery their
+  "stopped" state is expected (pause-gated). Whether stopped work pages
+  depends on the cause class in the Runbook below — never on `reorg_active`
+  alone.
 
 ## Query validity annotation (FR-18; enforced by readers, not by writers)
 
@@ -45,11 +46,39 @@ same shape as 003 `detail.class` / 004 pause detail conventions.
 
 ## Runbook (T032)
 
-- `txharbor_reorg_active == 1` → zero-advance on 002/003/004/005 is expected
-  (pause-gated recovery), **non-paging**. Do not page on stopped
-  002/003/004/005 scanners while active.
-- `txharbor_reorg_reconcile_required == 1` → human attention. Paging follows
-  operator policy; it is NOT automatic.
+Zero-advance on 002/003/004/005 while recovery is active is pause-gated
+(expected), but whether it pages depends on the cause class below — never
+on `reorg_active` alone.
+
+- Caused wait or backoff (expected, non-paging): `txharbor_reorg_active == 1`,
+  `txharbor_reorg_reconcile_required == 0`, `txharbor_reorg_evidence_wait_total`
+  increasing under its cause class (`transport`/`timeout`/`rate-limited`/
+  `invalid-response` retryable pass-through; `chain-mismatch`/
+  `contradictory`/`insufficient` holds). Status: phase stays
+  `detected`/`replaying`, frontier lags stable or shrinking. Reason: chain
+  evidence not yet available or transient RPC failure. Steps: confirm the
+  wait class in the counter labels, check serve logs for the matching
+  `ancestor search chain read failed; retrying` / `suffix discontinuous;
+  holding` line (redacted), verify RPC health; no operator action — the next
+  tick re-walks the same range.
+- Reconcile hold (needs a human): `txharbor_reorg_reconcile_required == 1`.
+  Status: phase is `reconcile_required`, ordinary work stays paused
+  independently. Reason: unrecoverable evidence (over-depth, ancestor
+  unobtainable, exhausted history, contradictory RPC — see
+  `reconcile_signaled` event detail for `cause=`/`searched=`/`evidence=`).
+  Steps: read the `reorg_recovery_events` row for the recovery id
+  (`reconcile_signaled` detail), follow the authorized repair/release path
+  (operator + evidence + disposition, full re-verify before release); paging
+  follows operator policy, it is NOT automatic.
+- Execution error or unexplained sustained no-progress (investigate):
+  `txharbor_reorg_active == 1`, `txharbor_reorg_reconcile_required == 0`,
+  `txharbor_reorg_evidence_wait_total` flat, frontier lags frozen across
+  ticks, depth/bound known. Status: phase and `updated_at` stop moving with
+  no wait-class explanation. Reason: loop-side failure (tick errors, DB
+  write refusal, stalled RPC) rather than evidence hold. Steps: check serve
+  logs for `recovery tick failed; retrying` (phase + redacted error), read
+  the `reorg_recovery` row (`phase`, `updated_at`, frontiers) to confirm the
+  stall, verify DB/lease/RPC health, then escalate per operator policy.
 - `txharbor_reorg_depth > txharbor_reorg_bound` → alert (the alert rule lives
   here in the runbook; the two gauges carry depth and bound separately).
 - Series mapping (contract → exposition, `txharbor_` prefix per repo shape):
@@ -67,7 +96,7 @@ same shape as 003 `detail.class` / 004 pause detail conventions.
 - Redaction boundary (SC-12): heights/hashes/ranges/versions are retained in
   metric Help strings and diagnostic detail; secrets/credentials/raw unbounded
   responses are never emitted (funnel: `logx.Redact`).
-- Wiring note: the metrics surface + contract ship first. The recovery loop
-  (`RecoveryExecutor` in `internal/indexer/reorg.go`) receives no
-  `*metrics.Metrics` today, so loop wiring is unwired by design here — a
-  007-era concern, and only with zero constructor churn.
+- Wiring: counters ride the executor funnel (`RecoveryMetrics`, wired in
+  `internal/app/serve.go` via `NewRecoveryLoopWithMetrics`); gauges ride the
+  serve-side `recoveryObserver.observeMetrics` over `LoadRecoverySnapshot`
+  (same registry served on `/metrics`).

@@ -556,6 +556,14 @@ func (m *Metrics) ObserveReorgDepthBound(chain int64, depth, bound int64) {
 	m.reorgBound.WithLabelValues(chainLabel(chain)).Set(float64(bound))
 }
 
+// ObserveReorgDepthPending records the bound while the ancestor search is
+// still in progress: the bound gauge is set, the depth series is removed
+// (unknown, never a zero that would read as an empty reorg).
+func (m *Metrics) ObserveReorgDepthPending(chain int64, bound int64) {
+	m.reorgBound.WithLabelValues(chainLabel(chain)).Set(float64(bound))
+	m.reorgDepth.DeleteLabelValues(chainLabel(chain))
+}
+
 // ObserveReorgFrontierLag records swept_end minus frontier for chain and
 // stream (block|log|deposit). ok=false means empty progress: the series is
 // removed rather than zeroed.

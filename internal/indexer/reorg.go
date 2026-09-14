@@ -89,6 +89,15 @@ type RecoveryExecutor struct {
 	retryI time.Duration
 	retryM time.Duration
 	batch  int
+	// metrics is the T032 counter funnel (nil = disabled). Gauges stay
+	// serve-side, derived from the durable row (reorgmetrics.go).
+	metrics RecoveryMetrics
+}
+
+// SetRecoveryMetrics attaches the counter funnel without constructor churn:
+// existing NewRecoveryLoop callers keep running metric-free.
+func (e *RecoveryExecutor) SetRecoveryMetrics(m RecoveryMetrics) {
+	e.metrics = m
 }
 
 // NewRecoveryExecutor validates without I/O: Q1 depth rules apply here, so a
@@ -148,6 +157,58 @@ func NewRecoveryLoop(pool *pgxpool.Pool, lease *Lease, header HeaderClient, logs
 	return func(ctx context.Context, checkLost func() error) error {
 		return ex.ServeLoop(ctx, checkLost)
 	}, nil
+}
+
+// NewRecoveryLoopWithMetrics is NewRecoveryLoop with the T032 counter
+// funnel attached: the serve path passes the registry adapter here, so the
+// production loop counts conversions and evidence waits into the scraped
+// registry. Tests keep NewRecoveryLoop (nil funnel).
+func NewRecoveryLoopWithMetrics(pool *pgxpool.Pool, lease *Lease, header HeaderClient, logs LogsClient, cfg RecoveryConfig, m RecoveryMetrics) (ServeFunc, error) {
+	ex, err := NewRecoveryExecutor(pool, lease, header, logs, cfg)
+	if err != nil {
+		return nil, err
+	}
+	ex.SetRecoveryMetrics(m)
+	return func(ctx context.Context, checkLost func() error) error {
+		return ex.ServeLoop(ctx, checkLost)
+	}, nil
+}
+
+func (e *RecoveryExecutor) countOrphaned(n int64) {
+	if e.metrics == nil || n <= 0 {
+		return
+	}
+	e.metrics.AddReorgOrphaned(e.cfg.ChainID, n)
+}
+
+func (e *RecoveryExecutor) countRevived(n int64) {
+	if e.metrics == nil || n <= 0 {
+		return
+	}
+	e.metrics.AddReorgRevived(e.cfg.ChainID, n)
+}
+
+func (e *RecoveryExecutor) countEvidenceWait(class string) {
+	if e.metrics == nil || class == "" {
+		return
+	}
+	e.metrics.AddReorgEvidenceWait(e.cfg.ChainID, class)
+}
+
+// evidenceWaitClass maps a non-retryable chain read error onto the
+// contract's coarse hold classes: not-found (height not yet available)
+// waits as insufficient; chain-mismatch keeps its name; anything else
+// waits as contradictory. Retryable kinds pass through verbatim at the
+// call site (string(eth.KindOf(err))).
+func evidenceWaitClass(err error) string {
+	switch eth.KindOf(err) {
+	case eth.KindNotFound:
+		return "insufficient"
+	case eth.KindChainMismatch:
+		return "chain-mismatch"
+	default:
+		return "contradictory"
+	}
 }
 
 // ancestorResult is one read-only search outcome.
@@ -213,6 +274,7 @@ func (e *RecoveryExecutor) searchAncestor(ctx context.Context, boundNumber int64
 				return ancestorResult{hold: true}
 			}
 			if retry {
+				e.countEvidenceWait(string(eth.KindOf(err)))
 				d := back.next()
 				slog.Warn("ancestor search chain read failed; retrying",
 					"chain_id", e.cfg.ChainID, "height", h, "retry_in", d, "error", logx.Redact(err.Error()))
@@ -225,6 +287,7 @@ func (e *RecoveryExecutor) searchAncestor(ctx context.Context, boundNumber int64
 			// Evidence-insufficient (chain-mismatch and friends): hold the
 			// position with a plain poll wait — nothing to back off, and the
 			// manual reconcile path stays the escape hatch.
+			e.countEvidenceWait(evidenceWaitClass(err))
 			if !waitCtx(ctx, e.poll) {
 				return ancestorResult{hold: true}
 			}
@@ -240,6 +303,7 @@ func (e *RecoveryExecutor) searchAncestor(ctx context.Context, boundNumber int64
 			if err := checkSuffixContinuity(local, chain, h+1, boundNumber); err != nil {
 				slog.Warn("ancestor suffix discontinuous; holding",
 					"chain_id", e.cfg.ChainID, "ancestor", h, "error", logx.Redact(err.Error()))
+				e.countEvidenceWait("insufficient")
 				if !waitCtx(ctx, e.poll) {
 					return ancestorResult{hold: true}
 				}
@@ -491,9 +555,11 @@ func (e *RecoveryExecutor) tickInvalidate(ctx context.Context, row *RecoveryRow,
 	if _, _, _, err := InvalidateRecoveryBlocks(ctx, e.pool, e.lease, e.cfg.ChainID, cap); err != nil {
 		return err
 	}
-	if _, err := InvalidateRecoveryObservations(ctx, e.pool, e.lease, e.cfg.ChainID, cap); err != nil {
+	orphaned, err := InvalidateRecoveryObservations(ctx, e.pool, e.lease, e.cfg.ChainID, cap)
+	if err != nil {
 		return err
 	}
+	e.countOrphaned(orphaned)
 	for _, stream := range []RecoveryStream{RecoveryStreamBlock, RecoveryStreamLog, RecoveryStreamDeposit} {
 		if _, _, err := RollbackRecoveryCheckpoint(ctx, e.pool, e.lease, e.cfg.ChainID, cap, stream); err != nil {
 			return err
@@ -583,10 +649,12 @@ func (e *RecoveryExecutor) replayStream(ctx context.Context, row *RecoveryRow, c
 		chainHash, chainParent, retry, _, err := e.chainBlock(ctx, h)
 		if err != nil {
 			if retry {
+				e.countEvidenceWait(string(eth.KindOf(err)))
 				return nil // bounded-wait next tick (backoff in caller)
 			}
 			// Evidence hold mid-replay: never falsely release; the phase
 			// stays replaying and the next tick re-walks the range.
+			e.countEvidenceWait(evidenceWaitClass(err))
 			return nil
 		}
 		_ = chainParent
@@ -631,6 +699,7 @@ func (e *RecoveryExecutor) replayStream(ctx context.Context, row *RecoveryRow, c
 			// Hold: frontier, checkpoints and events stay untouched; the
 			// next tick re-walks the same range. Never paper over the gap
 			// with an empty ReplayRecoveryRange.
+			e.countEvidenceWait("insufficient")
 			return nil
 		}
 		return err2
@@ -674,8 +743,12 @@ func (e *RecoveryExecutor) recanonicalizeHeight(ctx context.Context, row *Recove
 	}
 	for _, id := range identities {
 		evidence := fmt.Sprintf("height=%d block=%s canonical_reverified log_binding_reverified", h, oldHash)
-		if err := ReviveRecoveryObservation(ctx, e.pool, e.lease, e.cfg.ChainID, cap, id.blockHash, id.txHash, id.logIndex, evidence); err != nil {
+		converted, err := ReviveRecoveryObservation(ctx, e.pool, e.lease, e.cfg.ChainID, cap, id.blockHash, id.txHash, id.logIndex, evidence)
+		if err != nil {
 			return err
+		}
+		if converted {
+			e.countRevived(1)
 		}
 	}
 	return nil

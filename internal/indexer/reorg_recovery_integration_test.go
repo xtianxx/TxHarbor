@@ -1920,8 +1920,10 @@ func TestReorgRecoveryUS2Recanonicalize(t *testing.T) {
 	if cRev0 := rrecReadObs(t, ctx, s.pool, s.chainID, s.cBH, cTx); cRev0.status != "pending" {
 		t.Fatalf("C after first tick = %s, want pending (revived)", cRev0.status)
 	}
-	if err := ReviveRecoveryObservation(ctx, s.pool, s.lease, s.chainID, cap, s.cBH, cTx, 0, "rrec repeat"); err != nil {
+	if converted, err := ReviveRecoveryObservation(ctx, s.pool, s.lease, s.chainID, cap, s.cBH, cTx, 0, "rrec repeat"); err != nil {
 		t.Fatalf("repeat revive = %v, want idempotent nil", err)
+	} else if converted {
+		t.Fatal("repeat revive reported converted=true, want false (no double count)")
 	}
 	if n := rrecTransitionCount(t, ctx, s.pool, s.chainID, "orphaned", "pending", row.RecoveryID); n != 1 {
 		t.Fatalf("orphaned->pending transitions after repeat = %d, want still 1", n)

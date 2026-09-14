@@ -275,8 +275,10 @@ func Serve(ctx context.Context, d Deps) int {
 	// stream: same lease acquisition loop, same heartbeat, same ServeFunc
 	// shape. Timing reuses the INDEX triple and the replay cap comes from
 	// config (research R5 — no new knob names); the depth already refused
-	// above, and NewRecoveryLoop re-validates without I/O.
-	recoveryServe, err := indexer.NewRecoveryLoop(pool, lease, headerRPC, logRPC{client: ethClient, m: m}, buildRecoveryConfig(cfg, chainID))
+	// above, and NewRecoveryLoop re-validates without I/O. Conversions and
+	// evidence waits count into the scraped registry through the adapter;
+	// gauges ride the recoveryObserver below, derived from the durable row.
+	recoveryServe, err := indexer.NewRecoveryLoopWithMetrics(pool, lease, headerRPC, logRPC{client: ethClient, m: m}, buildRecoveryConfig(cfg, chainID), recoveryMetricsAdapter{m: m})
 	if err != nil {
 		ethClient.Close()
 		pool.Close()
@@ -330,6 +332,12 @@ func Serve(ctx context.Context, d Deps) int {
 	}
 	recoveryObserver := &recoveryObserver{read: recoveryRead}
 	recoveryObserver.observe(runCtx)
+	observeRecoveryMetrics := func(ctx context.Context) {
+		recoveryObserver.observeMetrics(ctx, m, chainID, func(ctx context.Context) (indexer.RecoverySnapshot, error) {
+			return indexer.LoadRecoverySnapshot(ctx, pool, chainID)
+		})
+	}
+	observeRecoveryMetrics(runCtx)
 
 	go runner.Run(runCtx)
 	serveErr := make(chan error, 1)
@@ -377,6 +385,7 @@ serveLoop:
 			depositObserver.observe()
 			confirmationObserver.observe()
 			recoveryObserver.observe(runCtx)
+			observeRecoveryMetrics(runCtx)
 			if err != nil && !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) {
 				fmt.Fprintf(stderr, "txharbor serve: indexer stopped: %s\n", logx.Redact(err.Error()))
 				exitCode = 1
@@ -388,6 +397,7 @@ serveLoop:
 			depositObserver.observe()
 			confirmationObserver.observe()
 			recoveryObserver.observe(runCtx)
+			observeRecoveryMetrics(runCtx)
 		}
 	}
 	cancel() // stop probe loop and indexer before releasing resources
@@ -611,12 +621,46 @@ func runServiceStreams(ctx context.Context, lease coordinatorLease, header, log,
 	return indexer.RunQuatroPlusRecovery(ctx, lease, header, log, deposit, confirm, recovery)
 }
 
+// recoveryMetricsAdapter funnels the executor's exact conversion and
+// evidence-wait counts into the scraped registry (T032). Orphaned arrives
+// with the idempotent transaction's own rowcount, so a bulk sweep counts
+// once no matter how large; revived arrives per real conversion only.
+type recoveryMetricsAdapter struct {
+	m *metrics.Metrics
+}
+
+func (a recoveryMetricsAdapter) AddReorgOrphaned(chain int64, n int64) {
+	for i := int64(0); i < n; i++ {
+		a.m.ObserveReorgOrphaned(chain)
+	}
+}
+
+func (a recoveryMetricsAdapter) AddReorgRevived(chain int64, n int64) {
+	for i := int64(0); i < n; i++ {
+		a.m.ObserveReorgRevived(chain)
+	}
+}
+
+func (a recoveryMetricsAdapter) AddReorgEvidenceWait(chain int64, class string) {
+	a.m.ObserveReorgEvidenceWait(chain, class)
+}
+
 // recoveryObserver samples the durable recovery row through the approved
 // readers (LoadRecoveryState/AnnotateRecoveryHeight): recovery activity,
 // chain pauses, and result validity stay three separate signals — this
 // observer only logs recovery-state transitions and never touches the
 // readiness aggregate, so an active recovery cannot flip service readiness
 // by itself. Read failures keep the last observed state for the next tick.
+//
+// observeMetrics mirrors the same row into the T032 gauges (active,
+// depth/bound, per-stream frontier lag, reconcile flag) through one
+// LoadRecoverySnapshot read per call: Set/Delete only, so repeat ticks
+// with no state change rewrite identical values and never inflate a
+// counter. A read failure keeps every gauge at its last value (never
+// zeroed into fake idle); a clean read with no row clears active,
+// reconcile and frontier lags (release leaves no active=1 behind) while
+// depth/bound keep their last known values. Counters are executor-owned
+// and never touched here, so polling cannot double-count a conversion.
 type recoveryObserver struct {
 	read         func(ctx context.Context) (indexer.RecoveryState, indexer.Validity, bool)
 	last         indexer.RecoveryState
@@ -635,6 +679,53 @@ func (o *recoveryObserver) observe(ctx context.Context) {
 			"validity", string(validity))
 	}
 	o.last, o.lastValidity, o.sampled = state, validity, true
+}
+
+// observeMetrics snapshots the durable recovery state into m. load is the
+// point read (production: LoadRecoverySnapshot over the serve pool;
+// tests: scripted). A load error leaves every gauge untouched.
+func (o *recoveryObserver) observeMetrics(ctx context.Context, m *metrics.Metrics, chainID int64, load func(ctx context.Context) (indexer.RecoverySnapshot, error)) {
+	if m == nil || load == nil {
+		return
+	}
+	snap, err := load(ctx)
+	if err != nil {
+		slog.Warn("recovery metrics read failed; keeping last observed",
+			"error", logx.Redact(err.Error()))
+		return
+	}
+	if snap.Row == nil {
+		m.ObserveReorgActive(chainID, false)
+		m.ObserveReorgReconcile(chainID, false)
+		for _, stream := range []string{"block", "log", "deposit"} {
+			m.ObserveReorgFrontierLag(chainID, stream, 0, false)
+		}
+		return
+	}
+	m.ObserveReorgActive(chainID, true)
+	m.ObserveReorgReconcile(chainID, snap.Reconcile)
+	if snap.Depth == nil {
+		m.ObserveReorgDepthPending(chainID, snap.Bound)
+	} else {
+		m.ObserveReorgDepthBound(chainID, *snap.Depth, snap.Bound)
+	}
+	frontiers := map[string]*int64{
+		"block":   snap.Row.BlockFrontier,
+		"deposit": snap.Row.DepositFrontier,
+		"log":     snap.Row.LogFrontier,
+	}
+	for _, stream := range []string{"block", "log", "deposit"} {
+		f := frontiers[stream]
+		if f == nil || snap.SweepEnd == nil {
+			m.ObserveReorgFrontierLag(chainID, stream, 0, false)
+			continue
+		}
+		var lag uint64
+		if *snap.SweepEnd > *f {
+			lag = uint64(*snap.SweepEnd - *f)
+		}
+		m.ObserveReorgFrontierLag(chainID, stream, lag, true)
+	}
 }
 
 // runShutdown executes steps in order under one shared budget. Remaining

@@ -1121,29 +1121,29 @@ func RecanonicalizeRecoveryBlock(ctx context.Context, pool *pgxpool.Pool, lease 
 // identity. Ex-Confirmed rows pass through Pending (basis retained as
 // history); 005 reconfirms post-release under the live policy. Repeat
 // execution converges on the transition-log UNIQUE.
-func ReviveRecoveryObservation(ctx context.Context, pool *pgxpool.Pool, lease *Lease, chainID int64, cap RecoveryCapture, blockHash, txHash string, logIndex int64, evidence string) error {
+func ReviveRecoveryObservation(ctx context.Context, pool *pgxpool.Pool, lease *Lease, chainID int64, cap RecoveryCapture, blockHash, txHash string, logIndex int64, evidence string) (converted bool, err error) {
 	if pool == nil {
-		return errors.New("revive observation: nil pool")
+		return false, errors.New("revive observation: nil pool")
 	}
 	tx, err := pool.BeginTx(ctx, pgx.TxOptions{})
 	if err != nil {
-		return fmt.Errorf("begin revive transaction: %w", err)
+		return false, fmt.Errorf("begin revive transaction: %w", err)
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 	if err := lockRecoveryChain(ctx, tx, chainID, lease); err != nil {
-		return err
+		return false, err
 	}
 	row, err := recheckRecoveryGate(ctx, tx, chainID, cap, reorgPhaseInvalidated, reorgPhaseReplaying)
 	if err != nil {
-		return err
+		return false, err
 	}
 	var status, orphanID string
 	err = tx.QueryRow(ctx, readObservationStatusSQL, chainID, blockHash, txHash, logIndex).Scan(&status, &orphanID)
 	if errors.Is(err, pgx.ErrNoRows) {
-		return &RecoveryGateError{detail: "revive target observation is missing"}
+		return false, &RecoveryGateError{detail: "revive target observation is missing"}
 	}
 	if err != nil {
-		return fmt.Errorf("re-read revive target: %w", err)
+		return false, fmt.Errorf("re-read revive target: %w", err)
 	}
 	if status == "pending" {
 		// Possible repeat: converge only when this recovery already recorded
@@ -1151,40 +1151,40 @@ func ReviveRecoveryObservation(ctx context.Context, pool *pgxpool.Pool, lease *L
 		// authority and this call refuses.
 		var one int
 		if err := tx.QueryRow(ctx, readTransitionSQL, chainID, blockHash, txHash, logIndex, "orphaned", "pending", row.RecoveryID).Scan(&one); err == nil {
-			return nil
+			return false, nil
 		}
-		return &RecoveryGateError{detail: "revive target is pending outside this recovery's conversion"}
+		return false, &RecoveryGateError{detail: "revive target is pending outside this recovery's conversion"}
 	}
 	if status != "orphaned" || orphanID != row.RecoveryID {
-		return &RecoveryGateError{detail: fmt.Sprintf(
+		return false, &RecoveryGateError{detail: fmt.Sprintf(
 			"revive target status=%s recovery=%s is not this recovery's orphan", status, orphanID)}
 	}
 	var blockNumber int64
 	var canonical bool
 	err = tx.QueryRow(ctx, readBlockBindingSQL, chainID, blockHash).Scan(&blockNumber, &canonical)
 	if errors.Is(err, pgx.ErrNoRows) || err == nil && !canonical {
-		return &RecoveryGateError{detail: "revive target block is not canonical under the lock"}
+		return false, &RecoveryGateError{detail: "revive target block is not canonical under the lock"}
 	}
 	if err != nil {
-		return fmt.Errorf("re-read revive block binding: %w", err)
+		return false, fmt.Errorf("re-read revive block binding: %w", err)
 	}
 	var one int
 	if err := tx.QueryRow(ctx, readLogBindingSQL, chainID, blockHash, txHash, logIndex).Scan(&one); errors.Is(err, pgx.ErrNoRows) {
-		return &RecoveryGateError{detail: "revive target log binding is missing under the lock"}
+		return false, &RecoveryGateError{detail: "revive target log binding is missing under the lock"}
 	} else if err != nil {
-		return fmt.Errorf("re-read revive log binding: %w", err)
+		return false, fmt.Errorf("re-read revive log binding: %w", err)
 	}
 	// History identity: the observation's version row still exists (versions
 	// are append-only, so this is a corruption tripwire, not a migration).
 	if err := tx.QueryRow(ctx, readObservationVersionSQL, chainID, blockHash, txHash, logIndex).Scan(&one); err != nil {
-		return fmt.Errorf("re-read revive version binding: %w", err)
+		return false, fmt.Errorf("re-read revive version binding: %w", err)
 	}
 	tag, err := tx.Exec(ctx, reviveObservationSQL, chainID, blockHash, txHash, logIndex, row.RecoveryID)
 	if err != nil {
-		return fmt.Errorf("revive observation: %w", err)
+		return false, fmt.Errorf("revive observation: %w", err)
 	}
 	if tag.RowsAffected() != 1 {
-		return &RecoveryGateError{detail: "revive affected 0 rows (concurrent conversion)"}
+		return false, &RecoveryGateError{detail: "revive affected 0 rows (concurrent conversion)"}
 	}
 	snapshot := fmt.Sprintf("revive block=%s canonical=%d evidence=%s", blockHash, blockNumber, evidence)
 	tag, err = tx.Exec(ctx, insertTransitionSQL, chainID, blockHash, txHash, logIndex, "orphaned", "pending", row.RecoveryID, snapshot)
@@ -1196,19 +1196,19 @@ func ReviveRecoveryObservation(ctx context.Context, pool *pgxpool.Pool, lease *L
 			// its own write; a conflict means a CONCURRENT txn committed the
 			// same transition, so our UPDATE also hit 0... unreachable: our
 			// UPDATE affected 1, so no concurrent converter exists).
-			return fmt.Errorf("revive transition conflict after converting: %w", err)
+			return false, fmt.Errorf("revive transition conflict after converting: %w", err)
 		}
-		return fmt.Errorf("insert revive transition: %w", err)
+		return false, fmt.Errorf("insert revive transition: %w", err)
 	}
 	if tag.RowsAffected() != 1 {
-		return fmt.Errorf("insert revive transition affected %d rows, want 1", tag.RowsAffected())
+		return false, fmt.Errorf("insert revive transition affected %d rows, want 1", tag.RowsAffected())
 	}
 	detail := fmt.Sprintf("recovery=%s observation=%s/%s/%d version=%d evidence=%s",
 		row.RecoveryID, blockHash, txHash, logIndex, row.Seq, evidence)
 	if err := appendRecoveryEvent(ctx, tx, chainID, row.RecoveryID, row.Seq, "observation_revived", detail); err != nil {
-		return err
+		return false, err
 	}
-	return tx.Commit(ctx)
+	return true, tx.Commit(ctx)
 }
 
 // completionReport is the re-verified FR-19判据 for release decisions.

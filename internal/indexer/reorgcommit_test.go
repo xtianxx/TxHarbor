@@ -146,7 +146,7 @@ func TestReorgGuardMatrixRefusals(t *testing.T) {
 	if err := ReplayRecoveryRange(ctx, pool, lease, chainID, owned, RecoveryStreamBlock, 13, 15, nil, nil, nil); !isRecoveryGate(err) {
 		t.Fatalf("wrong-phase replay = %v, want phase refusal", err)
 	}
-	if err := ReviveRecoveryObservation(ctx, pool, lease, chainID, owned, depositBlockHash(14), depositTxHash(14, 0), 0, "x"); !isRecoveryGate(err) {
+	if _, err := ReviveRecoveryObservation(ctx, pool, lease, chainID, owned, depositBlockHash(14), depositTxHash(14, 0), 0, "x"); !isRecoveryGate(err) {
 		t.Fatalf("wrong-phase revive = %v, want phase refusal", err)
 	}
 	if err := CompleteRecoveryVerify(ctx, pool, lease, chainID, owned); !isRecoveryGate(err) {
@@ -1963,8 +1963,10 @@ WHERE chain_id = $1 AND block_hash = $2 AND recovery_id = $3`, chainID, oldBH16,
 	if err := RecanonicalizeRecoveryBlock(ctx, pool, lease, chainID, owned1, 16, oldBH16); err != nil {
 		t.Fatalf("c1 recanonicalize 16: %v", err)
 	}
-	if err := ReviveRecoveryObservation(ctx, pool, lease, chainID, owned1, oldBH16, oldTx16, 0, "t035-same-hash"); err != nil {
+	if converted, err := ReviveRecoveryObservation(ctx, pool, lease, chainID, owned1, oldBH16, oldTx16, 0, "t035-same-hash"); err != nil {
 		t.Fatalf("c1 revive h16: %v", err)
+	} else if !converted {
+		t.Fatal("c1 revive h16 reported no conversion, want converted=true")
 	}
 	var revStatus, revOrphan string
 	if err := pool.QueryRow(ctx, `SELECT status, COALESCE(orphan_recovery_id, '') FROM deposit_observations
@@ -2141,8 +2143,10 @@ WHERE chain_id = $1 AND status = 'confirmed' AND confirm_tip_hash = $2`, chainID
 	if err := RecanonicalizeRecoveryBlock(ctx, pool, lease, chainID, owned2, 16, oldBH16); err != nil {
 		t.Fatalf("c2 recanonicalize 16: %v", err)
 	}
-	if err := ReviveRecoveryObservation(ctx, pool, lease, chainID, owned2, oldBH16, oldTx16, 0, "t035-c2-16"); err != nil {
+	if converted, err := ReviveRecoveryObservation(ctx, pool, lease, chainID, owned2, oldBH16, oldTx16, 0, "t035-c2-16"); err != nil {
 		t.Fatalf("c2 revive h16: %v", err)
+	} else if !converted {
+		t.Fatal("c2 revive h16 reported no conversion, want converted=true")
 	}
 	var c2obsAfter int64
 	if err := pool.QueryRow(ctx, `SELECT COUNT(*) FROM deposit_observations WHERE chain_id = $1`, chainID).Scan(&c2obsAfter); err != nil {
