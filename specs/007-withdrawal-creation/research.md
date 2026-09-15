@@ -140,18 +140,26 @@ endpoint, or infrastructure; upstream is NOT required to hold a DB connection as
   possession, identical to every existing privileged path.
 - **Actions** (full per-action tx in data-model Table 6 attempt semantics): `supply --operation-id O
   --authorization-id G --caller-id C --chain-id N --asset 0x… --recipient 0x…
-  --amount D [--expires-at T] --operator OP --reason R` (omitted `--operation-id` ⇒ tool mints +
-  echoes for runbook retry); `revoke --operation-id O --authorization-id G --operator OP --reason R`
-  (same O rule). Same attempt retried (same O) converges via `UNIQUE (operation_id)`; a NEW attempt
-  MUST mint a new O — grant state is never reverse-derived into identity. Already-bound requests
+  --amount D [--expires-at T] --operator OP --reason R`; `revoke --operation-id O --authorization-id G --operator OP --reason R`.
+  O generation rule (locked 五轮定点): generate-before-execute — the operator mints O BEFORE any
+  DB side effect and durably captures it FIRST (explicit `--operation-id` passthrough, or
+  two-step `withdrawal-authz mint` printing O to the runbook log before `supply` runs). Auto-mint
+  inside `supply` is allowed ONLY as convenience when the minted O is echoed AND the runbook
+  treats echo-loss as attempt-unknown (retry requires re-running mint ⇒ a NEW O ⇒ a NEW attempt
+  by definition — never a retry of the lost one). No crash-recoverable auto-O without a durable
+  capture point; no new platform. Same attempt retried (same O + same seven) converges via
+  `UNIQUE (operation_id)`; same O + any differ ⇒ `operation_conflict`; a NEW attempt MUST mint
+  a new O — grant state is never reverse-derived into identity. Already-bound requests
   keep their rows (revocation affects only not-yet-accepted receipts per FR-03b).
 - **Field/param validation**: identical validators as intake (`validate.go` shared): FR-06 amount,
   FR-07 addresses, FR-04 chain bind, caller existence; `expires_at` must be future if given.
 - **Atomicity**: supply/revoke + its audit row commit in one tx; per-action `RowsAffected`
   expectations in Table 6 (grant-INSERT `==1` on first supply, `==0`-assert on equal re-supply;
-  audit-INSERT `==1` per NEW attempt). Uncertain COMMIT ⇒ dual re-read (grant row for the business
-  report + audit by `operation_id` for the evidence report) then same-O or new-O retry per Table 6 —
-  grant state alone never proves the audit committed.
+  audit-INSERT `==1` per NEW attempt). Uncertain COMMIT ⇒ retry with the SAME O and SAME seven
+  (O-miss ⇒ unknown/retryable with same O; "missing both ⇒ new O" DELETED — a missing audit row
+  never proves rollback). Outcome basis is the audit row matching O + seven; grant state is
+  current-state info only (covers: grant pre-exists + this-attempt-refused ⇒ refusal, never
+  business success).
 - **Ops/acceptance**: runbook lines in quickstart V3/V7; integration tests drive the subcommand
   function in-process (like `confirmauth_test.go`) against real PostgreSQL — no shell-out.
 - **"007 只读验授权" boundary clarified**: request-handling paths (`intake.go`, `query.go`) never
