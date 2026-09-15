@@ -483,3 +483,283 @@ VALUES ($1, $2, $3, $4, 'seed', 'seed', $5)`,
 		t.Fatalf("ReadAttempt = (%+v, %v, %v), want supplied/found", readBack, found, err)
 	}
 }
+
+// ---------------------------------------------------------------------------
+// T023 [US4] same-O op-conflict + grant-PK first-supply three-outcome matrix.
+//
+// These tests reuse the T008 grant helpers above unchanged and add only
+// T023-prefixed helpers (grantRaceTwin, grantAuditRowByOp, grantRaceOutcome) so
+// no name collides with migration_integration_test.go, idempotency_integration_test.go,
+// or the T008 tests. Persistent state is read back from BOTH tables (COUNT /
+// per-O rows / stored detail), never inferred from a return code alone.
+// ---------------------------------------------------------------------------
+
+// grantRaceTwin releases two supply attempts from one start barrier after
+// proving the pool can hold both connections, then returns their outcomes and
+// errors in caller-index order (outcomes[i]/errs[i] belong to ops[i]).
+//
+// The barrier is the only synchronization (the T021 discipline): every
+// goroutine signals ready, parks at <-start, and close(start) launches both
+// together — no sleeps, no chance-based pacing. idempotencyProvePoolCapacity
+// is the deliberately generic T021 helper; db.OpenPool pins MaxConns to 8, so
+// both SupplyGrant transactions are provably in flight. The three first-supply
+// outcomes asserted by the callers are order-independent, so which caller wins
+// the grant PK insert cannot make a test pass or fail for the wrong reason.
+func grantRaceTwin(t *testing.T, ctx context.Context, pool *pgxpool.Pool, a, b OpInput) ([]*GrantOutcome, []error) {
+	t.Helper()
+	idempotencyProvePoolCapacity(t, ctx, pool, 2)
+	ops := []OpInput{a, b}
+	outs := make([]*GrantOutcome, len(ops))
+	errs := make([]error, len(ops))
+	var ready, done sync.WaitGroup
+	start := make(chan struct{})
+	ready.Add(len(ops))
+	done.Add(len(ops))
+	for i, op := range ops {
+		go func(i int, op OpInput) {
+			defer done.Done()
+			ready.Done() // parked at the barrier
+			<-start
+			outs[i], errs[i] = SupplyGrant(ctx, pool, op, "op", "pk-race")
+		}(i, op)
+	}
+	ready.Wait() // both callers parked
+	close(start) // release them together
+	done.Wait()
+	return outs, errs
+}
+
+// grantRaceOutcome returns one twin's outcome, failing on any error. A
+// grant-PK race is never surfaced to the caller as operation_conflict or a 503
+// retryable: the loser restarts and reports a recorded outcome.
+func grantRaceOutcome(t *testing.T, out *GrantOutcome, err error) *GrantOutcome {
+	t.Helper()
+	if err != nil {
+		t.Fatalf("concurrent first-supply error: %v (never operation_conflict/503 for a PK race)", err)
+	}
+	if out == nil {
+		t.Fatal("concurrent first-supply returned a nil outcome with no error")
+	}
+	return out
+}
+
+// grantAuditRowByOp reads the single audit row recorded for operationID — a
+// persistent-state read (not a response) of that attempt's action and its
+// redacted params snapshot. It fails unless exactly one row exists, so a
+// duplicated attempt can never be silently hidden.
+func grantAuditRowByOp(t *testing.T, ctx context.Context, pool *pgxpool.Pool, operationID string) (string, string) {
+	t.Helper()
+	rows, err := pool.Query(ctx,
+		`SELECT action, detail FROM withdrawal_grant_audit WHERE operation_id = $1 ORDER BY audit_id`, operationID)
+	if err != nil {
+		t.Fatalf("query audit row for operation %q: %v", operationID, err)
+	}
+	defer rows.Close()
+	var (
+		action, detail string
+		n              int
+	)
+	for rows.Next() {
+		if err := rows.Scan(&action, &detail); err != nil {
+			t.Fatalf("scan audit row for operation %q: %v", operationID, err)
+		}
+		n++
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("iterate audit row for operation %q: %v", operationID, err)
+	}
+	if n != 1 {
+		t.Fatalf("audit rows for operation %q = %d, want exactly 1", operationID, n)
+	}
+	return action, detail
+}
+
+// TestWithdrawalGrantConflictSameOperationMatrix covers T023 same-O op-conflict
+// deterministically (no race, no luck): a second attempt that reuses the
+// original operation id with a DIFFERENT op-input MUST report
+// operation_conflict with ZERO new business/audit writes, and the original row
+// plus its recorded outcome stay intact — including a recorded refusal, which
+// is never upgraded to success.
+func TestWithdrawalGrantConflictSameOperationMatrix(t *testing.T) {
+	// Given one recorded first supply.
+	ctx, pool := grantSetup(t)
+	grantSeedCaller(t, ctx, pool, 7101)
+	const authID = "auth-conflict-matrix"
+	original := grantTestOp("10000000000000000000000000000001", authID, 7101, "100")
+	if out, err := SupplyGrant(ctx, pool, original, "op", "original"); err != nil || out.Action != grantOutcomeSupplied {
+		t.Fatalf("original supply = (%+v, %v), want %s", out, err, grantOutcomeSupplied)
+	}
+
+	// When the same O is retried with a different amount, then with a different
+	// authorization_id (both are same-O different-op-input).
+	differAmount := original
+	differAmount.Amount = "999"
+	differAuth := original
+	differAuth.AuthorizationID = "auth-conflict-other"
+	for i, differ := range []OpInput{differAmount, differAuth} {
+		out, err := SupplyGrant(ctx, pool, differ, "op", "differ")
+		// Then the retry reports the conflict with no outcome and no new writes.
+		if out != nil {
+			t.Fatalf("conflicting retry %d outcome = %+v, want nil", i, out)
+		}
+		grantWantCode(t, err, CodeOperationConflict)
+		if got := grantAuditCountByOp(t, ctx, pool, original.OperationID); got != 1 {
+			t.Fatalf("retry %d: audit rows for original O = %d, want 1 (zero writes)", i, got)
+		}
+	}
+	if n := grantCount(t, ctx, pool, "auth-conflict-other"); n != 0 {
+		t.Fatalf("grant rows for the conflicting authorization_id = %d, want 0 (rolled back)", n)
+	}
+
+	// And the original row and its recorded outcome are untouched.
+	if n := grantCount(t, ctx, pool, authID); n != 1 {
+		t.Fatalf("grant rows for %q = %d, want 1", authID, n)
+	}
+	if state, amount := grantStateAndAmount(t, ctx, pool, authID); state != "active" || amount != "100" {
+		t.Fatalf("original grant = (%s, %s), want (active, 100)", state, amount)
+	}
+	if readBack, found, err := ReadAttempt(ctx, pool, original.OperationID); err != nil || !found || readBack.Action != grantOutcomeSupplied {
+		t.Fatalf("original outcome = (%+v, %v, %v), want supplied/found", readBack, found, err)
+	}
+
+	// When a refused attempt's O is retried with different input, the retry is a
+	// conflict and the stored outcome stays 'supply_refused' (never upgraded).
+	refusal := grantTestOp("10000000000000000000000000000002", authID, 7101, "200")
+	if out, err := SupplyGrant(ctx, pool, refusal, "op", "refuse"); err != nil || out.Action != grantOutcomeSupplyRefused {
+		t.Fatalf("refusal attempt = (%+v, %v), want %s", out, err, grantOutcomeSupplyRefused)
+	}
+	refusalDiffer := refusal
+	refusalDiffer.Amount = "201"
+	conflictOut, conflictErr := SupplyGrant(ctx, pool, refusalDiffer, "op", "differ")
+	if conflictOut != nil {
+		t.Fatalf("refused-O retry outcome = %+v, want nil", conflictOut)
+	}
+	grantWantCode(t, conflictErr, CodeOperationConflict)
+	readBack, found, err := ReadAttempt(ctx, pool, refusal.OperationID)
+	if err != nil || !found || readBack.Action != grantOutcomeSupplyRefused {
+		t.Fatalf("stored refusal outcome = (%+v, %v, %v), want supply_refused/found", readBack, found, err)
+	}
+	if got := grantAuditCountByOp(t, ctx, pool, refusal.OperationID); got != 1 {
+		t.Fatalf("audit rows for refusal O = %d, want 1", got)
+	}
+}
+
+// TestWithdrawalGrantPKRaceSameOperationTwins covers T023 first-supply
+// concurrency (i): same-O same-OPIN twins released together ⇒ ONE grant row and
+// ONE `supplied` audit row; the loser restarts into resupply with the SAME O
+// and every caller reports the recorded outcome — never operation_conflict/503.
+func TestWithdrawalGrantPKRaceSameOperationTwins(t *testing.T) {
+	ctx, pool := grantSetup(t)
+	grantSeedCaller(t, ctx, pool, 7102)
+	const authID = "auth-pk-same-o"
+	op := grantTestOp("20000000000000000000000000000001", authID, 7102, "100")
+
+	// When two identical same-O same-OPIN first-supplies are released together.
+	outs, errs := grantRaceTwin(t, ctx, pool, op, op)
+
+	// Then both report the one recorded outcome, with one grant + one audit row.
+	for i := range outs {
+		if o := grantRaceOutcome(t, outs[i], errs[i]); o.Action != grantOutcomeSupplied {
+			t.Fatalf("twin %d outcome = %+v, want %s", i, o, grantOutcomeSupplied)
+		}
+	}
+	if n := grantCount(t, ctx, pool, authID); n != 1 {
+		t.Fatalf("grant rows = %d, want 1", n)
+	}
+	acted := grantAuditActions(t, ctx, pool, authID)
+	if len(acted) != 1 || acted[0] != grantOutcomeSupplied {
+		t.Fatalf("audit actions = %v, want exactly [supplied]", acted)
+	}
+	if got := grantAuditCountByOp(t, ctx, pool, op.OperationID); got != 1 {
+		t.Fatalf("audit rows for shared O = %d, want 1", got)
+	}
+	if action, detail := grantAuditRowByOp(t, ctx, pool, op.OperationID); action != grantOutcomeSupplied || detail != opInputDetail(op) {
+		t.Fatalf("stored attempt = (%q, %q), want (%q, %q)", action, detail, grantOutcomeSupplied, opInputDetail(op))
+	}
+}
+
+// TestWithdrawalGrantPKRaceDifferentOperationSameInput covers T023 first-supply
+// concurrency (ii): different-O same-OPIN twins ⇒ ONE grant row (the first
+// supply) plus ONE audit row PER O — `supplied` for the winner and `resupplied`
+// for the loser — never operation_conflict/503.
+func TestWithdrawalGrantPKRaceDifferentOperationSameInput(t *testing.T) {
+	ctx, pool := grantSetup(t)
+	grantSeedCaller(t, ctx, pool, 7103)
+	const authID = "auth-pk-two-o"
+	opA := grantTestOp("30000000000000000000000000000001", authID, 7103, "100")
+	opB := grantTestOp("30000000000000000000000000000002", authID, 7103, "100")
+
+	outs, errs := grantRaceTwin(t, ctx, pool, opA, opB)
+
+	for i := range outs {
+		o := grantRaceOutcome(t, outs[i], errs[i])
+		if o.Action != grantOutcomeSupplied && o.Action != grantOutcomeResupplied {
+			t.Fatalf("twin %d outcome = %+v, want supplied or resupplied (never conflict/503)", i, o)
+		}
+	}
+	if n := grantCount(t, ctx, pool, authID); n != 1 {
+		t.Fatalf("grant rows = %d, want 1", n)
+	}
+	actionA, _ := grantAuditRowByOp(t, ctx, pool, opA.OperationID)
+	actionB, _ := grantAuditRowByOp(t, ctx, pool, opB.OperationID)
+	acted := grantAuditActions(t, ctx, pool, authID)
+	if len(acted) != 2 || !hasAction(acted, grantOutcomeSupplied) || !hasAction(acted, grantOutcomeResupplied) {
+		t.Fatalf("audit actions = %v, want exactly one supplied + one resupplied", acted)
+	}
+	if (actionA != grantOutcomeSupplied || actionB != grantOutcomeResupplied) &&
+		(actionA != grantOutcomeResupplied || actionB != grantOutcomeSupplied) {
+		t.Fatalf("per-O actions = (%q, %q), want {supplied, resupplied}", actionA, actionB)
+	}
+	if state, amount := grantStateAndAmount(t, ctx, pool, authID); state != "active" || amount != "100" {
+		t.Fatalf("grant = (%s, %s), want (active, 100) (same OPIN)", state, amount)
+	}
+}
+
+// TestWithdrawalGrantPKRaceDifferentOperationDifferentInput covers T023
+// first-supply concurrency (iii): different-O different-OPIN twins ⇒ ONE grant
+// row carrying the winner's params + winner `supplied` + loser `supply_refused`
+// whose `detail` records the loser's own params; the grant row is untouched by
+// the loser — never operation_conflict/503 for the grant-PK race.
+func TestWithdrawalGrantPKRaceDifferentOperationDifferentInput(t *testing.T) {
+	ctx, pool := grantSetup(t)
+	grantSeedCaller(t, ctx, pool, 7104)
+	const authID = "auth-pk-differ"
+	opA := grantTestOp("40000000000000000000000000000001", authID, 7104, "100")
+	opB := grantTestOp("40000000000000000000000000000002", authID, 7104, "200")
+
+	outs, errs := grantRaceTwin(t, ctx, pool, opA, opB)
+
+	for i := range outs {
+		o := grantRaceOutcome(t, outs[i], errs[i])
+		if o.Action != grantOutcomeSupplied && o.Action != grantOutcomeSupplyRefused {
+			t.Fatalf("twin %d outcome = %+v, want supplied or supply_refused (never conflict/503)", i, o)
+		}
+	}
+	if n := grantCount(t, ctx, pool, authID); n != 1 {
+		t.Fatalf("grant rows = %d, want 1", n)
+	}
+	acted := grantAuditActions(t, ctx, pool, authID)
+	if len(acted) != 2 || !hasAction(acted, grantOutcomeSupplied) || !hasAction(acted, grantOutcomeSupplyRefused) {
+		t.Fatalf("audit actions = %v, want exactly one supplied + one supply_refused", acted)
+	}
+
+	actionA, detailA := grantAuditRowByOp(t, ctx, pool, opA.OperationID)
+	actionB, detailB := grantAuditRowByOp(t, ctx, pool, opB.OperationID)
+	winner, loser := opA, opB
+	winnerAction, loserAction, loserDetail := actionA, actionB, detailB
+	if actionB == grantOutcomeSupplied {
+		winner, loser = opB, opA
+		winnerAction, loserAction, loserDetail = actionB, actionA, detailA
+	}
+	if winnerAction != grantOutcomeSupplied || loserAction != grantOutcomeSupplyRefused {
+		t.Fatalf("per-O actions = (%q, %q), want winner supplied + loser supply_refused", actionA, actionB)
+	}
+	// The winner's params are the grant row; the loser's own params live only in
+	// its refusal detail, and the grant carries nothing of the loser.
+	if state, amount := grantStateAndAmount(t, ctx, pool, authID); state != "active" || amount != winner.Amount {
+		t.Fatalf("grant = (%s, %s), want (active, %s) — the winner's params", state, amount, winner.Amount)
+	}
+	if loserDetail != opInputDetail(loser) {
+		t.Fatalf("loser refusal detail = %q, want %q (loser's attempted params)", loserDetail, opInputDetail(loser))
+	}
+}

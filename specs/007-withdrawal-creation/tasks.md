@@ -68,9 +68,9 @@
 
 **Independent Test**: V2 + V9 — no/bad/revoked key → 401; `can_create=FALSE` → 403; forged caller_id ignored; B-reads-A → byte-identical 404 (FR-02, FR-03, FR-15, SC-02)
 
-- [ ] T016 [P] [US2] Integration test for auth matrix in `internal/withdrawal/auth_integration_test.go` (V2: 401/403 paths, zero rows asserted, rotation preserves caller_id + scope)
-- [ ] T017 [P] [US2] Integration test for cross-caller privacy in `internal/withdrawal/privacy_integration_test.go` (V9: 404 byte-equality random-id vs foreign-id)
-- [ ] T018 [US2] Key lifecycle operator flow in `internal/app/apikeyauth_integration_test.go` (tags: integration; depends on T034) + startpoint-semantics tests in `internal/withdrawal/auth_integration_test.go` (R4/R5: grace-window dual-accept, post-startpoint revoke affects next attempt only; rotation preserves caller_id + scope; V7 key half; blocks no story — US2 checkpoint requires it green)
+- [x] T016 [P] [US2] Integration test for auth matrix in `internal/withdrawal/auth_integration_test.go` (V2: 401/403 paths, zero rows asserted, rotation preserves caller_id + scope)
+- [x] T017 [P] [US2] Integration test for cross-caller privacy in `internal/withdrawal/privacy_integration_test.go` (V9: 404 byte-equality random-id vs foreign-id)
+- [x] T018 [US2] Key lifecycle operator flow in `internal/app/apikeyauth_integration_test.go` (tags: integration; depends on T034) + startpoint-semantics tests in `internal/withdrawal/auth_integration_test.go` (R4/R5: grace-window dual-accept, post-startpoint revoke affects next attempt only; rotation preserves caller_id + scope; V7 key half; blocks no story — US2 checkpoint requires it green)
 
 **Checkpoint**: US1 AND US2 both work independently (auth boundary holds, privacy shape exact)
 
@@ -82,8 +82,8 @@
 
 **Independent Test**: V4 — full illegal matrix → 400/422 per contract, zero rows; EIP-55-mixed-case accepted + lowercased (FR-04–FR-07, SC-03)
 
-- [ ] T019 [P] [US3] Integration test for param matrix in `internal/withdrawal/validation_integration_test.go` (V4 incl. `1.5`/`1e3` decimal-barrier, max/max+1 boundary both directions per data-model.md layered amount enforcement §四: shape → big.Int range → DB CHECK)
-- [ ] T020 [US3] Whitelist enforcement wiring against 003/004 policy source in `internal/withdrawal/validate.go` (FR-05; no redefinition of asset list)
+- [x] T019 [P] [US3] Integration test for param matrix in `internal/withdrawal/validation_integration_test.go` (V4 incl. `1.5`/`1e3` decimal-barrier, max/max+1 boundary both directions per data-model.md layered amount enforcement §四: shape → big.Int range → DB CHECK)
+- [x] T020 [US3] Whitelist enforcement wiring against 003/004 policy source in `internal/withdrawal/validate.go` (FR-05; no redefinition of asset list)
 
 **Checkpoint**: Validation airtight at API + Go + DB layers (three-layer amount story green)
 
@@ -95,9 +95,9 @@
 
 **Independent Test**: V5 — same-key-equal → 200 same `request_id` row-count-unchanged; same-key-differ → 409 original-untouched; cross-caller same key → independent 201s (FR-09/FR-10, SC-04)
 
-- [ ] T021 [US4] Concurrency test same-key N-way in `internal/withdrawal/idempotency_integration_test.go` (exactly-1-row, single `request_id` to all; V5 + V6 first half; owns the file — T022 appends its cases after T021 lands)
-- [ ] T022 [US4] Cross-key same-grant + cross-caller isolation test in `internal/withdrawal/idempotency_integration_test.go` (403-path, original untouched; caller scoping; appends to T021's file, no `[P]` with T021)
-- [ ] T023 [US4] Same-O op-conflict + grant-PK three-outcome tests in `internal/withdrawal/grant_integration_test.go` (data-model.md supply-pseudocode first-supply concurrency (i/ii/iii): one-grant-one-supplied + per-O audits;异参 loser `supply_refused`; never `operation_conflict`/503 for PK race)
+- [x] T021 [US4] Concurrency test same-key N-way in `internal/withdrawal/idempotency_integration_test.go` (exactly-1-row, single `request_id` to all; V5 + V6 first half; owns the file — T022 appends its cases after T021 lands)
+- [x] T022 [US4] Cross-key same-grant + cross-caller isolation test in `internal/withdrawal/idempotency_integration_test.go` (403-path, original untouched; caller scoping; appends to T021's file, no `[P]` with T021)
+- [x] T023 [US4] Same-O op-conflict + grant-PK three-outcome tests in `internal/withdrawal/grant_integration_test.go` (data-model.md supply-pseudocode first-supply concurrency (i/ii/iii): one-grant-one-supplied + per-O audits;异参 loser `supply_refused`; never `operation_conflict`/503 for PK race)
 
 **Checkpoint**: Idempotency exact under concurrency (no duplicate intents constructible)
 
@@ -109,9 +109,9 @@
 
 **Independent Test**: V6 remainder — kill-9 mid-response → same-key 200; restart → 200; storage-down → 503 zero-Accepted; uncertain-COMMIT → re-classify (FR-12/FR-13, SC-05)
 
-- [ ] T024 [P] [US5] Crash/restart/retry test in `internal/withdrawal/recovery_integration_test.go` (kill-9, restart, same-O grant recovery per Table 6; O-capture crash semantics)
-- [ ] T025 [P] [US5] Revocation-interleave + expiry tests in `internal/withdrawal/revocation_integration_test.go` (R7 three cases; lock-wait expiry → 403; `expires_at == t_check` expired; post-check window accepted-residual)
-- [ ] T026 [US5] Storage-failure + unknown-commit tests in `internal/withdrawal/failure_integration_test.go` (503 shape + same-key-retry instruction text; never "definitely not created"; deadlock/timeout → 503 retryable, never mis-mapped to 23505; 401-no-audit-row assertion per data-model.md Table 5 C3/N1 rule: unauthenticated rejects write zero Table 5 rows; authenticated pre-tx rejects write exactly one best-effort row on the success path, zero-or-one (never duplicated) on write-failure/cancel paths)
+- [x] T024 [P] [US5] Crash/restart/retry test in `internal/withdrawal/recovery_integration_test.go` (kill-9, restart, same-O grant recovery per Table 6; O-capture crash semantics)
+- [x] T025 [P] [US5] Revocation-interleave + expiry tests in `internal/withdrawal/revocation_integration_test.go` (R7 three cases; lock-wait expiry → 403; `expires_at == t_check` expired; post-check window accepted-residual)
+- [x] T026 [US5] Storage-failure + unknown-commit tests in `internal/withdrawal/failure_integration_test.go` (503 shape + same-key-retry instruction text; never "definitely not created"; deadlock/timeout → 503 retryable, never mis-mapped to 23505; 401-no-audit-row assertion per data-model.md Table 5 C3/N1 rule: unauthenticated rejects write zero Table 5 rows; authenticated pre-tx rejects write exactly one best-effort row on the success path, zero-or-one (never duplicated) on write-failure/cancel paths)
 
 **Checkpoint**: Fault behavior proven (loss/crash/outage all converge without duplicates)
 
@@ -123,9 +123,9 @@
 
 **Independent Test**: V8 — active-recovery POST persists with zero nonce/sign/broadcast artefacts; GET servable with snapshot `state`; read-kill → `unknown`; POST-loss-retry → same 200 (FR-16/FR-17, SC-06/SC-07)
 
-- [ ] T027 [US6] Recovery-period intake test in `internal/withdrawal/recovery_period_integration_test.go` (Anvil E2E tags; V8 incl. absence-assertions: no rows outside 007 scope, no RPC broadcast; owns the file — T028 appends its cases after T027 lands)
-- [ ] T028 [US6] Recovery-snapshot query tests in `internal/withdrawal/recovery_period_integration_test.go` (single-snapshot precedence incl. release-then-re-establish concurrency; unknown on either-failure; `execution:not_started` constant; NO height-indexed validity call; appends to T027's file, no `[P]` with T027)
-- [ ] T029 [P] [US6] 006-governance read-only assertion in `internal/withdrawal/recovery_governance_integration_test.go` (tags: integration; depends on Foundational: no pause/de-auth/isolation rows written or deleted by any 007 path — `indexer_pause`/`log_pause`/`deposit_pause`/`reorg_recovery` untouched; downstream preconditions subset observed per 006 `contracts/downstream.md`; V8 governance half)
+- [x] T027 [US6] Recovery-period intake test in `internal/withdrawal/recovery_period_integration_test.go` (Anvil E2E tags; V8 incl. absence-assertions: no rows outside 007 scope, no RPC broadcast; owns the file — T028 appends its cases after T027 lands)
+- [x] T028 [US6] Recovery-snapshot query tests in `internal/withdrawal/recovery_period_integration_test.go` (single-snapshot precedence incl. release-then-re-establish concurrency; unknown on either-failure; `execution:not_started` constant; NO height-indexed validity call; appends to T027's file, no `[P]` with T027)
+- [x] T029 [P] [US6] 006-governance read-only assertion in `internal/withdrawal/recovery_governance_integration_test.go` (tags: integration; depends on Foundational: no pause/de-auth/isolation rows written or deleted by any 007 path — `indexer_pause`/`log_pause`/`deposit_pause`/`reorg_recovery` untouched; downstream preconditions subset observed per 006 `contracts/downstream.md`; V8 governance half)
 
 **Checkpoint**: 006 contract honored structurally (receive-only holds under recovery)
 

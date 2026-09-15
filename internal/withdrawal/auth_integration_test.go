@@ -396,3 +396,302 @@ func TestWithdrawalAuthRotationMidTransactionFailureRollsBack(t *testing.T) {
 		t.Fatalf("Authenticate(predecessor) after rolled-back rotation error = %v, want nil", err)
 	}
 }
+
+// ---------------------------------------------------------------------------
+// T016 [US2] — V2 auth matrix (contracts/api.md §1-2)
+// ---------------------------------------------------------------------------
+//
+// These tests extend the T007 credential-core coverage above with the V2
+// rejection matrix at the frozen SubmitWithdrawal boundary: the 401 key paths,
+// the 403 interface-permission path, and the 403 grant paths. Each asserts the
+// exact status/code, the response-first audit intent shape (401 → nil; 403 →
+// non-nil), and that no withdrawal_requests row is ever written.
+//
+// Rotation's caller_id + scope preservation is already locked by
+// TestWithdrawalAuthRotationGracePreservesIdentity and is deliberately NOT
+// duplicated here.
+//
+// Fingerprints: the 401 paths write nothing (no verifiable caller identity), so
+// Audit is nil and BOTH Table 3 (withdrawal_requests) and Table 5
+// (withdrawal_request_audit) stay at zero rows. The 403 paths carry a
+// response-first AuditIntent but the core still writes NOTHING — the intent is
+// persisted by the transport AFTER the response (T014/T010). The
+// permission-denied case demonstrates that hand-off explicitly by calling
+// WriteRejectAudit with the returned intent exactly once, mirroring the
+// handler's post-response write; the grant 403 cases stay intent-only.
+//
+// T018 appends its own R4/R5 startpoint-semantics tests below this section; the
+// separator keeps the two additions from interleaving.
+
+// TestWithdrawalAuthMatrixRejectedKeyPaths covers V2's 401 key matrix at the
+// library boundary: a missing key, a malformed key, a shape-valid but unissued
+// key, and a revoked key each classify to 401 unauthenticated with no audit
+// intent and zero Table 3 / Table 5 rows.
+func TestWithdrawalAuthMatrixRejectedKeyPaths(t *testing.T) {
+	pool := withdrawalAuthPool(t)
+	ctx := context.Background()
+
+	// Given a shape-valid credential that was never issued (distinct from both
+	// the empty and the malformed shapes)...
+	unissued, _, _, err := GenerateKey()
+	if err != nil {
+		t.Fatalf("GenerateKey(unissued): %v", err)
+	}
+	// ...and a real credential for caller 6001 that is then explicitly revoked.
+	revoked, revokedRef, err := IssueKey(ctx, pool, 6001, "v2-revoked")
+	if err != nil {
+		t.Fatalf("IssueKey(6001): %v", err)
+	}
+	if err := RevokeKey(ctx, pool, revokedRef.KeyID); err != nil {
+		t.Fatalf("RevokeKey(6001 key): %v", err)
+	}
+
+	cases := []struct {
+		name      string
+		presented string
+	}{
+		{"missing key", ""},
+		{"malformed key", "garbage"},
+		{"never-issued shape-valid key", unissued},
+		{"revoked key", revoked},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			// When an otherwise valid request presents the rejected key.
+			res, err := SubmitWithdrawal(ctx, pool, intakeReq(tc.presented, "idem-v2-401", "auth-v2-missing"))
+			if err != nil {
+				t.Fatalf("SubmitWithdrawal(%s): %v", tc.name, err)
+			}
+
+			// Then it is 401 unauthenticated with no audit intent.
+			if res.Status != 401 || res.Code != CodeUnauthenticated {
+				t.Fatalf("result = %+v, want 401/%s", res, CodeUnauthenticated)
+			}
+			intakeWantNoAudit(t, res)
+
+			// And nothing was written: zero Table 3 rows and zero Table 5 rows.
+			if n := intakeRequestCount(t, ctx, pool); n != 0 {
+				t.Fatalf("withdrawal_requests rows after 401 = %d, want 0", n)
+			}
+			if n := intakeAuditCount(t, ctx, pool); n != 0 {
+				t.Fatalf("withdrawal_request_audit rows after 401 = %d, want 0", n)
+			}
+		})
+	}
+}
+
+// TestWithdrawalAuthMatrixPermissionDenied covers the 403 interface-permission
+// path: a caller whose can_create=FALSE authenticates but is refused with
+// unauthorized, the result carries a non-nil `rejected` AuditIntent, and the
+// core writes no rows. The test then performs the transport's post-response
+// write itself (WriteRejectAudit) to prove the intent lands exactly one Table 5
+// row — the ONLY Table 5 row this file's V2 matrix expects, since the 401 paths
+// are nil-intent and the grant 403 paths stay intent-only.
+func TestWithdrawalAuthMatrixPermissionDenied(t *testing.T) {
+	pool := withdrawalAuthPool(t)
+	ctx := context.Background()
+
+	// Given a caller with a valid key but can_create=FALSE.
+	const callerID = int64(6002)
+	key := intakeKey(t, ctx, pool, callerID)
+	if _, err := pool.Exec(ctx,
+		`UPDATE caller SET can_create = FALSE, updated_at = now() WHERE caller_id = $1`, callerID); err != nil {
+		t.Fatalf("set can_create=FALSE: %v", err)
+	}
+
+	// When a valid request is submitted.
+	res, err := SubmitWithdrawal(ctx, pool, intakeReq(key, "idem-v2-denied", "auth-v2-denied"))
+	if err != nil {
+		t.Fatalf("SubmitWithdrawal(can_create=FALSE): %v", err)
+	}
+
+	// Then it is 403 unauthorized with a non-nil `rejected` intent, and the
+	// core persisted nothing (intent only).
+	if res.Status != 403 || res.Code != CodeUnauthorized {
+		t.Fatalf("result = %+v, want 403/%s", res, CodeUnauthorized)
+	}
+	intakeWantIntent(t, res, auditActionRejected, callerID, "")
+	if n := intakeRequestCount(t, ctx, pool); n != 0 {
+		t.Fatalf("withdrawal_requests rows after 403 = %d, want 0", n)
+	}
+	if n := intakeAuditCount(t, ctx, pool); n != 0 {
+		t.Fatalf("withdrawal_request_audit rows before the transport write = %d, want 0 (intent only)", n)
+	}
+
+	// And when the transport performs its post-response write with the returned
+	// intent, exactly one `rejected` row appears.
+	if err := WriteRejectAudit(ctx, pool,
+		res.Audit.CallerID, res.Audit.RequestID, res.Audit.Action, res.Audit.Detail); err != nil {
+		t.Fatalf("WriteRejectAudit(intent): %v", err)
+	}
+	if got := intakeAuditActions(t, ctx, pool); len(got) != 1 || got[0] != auditActionRejected {
+		t.Fatalf("withdrawal_request_audit actions = %v, want [rejected]", got)
+	}
+}
+
+// TestWithdrawalAuthMatrixGrantRejects covers V2's 403 grant matrix: a valid,
+// permitted key presenting an authorization that does not exist, then one whose
+// bound amount differs from the request. Each classifies to 403
+// authorization_invalid with a non-nil `rejected` intent and zero Table 3 rows;
+// neither persists a Table 5 row.
+func TestWithdrawalAuthMatrixGrantRejects(t *testing.T) {
+	pool := withdrawalAuthPool(t)
+	ctx := context.Background()
+
+	// Given a valid key for caller 6003.
+	const callerID = int64(6003)
+	key := intakeKey(t, ctx, pool, callerID)
+
+	t.Run("unknown grant", func(t *testing.T) {
+		// When the authorization_id has no row at all.
+		res, err := SubmitWithdrawal(ctx, pool, intakeReq(key, "idem-v2-unknown", "auth-v2-missing"))
+		if err != nil {
+			t.Fatalf("SubmitWithdrawal(unknown grant): %v", err)
+		}
+		// Then 403 authorization_invalid, rejected intent, zero Table 3 rows.
+		if res.Status != 403 || res.Code != CodeAuthorizationInvalid {
+			t.Fatalf("result = %+v, want 403/%s", res, CodeAuthorizationInvalid)
+		}
+		intakeWantIntent(t, res, auditActionRejected, callerID, "")
+		if n := intakeRequestCount(t, ctx, pool); n != 0 {
+			t.Fatalf("withdrawal_requests rows after unknown grant = %d, want 0", n)
+		}
+	})
+
+	t.Run("mismatched grant", func(t *testing.T) {
+		// Given an active grant bound to an amount that differs from the request.
+		intakeSupplyGrant(t, ctx, pool, callerID, "auth-v2-mismatch", "999")
+		// When the request presents the canonical amount.
+		res, err := SubmitWithdrawal(ctx, pool, intakeReq(key, "idem-v2-mismatch", "auth-v2-mismatch"))
+		if err != nil {
+			t.Fatalf("SubmitWithdrawal(mismatched grant): %v", err)
+		}
+		// Then 403 authorization_invalid, rejected intent, zero Table 3 rows.
+		if res.Status != 403 || res.Code != CodeAuthorizationInvalid {
+			t.Fatalf("result = %+v, want 403/%s", res, CodeAuthorizationInvalid)
+		}
+		intakeWantIntent(t, res, auditActionRejected, callerID, "")
+		if n := intakeRequestCount(t, ctx, pool); n != 0 {
+			t.Fatalf("withdrawal_requests rows after mismatched grant = %d, want 0", n)
+		}
+	})
+
+	// And neither grant 403 path persisted a Table 5 row (intent only).
+	if n := intakeAuditCount(t, ctx, pool); n != 0 {
+		t.Fatalf("withdrawal_request_audit rows after grant rejects = %d, want 0 (intent only)", n)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// T018 [US2] — startpoint semantics (R4/R5)
+// ---------------------------------------------------------------------------
+//
+// The auth predicate (R4) is evaluated at each attempt's start; there is no
+// cache, so the staleness window never outlives the attempt. These tests lock
+// that boundary: a revoke is observed by the NEXT Authenticate call, never by
+// an attempt that already read its verdict, and a rotation's grace stamp is a
+// future wall-clock instant, so the predecessor's acceptance ends exactly when
+// the window elapses.
+
+// TestWithdrawalAuthStartpointRevokeAffectsNextAttemptOnly covers R4's
+// pre/post-startpoint boundary: a revoke committing after a successful
+// startpoint is refused on the next fresh Authenticate call, while a revoke
+// committing before any attempt makes that first attempt 401.
+func TestWithdrawalAuthStartpointRevokeAffectsNextAttemptOnly(t *testing.T) {
+	pool := withdrawalAuthPool(t)
+	ctx := context.Background()
+
+	// Given a valid key whose first attempt completes (its startpoint verdict
+	// is already read)...
+	plaintext, ref, err := IssueKey(ctx, pool, 81, "startpoint-after")
+	if err != nil {
+		t.Fatalf("IssueKey(81) error = %v", err)
+	}
+	first, err := Authenticate(ctx, pool, plaintext)
+	if err != nil {
+		t.Fatalf("Authenticate(81, attempt 1) error = %v", err)
+	}
+	if first.Caller.ID != 81 || first.Key.KeyID != ref.KeyID {
+		t.Fatalf("Authenticate(81, attempt 1) = %+v, want caller 81 / key %d", first, ref.KeyID)
+	}
+
+	// When the key is revoked after that startpoint...
+	if err := RevokeKey(ctx, pool, ref.KeyID); err != nil {
+		t.Fatalf("RevokeKey(81) error = %v", err)
+	}
+
+	// Then the same logical retry as a NEW Authenticate call re-evaluates the
+	// startpoint and is refused; the caller row survives.
+	_, err = Authenticate(ctx, pool, plaintext)
+	withdrawalAuthWantCode(t, err, CodeUnauthenticated)
+	if !withdrawalAuthCallerExists(t, ctx, pool, 81) {
+		t.Fatal("caller row missing after startpoint-boundary revoke")
+	}
+
+	// And the mirror case: a revoke committing BEFORE any startpoint is observed
+	// by that very first attempt.
+	prePlaintext, preRef, err := IssueKey(ctx, pool, 82, "startpoint-before")
+	if err != nil {
+		t.Fatalf("IssueKey(82) error = %v", err)
+	}
+	if err := RevokeKey(ctx, pool, preRef.KeyID); err != nil {
+		t.Fatalf("RevokeKey(82) error = %v", err)
+	}
+	_, err = Authenticate(ctx, pool, prePlaintext)
+	withdrawalAuthWantCode(t, err, CodeUnauthenticated)
+}
+
+// TestWithdrawalAuthStartpointGraceWindowExpiry covers R4's time-based grace
+// stamp: with a one-second grace the predecessor and successor both accept
+// while the window is open, and once wall-clock passes the stamp the
+// predecessor's next startpoint check is refused while the successor keeps
+// working. The bounded poll below is itself the subject of the assertion (the
+// grace window IS time) — no other step waits.
+func TestWithdrawalAuthStartpointGraceWindowExpiry(t *testing.T) {
+	pool := withdrawalAuthPool(t)
+	ctx := context.Background()
+
+	oldPlaintext, oldRef, err := IssueKey(ctx, pool, 83, "grace-window")
+	if err != nil {
+		t.Fatalf("IssueKey(83) error = %v", err)
+	}
+	newPlaintext, newRef, err := RotateKey(ctx, pool, 83, 1)
+	if err != nil {
+		t.Fatalf("RotateKey(83, grace=1) error = %v", err)
+	}
+	if newRef.KeyID == oldRef.KeyID {
+		t.Fatal("RotateKey reused the predecessor key_id")
+	}
+
+	// During the grace window both credentials accept (dual-accept).
+	oldResult, err := Authenticate(ctx, pool, oldPlaintext)
+	if err != nil {
+		t.Fatalf("Authenticate(predecessor within grace) error = %v", err)
+	}
+	newResult, err := Authenticate(ctx, pool, newPlaintext)
+	if err != nil {
+		t.Fatalf("Authenticate(successor) error = %v", err)
+	}
+	if oldResult.Caller.ID != 83 || newResult.Caller.ID != 83 {
+		t.Fatalf("grace dual-accept caller ids = %d/%d, want 83/83", oldResult.Caller.ID, newResult.Caller.ID)
+	}
+
+	// After the window elapses the predecessor's next attempt is refused.
+	deadline := time.Now().Add(15 * time.Second)
+	for {
+		if _, err := Authenticate(ctx, pool, oldPlaintext); err != nil {
+			withdrawalAuthWantCode(t, err, CodeUnauthenticated)
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("predecessor still authenticates after the grace window elapsed")
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	if _, err := Authenticate(ctx, pool, newPlaintext); err != nil {
+		t.Fatalf("Authenticate(successor) after predecessor grace expiry error = %v", err)
+	}
+	if !withdrawalAuthCallerExists(t, ctx, pool, 83) {
+		t.Fatal("caller row missing after grace expiry")
+	}
+}

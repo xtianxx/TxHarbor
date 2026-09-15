@@ -289,8 +289,15 @@ func Serve(ctx context.Context, d Deps) int {
 	// takes precedence over the health handler's "/" subtree, and health/metrics
 	// stay unchanged on the child mux. No new listener or address.
 	withdrawH := &WithdrawalHandler{
-		Pool:      pool,
-		ChainID:   chainID,
+		Pool:    pool,
+		ChainID: chainID,
+		// T020 deferred handoff: the FR-05 live source is
+		// withdrawal.ResolveAssetAllowlist (the newest 004
+		// deposit_config_history row). It stays out of startup because that
+		// row is written by the privileged out-of-loop authorization and may
+		// not exist yet; the interim cfg.DepositContracts projection carries
+		// the same approved 004 asset set until the handler reads the live
+		// source per attempt.
 		Allowlist: withdrawalAllowlist(cfg.DepositContracts),
 		Metrics:   m,
 	}

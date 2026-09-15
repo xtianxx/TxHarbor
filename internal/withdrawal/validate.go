@@ -1,12 +1,17 @@
 package withdrawal
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"math/big"
 	"regexp"
+	"sort"
 	"strings"
 
 	"github.com/ethereum/go-ethereum/common"
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 // maxUint256Dec is 2²⁵⁶−1, the largest value a NUMERIC(78,0) uint256 column can
@@ -51,6 +56,63 @@ func ValidateAssetWhitelisted(asset string, allowlist []string) error {
 	}
 	return New(CodeValidationFailed, "asset is not in the configured whitelist").
 		WithField("asset")
+}
+
+// resolveAssetAllowlistSQL reads the newest deposit policy version for a chain.
+// deposit_config_history is the append-only 004 version ledger the deposit
+// indexer authorizes against; its `assets` column is the canonical
+// `<address>:<effective>` snapshot (004 data-model Table 4, research R11). The
+// latest version by version_seq is the currently effective policy.
+const resolveAssetAllowlistSQL = `
+SELECT assets FROM deposit_config_history
+WHERE chain_id = $1 ORDER BY version_seq DESC LIMIT 1`
+
+// ResolveAssetAllowlist reads the live 003/004 policy source for FR-05: the
+// asset set of the newest deposit_config_history row for chainID. It is T020's
+// source replacement for T014's interim cfg.DepositContracts projection —
+// callers thread the result into ValidateAssetWhitelisted (typically once per
+// create attempt), so the asset list is never redefined here. The returned list
+// is canonical (lowercase, sorted, deduplicated), mirroring
+// config.NormalizeWhitelist. A missing or blank policy row is an error: the
+// whitelist never degrades into an empty or full-chain fallback.
+func ResolveAssetAllowlist(ctx context.Context, pool *pgxpool.Pool, chainID int64) ([]string, error) {
+	var snapshot string
+	err := pool.QueryRow(ctx, resolveAssetAllowlistSQL, chainID).Scan(&snapshot)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, fmt.Errorf("no deposit config history for chain %d: whitelist source is undefined", chainID)
+	}
+	if err != nil {
+		return nil, fmt.Errorf("read deposit config history for chain %d: %w", chainID, err)
+	}
+	return parseAssetAllowlist(snapshot)
+}
+
+// parseAssetAllowlist extracts the asset addresses from a canonical 004 policy
+// snapshot (`<address>:<effective>` lines, as produced by
+// config.DepositSnapshot) into the same canonical form NormalizeWhitelist
+// yields: lowercase 0x hex, sorted, deduplicated. A blank snapshot, a blank
+// entry, or a malformed address is an error — never a partial or empty list.
+func parseAssetAllowlist(snapshot string) ([]string, error) {
+	if strings.TrimSpace(snapshot) == "" {
+		return nil, errors.New("deposit config asset snapshot is blank")
+	}
+	lines := strings.Split(snapshot, "\n")
+	seen := make(map[string]struct{}, len(lines))
+	out := make([]string, 0, len(lines))
+	for _, ln := range lines {
+		addr, _, ok := strings.Cut(ln, ":")
+		if !ok || !common.IsHexAddress(addr) {
+			return nil, fmt.Errorf("deposit config asset line %q is not address:effective", ln)
+		}
+		norm := strings.ToLower(addr)
+		if _, dup := seen[norm]; dup {
+			continue
+		}
+		seen[norm] = struct{}{}
+		out = append(out, norm)
+	}
+	sort.Strings(out)
+	return out, nil
 }
 
 // ValidateAmount enforces FR-06's layered amount rule: the raw transport string
