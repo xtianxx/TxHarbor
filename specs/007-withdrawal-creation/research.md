@@ -61,7 +61,7 @@ progression Go+PostgreSQL+Anvil); 007 intake uses exactly one lock object (grant
 
 ## R3 — key_id vs caller_id: two tables; rotation inserts, identity never mutates (resolves FR-03/FR-10)
 
-- **Decision**: `caller` (stable, non-secret business identity; `withdrawals.caller_id` FK → it)
+- **Decision**: `caller` (stable, non-secret business identity; `withdrawal_requests.caller_id` FK → it)
   plus `api_key` (`key_id`, `caller_id` FK, `key_hash`, prefix, timestamps). Rotation = INSERT new
   `api_key` with the same `caller_id`, then revoke the old row. `caller_id` is never encoded in,
   derived from, or changed by the key. Idempotency scope `(caller_id, idempotency_key)` uses
@@ -95,9 +95,16 @@ progression Go+PostgreSQL+Anvil); 007 intake uses exactly one lock object (grant
 
 ## R5 — Ops entry point & secret hygiene (resolves FR-03 operability, no admin UI)
 
-- **Decision**: Issuance/rotation/revocation = operator tooling, not HTTP. Reuse the T024 precedent
+- **Decision**: Issuance/rotation/revocation = operator tooling, not HTTP: `txharbor apikey-auth
+  <issue|rotate|revoke>` subcommand (owned by tasks T034; same `internal/app` shape as R9:
+  flag parsing → config.Load → operator-connection tx; operator + reason recorded; exit codes
+  0/1/2 mirroring `confirm-auth`). Reuse the T024 precedent
   (`depositauth.go`: migrations stay pure DDL; controlled, versioned operator path). Key generation
   in Go (CSPRNG + encoding are test-locked Go concerns); show plaintext once; persist digest only.
+  `issue --caller-id C --label L --operator OP --reason R` inserts (or reuses) the `caller` row and
+  inserts one `api_key` row, printing the plaintext once; `rotate --caller-id C …` inserts the
+  successor row then sets `revoked_at` on the predecessor (grace: future ts for dual-accept window,
+  immediate: `now()`); `revoke --key-id K …` sets `revoked_at`. Rotation never mutates `caller_id`.
   `internal/logx.Redact` already covers `Authorization: Bearer …` (`redact.go` + bearer tests);
   the middleware MUST log only `caller_id` + `key_id` + prefix, and 401s stay generic.
   `.env.example` carries no real/seed key.
@@ -150,7 +157,7 @@ endpoint, or infrastructure; upstream is NOT required to hold a DB connection as
   → rollback → read-only re-read → equal ⇒ resupply-audit with SAME O (one bounded re-execution),
   differ ⇒ `supply_refused`-audit. Grant-PK conflict is NEVER `operation_conflict` and NEVER
   503-unavailable. Same attempt retried (same O + same op-input) converges via
-  `UNIQUE (operation_id)`; same O + any differ ⇒ `operation_conflict`; a NEW attempt MUST mint
+  `CONSTRAINT withdrawal_grant_audit_operation_id_uniq UNIQUE (operation_id)`; same O + any differ ⇒ `operation_conflict`; a NEW attempt MUST mint
   a new O — grant state is never reverse-derived into identity. Already-bound requests
   keep their rows (revocation affects only not-yet-accepted receipts per FR-03b).
 - **Field/param validation**: identical validators as intake (`validate.go` shared): FR-06 amount,
@@ -197,7 +204,7 @@ No coordinator lock, no advisory lock, no `FOR UPDATE` anywhere on the intake pa
 coordination primitive on this path is `FOR SHARE` on the one grant row being consumed (see
 invariant table). Tasks/implement MUST NOT re-decide, add a global lock, or drop the share lock.
 
-- **Carrier**: `UNIQUE (authorization_id)`, `NOT NULL` (FR-03b requires an authorization per create;
+- **Carrier**: `UNIQUE (authorization_id)` declared as `CONSTRAINT withdrawal_requests_authorization_uniq` (FR-03b requires an authorization per create;
   named so pgx can map it). Concurrent different-key binds serialize at the index: one wins, the
   loser gets 23505 on this constraint → 403 (FR-14 "不满足逐笔授权要求"; locked here as 403,
   not 409 — a bound grant means the caller lacks a *usable* grant for a new request).
@@ -237,7 +244,7 @@ invariant table). Tasks/implement MUST NOT re-decide, add a global lock, or drop
   Case C (interleaved: R holds share, V waits): V cannot commit mid-R; R's INSERT + COMMIT decide
   first; then V commits. Identical outcome to Case B, deterministically — the "快照后撤销"
   hole of the previous revision is closed by the lock, not by snapshot wishful thinking. ✓
-  No outcome creates a second request for one grant (`authorization_uniq`), and no outcome
+  No outcome creates a second request for one grant (`withdrawal_requests_authorization_uniq`), and no outcome
   cancels an Accepted row. QED against the Q2 rule with no rule relaxation.
 - **Alternatives closed**: advisory lock (rejected); auth-row `FOR UPDATE` (rejected);
   coordinator-lock intake (rejected — cost without coverage); conditional
@@ -246,9 +253,16 @@ invariant table). Tasks/implement MUST NOT re-decide, add a global lock, or drop
 
 ## R8 — pgx 23505 mapping without TOCTOU; atomic tx shape (resolves FR-12/FR-13/FR-14)
 
-- **Decision**: Map by `pgconn.PgError.ConstraintName` (`caller_key_uniq` → replay-or-409;
-  `authorization_uniq` → 403-path), matching the repo's `isUniqueViolation` + `logscanner.go`
-  constraint-name precedent. A 23505 **aborts the tx** — ROLLBACK (or SAVEPOINT), then classify on
+- **Decision**: Map by `pgconn.PgError.ConstraintName` using the EXACT names declared in
+  `migrations/000007_withdrawal_creation.sql` (single source of truth; short forms below in
+  parentheses are prose shorthands only and MUST NOT be used as match values):
+  `withdrawal_requests_caller_key_uniq` ("caller_key_uniq" → replay-or-409);
+  `withdrawal_requests_authorization_uniq` ("authorization_uniq" → 403-path);
+  `withdrawal_grant_audit_operation_id_uniq` ("operation_id_uniq" → same-O re-read);
+  `withdrawal_authorizations_pkey` (first-supply PK race → N1 bounded branch), matching the repo's
+  `isUniqueViolation` + `logscanner.go` constraint-name precedent. T006 owns a verification step
+  asserting the real database error `ConstraintName` values match the declared names and that each
+  23505 branch fires on its intended constraint (see data-model.md classification protocol). A 23505 **aborts the tx** — ROLLBACK (or SAVEPOINT), then classify on
   the pool; that post-commit-visibility read is authoritative, not TOCTOU. Explicitly handle
   classify-miss (winner not yet visible → retryable, never fabricated) and uncertain COMMIT
   (re-classify → replay/conflict/retryable), mirroring `reorgpolicy.go:353-366`.

@@ -8,10 +8,13 @@
 
 Receive-only, authenticated, authorized idempotent withdrawal intake: `POST /withdrawals`
 persists an Accepted request (never executes), `GET /withdrawals/{id}` serves owner-restricted
-facts. Technical approach (research R1–R8): deterministic SHA-256 API-key credentials against
-`caller` + `api_key` tables with same-query revocation; intake as plain-INSERT → catch 23505 →
-classify transactions over `UNIQUE (caller_id, idempotency_key)` + `UNIQUE (authorization_id)`
-carriers, reusing the repo's shared `writeGuard`/lease/lock primitives and audit-in-tx discipline.
+facts. Technical approach (research R1–R9): deterministic SHA-256 API-key credentials against
+`caller` + `api_key` tables with same-query revocation (operator lifecycle via `apikey-auth`
+subcommand, R5); intake as plain-INSERT → catch 23505 →
+classify transactions over `withdrawal_requests_caller_key_uniq` +
+`withdrawal_requests_authorization_uniq` carriers (exact `ConstraintName` match, R8),
+reusing the repo's shared `writeGuard` primitive (no lease/coordinator lock on 007 paths)
+and audit-in-tx discipline.
 Recovery-period behavior is structural (no execution code exists in 007) with live 006 state reads.
 
 ## Technical Context
@@ -25,7 +28,8 @@ cross-cutting concerns).
 
 **Storage**: PostgreSQL only (postgres:18.6 pin — PG19 `ON CONFLICT DO SELECT` unavailable by
 design). New: `caller`, `api_key`, `withdrawal_requests`, `withdrawal_authorizations`,
-`withdrawal_request_audit` (data-model.md Tables 1–5). No Redis/Kafka/new infra.
+`withdrawal_request_audit`, `withdrawal_grant_audit` (data-model.md Tables 1–6: R1/R3/R6/R7/R8
+request carriers + R1–R5 key carriers + R9 grant-audit carrier). No Redis/Kafka/new infra.
 
 **Testing**: `go test ./...` (unit: validation, equivalence, error mapping) +
 `make test-integration` (real PostgreSQL: concurrency/crash/revocation races; Anvil E2E for
@@ -64,7 +68,7 @@ Pre-Phase-0 (2026-09-15, against Constitution 1.1.0):
 - IX/X/XI (Failure paths, local testing, invariant tests): PASS — V1–V9 matrix, failure-first.
 - XII (Observability): PASS — structured logs with caller/request/chain/asset/retry fields, no
   secrets; metrics ride the existing registry (new counters named per repo shape).
-- XIII (Simplicity): PASS — no new infra/services; two small tables + three business tables.
+- XIII (Simplicity): PASS — no new infra/services; two credential tables + four business/audit tables.
 - XIV (Spec-driven): PASS — this plan; scope fenced by Non-Goals.
 
 Post-Phase-1 re-check (2026-09-15): no new violations introduced. Data-model adds tables because
@@ -79,8 +83,8 @@ naming stay inside plan scope (contracts/api.md), not implementation.
 ```text
 specs/007-withdrawal-creation/
 ├── plan.md                 # This file (/speckit.plan output)
-├── research.md             # Phase 0 output (R1–R8 decisions)
-├── data-model.md           # Phase 1 output (Tables 1–5 + txn catalog + concurrency argument)
+├── research.md             # Phase 0 output (R1–R9 decisions: R1–R5 key lifecycle, R6–R8 intake, R9 grant supply)
+├── data-model.md           # Phase 1 output (Tables 1–6 + txn catalog + concurrency argument + supply pseudocode)
 ├── quickstart.md           # Phase 1 output (V1–V9 validation guide, design only)
 ├── contracts/              # Phase 1 output
 │   └── api.md              # HTTP/validation-order/query-shape/recovery/downstream contract
@@ -104,14 +108,15 @@ internal/withdrawal/
 ├── grant.go                # upstream grant supply entry (R9 withdrawal-authz carrier; NOT caller-writable)
 └── ..._test.go             # unit: vectors, equivalence, error mapping (no DB where possible)
 
-internal/app/              # EXTEND: mount POST/GET on existing http.Server; config passthrough;
-                           # add withdrawal-authz subcommand mirroring confirm-auth carrier (R9)
-internal/config/config.go  # EXTEND: chain bind + HTTP addr reuse (no new secret knobs in 007)
-internal/metrics/          # EXTEND: intake counters/gauges on existing registry
+internal/app/              # EXTEND: mount POST/GET on existing http.Server (`health.NewServer(...).Handler()` mux in `internal/app/serve.go:288-293`); config passthrough (`internal/config/config.go` chain bind + HTTP addr reuse, owned by T035);
+                           # add `withdrawal-authz` (`internal/app/withdrawalauthz.go`) + `apikey-auth` (`internal/app/apikeyauth.go`)
+                           # subcommands mirroring confirm-auth carrier (R5/R9; dispatch in `cmd/txharbor/main.go` switch)
+internal/config/config.go  # EXTEND (owned by T035): chain bind (`ChainID` from `TXHARBOR_CHAIN_ID`) + HTTP addr reuse (`HTTPAddr`, no new secret knobs in 007)
+internal/metrics/          # EXTEND: intake counters/gauges on existing registry (owned by T015)
 internal/logx/             # reuse Redact (no change expected)
 
 migrations/
-└── 000007_withdrawal_creation.sql  # Tables 1–5 (R1–R8 carriers; pure DDL)
+└── 000007_withdrawal_creation.sql  # Tables 1–6 (R1–R9 carriers; pure DDL; all classifiable constraints explicitly named — see F3/F4 note in tasks.md)
 
 tests (per V-matrix; design only, not written here):
 ├── unit: go test (validation/equivalence/mapping)
@@ -127,7 +132,12 @@ packages for config/logging/metrics; one new `internal/withdrawal` domain packag
 
 None. (New tables in one migration are required carriers — upstream tables cannot hold caller
 credentials or withdrawal intents without breaking their contracts; see R1/R3/R7 alternatives
-rejected. Constraints-only intake adds no lock object.)
+rejected. R7 FINAL intake coordination: exactly one lock object — the grant-row `FOR SHARE`
+on the receipt path. Scoped precisely: the receipt path (`intake.go`) never uses `FOR UPDATE`
+or coordinator/advisory locks; the operator supply/revoke path (`grant.go` + `withdrawal-authz`)
+uses `FOR UPDATE` on the grant row for state writers per the Table 6 attempt protocol — the two
+paths share no lock-order ring. Coordinator `indexer_lease` lock, advisory locks, and grant-row
+`FOR UPDATE` on the receipt path remain rejected.)
 
 ## FR/SC/Scenario → design/verification mapping
 
@@ -135,14 +145,14 @@ rejected. Constraints-only intake adds no lock object.)
 |---|---|---|
 | FR-01 (endpoints+auth) | app wiring + auth.go | V1, V2 |
 | FR-02 (identity vs permission) | caller row + `can_create` + key binding | V2 |
-| FR-03 (API key) | R1/R2/R4/R5; Table 2 | V2, V7 |
-| FR-03b (grant model) | Table 4 + supply entry + atomic bind (R7/R8) | V3, V6, V7 |
-| FR-04/FR-05 (chain/whitelist) | validate.go + deployment bind | V4 |
+| FR-03 (API key) | R1/R2/R4/R5; Table 2; `apikey-auth` subcommand | V2, V7 |
+| FR-03b (grant model) | Table 4 + Table 6 + supply entry + atomic bind (R7/R8/R9) | V3, V6, V7 |
+| FR-04/FR-05 (chain/whitelist) | validate.go + deployment bind (`config.ChainID`) | V4 |
 | FR-06/FR-07 (amount/address) | validate.go; NUMERIC(78,0) + hex CHECKs | V4, V5 |
-| FR-08 (Accepted semantics) | status CHECK + contracts §3 | V1, V8 |
-| FR-09/FR-10 (key scope/compare) | `caller_key_uniq` + FR-10 set (R6) | V5, V6 |
+| FR-08 (Accepted semantics) | status CHECK (Table 3) + contracts §3 | V1, V8 |
+| FR-09/FR-10 (key scope/compare) | `withdrawal_requests_caller_key_uniq` + FR-10 set (R6; exact `ConstraintName` match — short forms `caller_key_uniq`/`authorization_uniq`/`operation_id_uniq` are prose shorthands only, never match values) | V5, V6 |
 | FR-11 (permanent) | no cleanup path; full UNIQUEs (R1/R4) | V6, V7 |
-| FR-12/FR-13 (atomic/concurrent) | txn catalog T-* + concurrency argument (R7 FINAL: constraints + grant-row FOR SHARE, fixed-order classify, T-dual-race) | V6 |
+| FR-12/FR-13 (atomic/concurrent) | txn catalog T-* + concurrency argument (R7 FINAL: DB UNIQUE carriers + grant-row FOR SHARE sole lock on receipt path, fixed-order classify, T-dual-race) | V6 |
 | FR-14/FR-15 (responses/privacy) | contracts/api.md §§1–3 (403 locked for auth-bound; dual-race order rule) | V1–V3, V9 |
 | FR-16/FR-17 (recovery) | contracts §4; read-only 006 consumption | V8 |
 | FR-18/FR-19 (upstream/downstream) | grant supply + downstream handoff | V3 + review |

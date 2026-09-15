@@ -22,8 +22,8 @@
 
 - [ ] T001 Create `internal/withdrawal/` package skeleton per plan.md source tree (auth.go, validate.go, intake.go, query.go, grant.go + _test.go stubs)
 - [ ] T002 [P] Define typed domain errors + stable machine codes per contracts/api.md §1 table in `internal/withdrawal/errors.go` (FR-14: malformed_request/validation_failed/unauthenticated/unauthorized/authorization_invalid/idempotency_conflict/not_found/temporarily_unavailable/operation_conflict)
-- [ ] T003 [P] Implement shared validators in `internal/withdrawal/validate.go` (FR-04 chain bind; FR-05 whitelist hook; FR-06 `[1-9][0-9]*` shape + `math/big` ≤ 2²⁵⁶−1; FR-07 EIP-55 + lowercase canonicalization; FR-09 key shape 1–128 ASCII 0x21–0x7E) with unit vectors
-- [ ] T004 [P] Unit tests for validators in `internal/withdrawal/validate_test.go` (V4 matrix: wrong chain, non-whitelist, bad shape, mixed-case fail/pass, "0"/"00123"/"-5"/"1.5"/non-digits/>uint256, max-uint256 accept, max+1 reject)
+- [ ] T003 [P] Implement shared validators in `internal/withdrawal/validate.go` (FR-04 chain bind; FR-05 whitelist hook; FR-06 `[1-9][0-9]*` shape + `math/big` ≤ 2²⁵⁶−1; FR-07 EIP-55 + lowercase canonicalization; FR-09 key shape 1–128 ASCII 0x21–0x7E) with smoke vectors only (full matrix lives in T004)
+- [ ] T004 [P] Unit tests for validators in `internal/withdrawal/validate_test.go` (V4 FULL matrix, owns all boundary assertions: wrong chain, non-whitelist, bad shape, mixed-case fail/pass, "0"/"00123"/"-5"/"1.5"/"1e3"/non-digits/>uint256, max-uint256 accept BOTH directions — persist-accept at max, layer-2 reject at max+1 with zero rows)
 
 ---
 
@@ -33,15 +33,16 @@
 
 **⚠️ CRITICAL**: No user story work can begin until this phase is complete
 
-- [ ] T005 Write `migrations/000007_withdrawal_creation.sql` (Tables 1–6 per data-model.md: `caller`, `api_key`, `withdrawal_requests` with `caller_key_uniq` + `authorization_uniq` + amount `CHECK(amount >= 1 AND amount <= 2²⁵⁶−1 literal)`, `withdrawal_authorizations`, `withdrawal_request_audit`, `withdrawal_grant_audit` with `UNIQUE(operation_id)`; pure DDL, goose sequence)
-- [ ] T006 Migration verification: goose up/down reproducibility on scratch DB + CHECK/UNIQUE negative tests + 000001–000006 untouched-meaning check (FR-11/FR-12 carriers; T000-P unaffected)
-- [ ] T007 [P] API-key credential core in `internal/withdrawal/auth.go` (R1–R2: `txh_` + 32B CSPRNG generation, sha256-hex storage, `UNIQUE(key_hash)`, constant-time compare, single-statement revocation predicate, `caller_id` derivation, key_id+prefix-only logging)
-- [ ] T008 [P] Grant-supply core in `internal/withdrawal/grant.go` (R9: `mint` + `supply`/`revoke` statement scripts, Table 6 attempt semantics with caller-supplied `operation_id`, op-input 8-field binding + compare, PK-race bounded re-execution, uncertain-COMMIT same-O recovery; `operator`/`reason` as retry metadata)
-- [ ] T009 [P] `withdrawal-authz` operator subcommand in `internal/app/withdrawalauthz.go` mirroring `confirm-auth` carrier (`internal/app/confirmauth.go:16-35`: flag → config.Load → operator-connection tx; REQUIRED `--operation-id`; exit codes 0/1/2; in-process testable)
-- [ ] T010 Intake transaction core in `internal/withdrawal/intake.go` (R7 FINAL + R8: pre-tx classify, BEGIN→writeGuard→`FOR SHARE` grant row→`clock_timestamp()`→validity strict-`>`→plain INSERT→audit→COMMIT; 23505 fixed-order classify incl. T-dual-race; commit-unknown re-classify; N1 PK-branch O-first re-read)
-- [ ] T011 Query core in `internal/withdrawal/query.go` (ownership-enforced read, identical-404 shape, single-snapshot recovery annotation per contracts/api.md §3: REPEATABLE READ row+event, precedence rule, unknown on either-failure, `execution:not_started`, NO height-indexed validity)
+- [ ] T005 Write `migrations/000007_withdrawal_creation.sql` (Tables 1–6 per data-model.md: `caller`, `api_key` with `UNIQUE(key_hash)`, `withdrawal_requests` with `CONSTRAINT withdrawal_requests_caller_key_uniq UNIQUE (caller_id, idempotency_key)` + `CONSTRAINT withdrawal_requests_authorization_uniq UNIQUE (authorization_id)` + amount `CHECK(amount >= 1 AND amount <= 2²⁵⁶−1 literal)`, `withdrawal_authorizations` (PK `authorization_id`), `withdrawal_request_audit`, `withdrawal_grant_audit` with `CONSTRAINT withdrawal_grant_audit_operation_id_uniq UNIQUE (operation_id)`; ALL classifiable constraints explicitly named — short forms (`caller_key_uniq`/`authorization_uniq`/`operation_id_uniq`) are prose shorthands only, never match values; pure DDL, goose sequence)
+- [ ] T006 Migration verification in `internal/withdrawal/migration_integration_test.go` (NEW file, tags: integration; precedent shape `internal/indexer/migrate_integration_test.go`): (a) `git diff --name-only -- migrations/000001_baseline.sql migrations/000002_chain_indexer.sql migrations/000003_event_indexing.sql migrations/000004_deposit_detection.sql migrations/000005_confirmation_tracking.sql migrations/000006_reorg_recovery.sql` empty — history files untouched; (b) upgrade-compat: baseline→000006→000007 `goose up` on scratch DB green + `goose status` clean, then 000007 `down`/`up` reproducible; (c) behavior assertions: CHECK/UNIQUE negative inserts for 000007 (zero/over-uint256 amount, bad hex, dup key, dup auth) each fail with the EXPECTED exact `ConstraintName` (`withdrawal_requests_caller_key_uniq`, `withdrawal_requests_authorization_uniq`, `withdrawal_grant_audit_operation_id_uniq`, amount CHECK) — checksum-only comparison is NOT accepted as compat proof; (d) 23505 branch-match assertion: each provoked violation maps to its intended classify branch per research R8 (F3/F4 protocol); (e) upstream smoke: 002–006 tables still accept one representative write each post-upgrade (FR-11/FR-12 carriers; T000-P unaffected)
+- [ ] T007 [P] API-key credential core in `internal/withdrawal/auth.go` (R1–R2: `txh_` + 32B CSPRNG generation, sha256-hex storage, `UNIQUE(key_hash)`, constant-time compare, single-statement revocation predicate, `caller_id` derivation, key_id+prefix-only logging; exposes `IssueKey`/`RotateKey`/`RevokeKey` library functions owned by T034's subcommand; `[P]` ONLY with T008 — T009/T010/T011/T034 build on its interfaces)
+- [ ] T008 [P] Grant-supply core in `internal/withdrawal/grant.go` (R9: `mint` + `supply`/`revoke` statement scripts, Table 6 attempt semantics with caller-supplied `operation_id`, op-input 8-field binding + compare, PK-race bounded re-execution, uncertain-COMMIT same-O recovery; `operator`/`reason` as retry metadata; `[P]` ONLY with T007 — T009/T010 build on its interfaces)
+- [ ] T009 `withdrawal-authz` operator subcommand in `internal/app/withdrawalauthz.go` + dispatch case in `cmd/txharbor/main.go` mirroring `confirm-auth` carrier (`internal/app/confirmauth.go:16-35`: flag → config.Load → operator-connection tx; REQUIRED `--operation-id`; exit codes 0/1/2; in-process testable; depends on T008)
+- [ ] T010 Intake transaction core in `internal/withdrawal/intake.go` (R7 FINAL + R8: pre-tx classify, BEGIN→writeGuard→`FOR SHARE` grant row→`clock_timestamp()`→validity strict-`>`→plain INSERT→audit→COMMIT; 23505 fixed-order classify on EXACT names `withdrawal_requests_caller_key_uniq` → 200/409 then `withdrawal_requests_authorization_uniq` → 403 incl. T-dual-race; commit-unknown re-classify; N1 PK-branch O-first re-read; pre-tx reject audit writer per data-model.md Table 5 C3 rule; 401 path writes no audit row — asserted in T026; depends on T007, T008)
+- [ ] T011 Query core in `internal/withdrawal/query.go` (ownership-enforced read, identical-404 shape, single-snapshot recovery annotation per contracts/api.md §3: REPEATABLE READ row+event, precedence rule, unknown on either-failure, `execution:not_started`, NO height-indexed validity; depends on T007)
+- [ ] T034 `apikey-auth` operator subcommand in `internal/app/apikeyauth.go` + dispatch case in `cmd/txharbor/main.go` mirroring `confirm-auth` carrier (R5: `issue --caller-id C --label L --operator OP --reason R` / `rotate --caller-id C [--grace-seconds S] …` / `revoke --key-id K …`; flag → config.Load → operator-connection tx over the DB operator's connection; plaintext shown once, digest-only persisted; rotation inserts successor + stamps predecessor `revoked_at`, never mutates `caller_id`; exit codes 0/1/2; in-process tests in `internal/app/apikeyauth_test.go` (usage/exit codes) + `internal/app/apikeyauth_integration_test.go` (tags: integration; issue→auth→rotate→revoke lifecycle against real PostgreSQL); depends on T007; blocks T018)
 
-**Checkpoint**: Foundation ready — migration applies cleanly, all carriers exist, user stories can begin
+**Checkpoint**: Foundation ready — migration applies cleanly (`go build ./...` green), all carriers exist with interfaces frozen (`auth.go` Issue/Verify, `grant.go` supply/revoke scripts), T006 verification green, user stories can begin. Foundation completion = build green + T006 green + carrier unit/in-process tests green (T034's integration tests, T010/T011 compile + unit-level classify tests); story-level V-scenarios remain with their stories, not claimed here.
 
 ---
 
@@ -53,8 +54,9 @@
 
 - [ ] T012 [P] [US1] Integration test for create+self-query in `internal/withdrawal/intake_integration_test.go` (tags: integration; V1 happy path incl. amount-string round-trip, SC-01/SC-08)
 - [ ] T013 [P] [US1] Contract test for POST/GET shapes + error codes in `internal/withdrawal/contract_test.go` (201/200 bodies per contracts/api.md §§1/3)
-- [ ] T014 [US1] Wire POST /withdrawals + GET /withdrawals/{id} on existing `http.Server` in `internal/app/` (plan wiring; no new listener; caller_id from key row only) (depends on T010, T011)
-- [ ] T015 [US1] Structured logging + metrics on existing registries (caller/request/chain/asset/retry fields, zero secrets via `logx.Redact`; FR-20/FR-21)
+- [ ] T014 [US1] Wire POST /withdrawals + GET /withdrawals/{id} on existing `http.Server` (`health.NewServer(...).Handler()` mux in `internal/app/serve.go:288-293`; no new listener; caller_id from key row only; route registration + handler wiring only) (depends on T010, T011, T035)
+- [ ] T035 [US1] Config passthrough in `internal/config/config.go` (plan wiring: `ChainID` from `TXHARBOR_CHAIN_ID` as deployment chain bind for FR-04 + `HTTPAddr` reuse; NO new secret knobs in 007; validation via existing `config.Load` + `internal/app/serve_config_test.go`-style unit test; depends on T001; blocks T014)
+- [ ] T015 [US1] Structured logging + metrics in `internal/withdrawal/intake.go` (log fields) + `internal/metrics/` registry extension (plan wiring; caller/request/chain/asset/retry fields, zero secrets via `logx.Redact`; FR-20/FR-21; depends on T014)
 
 **Checkpoint**: US1 fully functional and testable independently (create → persist → self-query round-trip green)
 
@@ -68,7 +70,7 @@
 
 - [ ] T016 [P] [US2] Integration test for auth matrix in `internal/withdrawal/auth_integration_test.go` (V2: 401/403 paths, zero rows asserted, rotation preserves caller_id + scope)
 - [ ] T017 [P] [US2] Integration test for cross-caller privacy in `internal/withdrawal/privacy_integration_test.go` (V9: 404 byte-equality random-id vs foreign-id)
-- [ ] T018 [US2] Key issuance/rotation/revocation operator flow + startpoint-semantics tests (R4/R5: grace-window dual-accept, post-startpoint revoke affects next attempt only; V7 key half)
+- [ ] T018 [US2] Key lifecycle operator flow in `internal/app/apikeyauth_integration_test.go` (tags: integration; depends on T034) + startpoint-semantics tests in `internal/withdrawal/auth_integration_test.go` (R4/R5: grace-window dual-accept, post-startpoint revoke affects next attempt only; rotation preserves caller_id + scope; V7 key half; blocks no story — US2 checkpoint requires it green)
 
 **Checkpoint**: US1 AND US2 both work independently (auth boundary holds, privacy shape exact)
 
@@ -80,7 +82,7 @@
 
 **Independent Test**: V4 — full illegal matrix → 400/422 per contract, zero rows; EIP-55-mixed-case accepted + lowercased (FR-04–FR-07, SC-03)
 
-- [ ] T019 [P] [US3] Integration test for param matrix in `internal/withdrawal/validation_integration_test.go` (V4 incl. `1.5`/`1e3` decimal-barrier, max/max+1 boundary both directions per §四)
+- [ ] T019 [P] [US3] Integration test for param matrix in `internal/withdrawal/validation_integration_test.go` (V4 incl. `1.5`/`1e3` decimal-barrier, max/max+1 boundary both directions per data-model.md layered amount enforcement §四: shape → big.Int range → DB CHECK)
 - [ ] T020 [US3] Whitelist enforcement wiring against 003/004 policy source in `internal/withdrawal/validate.go` (FR-05; no redefinition of asset list)
 
 **Checkpoint**: Validation airtight at API + Go + DB layers (three-layer amount story green)
@@ -93,9 +95,9 @@
 
 **Independent Test**: V5 — same-key-equal → 200 same `request_id` row-count-unchanged; same-key-differ → 409 original-untouched; cross-caller same key → independent 201s (FR-09/FR-10, SC-04)
 
-- [ ] T021 [P] [US4] Concurrency test same-key N-way in `internal/withdrawal/idempotency_integration_test.go` (exactly-1-row, single `request_id` to all; V5 + V6 first half)
-- [ ] T022 [P] [US4] Cross-key same-grant + cross-caller isolation test in `internal/withdrawal/idempotency_integration_test.go` (403-path, original untouched; caller scoping)
-- [ ] T023 [US4] Same-O op-conflict + grant-PK three-outcome tests in `internal/withdrawal/grant_integration_test.go` (§二 i/ii/iii: one-grant-one-supplied + per-O audits;异参 loser `supply_refused`; never `operation_conflict`/503 for PK race)
+- [ ] T021 [US4] Concurrency test same-key N-way in `internal/withdrawal/idempotency_integration_test.go` (exactly-1-row, single `request_id` to all; V5 + V6 first half; owns the file — T022 appends its cases after T021 lands)
+- [ ] T022 [US4] Cross-key same-grant + cross-caller isolation test in `internal/withdrawal/idempotency_integration_test.go` (403-path, original untouched; caller scoping; appends to T021's file, no `[P]` with T021)
+- [ ] T023 [US4] Same-O op-conflict + grant-PK three-outcome tests in `internal/withdrawal/grant_integration_test.go` (data-model.md supply-pseudocode first-supply concurrency (i/ii/iii): one-grant-one-supplied + per-O audits;异参 loser `supply_refused`; never `operation_conflict`/503 for PK race)
 
 **Checkpoint**: Idempotency exact under concurrency (no duplicate intents constructible)
 
@@ -109,7 +111,7 @@
 
 - [ ] T024 [P] [US5] Crash/restart/retry test in `internal/withdrawal/recovery_integration_test.go` (kill-9, restart, same-O grant recovery per Table 6; O-capture crash semantics)
 - [ ] T025 [P] [US5] Revocation-interleave + expiry tests in `internal/withdrawal/revocation_integration_test.go` (R7 three cases; lock-wait expiry → 403; `expires_at == t_check` expired; post-check window accepted-residual)
-- [ ] T026 [US5] Storage-failure + unknown-commit tests in `internal/withdrawal/failure_integration_test.go` (503 shape + same-key-retry instruction text; never "definitely not created"; deadlock/timeout → 503 retryable, never mis-mapped to 23505)
+- [ ] T026 [US5] Storage-failure + unknown-commit tests in `internal/withdrawal/failure_integration_test.go` (503 shape + same-key-retry instruction text; never "definitely not created"; deadlock/timeout → 503 retryable, never mis-mapped to 23505; 401-no-audit-row assertion per data-model.md Table 5 C3 rule: unauthenticated rejects write zero Table 5 rows, authenticated pre-tx rejects write exactly one best-effort row)
 
 **Checkpoint**: Fault behavior proven (loss/crash/outage all converge without duplicates)
 
@@ -121,9 +123,9 @@
 
 **Independent Test**: V8 — active-recovery POST persists with zero nonce/sign/broadcast artefacts; GET servable with snapshot `state`; read-kill → `unknown`; POST-loss-retry → same 200 (FR-16/FR-17, SC-06/SC-07)
 
-- [ ] T027 [P] [US6] Recovery-period intake test in `internal/withdrawal/recovery_period_integration_test.go` (Anvil E2E tags; V8 incl. absence-assertions: no rows outside 007 scope, no RPC broadcast)
-- [ ] T028 [US6] Recovery-snapshot query tests in `internal/withdrawal/recovery_period_integration_test.go` (single-snapshot precedence incl. release-then-re-establish concurrency; unknown on either-failure; `execution:not_started` constant; NO height-indexed validity call)
-- [ ] T029 [US6] 006-governance read-only assertion (no pause/de-auth/isolation rows written or deleted by any 007 path; downstream preconditions subset observed)
+- [ ] T027 [US6] Recovery-period intake test in `internal/withdrawal/recovery_period_integration_test.go` (Anvil E2E tags; V8 incl. absence-assertions: no rows outside 007 scope, no RPC broadcast; owns the file — T028 appends its cases after T027 lands)
+- [ ] T028 [US6] Recovery-snapshot query tests in `internal/withdrawal/recovery_period_integration_test.go` (single-snapshot precedence incl. release-then-re-establish concurrency; unknown on either-failure; `execution:not_started` constant; NO height-indexed validity call; appends to T027's file, no `[P]` with T027)
+- [ ] T029 [P] [US6] 006-governance read-only assertion in `internal/withdrawal/recovery_governance_integration_test.go` (tags: integration; depends on Foundational: no pause/de-auth/isolation rows written or deleted by any 007 path — `indexer_pause`/`log_pause`/`deposit_pause`/`reorg_recovery` untouched; downstream preconditions subset observed per 006 `contracts/downstream.md`; V8 governance half)
 
 **Checkpoint**: 006 contract honored structurally (receive-only holds under recovery)
 
@@ -133,9 +135,9 @@
 
 **Purpose**: Regression, CI, docs, runbook — no new behavior
 
-- [ ] T030 [P] 002–006 regression gate: `go test ./...` + `go test -tags integration` green with zero 002–006 file modifications outside plan wiring points (diff-gated; historical CI 34918673432 cited as 006 baseline only)
+- [ ] T030 [P] 002–006 regression gate (tags: unit + integration): `go test ./...` + `go test -tags integration` green. Diff gate (explicit allowlist, reviewed with the test evidence — a file being listed does NOT bless arbitrary changes inside it): ALLOWED-NEW `internal/withdrawal/**`, `internal/app/withdrawalauthz.go`, `internal/app/apikeyauth.go` (+ their `*_test.go` / `*_integration_test.go`), `migrations/000007_withdrawal_creation.sql`, `specs/007-withdrawal-creation/**`; ALLOWED-MODIFY `cmd/txharbor/main.go` (dispatch cases only), `internal/app/serve.go` (route mount only), `internal/app/serve_config_test.go` (T035 config unit test only), `internal/config/config.go` (chain-bind passthrough only, no new secret knobs), `internal/metrics/**` (new counters only). Any diff to `internal/indexer/**`, `internal/db/**`, `migrations/000001–000006`, or the shared `writeGuard`/lease/coordinator constants → STOP, explicit review required, full regression re-run. Read-only consumption of 003/004 whitelist sources (T020) and 006 recovery rows/events (T011/T028/T029) needs no gate exception — no files change. This gate checks for unintended drift; it does NOT substitute for the V-matrix behavior regression (T033). Historical CI 34918673432 cited as 006 baseline only.
 - [ ] T031 [P] Lint/vet/build gate: `gofmt` + `go vet -tags integration ./...` + `go build ./...` per Makefile (existing `ci.yml` four jobs, no workflow change)
-- [ ] T032 Runbook + operator docs for `withdrawal-authz` (mint→supply→revoke flows, O capture rule, exit codes) + quickstart V1–V9 checklist execution record
+- [ ] T032 Operator runbook in `specs/007-withdrawal-creation/quickstart.md` (append §操作 runbook, 005 T029 precedent — no new contracts file): `withdrawal-authz` mint→supply→revoke flows + `apikey-auth` issue→rotate→revoke flows, O capture rule, exit codes 0/1/2, DSN trust root, uncertain-COMMIT same-O retry rule + V1–V9 checklist execution record (depends on T009, T034; no new behavior)
 - [ ] T033 Full V-matrix validation run + FR/SC mapping sign-off (SC-01–SC-08 each tied to a green test; T000-P recorded still-open)
 
 ---
@@ -144,10 +146,10 @@
 
 ### Phase Dependencies
 
-- **Setup (Phase 1)**: No dependencies — T001 first, then T002–T004 in parallel [P]
-- **Foundational (Phase 2)**: Depends on Phase 1 — T005→T006 migration chain first; T007–T011 in parallel [P] after T005 (table shapes needed); T011 needs T007
-- **User Stories (Phase 3–8)**: All depend on Foundational; US1 (MVP) → US2 → US3 → US4 → US5 → US6 recommended; US2/US3 test files can start in parallel once T007/T010 land
-- **Polish (Phase 9)**: Depends on all stories; T030–T031 [P] in parallel, then T032–T033
+- **Setup (Phase 1)**: No dependencies — T001 first, then T002–T004 in parallel [P]; T035 (config passthrough) after T001, blocks T014
+- **Foundational (Phase 2)**: Depends on Phase 1 — T005→T006 migration chain first (table shapes + exact `ConstraintName` declarations needed by all carriers); then T007+T008 in parallel [P] (different files: `auth.go` / `grant.go`, neither imports the other); then T009 (depends on T008), T010 (depends on T007 + T008), T011 (depends on T007), T034 (depends on T007, blocks T018). T009/T010/T011/T034 carry NO `[P]` — each has a same-phase dependency. T010/T011 compile + unit-level classify tests green is part of the Foundation checkpoint, not deferred to stories.
+- **User Stories (Phase 3–8)**: All depend on Foundational COMPLETE (checkpoint green); US1 (MVP) → US2 → US3 → US4 → US5 → US6 recommended order, US2/US3 test files can start in parallel once T007/T010 interfaces are frozen
+- **Polish (Phase 9)**: Depends on all stories; T030–T031 [P] in parallel (different concerns: regression vs lint; both read-only gates), then T032 (depends on T009 + T034), then T033
 
 ### Within-story order
 
@@ -157,9 +159,8 @@
 ### Parallel opportunities
 
 - T002, T003, T004 [P] after T001
-- T007, T008, T009 [P] after T005 (different files: auth.go / grant.go / withdrawalauthz.go)
-- Story test files [P] within each story phase
-- US2/US3/US4 test authoring can overlap once foundation interfaces are fixed
+- T007 + T008 [P] after T005+T006 (different files: auth.go / grant.go, neither imports the other — the ONLY same-phase parallel pair in Foundation); T009/T010/T011/T034 follow their stated dependencies, never in parallel with their prerequisites
+- T030 + T031 [P] in Polish (different concerns: regression gate vs lint gate)
 
 ---
 
@@ -167,13 +168,13 @@
 
 | FR | Tasks | SC | V |
 |---|---|---|---|
-| FR-01 (endpoints+auth) | T007, T014 | SC-01 | V1 |
-| FR-02 (identity/permission) | T007, T018 | SC-02 | V2 |
-| FR-03 (API key) | T007, T009, T015, T018 | SC-02/08 | V2, V7 |
+| FR-01 (endpoints+auth) | T007, T014, T035 | SC-01 | V1 |
+| FR-02 (identity/permission) | T007, T018, T034 | SC-02 | V2 |
+| FR-03 (API key) | T007, T034, T015, T018 | SC-02/08 | V2, V7 |
 | FR-03b (grant model) | T008, T009, T023, T025 | SC-04/05 | V3, V6, V7 |
-| FR-04/FR-05 | T003, T020 | SC-03 | V4 |
+| FR-04/FR-05 | T003, T020, T035 (chain bind) | SC-03 | V4 |
 | FR-06/FR-07 | T003, T004, T019 | SC-03/08 | V4 |
-| FR-08 (Accepted) | T014 | SC-01/06 | V1, V8 |
+| FR-08 (Accepted) | T005 (status CHECK), T006 (CHECK negative), T014 | SC-01/06 | V1, V8 |
 | FR-09/FR-10 | T010, T021, T022 | SC-04 | V5, V6 |
 | FR-11 (permanent) | T005, T006, T021 | SC-04/05 | V5–V7 |
 | FR-12/FR-13 | T010, T021, T024, T026 | SC-05 | V6 |
@@ -204,6 +205,6 @@
 ## Notes
 
 - [P] = different files, no dependencies; story label = traceability
-- Commit after each task or logical group per batch-closeout rule (§四)
+- Commit after each task or logical group (small, reviewable batches per constitution XIV)
 - T000-P stays open; 006 evidence (merge 8e1a440, CI 34918673432) is baseline context only
 - No 008–011 tasks; no future execution modules

@@ -5,7 +5,7 @@
 
 007 is a receive-only intake writer on top of 002–006 truths: it never redefines upstream
 semantics, never allocates nonces, never signs, never broadcasts. All decisions in research.md
-(R1–R8). Conventions follow 004/005/006: lowercase `0x`-prefixed hex for addresses
+(R1–R9: R1–R5 key lifecycle, R6–R8 intake, R9 grant supply). Conventions follow 004/005/006: lowercase `0x`-prefixed hex for addresses
 (`~ '^0x[0-9a-f]{40}$'`), `NUMERIC` integer amounts, named UNIQUE constraints (pgx-mappable),
 append-only audit, `TIMESTAMPTZ DEFAULT now()`.
 
@@ -60,6 +60,12 @@ Key format: `txh_` + base64url(32 CSPRNG bytes); presented via `Authorization: B
 | CONSTRAINT `withdrawal_requests_caller_key_uniq` | `UNIQUE (caller_id, idempotency_key)` | replay-or-409 carrier (R6) | |
 | CONSTRAINT `withdrawal_requests_authorization_uniq` | `UNIQUE (authorization_id)` | one-auth→one-request carrier (R7) | |
 
+Naming rule (F3/F4): every constraint consumed by `ConstraintName` classification MUST carry an
+explicit `CONSTRAINT <name>` in `migrations/000007_withdrawal_creation.sql` — never rely on
+PostgreSQL auto-naming. Short forms (`caller_key_uniq`, `authorization_uniq`, `operation_id_uniq`)
+are prose shorthands only; the protocol in research R8 and the supply pseudocode below use exact
+names. T006 verifies the real `ConstraintName` values against these declarations.
+
 `NUMERIC(78,0)` holds the full uint256 range (78 decimal digits) as an integer; CHECK `> 0`
 rejects zero at the storage layer as well. Layered amount enforcement (§四, all three — capacity alone is not validation):
 (1) transport-shape reject in `validate.go` — must match `[1-9][0-9]*`, which already
@@ -112,6 +118,19 @@ plus full param equality; mismatch/inactive/expired → 403, zero persistence. R
 Written in the same tx as the request insert (R8); replay/conflict/reject paths append their
 own rows. Never updated or deleted (FR-11).
 
+Pre-tx reject audit writer (C3 — no fictitious identity): rows are written ONLY when a
+`caller_id` is known. Authenticated pre-tx rejections (422 validation, 403 permission/grant
+fast-path, 400 malformed with valid key, 409 fast-path conflict) → the HTTP handler issues ONE
+best-effort single-statement `INSERT` into this table in its own tx AFTER sending the response
+decision (never blocks the response; failure → structured log + metric, never 503). The
+`request_id` column carries the returned-or-would-be `request_id` (`wr-…` for replays/conflicts
+of an existing row; a `rej-…` opaque marker for never-created rejects — never a fabricated
+`withdrawal_requests` identity). Unauthenticated rejections (401, no verifiable identity) write
+NO Table 5 row — there is no caller to attribute; they are covered by structured logs
+(`logx.Redact`, no key material) + `unauthenticated_total` metric. In-tx rejections (validity
+fails after BEGIN, T-auth-bound, T-unavailable-attempt) ride the receipt tx or its rollback
+branch per the catalog. T010 owns the writer; T026 asserts the 401-no-row rule.
+
 ## Table 6 — `withdrawal_grant_audit` (append-only grant-supply log; R9 carrier)
 
 Shape mirrors `deposit_pause_audit` (`migrations/000004_deposit_detection.sql:109-122`):
@@ -120,8 +139,9 @@ chain-agnostic here (single deployment), keyed by grant id + action.
 | Column | Type | Constraints | Notes |
 |--------|------|-------------|-------|
 | audit_id | BIGINT | PK (`GENERATED ALWAYS AS IDENTITY`) | sole identity; every attempt gets its own row |
-| operation_id | TEXT | `NOT NULL UNIQUE` | stable operation identity, caller-supplied per attempt (see below); the ONLY dedup key |
+| operation_id | TEXT | `NOT NULL` (UNIQUE via `CONSTRAINT withdrawal_grant_audit_operation_id_uniq` row below) | stable operation identity, caller-supplied per attempt (see below); the ONLY dedup key |
 | authorization_id | TEXT | `NOT NULL` (no FK — audit must survive and must key unbound grants; a grant row may never exist for a refused supply) | §三: unbound-grant audit keys here, not Table 5 |
+| CONSTRAINT `withdrawal_grant_audit_operation_id_uniq` | `UNIQUE (operation_id)` | attempt-dedup carrier (Table 6 23505 classify key) | |
 | caller_id | BIGINT | `NOT NULL` | grant's caller (or attempted caller on refused supply) |
 | action | TEXT | `NOT NULL CHECK IN ('supplied','resupplied','supply_refused','revoked','revoke_nop')` | supply vocabulary |
 | operator | TEXT | `NOT NULL DEFAULT ''` | declared supply identity (audit claim; trust root is DSN possession, R9) |
@@ -160,13 +180,13 @@ normalized op-input; the 三轮 `grant_state_seq` key and its narrative stay wit
   + audit INSERT. Concurrent duplicate re-supplies record one row each — attempts, not changes.
 - `supply_refused` (new `operation_id` per attempt): zero grant mutation + audit INSERT commit
   together (refusal is the committed outcome, not a rollback). Attempted params live in `detail`;
-  the grant table carries nothing. 23505 on `operation_id` (same attempt retried concurrently) →
+  the grant table carries nothing. 23505 on `withdrawal_grant_audit_operation_id_uniq` (same attempt retried concurrently) →
   rollback → re-read by O → compare op-input → equal: report recorded outcome WITHOUT a second row
   (the only audit convergence, and it converges to the *same attempt*); differ: `operation_conflict`.
 - `revoked` (new `operation_id`): active → revoked + audit, both `==1`.
 - `revoke_nop` (new `operation_id` per attempt): each repeat records its own row; idempotent success.
 - 23505 handling (audit tx aborted — MUST rollback before any further statement, same R8 rule):
-  on `operation_id` conflict → rollback → re-read by O → compare-then-report per above; on any
+  on `withdrawal_grant_audit_operation_id_uniq` conflict → rollback → re-read by O → compare-then-report per above; on any
   other error (incl. deadlock `40P01`, lock timeout) → rollback → typed retryable, never partial.
   Grant-row state alone NEVER proves an audit row committed and NEVER proves THIS attempt
   succeeded — especially: grant pre-exists + this attempt异参-refused ⇒ report refusal, never
@@ -195,7 +215,7 @@ COMMIT → same-O retry only (O-miss ⇒ unknown/retryable with same O, never ne
 - **T-replay**: classify hit + FR-10 equality → return original + `replayed` audit (no new request).
 - **T-conflict**: classify hit + any business-param/auth-id inequality → 409 + `conflict` audit,
   original untouched.
-- **T-auth-bound**: 23505 on `authorization_uniq` → fixed-order classify (R8 FINAL: key first,
+- **T-auth-bound**: 23505 on `withdrawal_requests_authorization_uniq` → fixed-order classify (R8 FINAL: key first,
   then auth) → miss-on-key + hit-on-auth → 403 + `auth_failed` audit, zero new rows.
 - **T-reject**: auth/param failure pre- or in-tx → typed 400/401/403/422 + `rejected` audit,
   zero persistence.
@@ -211,6 +231,9 @@ COMMIT → same-O retry only (O-miss ⇒ unknown/retryable with same O, never ne
 O = require(--operation-id)                 # explicit-only (mint step precedes; R9 rule);
                                             # no O ⇒ no DB side effects, full stop
 OPIN = (action, G, caller, chain, asset, recipient, amount, expires_at)  # op-input, 8 fields
+# Constraint-name protocol: match EXACT pg names (never prose shorthands):
+#   withdrawal_requests_caller_key_uniq / withdrawal_requests_authorization_uniq /
+#   withdrawal_grant_audit_operation_id_uniq / withdrawal_authorizations_pkey.
 BEGIN
 SET LOCAL statement_timeout = '5s'
 grant = SELECT * FROM withdrawal_authorizations WHERE authorization_id = $G FOR UPDATE
@@ -229,7 +252,7 @@ elif action = revoke and grant.state != 'active':
 else:  # grant missing (non-supply), or OPIN != grant_OPIN
     INSERT INTO withdrawal_grant_audit (O, G, ...OPIN-attempted, 'supply_refused', ...)
 COMMIT
-on 23505(constraint = operation_id_uniq):
+on 23505(constraint = withdrawal_grant_audit_operation_id_uniq):
     ROLLBACK                                 # aborted tx: NO further statement in it
     row = SELECT * FROM withdrawal_grant_audit WHERE operation_id = $O
     if row.missing: return retryable(same O, same OPIN)   # tx may still be open; never new O
@@ -244,7 +267,7 @@ on 23505(constraint = withdrawal_authorizations_pkey):   # FIRST-SUPPLY RACE bra
     if equal(OPIN, grant2_OPIN) and action = supply:
         # winner's params == mine: my attempt becomes a resupply — SAME O, SAME OPIN, one retry
         INSERT INTO withdrawal_grant_audit (O, G, ...OPIN, 'resupplied', ...)  # own single-statement tx
-        # 23505(operation_id_uniq) here ⇒ my twin already recorded ⇒ re-read by O ⇒ report it
+        # 23505(withdrawal_grant_audit_operation_id_uniq) here ⇒ my twin already recorded ⇒ re-read by O ⇒ report it
     else:
         INSERT INTO withdrawal_grant_audit (O, G, ...OPIN-attempted, 'supply_refused', ...)
     # retry budget: at most ONE re-execution per call (bounded — never a loop); a second 23505 or
@@ -279,9 +302,9 @@ grant row (winner's params) + winner `supplied` + loser `supply_refused` (loser'
 ## Concurrency argument (why two writers cannot both win; R7 FINAL)
 
 Both uniqueness carriers are single index inserts — atomic and serializing by construction.
-Concurrent same-key writers: one INSERT commits, losers get 23505 on `caller_key_uniq` and
+Concurrent same-key writers: one INSERT commits, losers get 23505 on `withdrawal_requests_caller_key_uniq` and
 classify to the winner (R6). Concurrent same-auth different-key writers: one commits, losers
-get 23505 on `authorization_uniq` → fixed-order classify → 403 (R7). Auth-validity itself is
+get 23505 on `withdrawal_requests_authorization_uniq` → fixed-order classify → 403 (R7). Auth-validity itself is
 proven by the `FOR SHARE` grant-row lock + validity SELECT in the receipt tx (three-case
 interleave proof in research R7 — the earlier "shared snapshot" wording is withdrawn);
 per-request key/permission checks prove startpoint freshness (no whole-request immediacy
