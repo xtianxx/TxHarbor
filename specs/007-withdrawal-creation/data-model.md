@@ -237,6 +237,9 @@ on 23505(constraint = operation_id_uniq):
     else: return operation_conflict, zero writes
 on 23505(constraint = withdrawal_authorizations_pkey):   # FIRST-SUPPLY RACE branch (六轮定点):
     ROLLBACK                                 # concurrent first-supply won; loser restarts BOUNDED:
+    row0 = SELECT * FROM withdrawal_grant_audit WHERE operation_id = $O   # N1: O first —
+    if row0.present and equal(OPIN, row0.opin): return row0.outcome       # already recorded
+    if row0.present and differ: return operation_conflict, zero writes    # (e.g. twin recorded)
     grant2 = SELECT * FROM withdrawal_authorizations WHERE authorization_id = $G  # no lock, read-only
     if equal(OPIN, grant2_OPIN) and action = supply:
         # winner's params == mine: my attempt becomes a resupply — SAME O, SAME OPIN, one retry
@@ -246,8 +249,10 @@ on 23505(constraint = withdrawal_authorizations_pkey):   # FIRST-SUPPLY RACE bra
         INSERT INTO withdrawal_grant_audit (O, G, ...OPIN-attempted, 'supply_refused', ...)
     # retry budget: at most ONE re-execution per call (bounded — never a loop); a second 23505 or
     # error ⇒ retryable(same O, same OPIN) for the OUTER caller, which retries the whole call.
-    # NEVER map the grant-PK conflict to operation_conflict (it is not an O-binding mismatch)
-    # and NEVER to 503-unavailable (storage is healthy; this is contention with a known outcome).
+    # Budget exhaustion reports retryable — it does NOT promise immediate final success per call.
+    # NEVER map the grant-PK conflict itself to operation_conflict (not an O-binding mismatch).
+    # Contention-known-outcome is not storage-unavailable; genuine storage failure during recovery
+    # still reports per the established 503/retryable semantics (never swallowed).
 on 23505(other) / 40P01 / timeout / conn-error:
     ROLLBACK; return retryable(same O, same OPIN)
 on COMMIT-unknown:
