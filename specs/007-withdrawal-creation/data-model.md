@@ -61,7 +61,12 @@ Key format: `txh_` + base64url(32 CSPRNG bytes); presented via `Authorization: B
 | CONSTRAINT `withdrawal_requests_authorization_uniq` | `UNIQUE (authorization_id)` | one-auth→one-request carrier (R7) | |
 
 `NUMERIC(78,0)` holds the full uint256 range (78 decimal digits) as an integer; CHECK `> 0`
-rejects zero at the storage layer as well. No nonce/signature/broadcast columns exist by design
+rejects zero at the storage layer as well. Layered amount enforcement (all three, not capacity
+alone): (1) transport-shape reject in `validate.go` — must match `[1-9][0-9]*`, which already
+excludes zero, leading zeros, signs, decimals, exponents, blanks (FR-06); (2) semantic range
+check in Go — value ≤ 2²⁵⁶−1 via `math/big` before INSERT (FR-06; over-length digit strings die
+here, never reaching the DB); (3) storage CHECK `> 0` + `NUMERIC(78,0)` scale-0 as depth defense
+(this table). No nonce/signature/broadcast columns exist by design
 (FR-19); 008+ add their own tables keyed off `request_id` (Downstream Handoff, no FK from 007 side).
 
 ## Table 4 — `withdrawal_authorizations` (upstream grant supply; 007 reads, never approves)
@@ -79,11 +84,13 @@ rejects zero at the storage layer as well. No nonce/signature/broadcast columns 
 | supplied_at | TIMESTAMPTZ | `NOT NULL DEFAULT now()` | audit: when upstream supplied it |
 | supplied_by | TEXT | `NOT NULL DEFAULT ''` | audit: controlled-supply identity (R5-adjacent) |
 
-Supply path: controlled, auditable operator/upstream entry (FR-03b — exact carrier in plan;
-ordinary API callers MUST NOT write here; enforced by privilege separation, documented in plan).
-Intake validates `state='active' AND (expires_at IS NULL OR expires_at > now())` plus full
-param equality in-tx; mismatch/inactive → 403, zero persistence. `FOR SHARE` on this row only
-if the plan locks the R7 strictness choice (default: plain read + constraint carrier).
+Supply path (locked 2026-09-15定向收尾 — R9, see research.md): the `txharbor withdrawal-authz`
+command (same controlled-script carrier as T024 `depositauth.go:1-32`: repository-owned,
+version-controlled parameterized SQL in one explicit BEGIN..COMMIT over the DB operator's
+connection; NOT a stored function; migrations stay pure DDL). Intake validates
+`state='active' AND (expires_at IS NULL OR expires_at > now())` plus full param equality
+in-tx (R7 FINAL read); mismatch/inactive → 403, zero persistence. No FOR SHARE, no coordinator
+lock on any 007 path.
 
 ## Table 5 — `withdrawal_request_audit` (append-only receipt log)
 
@@ -107,21 +114,23 @@ own rows. Never updated or deleted (FR-11).
 - **T-replay**: classify hit + FR-10 equality → return original + `replayed` audit (no new request).
 - **T-conflict**: classify hit + any business-param/auth-id inequality → 409 + `conflict` audit,
   original untouched.
-- **T-auth-bound**: 23505 on `authorization_uniq` → classify by `authorization_id` → 403
-  (FR-14 mapping; plan confirms) + `auth_failed` audit, zero new rows.
+- **T-auth-bound**: 23505 on `authorization_uniq` → fixed-order classify (R8 FINAL: key first,
+  then auth) → miss-on-key + hit-on-auth → 403 + `auth_failed` audit, zero new rows.
 - **T-reject**: auth/param failure pre- or in-tx → typed 400/401/403/422 + `rejected` audit,
   zero persistence.
 - **T-unavailable**: storage failure → 503 + `unavailable` audit attempt (best-effort; MUST NOT
   return Accepted).
-- **Coordinator-lock variant** (only if plan locks R7 strictness): `ensureLeaseSQL` +
-  `lockCoordSQL` between writeGuard and authValidation, fixed order, coordinator row first
-  (shared consts, `scanner.go:1083-1098`).
+- **T-dual-race**: both UNIQUEs violated at once → single reported `ConstraintName` is NOT
+  semantic; fixed-order classify decides (key-hit equality → 200; key-hit inequality → 409;
+  else auth-hit → 403; else retryable). Never derive the response from report order.
 
-## Concurrency argument (why two writers cannot both win)
+## Concurrency argument (why two writers cannot both win; R7 FINAL)
 
 Both uniqueness carriers are single index inserts — atomic and serializing by construction.
 Concurrent same-key writers: one INSERT commits, losers get 23505 on `caller_key_uniq` and
 classify to the winner (R6). Concurrent same-auth different-key writers: one commits, losers
-get 23505 on `authorization_uniq` (R7). No app memory, no second lock object in the default
-(constraints-only) variant. Restart safety follows: all guarantees are durable rows; a retry
-after crash/response-loss replays against the same constraints (FR-13).
+get 23505 on `authorization_uniq` → fixed-order classify → 403 (R7). Auth-validity itself is
+proven by the in-tx re-read sharing the INSERT's snapshot ("snapshot时刻有效"); per-request
+key/permission checks prove revocation immediacy; post-rollback classify proves loss/uncertain
+recovery. No app memory, no second lock object. Restart safety follows: all guarantees are
+durable rows; a retry after crash/response-loss replays against the same constraints (FR-13).

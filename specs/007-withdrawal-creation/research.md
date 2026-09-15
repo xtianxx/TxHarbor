@@ -94,8 +94,52 @@ no second lock object, no new lock order.
   `internal/logx.Redact` already covers `Authorization: Bearer …` (`redact.go` + bearer tests);
   the middleware MUST log only `caller_id` + `key_id` + prefix, and 401s stay generic.
   `.env.example` carries no real/seed key.
+- **Key entropy premise (locked 2026-09-15定向收尾)**: 32 bytes from `crypto/rand`, base64url,
+  `txh_` typed prefix. The SHA-256-only decision (R1) is valid *only* under this premise —
+  server-issued high-entropy secrets. Tooling MUST generate (never accept caller-supplied key
+  material), MUST show plaintext once, MUST persist digest only. Key rotation/revocation ride the
+  same operator-subcommand family as R9 (`internal/app` shape: flag parsing → config.Load →
+  operator-connection tx; operator + reason recorded; exit codes 0/1/2 mirroring `confirm-auth`).
 - **Alternatives considered**: HTTP admin endpoint (rejected — new attack surface, unneeded);
   pgcrypto-side generation (rejected — crypto/encoding belong in Go per repo layout).
+
+## R9 — Authorization supply entry: `withdrawal-authz` operator subcommand (resolves FR-03b operability)
+
+**FINAL (locked 2026-09-15定向收尾).** Carrier: `txharbor withdrawal-authz <supply|revoke> …`
+operator subcommand, mirroring the shipped `confirm-auth` shape
+(`internal/app/confirmauth.go:16-35`): `flag` parsing → `config.Load` for the DSN (full serve-env
+validation, run with the serve env file) → `pgxpool` connect over the DB operator's connection →
+one explicit BEGIN..COMMIT of repository-owned parameterized SQL. NOT a stored function (T024
+rationale, `depositauth.go:1-32`: failure-injection needs statement control; no second-language
+identity logic; migrations stay pure DDL; reviewed artifact = executed artifact). No new service,
+endpoint, or infrastructure; upstream is NOT required to hold a DB connection as a default premise
+— the DB operator runs this binary with DSN access (same trust as `migrate` and `confirm-auth`).
+
+- **Who calls / trusted identity**: the DB operator (human or upstream-driven runbook step) invoking
+  the binary with DSN access. `--operator` is recorded verbatim as the declared supply identity in
+  `supplied_by` + audit rows; it is an audit claim, not a cryptographic proof — the trust root is
+  DSN possession, identical to every existing privileged path.
+- **Who can create/revoke; why API callers cannot**: only this subcommand issues the supply
+  statements. Ordinary withdrawal API callers hold no DB credential at all (HTTP only); privilege
+  separation is by credential possession (DSN vs API key), not by an in-app role check that could
+  be bypassed. A bare `psql` INSERT is forbidden by the same rule as `confirm-auth`: every guard
+  lives inside the reviewed function, and this is the only binary path that executes it.
+- **Actions**: `supply --authorization-id G --caller-id C --chain-id N --asset 0x… --recipient 0x…
+  --amount D [--expires-at T] --operator OP --reason R` (upserts the Table 4 row; same grant id +
+  same full param set → idempotent re-supply returning the row; same id + any param differ →
+  refused, row untouched); `revoke --authorization-id G --operator OP --reason R` (`active` →
+  `revoked`; already-bound requests keep their rows — revocation affects only not-yet-accepted
+  receipts per FR-03b; already-`revoked` → idempotent success).
+- **Field/param validation**: identical validators as intake (`validate.go` shared): FR-06 amount,
+  FR-07 addresses, FR-04 chain bind, caller existence; `expires_at` must be future if given.
+- **Atomicity**: supply/revoke + its audit row commit in one tx (`RowsAffected()==1` checks;
+  uncertain COMMIT → re-read the grant row and report its durable state, same discipline as R8).
+- **Ops/acceptance**: runbook lines in quickstart V3/V7; integration tests drive the subcommand
+  function in-process (like `confirmauth_test.go`) against real PostgreSQL — no shell-out.
+- **"007 只读验授权" boundary clarified**: request-handling paths (`intake.go`, `query.go`) never
+  write Table 4; the supply/revoke entry above plus its audit is owned by `grant.go` + this
+  subcommand. Upstream keeps business-approval and balance-reservation responsibility (FR-18);
+  this entry is the controlled, auditable handoff — not an approval engine.
 
 ## R6 — Insert-first, no ON CONFLICT for the request path (resolves FR-10/FR-12/FR-14)
 
@@ -120,19 +164,35 @@ no second lock object, no new lock order.
 
 ## R7 — One authorization → one request via constraint, not lock (resolves FR-03b)
 
-- **Decision**: `UNIQUE (authorization_id)`, `NOT NULL` (FR-03b requires an authorization per create;
+**FINAL (locked 2026-09-15定向收尾): constraints-only. No coordinator lock, no FOR SHARE,
+no second lock object on the intake path.** The unselected variants are closed, not deferred:
+tasks/implement MUST NOT re-decide or silently add a global lock.
+
+- **Carrier**: `UNIQUE (authorization_id)`, `NOT NULL` (FR-03b requires an authorization per create;
   named so pgx can map it). Concurrent different-key binds serialize at the index: one wins, the
-  loser gets 23505 on this constraint → 403 (FR-14 "不满足逐笔授权要求"; plan confirms 403 vs 409).
+  loser gets 23505 on this constraint → 403 (FR-14 "不满足逐笔授权要求"; locked here as 403,
+  not 409 — a bound grant means the caller lacks a *usable* grant for a new request).
 - **Rationale**: A constraint needs no lock ordering. Advisory locks are a second, session-scoped
   coordination primitive outside the repo's single-lock discipline (pgsql-general consensus: row
   locks/constraints over advisory locks for per-record races). `FOR UPDATE` on the auth row would
-  add a second lock object and a lock-order-ring risk (explicitly forbidden).
-- **Revocation-isolation option (only if strictness demands)**: `FOR SHARE` the auth row *only*
-  (shared; acquired before any coordinator lock, never reversed), or route upstream auth
-  supply/revocation writes through the same single `indexer_lease` FOR UPDATE lock for one total
-  order with zero new locks. Default is constraints-only; plan locks this choice.
-- **Alternatives considered**: advisory lock (rejected); auth-row `FOR UPDATE` (rejected as default);
-  conditional `INSERT … SELECT … WHERE NOT EXISTS` (rejected — still needs the constraint; zero-row
+  add a second lock object and a lock-order-ring risk (explicitly forbidden). The coordinator
+  `indexer_lease` lock is rejected for intake: it would serialize every API create against the
+  indexer loops for zero additional guarantee (see invariant table — every invariant is already
+  carried by a constraint or a same-tx read).
+- **Invariant coverage (what proves what)**:
+  | Invariant | Carrier | Why sufficient |
+  |---|---|---|
+  | 同 caller 同键至多一请求 | `UNIQUE (caller_id, idempotency_key)` index insert | atomic + serializing by construction |
+  | 同一授权跨不同键至多一请求 | `UNIQUE (authorization_id)` index insert | same; loser maps to 403 |
+  | 授权在接收时有效 (state/params/expiry/caller-bind) | in-tx validity re-read + param equality, same snapshot as the INSERT | revocation committing after the tx snapshot is invisible to this receipt — defined semantics "snapshot时刻有效", identical to READ COMMITTED single-statement guarantees; a revoke racing *before* the snapshot blocks (403, zero rows) |
+  | 调用方权限/密钥吊销即时生效 | per-request auth lookup (`api_key` predicate, R4) | every request re-reads; no cache |
+  | 响应丢失/提交未知后不重建 | post-rollback classify against durable rows (R8) | winner visibility decides; miss → retryable |
+- **Ordering (locked)**: pre-tx classify (fast path only) → BEGIN → writeGuard →
+  auth-validity re-read → plain INSERT → audit INSERT → COMMIT. No `ensureLeaseSQL`/`lockCoordSQL`
+  on this path. 23505 handling per R8 (rollback-then-classify; dual-constraint race below).
+- **Alternatives closed**: advisory lock (rejected); auth-row `FOR UPDATE` (rejected);
+  coordinator-lock intake (rejected — cost without coverage); conditional
+  `INSERT … SELECT … WHERE NOT EXISTS` (rejected — still needs the constraint; zero-row
   result is ambiguous and needs classification anyway).
 
 ## R8 — pgx 23505 mapping without TOCTOU; atomic tx shape (resolves FR-12/FR-13/FR-14)
@@ -143,11 +203,19 @@ no second lock object, no new lock order.
   the pool; that post-commit-visibility read is authoritative, not TOCTOU. Explicitly handle
   classify-miss (winner not yet visible → retryable, never fabricated) and uncertain COMMIT
   (re-classify → replay/conflict/retryable), mirroring `reorgpolicy.go:353-366`.
-- **Tx shape**: pre-tx opportunistic classify (fast path only) → `BEGIN` → `SET LOCAL
-  statement_timeout` (shared `writeGuard`) → validate auth (same tx; `FOR SHARE` only if R7
-  strictness chosen) → plain `INSERT` request → `INSERT` audit (same tx; repo precedent:
-  DELETE + audit in one tx, `depositauth.go:1142-1159`) → `COMMIT` with
+- **Tx shape (locked)**: pre-tx opportunistic classify (fast path only) → `BEGIN` → `SET LOCAL
+  statement_timeout` (shared `writeGuard`) → auth-validity re-read (same tx, plain SELECT;
+  R7 FINAL: no FOR SHARE, no coordinator lock) → plain `INSERT` request → `INSERT` audit
+  (same tx; repo precedent: DELETE + audit in one tx, `depositauth.go:1142-1159`) → `COMMIT` with
   `RowsAffected()==1` checks, 23505/commit-error handling per above.
-- **Coordinator-lock choice** (locked in plan, §三.2): constraints-only is sufficient for FR-12/FR-13;
-  add `ensureLeaseSQL` + `lockCoordSQL` (fixed order, coordinator row first) only to isolate the
-  auth-validity read from concurrent revocation. The pre-tx read is never the guarantee.
+- **Dual-constraint race (locked semantics)**: one INSERT can violate both UNIQUEs at once, but
+  PostgreSQL reports exactly one `ConstraintName`. Order of report is NOT a semantic signal and
+  MUST NOT decide the response. Rule: after any 23505, rollback, then classify **deterministically
+  in fixed order** — (1) read by `(caller_id, idempotency_key)`: hit + FR-10 equality → 200;
+  hit + inequality → 409 (authoritative for this key regardless of what else fired); (2) only on
+  key-miss, read by `authorization_id`: hit (bound to another request) → 403; (3) miss both →
+  retryable. A 409 for this key is never downgraded to 403 by a co-fired auth violation, and a
+  same-key replay is never upgraded to 409/403.
+- **Replay immunity to later grant state (locked)**: the replay path (classify hit + FR-10
+  equality) checks current key-auth + interface permission only; it MUST NOT re-validate the
+  original grant row. Grant expiry/revocation after accept changes nothing for replays (Q5).

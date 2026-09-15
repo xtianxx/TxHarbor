@@ -68,8 +68,20 @@ documents the closed check set; FR-11).
   "执行结果未知" (Q8 correction — unknown-outcome vocabulary belongs to 006 in-flight *external*
   requests, FR-17, not to 007 rows).
 - `recovery.state`: live 006 state at read time (`none`/`recovering`/`paused_reconcile`/`released`,
-  006 FR-18 subset); request facts stay servable in every state. Read-failure → `state: unknown`
-  with the same body (never forge `released`; §三.4). No nonce/signature/broadcast fields exist.
+  006 FR-18 subset); request facts stay servable in every state. Read point and reader contract:
+  every GET performs one fresh `LoadRecoveryState` + `RecoveryReleased` read
+  (`internal/indexer/reorgquery.go:62-83` — nil-able point read, no side effects, derived from
+  durable state at read time, never a cache flag); annotation follows `AnnotateRecoveryHeight`
+  (`reorgquery.go:43-60`), with 007 rows treated as ancestor-side facts (always servable; the
+  validity axis does not gate request facts). Read-failure → `state: unknown`
+  with the same body (never forge `released`; a failed read MUST NOT map to none-or-released).
+  `state` and the request row are two independent reads, not an atomic global view — the contract
+  promises per-read freshness, not cross-read atomicity. No nonce/signature/broadcast fields exist.
+- POST + recovery-read interplay: recovery state is never read on the POST path (creates do not
+  depend on it — intake observes the 006 downstream preconditions subset per FR-16, which is a
+  gate on follow-on action, of which 007 has none). A POST that committed but whose response was
+  lost replays by key (200, §1); recovery-read failure on a later GET changes only the `state`
+  field (`unknown`), never the replay outcome or the `request_id`.
 
 ## 4. Recovery-period behavior (006承接, FR-16/FR-17)
 
