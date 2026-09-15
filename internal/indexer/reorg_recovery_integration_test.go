@@ -2237,6 +2237,17 @@ func rrecCommitLogHeights(t *testing.T, ctx context.Context, s *rrecScene, cfg L
 	t.Helper()
 	sc := logscanNewScanner(t, s.pool, s.client, s.client, s.lease, cfg)
 	for {
+		// Capture-first (production ServeLoop discipline): the version binds
+		// before ANY batch input is read. On active recovery the batch is
+		// abandoned before reading inputs; a refusal never re-submits old
+		// inputs under a fresh capture — reprocessing restarts from capture.
+		rcap, active, err := captureRecoveryVersion(ctx, s.pool, s.chainID)
+		if err != nil {
+			t.Fatalf("capture recovery: %v", err)
+		}
+		if active {
+			t.Fatalf("active recovery during deterministic staging (seq=%d): refusing to build inputs under it", rcap.Seq)
+		}
 		next, ok := logscanCheckpointNext(ctx, s.pool, s.chainID)
 		first := !ok
 		if ok && next >= wantNext {
@@ -2261,10 +2272,6 @@ func rrecCommitLogHeights(t *testing.T, ctx context.Context, s *rrecScene, cfg L
 		rows, err := sc.validateLogs(h, h, coverage, logs)
 		if err != nil {
 			t.Fatalf("validateLogs [%d,%d]: %v", h, h, err)
-		}
-		rcap, active, err := captureRecoveryVersion(ctx, s.pool, s.chainID)
-		if err != nil || active {
-			t.Fatalf("capture recovery = (%v active=%v err=%v), want inactive version", rcap, active, err)
 		}
 		if err := sc.commitLogRange(ctx, h, h, first, coverage, rows, rcap); err != nil {
 			t.Fatalf("commitLogRange [%d,%d]: %v", h, h, err)
