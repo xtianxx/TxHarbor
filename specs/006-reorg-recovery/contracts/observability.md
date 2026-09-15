@@ -17,7 +17,7 @@ emitted). No new metric system, no new log pipeline.
 ## Metrics (counter/gauge names; labels include chain_id)
 
 - `reorg_active{chain_id}` — 1 while a recovery row exists, else 0.
-- `reorg_depth_vs_bound{chain_id}` — computed depth and bound (two gauges; alert on depth > bound).
+- `reorg_depth_vs_bound{chain_id}` — computed depth and bound (two gauges; alert on depth > bound only while the same chain's `reorg_active == 1`; with no active row the series keep last-known values and carry no live claim).
 - `reorg_frontier_lag{chain_id,stream}` — per stream: swept_end − frontier (block/log/deposit).
 - `reorg_orphaned_total{chain_id}` / `reorg_revived_total{chain_id}` — conversion counters.
 - `reorg_reconcile_required{chain_id}` — 1 while phase = reconcile_required.
@@ -79,8 +79,18 @@ on `reorg_active` alone.
   logs for `recovery tick failed; retrying` (phase + redacted error), read
   the `reorg_recovery` row (`phase`, `updated_at`, frontiers) to confirm the
   stall, verify DB/lease/RPC health, then escalate per operator policy.
-- `txharbor_reorg_depth > txharbor_reorg_bound` → alert (the alert rule lives
-  here in the runbook; the two gauges carry depth and bound separately).
+- `txharbor_reorg_depth > txharbor_reorg_bound` fires only with an
+  active-recovery guard on the same chain, e.g.
+  `txharbor_reorg_depth > txharbor_reorg_bound and on(chain_id) txharbor_reorg_active == 1`
+  (`and`, not `unless`: label matching is per same-`chain_id` series, and a
+  missing active series or `active == 0` must suppress the alert, never pass
+  it). The two gauges carry depth and bound separately; with no active row
+  they keep last-known values (stale, not live) — same for `active` itself on
+  a read failure (gauges untouched), so a flat alert input is diagnosed via
+  serve logs (`recovery metrics read failed; keeping last observed`) plus the
+  durable `reorg_recovery` row (`phase`, `updated_at`, frontiers), not via
+  the alert condition alone. The active guard scopes the alert; it does not
+  solve all staleness.
 - Series mapping (contract → exposition, `txharbor_` prefix per repo shape):
 
   | Contract identity | Exposition name |

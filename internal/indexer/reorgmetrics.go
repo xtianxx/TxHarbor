@@ -1,17 +1,22 @@
 // reorgmetrics.go wires the 006 recovery execution path to the metrics
 // surface (T032, contracts/observability.md) with zero constructor churn:
 //
-//   - Counters (orphaned/revived/evidence-wait) are event-exact: only the
-//     executor sees conversions and waits, so it reports them through the
-//     narrow RecoveryMetrics interface (nil = disabled; unit paths stay
+//   - Counters (orphaned/revived/evidence-wait) are at-most-once
+//     observations, not audit-exact counts: only the executor sees
+//     conversions and waits, so it reports them through the narrow
+//     RecoveryMetrics interface (nil = disabled; unit paths stay
 //     metric-free). Orphaned counts ride the idempotent transaction's own
 //     rowcount (repeat execution converts 0 → counts 0); revived counts
 //     ride ReviveRecoveryObservation's converted flag (converged repeats
 //     report false → never double-counted, including crash-resume
-//     re-walks). Evidence-wait classes are the executor's own cause
-//     taxonomy (transport/timeout/rate-limited/invalid-response
-//     pass-through; chain-mismatch/contradictory/insufficient holds) —
-//     no new taxonomy, no heights/hashes in labels.
+//     re-walks). The count happens after the transaction commits, so a
+//     crash (or lost commit response) between commit and counting may
+//     undercount; process restart resets counters to zero. The durable
+//     deposit_observation_transitions / reorg_recovery_events rows are the
+//     audit authority, never these counters. Evidence-wait classes are the
+//     executor's own cause taxonomy (transport/timeout/rate-limited/
+//     invalid-response pass-through; chain-mismatch/contradictory/
+//     insufficient holds) — no new taxonomy, no heights/hashes in labels.
 //   - Gauges (active/depth/bound/frontier-lag/reconcile) are state
 //     snapshots derived from the durable row at read time, so they belong
 //     to the serve-side observer (same "re-read, don't trust memory"
@@ -28,8 +33,9 @@ import (
 
 // RecoveryMetrics is the executor-to-registry funnel for the three 006
 // monotonic counters. Implementations must be repeat-safe on their own
-// terms (Prometheus counters only increase); the executor guarantees it
-// never reports the same conversion twice.
+// terms (Prometheus counters only increase); the executor never reports
+// the same conversion twice, but it may report it zero times on the
+// commit-to-count crash window — never twice, possibly once or not at all.
 type RecoveryMetrics interface {
 	AddReorgOrphaned(chain int64, n int64)
 	AddReorgRevived(chain int64, n int64)
