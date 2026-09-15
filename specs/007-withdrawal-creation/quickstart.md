@@ -125,9 +125,12 @@ Caller B GET caller A's `request_id` → 404 byte-identical shape to random-id 4
    每创建尝试 exactly-once 归一（证据 T015）。真 SIGKILL/40P01 注入证据见实现；
    原生 SQL 40P01 探针仅证错误类别存在。
 
-5. V1–V9 执行记录（本机 `make test test-race test-integration` 全绿）：
+5. V1–V9 执行记录（T032 时点快照，HEAD b54ec24；本机 `make test test-race test-integration` 全绿）：
    单元 733/11 包；race 全仓 733/11 包；集成 withdrawal 313、app 147（含重放×策略/
-   认证丢失回归）、db 88、health 5、indexer 580。V1 T012/T015、V2 T016–T018、
+   认证丢失回归）、db 88、health 5、indexer 580。后续审查修正批（nil-pool 守卫、
+   规范回显等）把计数推高到 单元/race 737、withdrawal 319、app 153，见
+   `evidence-007-closeout.md`（命令、口径与来源附录）；本节数字保留为 T032 时点
+   原始记录，不改写。V1 T012/T015、V2 T016–T018、
    V3 T009、V4 T019/T020、V5 T021–T023、V6 T024–T026（含真 kill-9 双终止点、
    应用路径 40P01）、V7 T018/T025、V8 T027–T029、V9 T017。requirements 保持
    21/22 真实状态；T000-P 独立 open；008–011 只记边界，未实现。

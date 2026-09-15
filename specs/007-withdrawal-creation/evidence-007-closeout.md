@@ -45,3 +45,56 @@ metrics 8-series exactly-once; retention permanence; status-pending 23514.
 - T030 db-test fix is test-only (chain-relative counts + 007 removal/re-apply
   asserts); 001–006 schema untouched. Downgrade `[7 6 5]` hardcodes the
   current head — 008 will need the same maintenance.
+## Provenance appendix (#8 closure, 2026-09-15, docs-only)
+
+Literal commands (entries per Makefile/ci.yml four jobs; sharding only where a
+single 600s tool call cannot cover a package):
+
+- `go build ./...`
+- `gofmt -l internal/ cmd/`
+- `go vet ./...` + `go vet -tags integration ./...`
+- `go test ./... -count=1`
+- `go test -race ./... -count=1`
+- `go test -tags integration ./internal/withdrawal/ ./internal/app/ ./internal/db/ ./internal/health/ -count=1` (db/health ran
+  together; withdrawal/app each alone)
+- indexer, three selections (union covers all top-level tests, see below):
+  `go test -tags integration ./internal/indexer/ -count=1 -run '^Test[A-C]'`
+  `go test -tags integration ./internal/indexer/ -count=1 -run '^Test[D-P]'`
+  `go test -tags integration ./internal/indexer/ -count=1 -run '^Test[Q-Z]'`
+
+Shard-union computation (recomputed read-only 2026-09-15 at 513825d,
+identical result):
+
+- command: `grep -h '^func Test' internal/indexer/*_test.go`, partition by
+  `^Test[A-C]` / `^Test[D-P]` / `^Test[Q-Z]`
+- output: `total top-level: 271`, `A-C: 82`, `D-P: 111`, `Q-Z: 78`,
+  `union: 271`, `overlap: 0`, `MISSED: none`
+- caliber note: 271 = top-level `Test*` function names (selection units);
+  580 = executed instances including subtests (173+316+91 shard tallies).
+  The two numbers measure different units and are not expected to be equal.
+
+Toolchain (current check 2026-09-15, NOT backdated to run time):
+
+- `go version go1.26.5 linux/amd64` (queried now; the Go version active during
+  the historical runs was never recorded → unrecoverable, stated as such)
+- PostgreSQL image `postgres:18.6-trixie` (test-declared in
+  `*_integration_test.go` container specs, verified by grep now; same image
+  named by every integration run)
+
+Per-tally provenance:
+
+- witnessed (orchestrator ran the command in-session and saw the tool output;
+  no log files were persisted, so "witnessed" means observed-live, not
+  attached): unit 733→737, race 733→737, withdrawal 309→313→319, app
+  139→145→147→153, db 88 (post-fix), health 5, indexer shards 173/316/91,
+  union computation (twice, identical).
+- re-verified: every agent-reported number above was re-run by the
+  orchestrator on the exact staged content before merge (merge runs ==
+  HEAD content; commits contain no further edits).
+- reused (not re-run): db 88/health 5/indexer shards from the T030 turn for
+  the review-fix merge (unaffected packages; code diff of the review-fix
+  batch touches none of their non-test files — verified via staged file
+  list), plus the T032-time quickstart §5 snapshot below.
+- original logs vs summary: no raw `go test` logs exist on branch or in
+ Ticket artifacts; all tallies are human summaries of observed tool output.
+  Nothing here reconstructs or invents a missing log.
