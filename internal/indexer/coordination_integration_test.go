@@ -59,7 +59,8 @@ func seedCoordFirstBlock(t *testing.T, ctx context.Context, pool *pgxpool.Pool, 
 		t.Fatalf("seed lease Acquire() = (%v, %d, %v), want win", won, token, err)
 	}
 	sc := newCoordScanner(t, pool, lease, startHeight)
-	if err := sc.commitBlock(ctx, blockWrite{number: startHeight, hash: hash, parent: coordHash(0), first: true}); err != nil {
+	rcap := testRecoveryCap(t, ctx, pool, chainID)
+	if err := sc.commitBlock(ctx, blockWrite{number: startHeight, hash: hash, parent: coordHash(0), first: true}, rcap); err != nil {
 		t.Fatalf("seed first block at %d: %v", startHeight, err)
 	}
 	return lease, sc
@@ -231,9 +232,10 @@ func TestCoordinationPauseHoldsOffAdvance(t *testing.T) {
 	defer cancelB()
 	bStarted := make(chan struct{})
 	bDone := make(chan error, 1)
+	rcapB := testRecoveryCap(t, ctx, pool, chainID)
 	go func() {
 		close(bStarted)
-		bDone <- scanner.commitBlock(bCtx, blockWrite{number: startHeight + 1, hash: nextHash, parent: firstHash, first: false})
+		bDone <- scanner.commitBlock(bCtx, blockWrite{number: startHeight + 1, hash: nextHash, parent: firstHash, first: false}, rcapB)
 	}()
 	<-bStarted
 	blockedPID := waitForBlockedBy(t, ctx, pool, aPID, 10*time.Second)
@@ -327,7 +329,8 @@ func TestCoordinationStaleTokenWritesRefused(t *testing.T) {
 	}
 
 	// Old-token advance: refused at the independent verdict statement.
-	err = oldScanner.commitBlock(ctx, blockWrite{number: startHeight + 1, hash: nextHash, parent: firstHash, first: false})
+	rcap := testRecoveryCap(t, ctx, pool, chainID)
+	err = oldScanner.commitBlock(ctx, blockWrite{number: startHeight + 1, hash: nextHash, parent: firstHash, first: false}, rcap)
 	if !errors.Is(err, ErrLeaseLost) {
 		t.Fatalf("stale advance error = %v, want ErrLeaseLost", err)
 	}
@@ -347,7 +350,7 @@ func TestCoordinationStaleTokenWritesRefused(t *testing.T) {
 
 	// Positive control: the takeover token writes normally.
 	newScanner := newCoordScanner(t, pool, takeover, startHeight)
-	if err := newScanner.commitBlock(ctx, blockWrite{number: startHeight + 1, hash: nextHash, parent: firstHash, first: false}); err != nil {
+	if err := newScanner.commitBlock(ctx, blockWrite{number: startHeight + 1, hash: nextHash, parent: firstHash, first: false}, rcap); err != nil {
 		t.Fatalf("new-holder advance: %v", err)
 	}
 	after, ok := readCoordCheckpoint(t, ctx, pool, chainID)
@@ -364,12 +367,12 @@ type coordFirstOutcome struct {
 
 // raceCoordFirstBlocks runs the first-block write protocol concurrently from
 // two sessions behind a start barrier and returns both outcomes.
-func raceCoordFirstBlocks(ctx context.Context, a, b *Scanner, number uint64, hashA, hashB string) []coordFirstOutcome {
+func raceCoordFirstBlocks(ctx context.Context, a, b *Scanner, number uint64, hashA, hashB string, rcap RecoveryCapture) []coordFirstOutcome {
 	start := make(chan struct{})
 	out := make(chan coordFirstOutcome, 2)
 	run := func(sc *Scanner, hash string) {
 		<-start
-		out <- coordFirstOutcome{scanner: sc, err: sc.commitBlock(ctx, blockWrite{number: number, hash: hash, parent: coordHash(0), first: true})}
+		out <- coordFirstOutcome{scanner: sc, err: sc.commitBlock(ctx, blockWrite{number: number, hash: hash, parent: coordHash(0), first: true}, rcap)}
 	}
 	go run(a, hashA)
 	go run(b, hashB)
@@ -457,11 +460,12 @@ func TestCoordinationConcurrentFirstBlock(t *testing.T) {
 		scA := newCoordScanner(t, poolA, lease, startHeight)
 		scB := newCoordScanner(t, poolB, lease, startHeight)
 
-		_, loser := splitFirstOutcomes(t, raceCoordFirstBlocks(ctx, scA, scB, startHeight, hash, hash))
+		rcap := testRecoveryCap(t, ctx, poolA, chainID)
+		_, loser := splitFirstOutcomes(t, raceCoordFirstBlocks(ctx, scA, scB, startHeight, hash, hash, rcap))
 		requireSingleCoordFirstBlock(t, ctx, poolA, chainID, startHeight, hash)
 
 		// Case 3: the loser re-reads the durable state and advances to S+1.
-		if err := loser.commitBlock(ctx, blockWrite{number: startHeight + 1, hash: nextHash, parent: hash, first: false}); err != nil {
+		if err := loser.commitBlock(ctx, blockWrite{number: startHeight + 1, hash: nextHash, parent: hash, first: false}, rcap); err != nil {
 			t.Fatalf("loser advance to S+1: %v", err)
 		}
 		cp, ok := readCoordCheckpoint(t, ctx, poolA, chainID)
@@ -485,7 +489,8 @@ func TestCoordinationConcurrentFirstBlock(t *testing.T) {
 		scA := newCoordScanner(t, poolA, lease, startHeight)
 		scB := newCoordScanner(t, poolB, lease, startHeight)
 
-		_, loser := splitFirstOutcomes(t, raceCoordFirstBlocks(ctx, scA, scB, startHeight, h1, h2))
+		rcapDiv := testRecoveryCap(t, ctx, poolA, divergentChain)
+		_, loser := splitFirstOutcomes(t, raceCoordFirstBlocks(ctx, scA, scB, startHeight, h1, h2, rcapDiv))
 		stored, ok := readCoordCheckpoint(t, ctx, poolA, divergentChain)
 		if !ok {
 			t.Fatal("winner did not commit a checkpoint")
@@ -579,6 +584,7 @@ func TestCoordinationPauseFreezesCheckpoint(t *testing.T) {
 	start := make(chan struct{})
 	errs := make(chan error, attempts)
 	var wg sync.WaitGroup
+	rcap := testRecoveryCap(t, ctx, pool, chainID)
 	for i := 0; i < attempts; i++ {
 		number, first := startHeight+1, false
 		if i%2 == 0 {
@@ -589,7 +595,7 @@ func TestCoordinationPauseFreezesCheckpoint(t *testing.T) {
 		go func(sc *Scanner, number uint64, first bool) {
 			defer wg.Done()
 			<-start
-			errs <- sc.commitBlock(ctx, blockWrite{number: number, hash: nextHash, parent: firstHash, first: first})
+			errs <- sc.commitBlock(ctx, blockWrite{number: number, hash: nextHash, parent: firstHash, first: first}, rcap)
 		}(sc, number, first)
 	}
 	close(start)

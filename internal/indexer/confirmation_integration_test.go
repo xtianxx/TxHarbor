@@ -1275,6 +1275,7 @@ func TestConfirmationDualWorkerRaceConverges(t *testing.T) {
 	// One acquired lease shared by both workers (Token() is an atomic
 	// load, safe for concurrent use); both present the same owner/token.
 	lease := depositITLease(t, poolA, chainID)
+	rcap := testRecoveryCap(t, ctx, poolA, chainID)
 	basis := ConfirmBasis{BlockHash: bh, TxHash: txHash, Height: h,
 		TipNumber: tip, TipHash: depositBlockHash(tip), PolicySeq: 1, ThresholdN: n}
 
@@ -1288,7 +1289,7 @@ func TestConfirmationDualWorkerRaceConverges(t *testing.T) {
 			defer wg.Done()
 			ready <- struct{}{}
 			<-gate
-			errs[i] = c.ConfirmDepositUnit(ctx, lease, basis)
+			errs[i] = c.ConfirmDepositUnit(ctx, lease, basis, rcap)
 		}(i, c)
 	}
 	for i := 0; i < 2; i++ {
@@ -1341,7 +1342,7 @@ SELECT count(*) FROM deposit_observations WHERE chain_id = $1 AND status = 'pend
 	// Loser converges on re-read: a repeat commit through the losing
 	// handle returns nil with confirmed_at and every basis column
 	// byte-identical to the winner's (first-seen facts immutable, I2).
-	if err := committerB.ConfirmDepositUnit(ctx, lease, basis); err != nil {
+	if err := committerB.ConfirmDepositUnit(ctx, lease, basis, rcap); err != nil {
 		t.Fatalf("loser re-read ConfirmDepositUnit() = %v, want nil (converge)", err)
 	}
 	if got := confirm13ConfirmedAt(t, ctx, poolA, chainID, bh, txHash); got != winnerAt {
@@ -1386,9 +1387,10 @@ func TestConfirmationRepeatChecksStaySingleConversion(t *testing.T) {
 	confirmSeedPolicyRow(t, ctx, pool, chainID, 1, int64(n), nil, "bootstrap", nil)
 
 	c, lease := confirmCommitter(t, pool, chainID, n)
+	rcap := testRecoveryCap(t, ctx, pool, chainID)
 	basis := ConfirmBasis{BlockHash: bh, TxHash: txHash, Height: h,
 		TipNumber: tip, TipHash: depositBlockHash(tip), PolicySeq: 1, ThresholdN: n}
-	if err := c.ConfirmDepositUnit(ctx, lease, basis); err != nil {
+	if err := c.ConfirmDepositUnit(ctx, lease, basis, rcap); err != nil {
 		t.Fatalf("first ConfirmDepositUnit(): %v", err)
 	}
 	firstAt := confirm13ConfirmedAt(t, ctx, pool, chainID, bh, txHash)
@@ -1397,7 +1399,7 @@ func TestConfirmationRepeatChecksStaySingleConversion(t *testing.T) {
 
 	// Repeat checks >= 2: every one converges (nil), none rewrites.
 	for i := 0; i < 2; i++ {
-		if err := c.ConfirmDepositUnit(ctx, lease, basis); err != nil {
+		if err := c.ConfirmDepositUnit(ctx, lease, basis, rcap); err != nil {
 			t.Fatalf("repeat ConfirmDepositUnit() #%d = %v, want nil (converge)", i+1, err)
 		}
 	}
@@ -1481,6 +1483,7 @@ func TestConfirmationPreCommitKillRetriesFromDurableState(t *testing.T) {
 		t.Fatalf("NewConfirmationCommitter(): %v", err)
 	}
 	lease := depositITLease(t, pool, chainID)
+	rcap := testRecoveryCap(t, ctx, pool, chainID)
 	basis := ConfirmBasis{BlockHash: bh, TxHash: txHash, Height: h,
 		TipNumber: tip, TipHash: depositBlockHash(tip), PolicySeq: 1, ThresholdN: n}
 
@@ -1488,7 +1491,7 @@ func TestConfirmationPreCommitKillRetriesFromDurableState(t *testing.T) {
 	// server rolls the attempt back. The call must fail (never silent
 	// success on a killed write).
 	fault.armSQL("UPDATE deposit_observations", false, false)
-	if err := committer.ConfirmDepositUnit(ctx, lease, basis); err == nil {
+	if err := committer.ConfirmDepositUnit(ctx, lease, basis, rcap); err == nil {
 		t.Fatal("ConfirmDepositUnit() with the write killed = nil, want a connection error")
 	}
 	fault.waitFired(t, "connection death at the conditional UPDATE")
@@ -1502,7 +1505,7 @@ func TestConfirmationPreCommitKillRetriesFromDurableState(t *testing.T) {
 	confirmAssertZeroWrite(t, ctx, pool, chainID, bh, txHash, 1)
 
 	// Retry from durable state converts exactly once with the exact basis.
-	if err := committer.ConfirmDepositUnit(ctx, lease, basis); err != nil {
+	if err := committer.ConfirmDepositUnit(ctx, lease, basis, rcap); err != nil {
 		t.Fatalf("retry ConfirmDepositUnit() = %v, want nil", err)
 	}
 	status, nullAt, tipN, thr, seq, gotTipHash, conf :=
@@ -1569,6 +1572,7 @@ func TestConfirmationUnknownCommitOutcomeResolvesByPKReread(t *testing.T) {
 		t.Fatalf("NewConfirmationCommitter(): %v", err)
 	}
 	lease := depositITLease(t, pool, chainID)
+	rcap := testRecoveryCap(t, ctx, pool, chainID)
 	basis1 := ConfirmBasis{BlockHash: bh1, TxHash: txHash1, Height: h1,
 		TipNumber: tip, TipHash: depositBlockHash(tip), PolicySeq: 1, ThresholdN: n}
 	basis2 := ConfirmBasis{BlockHash: bh2, TxHash: txHash2, Height: h2,
@@ -1578,7 +1582,7 @@ func TestConfirmationUnknownCommitOutcomeResolvesByPKReread(t *testing.T) {
 	// The PK re-read定性 it committed -> nil (not an error, not a blind
 	// "not-committed" retry).
 	fault.armSQL(depositFaultCommit, true, false)
-	if err := committer.ConfirmDepositUnit(ctx, lease, basis1); err != nil {
+	if err := committer.ConfirmDepositUnit(ctx, lease, basis1, rcap); err != nil {
 		t.Fatalf("ConfirmDepositUnit() with the COMMIT reply lost = %v, want nil (PK re-read converges)", err)
 	}
 	fault.waitFired(t, "COMMIT reply loss")
@@ -1600,7 +1604,7 @@ func TestConfirmationUnknownCommitOutcomeResolvesByPKReread(t *testing.T) {
 	// The follow-up check converges with byte-identical facts: the unknown
 	// outcome was committed, so treating it as not-committed would have
 	// rewritten first-seen facts (I2).
-	if err := committer.ConfirmDepositUnit(ctx, lease, basis1); err != nil {
+	if err := committer.ConfirmDepositUnit(ctx, lease, basis1, rcap); err != nil {
 		t.Fatalf("follow-up ConfirmDepositUnit() = %v, want nil (converge)", err)
 	}
 	if got := confirm13ConfirmedAt(t, ctx, pool, chainID, bh1, txHash1); got != firstAt {
@@ -1617,7 +1621,7 @@ func TestConfirmationUnknownCommitOutcomeResolvesByPKReread(t *testing.T) {
 	//定性 it uncommitted -> error (never silent success, never a phantom
 	// row); a retry then converts exactly once.
 	fault.armSQL(depositFaultCommit, false, false)
-	if err := committer.ConfirmDepositUnit(ctx, lease, basis2); err == nil {
+	if err := committer.ConfirmDepositUnit(ctx, lease, basis2, rcap); err == nil {
 		t.Fatal("ConfirmDepositUnit() with COMMIT unlanded = nil, want an unknown-outcome error")
 	}
 	fault.waitFired(t, "connection death at COMMIT")
@@ -1627,7 +1631,7 @@ func TestConfirmationUnknownCommitOutcomeResolvesByPKReread(t *testing.T) {
 	}
 	confirmAssertZeroWrite(t, ctx, pool, chainID, bh2, txHash2, 1)
 
-	if err := committer.ConfirmDepositUnit(ctx, lease, basis2); err != nil {
+	if err := committer.ConfirmDepositUnit(ctx, lease, basis2, rcap); err != nil {
 		t.Fatalf("retry ConfirmDepositUnit() = %v, want nil", err)
 	}
 	status3, nullAt3, tipN3, thr3, seq3, gotTipHash3, conf3 :=
@@ -1686,6 +1690,7 @@ func TestConfirmationRestartRecoveryResumesDurableState(t *testing.T) {
 	depositSeedObservation(t, ctx, pool, chainID, h2, bh2, txHash2, 0, "1", 1)
 	confirmSeedPolicyRow(t, ctx, pool, chainID, 1, int64(n), nil, "bootstrap", nil)
 
+	rcap := testRecoveryCap(t, ctx, pool, chainID)
 	basis1 := ConfirmBasis{BlockHash: bh1, TxHash: txHash1, Height: h1,
 		TipNumber: tip, TipHash: depositBlockHash(tip), PolicySeq: 1, ThresholdN: n}
 	basis2 := ConfirmBasis{BlockHash: bh2, TxHash: txHash2, Height: h2,
@@ -1698,7 +1703,7 @@ func TestConfirmationRestartRecoveryResumesDurableState(t *testing.T) {
 		t.Fatalf("NewConfirmationCommitter(crasher): %v", err)
 	}
 	crashLease := depositITOwnedLease(t, pool, chainID, "crasher-31349", time.Second, 250*time.Millisecond)
-	if err := crasher.ConfirmDepositUnit(ctx, crashLease, basis1); err != nil {
+	if err := crasher.ConfirmDepositUnit(ctx, crashLease, basis1, rcap); err != nil {
 		t.Fatalf("pre-crash ConfirmDepositUnit() = %v", err)
 	}
 	at1 := confirm13ConfirmedAt(t, ctx, pool, chainID, bh1, txHash1)
@@ -1721,7 +1726,7 @@ func TestConfirmationRestartRecoveryResumesDurableState(t *testing.T) {
 	freshLease := depositITOwnedLease(t, pool, chainID, "restarted-31349", time.Minute, 10*time.Second)
 
 	// The pre-crash conversion converges byte-identical (confirmed untouched).
-	if err := restarter.ConfirmDepositUnit(ctx, freshLease, basis1); err != nil {
+	if err := restarter.ConfirmDepositUnit(ctx, freshLease, basis1, rcap); err != nil {
 		t.Fatalf("restart re-check of h1 = %v, want nil (converge)", err)
 	}
 	if got := confirm13ConfirmedAt(t, ctx, pool, chainID, bh1, txHash1); got != at1 {
@@ -1735,7 +1740,7 @@ func TestConfirmationRestartRecoveryResumesDurableState(t *testing.T) {
 	}
 
 	// The still-pending row is processed exactly once with the exact basis.
-	if err := restarter.ConfirmDepositUnit(ctx, freshLease, basis2); err != nil {
+	if err := restarter.ConfirmDepositUnit(ctx, freshLease, basis2, rcap); err != nil {
 		t.Fatalf("restart ConfirmDepositUnit(h2) = %v, want nil", err)
 	}
 	status2, nullAt2, tipN2, thr2, seq2, gotTipHash2, conf2 :=
@@ -2022,9 +2027,10 @@ func TestConfirmationConfirmedRowsRejectEveryRewritePath(t *testing.T) {
 	confirmSeedPolicyRow(t, ctx, pool, chainID, 1, int64(n), nil, "bootstrap", nil)
 
 	c, lease := confirmCommitter(t, pool, chainID, n)
+	rcap := testRecoveryCap(t, ctx, pool, chainID)
 	basis := ConfirmBasis{BlockHash: bh, TxHash: txHash, Height: h,
 		TipNumber: tip, TipHash: depositBlockHash(tip), PolicySeq: 1, ThresholdN: n}
-	if err := c.ConfirmDepositUnit(ctx, lease, basis); err != nil {
+	if err := c.ConfirmDepositUnit(ctx, lease, basis, rcap); err != nil {
 		t.Fatalf("ConfirmDepositUnit(): %v", err)
 	}
 
@@ -2050,7 +2056,7 @@ func TestConfirmationConfirmedRowsRejectEveryRewritePath(t *testing.T) {
 	}
 
 	// Path 1: re-commit of the same basis converges (nil) with zero writes.
-	if err := c.ConfirmDepositUnit(ctx, lease, basis); err != nil {
+	if err := c.ConfirmDepositUnit(ctx, lease, basis, rcap); err != nil {
 		t.Fatalf("re-commit ConfirmDepositUnit() = %v, want nil (converge)", err)
 	}
 	assertUnchanged("re-commit same basis")
@@ -2142,13 +2148,14 @@ func TestConfirmationIntegritySpotCheckSQL(t *testing.T) {
 	confirmSeedPolicyRow(t, ctx, pool, chainID, 1, int64(n), nil, "bootstrap", nil)
 
 	c, lease := confirmCommitter(t, pool, chainID, n)
+	rcap := testRecoveryCap(t, ctx, pool, chainID)
 	for i, b := range []ConfirmBasis{
 		{BlockHash: bh1, TxHash: txHash1, Height: h1,
 			TipNumber: tip, TipHash: depositBlockHash(tip), PolicySeq: 1, ThresholdN: n},
 		{BlockHash: bh2, TxHash: txHash2, Height: h2,
 			TipNumber: tip, TipHash: depositBlockHash(tip), PolicySeq: 1, ThresholdN: n},
 	} {
-		if err := c.ConfirmDepositUnit(ctx, lease, b); err != nil {
+		if err := c.ConfirmDepositUnit(ctx, lease, b, rcap); err != nil {
 			t.Fatalf("ConfirmDepositUnit(#%d): %v", i+1, err)
 		}
 	}

@@ -275,6 +275,7 @@ func TestDepositAuthHappyPathAndDuplicates(t *testing.T) {
 	cfg.ConfigHash = h1
 	sc := depositITScanner(t, pool, cfg)
 	lease := depositITLease(t, pool, chainID)
+	rcap := testRecoveryCap(t, ctx, sc.pool, sc.cfg.ChainID)
 	unit, batch, captured := depositITPrepareUnit(t, ctx, sc, 15, 15)
 
 	h2Assets := depositAuthSnapshot(depositAuthLine(testContractA, 10), depositAuthLine(testContractB, 12))
@@ -314,7 +315,7 @@ func TestDepositAuthHappyPathAndDuplicates(t *testing.T) {
 	// The old-basis unit is refused under the lock: the authorization
 	// committed version_seq=2, so the captured version_seq=1 is stale (the
 	// config identity moved with it) and nothing may be written.
-	err = sc.commitDepositUnit(ctx, lease, unit, batch, captured, 15, 15)
+	err = sc.commitDepositUnit(ctx, lease, unit, batch, captured, 15, 15, rcap)
 	if !errors.Is(err, errDepositVersionMismatch) {
 		t.Fatalf("old-basis commit = %v (%T), want errDepositVersionMismatch", err, err)
 	}
@@ -1019,11 +1020,12 @@ func TestDepositAuthNestedReplay(t *testing.T) {
 		cfg.ConfigHash = h3
 		sc := depositITScanner(t, pool, cfg)
 		lease := depositITLease(t, pool, chainID)
+		rcap := testRecoveryCap(t, ctx, sc.pool, sc.cfg.ChainID)
 		unit, batch, captured := depositITPrepareUnit(t, ctx, sc, 10, 20)
 		if len(batch.matched) != 1 || batch.nomatch != 1 {
 			t.Fatalf("batch = %d matched %d nomatch, want 1/1", len(batch.matched), batch.nomatch)
 		}
-		if err := sc.commitDepositUnit(ctx, lease, unit, batch, captured, 10, 20); err != nil {
+		if err := sc.commitDepositUnit(ctx, lease, unit, batch, captured, 10, 20, rcap); err != nil {
 			t.Fatalf("commit replay: %v", err)
 		}
 		if n := depositCountRows(t, ctx, pool, "deposit_observations", chainID); n != 1 {
@@ -1046,6 +1048,7 @@ func TestDepositAuthNestedReplay(t *testing.T) {
 		cfg.ConfigHash = h1
 		sc := depositITScanner(t, pool, cfg)
 		lease := depositITLease(t, pool, chainID)
+		rcap := testRecoveryCap(t, ctx, sc.pool, sc.cfg.ChainID)
 		unit, batch, captured := depositITPrepareUnit(t, ctx, sc, 21, 25)
 		withB := depositAuthSnapshot(depositAuthLine(testContractA, 10), depositAuthLine(testContractB, 10))
 		add := depositAuthBaseReq(t, chainID, "loopback-add", 1)
@@ -1065,7 +1068,7 @@ func TestDepositAuthNestedReplay(t *testing.T) {
 		}
 		// The v1-captured unit is abandoned by version isolation and re-read
 		// under v3 converges the empty replay range.
-		if err := sc.commitDepositUnit(ctx, lease, unit, batch, captured, 21, 25); !errors.Is(err, errDepositVersionMismatch) {
+		if err := sc.commitDepositUnit(ctx, lease, unit, batch, captured, 21, 25, rcap); !errors.Is(err, errDepositVersionMismatch) {
 			t.Fatalf("stale loopback commit = %v, want errDepositVersionMismatch", err)
 		}
 		if n := depositCountRows(t, ctx, pool, "deposit_observations", chainID); n != 0 {
@@ -1076,7 +1079,7 @@ func TestDepositAuthNestedReplay(t *testing.T) {
 		if captured3 == nil || captured3.versionSeq != 3 {
 			t.Fatalf("captured = %+v, want version_seq 3", captured3)
 		}
-		if err := sc3.commitDepositUnit(ctx, lease, unit3, batch3, captured3, 10, 20); err != nil {
+		if err := sc3.commitDepositUnit(ctx, lease, unit3, batch3, captured3, 10, 20, rcap); err != nil {
 			t.Fatalf("v3 replay commit: %v", err)
 		}
 		if _, _, next, _ := depositCheckpointState(t, ctx, pool, chainID); next != 21 {

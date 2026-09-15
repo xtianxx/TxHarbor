@@ -9,6 +9,8 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+
+	"github.com/pressly/goose/v3"
 )
 
 // tableDef captures the column and constraint definitions of one table: the
@@ -151,16 +153,17 @@ func TestConfirmationMigrationEmptyDatabaseAndRepeat(t *testing.T) {
 }
 
 // TestConfirmationMigrationUpgradeFrom004PreservesExistingData covers the
-// T001 "upgrade from a 004 database" condition: only 000005 applies, the
-// pre-existing pending observation survives with NULL basis columns, and the
-// 002/003/004 table definitions are byte-identical except for the additive
-// 005 changes on deposit_observations (any other delta fails with the full
-// before/after text as diff evidence).
+// T001 "upgrade from a 004 database" condition in two legs: 004 -> 000005
+// (only 000005 applies; the 002/003/004 table definitions are byte-identical
+// except for the additive 005 changes on deposit_observations), then
+// 000005 -> 000006 (the approved reorg-recovery deltas land: fork-identity
+// PK, canonical partial-unique, 3-state status + orphan-evidence columns,
+// four new tables) while 005 rows/columns stay intact in meaning.
 func TestConfirmationMigrationUpgradeFrom004PreservesExistingData(t *testing.T) {
 	dsn := startPostgres(t)
 	ctx := context.Background()
 
-	at004 := migrateUpThrough(t, dsn, 4)
+	migrateUpThrough(t, dsn, 4)
 	sqlDB := openTestSQL(t, dsn)
 	if relationExists(t, sqlDB, "confirmation_policy_history") {
 		t.Fatal("confirmation_policy_history must not exist before 000005 is applied")
@@ -183,41 +186,38 @@ func TestConfirmationMigrationUpgradeFrom004PreservesExistingData(t *testing.T) 
 
 	before := snapshotFrozen(t, sqlDB)
 
-	files, err := MigrationFiles(Migrations)
-	if err != nil {
-		t.Fatalf("list embedded migrations: %v", err)
+	// Leg 1: 004 -> 000005. Only 000005 may apply here (the DB already sits
+	// at 4, so exactly one file applies).
+	leg1Opts := testMigrateOptions(dsn)
+	leg1Opts.FS = migrationSubsetFS(t, 5)
+	var leg1Out bytes.Buffer
+	if err := MigrateUp(ctx, leg1Opts, &leg1Out); err != nil {
+		t.Fatalf("leg-1 MigrateUp() error = %v (output %q)", err, leg1Out.String())
 	}
-	var out bytes.Buffer
-	if err := MigrateUp(ctx, testMigrateOptions(dsn), &out); err != nil {
-		t.Fatalf("upgrade MigrateUp() error = %v (output %q)", err, out.String())
-	}
-	if want := fmt.Sprintf("applied=%d skipped=%d pending=0", len(files)-at004, at004); !strings.Contains(out.String(), want) {
-		t.Fatalf("upgrade MigrateUp() output = %q, want %q", out.String(), want)
-	}
-	if _, err := CheckCompatibility(ctx, testMigrateOptions(dsn)); err != nil {
-		t.Fatalf("CheckCompatibility() after upgrade error = %v", err)
+	if want := "applied=1 skipped=4 pending=0"; !strings.Contains(leg1Out.String(), want) {
+		t.Fatalf("leg-1 MigrateUp() output = %q, want %q", leg1Out.String(), want)
 	}
 
-	after := snapshotFrozen(t, sqlDB)
+	mid := snapshotFrozen(t, sqlDB)
 	for _, tbl := range confirmationFrozenTables {
-		if before[tbl].columns != after[tbl].columns {
-			t.Errorf("%s columns changed by 000005:\nbefore:\n%safter:\n%s", tbl, before[tbl].columns, after[tbl].columns)
+		if before[tbl].columns != mid[tbl].columns {
+			t.Errorf("%s columns changed by 000005:\nbefore:\n%smid:\n%s", tbl, before[tbl].columns, mid[tbl].columns)
 		}
-		if len(before[tbl].constraints) != len(after[tbl].constraints) {
-			t.Errorf("%s constraint count changed by 000005: before=%v after=%v",
-				tbl, before[tbl].constraints, after[tbl].constraints)
+		if len(before[tbl].constraints) != len(mid[tbl].constraints) {
+			t.Errorf("%s constraint count changed by 000005: before=%v mid=%v",
+				tbl, before[tbl].constraints, mid[tbl].constraints)
 		}
 		for name, body := range before[tbl].constraints {
-			if after[tbl].constraints[name] != body {
-				t.Errorf("%s constraint %s changed by 000005: before=%q after=%q",
-					tbl, name, body, after[tbl].constraints[name])
+			if mid[tbl].constraints[name] != body {
+				t.Errorf("%s constraint %s changed by 000005: before=%q mid=%q",
+					tbl, name, body, mid[tbl].constraints[name])
 			}
 		}
 	}
 
 	// deposit_observations: every pre-existing column and every pre-existing
-	// constraint except the widened status set must be untouched.
-	bObs, aObs := before["deposit_observations"], after["deposit_observations"]
+	// constraint except the widened status set must be untouched by 000005.
+	bObs, aObs := before["deposit_observations"], mid["deposit_observations"]
 	for _, line := range strings.Split(strings.TrimSpace(bObs.columns), "\n") {
 		if !strings.Contains(aObs.columns, line) {
 			t.Errorf("deposit_observations lost pre-existing column def %q", line)
@@ -248,6 +248,74 @@ func TestConfirmationMigrationUpgradeFrom004PreservesExistingData(t *testing.T) 
 	}
 	if status != "pending" || confirmedAt.Valid {
 		t.Fatalf("pre-upgrade observation changed: status=%q confirmed_at=%v", status, confirmedAt)
+	}
+
+	// Leg 2: 000005 -> 000006. Exactly one migration applies; the approved
+	// reorg-recovery deltas land while 005 rows/columns stay intact.
+	files, err := MigrationFiles(Migrations)
+	if err != nil {
+		t.Fatalf("list embedded migrations: %v", err)
+	}
+	var out bytes.Buffer
+	if err := MigrateUp(ctx, testMigrateOptions(dsn), &out); err != nil {
+		t.Fatalf("leg-2 MigrateUp() error = %v (output %q)", err, out.String())
+	}
+	if want := fmt.Sprintf("applied=1 skipped=%d pending=0", len(files)-1); !strings.Contains(out.String(), want) {
+		t.Fatalf("leg-2 MigrateUp() output = %q, want %q", out.String(), want)
+	}
+	if _, err := CheckCompatibility(ctx, testMigrateOptions(dsn)); err != nil {
+		t.Fatalf("CheckCompatibility() after 000006 error = %v", err)
+	}
+
+	after := snapshotFrozen(t, sqlDB)
+	pkey6 := after["chain_blocks"].constraints["chain_blocks_pkey"]
+	if pkey6 == before["chain_blocks"].constraints["chain_blocks_pkey"] ||
+		!strings.Contains(pkey6, "chain_id") || !strings.Contains(pkey6, "number") ||
+		!strings.Contains(pkey6, "hash") {
+		t.Errorf("chain_blocks_pkey after 000006 = %q, want the fork-identity (chain_id, number, hash) key", pkey6)
+	}
+	for _, tbl := range confirmationFrozenTables {
+		if tbl == "chain_blocks" {
+			continue
+		}
+		if mid[tbl].columns != after[tbl].columns {
+			t.Errorf("%s columns changed by 000006:\nmid:\n%safter:\n%s", tbl, mid[tbl].columns, after[tbl].columns)
+		}
+		if len(mid[tbl].constraints) != len(after[tbl].constraints) {
+			t.Errorf("%s constraint count changed by 000006: mid=%v after=%v",
+				tbl, mid[tbl].constraints, after[tbl].constraints)
+		}
+	}
+	mObs, aObs6 := mid["deposit_observations"], after["deposit_observations"]
+	for _, line := range strings.Split(strings.TrimSpace(mObs.columns), "\n") {
+		if !strings.Contains(aObs6.columns, line) {
+			t.Errorf("deposit_observations lost 005 column def %q under 000006", line)
+		}
+	}
+	for _, col := range []string{"orphaned_at|", "orphan_recovery_id|", "orphan_reason|"} {
+		if !strings.Contains(aObs6.columns, col) {
+			t.Errorf("deposit_observations missing 000006 orphan-evidence column %q", col)
+		}
+	}
+	if def := aObs6.constraints["deposit_observations_status_check"]; !strings.Contains(def, "orphaned") {
+		t.Errorf("3-state status check = %q, want IN ('pending','confirmed','orphaned')", def)
+	}
+	if def := aObs6.constraints["deposit_observations_confirmation_consistency"]; !strings.Contains(def, "orphaned") {
+		t.Errorf("3-state consistency check = %q, want the orphaned branch", def)
+	}
+	for _, tbl := range []string{
+		"reorg_policy_history", "reorg_recovery", "reorg_recovery_events", "deposit_observation_transitions",
+	} {
+		if !relationExists(t, sqlDB, tbl) {
+			t.Errorf("%s missing after 000006", tbl)
+		}
+	}
+	if err := sqlDB.QueryRowContext(ctx, `SELECT status, confirmed_at FROM deposit_observations
+		WHERE chain_id = 1 AND block_hash = $1`, blockHash).Scan(&status, &confirmedAt); err != nil {
+		t.Fatalf("read pre-upgrade observation after 000006: %v", err)
+	}
+	if status != "pending" || confirmedAt.Valid {
+		t.Fatalf("pre-upgrade observation changed by 000006: status=%q confirmed_at=%v", status, confirmedAt)
 	}
 }
 
@@ -387,10 +455,19 @@ func TestConfirmationMigrationSchemaConstraints(t *testing.T) {
 	}
 }
 
+func versionsOf(results []*goose.MigrationResult) []int64 {
+	out := make([]int64, 0, len(results))
+	for _, r := range results {
+		out = append(out, r.Source.Version)
+	}
+	return out
+}
+
 // TestConfirmationMigrationDowngradeFrom005RemovesOnly005 covers the Down
-// section: rolling back 000005 drops the history table, the basis columns,
-// the pending index, and the widened status set while 002/003/004 schema and
-// rows stay intact, and re-applying works.
+// section: rolling back to 4 removes 000006 (scratch-only shape: no fork
+// history rows exist here, per the T007 outage boundary) then 000005 — the
+// history table, the basis columns, the pending index, and the widened status
+// set — while 002/003/004 schema and rows stay intact, and re-applying works.
 func TestConfirmationMigrationDowngradeFrom005RemovesOnly005(t *testing.T) {
 	dsn := startPostgres(t)
 	ctx := context.Background()
@@ -418,13 +495,16 @@ func TestConfirmationMigrationDowngradeFrom005RemovesOnly005(t *testing.T) {
 	if err != nil {
 		t.Fatalf("DownTo(4): %v", err)
 	}
-	if len(results) != 1 || results[0].Source.Version != 5 {
-		t.Fatalf("DownTo(4) rolled back %d migration(s), want exactly version 5", len(results))
+	if len(results) != 2 || results[0].Source.Version != 6 || results[1].Source.Version != 5 {
+		t.Fatalf("DownTo(4) rolled back %v, want exactly versions [6 5] in order", versionsOf(results))
 	}
 
-	for _, rel := range []string{"confirmation_policy_history", "deposit_observations_pending_height_idx"} {
+	for _, rel := range []string{
+		"reorg_policy_history", "reorg_recovery", "reorg_recovery_events", "deposit_observation_transitions",
+		"confirmation_policy_history", "deposit_observations_pending_height_idx",
+	} {
 		if relationExists(t, sqlDB, rel) {
-			t.Errorf("%s still exists after DOWN of 000005", rel)
+			t.Errorf("%s still exists after DOWN to 4", rel)
 		}
 	}
 	var basisCols int
@@ -468,8 +548,8 @@ func TestConfirmationMigrationDowngradeFrom005RemovesOnly005(t *testing.T) {
 	if err := MigrateStatus(ctx, opts, &out); err != nil {
 		t.Fatalf("MigrateStatus() after down error = %v", err)
 	}
-	if !strings.Contains(out.String(), "current_version=4") || !strings.Contains(out.String(), "pending=1") {
-		t.Fatalf("status after down = %q, want current_version=4 and pending=1", out.String())
+	if !strings.Contains(out.String(), "current_version=4") || !strings.Contains(out.String(), "pending=2") {
+		t.Fatalf("status after down = %q, want current_version=4 and pending=2", out.String())
 	}
 
 	files, err := MigrationFiles(Migrations)
@@ -485,5 +565,8 @@ func TestConfirmationMigrationDowngradeFrom005RemovesOnly005(t *testing.T) {
 	}
 	if !relationExists(t, sqlDB, "confirmation_policy_history") {
 		t.Fatal("confirmation_policy_history missing after re-up")
+	}
+	if !relationExists(t, sqlDB, "reorg_recovery") {
+		t.Fatal("reorg_recovery missing after re-up")
 	}
 }

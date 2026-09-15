@@ -46,6 +46,12 @@ const (
 	EnvDepositWatchAddresses = "TXHARBOR_DEPOSIT_WATCH_ADDRESSES"
 	EnvDepositBatchBlocks    = "TXHARBOR_DEPOSIT_BATCH_BLOCKS"
 	EnvConfirmationDepth     = "TXHARBOR_CONFIRMATION_DEPTH"
+	// Reorg recovery (006 FR-03/Q1): required raw max-depth string (no
+	// default; parsed + refused at startup via ParseReorgMaxDepth) plus the
+	// optional replay-batch cap. Poll/retry timing reuses the INDEX knobs
+	// (research R5 timing table — no new knob names).
+	EnvReorgMaxDepth    = "TXHARBOR_REORG_MAX_DEPTH"
+	EnvReorgReplayBatch = "TXHARBOR_REORG_REPLAY_BATCH"
 )
 
 // Defaults from data-model §1. Acceptance runs use these values (FR-013).
@@ -70,6 +76,12 @@ const (
 	// R7: same round-trip trade-off as the 003 log stream; tuning it never
 	// changes history semantics and it is not part of the config identity).
 	DefaultDepositBatchBlocks = uint64(500)
+
+	// DefaultReorgReplayBatch caps one recovery replay range (research R5
+	// timing table: one frontier-advance txn per stream range). It mirrors
+	// the executor's internal default so an unset knob behaves identically
+	// to a directly constructed executor.
+	DefaultReorgReplayBatch = uint64(500)
 
 	// logConfigVersion prefixes the config identity encoding (clarification
 	// A1). The version is part of the hashed input so future encodings never
@@ -119,6 +131,15 @@ type Config struct {
 	// Confirmation tracking (005 FR-03/Q1): required positive threshold N
 	// in [1, MaxInt64] (BIGINT system range, no business cap, no default).
 	ConfirmationDepth uint64
+	// Reorg recovery (006 FR-03/Q1): raw max-depth string, carried through
+	// unparsed — startup parses it via ParseReorgMaxDepth and refuses via
+	// the serve fail() path, so a missing/zero/negative/non-integer/
+	// out-of-representation value never reaches the executor.
+	ReorgMaxDepthRaw string
+	// Replay batch cap for the recovery executor (research R5 timing
+	// table); poll/retry timing reuses IndexPollInterval/IndexRetryInitial/
+	// IndexRetryMax, so no new timing knobs exist.
+	ReorgReplayBatch uint64
 }
 
 // DepositEntry is one normalized `address[:effective]` configuration item: a
@@ -272,6 +293,25 @@ func Load(getenv Getenv) (*Config, error) {
 		c.ConfirmationDepth = n
 	}
 
+	// Reorg recovery (006): the raw max-depth string passes through
+	// unvalidated here — startup (serve.go) parses it and refuses via the
+	// fail() path, keeping one refusal site next to the executor that
+	// binds it. Only the replay-batch cap validates at Load, like the
+	// other batch knobs above.
+	if raw, ok := getenv(EnvReorgMaxDepth); ok {
+		c.ReorgMaxDepthRaw = raw
+	}
+
+	c.ReorgReplayBatch = DefaultReorgReplayBatch
+	if raw, ok := getenv(EnvReorgReplayBatch); ok && raw != "" {
+		n, err := strconv.ParseUint(raw, 10, 64)
+		if err != nil || n == 0 {
+			errs = append(errs, invalid(EnvReorgReplayBatch, "%q is not a positive decimal integer", raw))
+		} else {
+			c.ReorgReplayBatch = n
+		}
+	}
+
 	if raw, ok := getenv(EnvHTTPAddr); ok && raw != "" {
 		if err := validateHTTPAddr(raw); err != nil {
 			errs = append(errs, invalid(EnvHTTPAddr, "%v", err))
@@ -307,13 +347,14 @@ func Load(getenv Getenv) (*Config, error) {
 // one startup echo line (FR-003).
 func (c *Config) Summary() string {
 	return fmt.Sprintf(
-		"pg=%s rpc=%s chain_id=%d start_height=%d http_addr=%s startup_timeout=%s probe_interval=%s probe_timeout=%s shutdown_timeout=%s migrate_lock_timeout=%s index_rpc_timeout=%s index_poll_interval=%s index_retry_initial=%s index_retry_max=%s log_start_height=%d log_contracts=%d log_config_hash=%s log_batch_blocks=%d deposit_start_height=%d deposit_contracts=%d deposit_watch_addresses=%d deposit_config_hash=%s deposit_batch_blocks=%d confirmation_depth=%d",
+		"pg=%s rpc=%s chain_id=%d start_height=%d http_addr=%s startup_timeout=%s probe_interval=%s probe_timeout=%s shutdown_timeout=%s migrate_lock_timeout=%s index_rpc_timeout=%s index_poll_interval=%s index_retry_initial=%s index_retry_max=%s log_start_height=%d log_contracts=%d log_config_hash=%s log_batch_blocks=%d deposit_start_height=%d deposit_contracts=%d deposit_watch_addresses=%d deposit_config_hash=%s deposit_batch_blocks=%d confirmation_depth=%d reorg_max_depth=%s reorg_replay_batch=%d",
 		logx.Redact(c.PGDSN), logx.Redact(c.RPCURL), c.ChainID, c.StartHeight, c.HTTPAddr,
 		c.StartupTimeout, c.ProbeInterval, c.ProbeTimeout, c.ShutdownTimeout, c.MigrateLockTimeout,
 		c.IndexRPCTimeout, c.IndexPollInterval, c.IndexRetryInitial, c.IndexRetryMax,
 		c.LogStartHeight, len(c.LogContracts), c.LogConfigHash, c.LogBatchBlocks,
 		c.DepositStartHeight, len(c.DepositContracts), len(c.DepositWatchAddresses),
-		c.DepositConfigHash, c.DepositBatchBlocks, c.ConfirmationDepth,
+		c.DepositConfigHash, c.DepositBatchBlocks, c.ConfirmationDepth, c.ReorgMaxDepthRaw,
+		c.ReorgReplayBatch,
 	)
 }
 

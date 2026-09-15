@@ -166,6 +166,7 @@ func seedScanTo(t *testing.T, ctx context.Context, pool *pgxpool.Pool, chain *sc
 		h string
 		p string
 	}
+	rcap := testRecoveryCap(t, ctx, pool, scanChainID)
 	chain.mu.Lock()
 	var writes []hw
 	for n := S; n <= N; n++ {
@@ -178,7 +179,7 @@ func seedScanTo(t *testing.T, ctx context.Context, pool *pgxpool.Pool, chain *sc
 	}
 	chain.mu.Unlock()
 	for _, w := range writes {
-		if err := sc.commitBlock(ctx, blockWrite{number: w.n, hash: w.h, parent: w.p, first: w.n == S}); err != nil {
+		if err := sc.commitBlock(ctx, blockWrite{number: w.n, hash: w.h, parent: w.p, first: w.n == S}, rcap); err != nil {
 			t.Fatalf("seed commit %d: %v", w.n, err)
 		}
 	}
@@ -515,6 +516,7 @@ func TestScanUncertainCommitIdempotent(t *testing.T) {
 	if uint64(base.height) != 4 || uint64(base.startHeight) != 4 {
 		t.Fatalf("seeded checkpoint = %+v, want height 4 start 4", base)
 	}
+	rcap := testRecoveryCap(t, ctx, pool, scanChainID)
 	next := uint64(base.height) + 1
 	hn := hashHex(chain.heads[next].Hash())
 	// Parent comes from durable truth, not from a second chain read.
@@ -524,7 +526,7 @@ func TestScanUncertainCommitIdempotent(t *testing.T) {
 		wg.Add(1)
 		go func(i int) {
 			defer wg.Done()
-			errs[i] = seedSC.commitBlock(ctx, blockWrite{number: next, hash: hn, parent: base.hash})
+			errs[i] = seedSC.commitBlock(ctx, blockWrite{number: next, hash: hn, parent: base.hash}, rcap)
 		}(i)
 	}
 	wg.Wait()
@@ -587,10 +589,11 @@ func TestScanDuplicateDeliveryIdempotent(t *testing.T) {
 	defer pool.Close()
 	chain := newScriptChain(31337, 5, 0xAA)
 	_, sc := newScanScanner(t, pool, chain, "scan-a", 4)
+	rcap := testRecoveryCap(t, ctx, pool, scanChainID)
 	h4 := hashHex(chain.heads[4].Hash())
 	p4 := hashHex(chain.heads[4].ParentHash)
 	for i := 0; i < 3; i++ {
-		if err := sc.commitBlock(ctx, blockWrite{number: 4, hash: h4, parent: p4, first: i == 0}); err != nil && !errors.Is(err, errStaleState) {
+		if err := sc.commitBlock(ctx, blockWrite{number: 4, hash: h4, parent: p4, first: i == 0}, rcap); err != nil && !errors.Is(err, errStaleState) {
 			t.Fatalf("delivery %d: %v", i, err)
 		}
 	}

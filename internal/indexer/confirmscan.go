@@ -51,7 +51,7 @@ type confirmationMetrics interface {
 // confirmationCommitter commits one captured candidate. It is satisfied by
 // *ConfirmationCommitter; tests substitute a scripted fake.
 type confirmationCommitter interface {
-	ConfirmDepositUnit(ctx context.Context, lease *Lease, basis ConfirmBasis) error
+	ConfirmDepositUnit(ctx context.Context, lease *Lease, basis ConfirmBasis, rcap RecoveryCapture) error
 }
 
 // confirmationQuerier is satisfied by *pgxpool.Pool: the tick reads run
@@ -203,6 +203,11 @@ func classifyConfirmationOutcome(err error) (confirmOutcome, string) {
 	var drift *ConfirmationDriftError
 	if errors.As(err, &drift) {
 		return confirmHalt, "policy_drift"
+	}
+	if isRecoveryGate(err) {
+		// 006 recovery version moved under the batch: re-tick with a fresh
+		// capture upstream (never re-label old results).
+		return confirmRetryTick, "recovery_gate"
 	}
 	var pause *streamPauseError
 	if errors.As(err, &pause) {
@@ -438,6 +443,29 @@ outer:
 			return err
 		}
 
+		// 006 loop gate (T016): capture the recovery version BEFORE batch
+		// inputs and never start a batch under an active recovery row.
+		rcap, active, err := captureRecoveryVersion(ctx, s.db, s.cfg.ChainID)
+		if err != nil {
+			if ctx.Err() != nil {
+				return nil
+			}
+			s.conState.Store(2)
+			s.observeTick(0, confirmationPolicy{}, confirmationTip{}, false)
+			if !s.wait(ctx, back.next()) {
+				return nil
+			}
+			continue
+		}
+		if active {
+			s.conState.Store(1)
+			s.observeTick(0, confirmationPolicy{}, confirmationTip{}, false)
+			if !s.wait(ctx, poll) {
+				return nil
+			}
+			continue
+		}
+
 		policy, err := s.readConfirmationPolicy(ctx, s.db)
 		if err != nil {
 			if ctx.Err() != nil {
@@ -581,7 +609,7 @@ outer:
 				PolicySeq:  seq,
 				ThresholdN: s.cfg.ThresholdN,
 			}
-			err := s.commit.ConfirmDepositUnit(ctx, lease, basis)
+			err := s.commit.ConfirmDepositUnit(ctx, lease, basis, rcap)
 			outcome, reason := classifyConfirmationOutcome(err)
 			switch outcome {
 			case confirmCommitted:

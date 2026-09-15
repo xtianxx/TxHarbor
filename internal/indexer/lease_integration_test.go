@@ -140,7 +140,7 @@ func tryWriteWithToken(ctx context.Context, pool *pgxpool.Pool, chainID, number 
 	}
 	if _, err := tx.Exec(ctx,
 		`INSERT INTO chain_blocks (chain_id, number, hash, parent_hash)
-		 VALUES ($1, $2, $3, $4) ON CONFLICT (chain_id, number) DO NOTHING`,
+		 VALUES ($1, $2, $3, $4) ON CONFLICT (chain_id, number, hash) DO NOTHING`,
 		chainID, number, hash, parentHash); err != nil {
 		return false, err
 	}

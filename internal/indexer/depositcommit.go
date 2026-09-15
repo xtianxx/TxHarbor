@@ -190,6 +190,7 @@ func (s *DepositScanner) commitDepositUnit(
 	batch depositBatch,
 	captured *depositProgress,
 	a, b uint64,
+	rcap RecoveryCapture,
 ) error {
 	if lease == nil {
 		return errors.New("deposit commit: nil lease")
@@ -250,6 +251,12 @@ func (s *DepositScanner) commitDepositUnit(
 	// All three pause streams must be absent (FR-12); an upstream pause blocks
 	// the deposit commit as well.
 	if err := s.rejectStreamPauses(ctx, tx); err != nil {
+		return err
+	}
+	// 006 recovery gate (T015): same capture/commit-triple/refuse semantics;
+	// 006-owned re-reads (Owned set, identity + phase verified under the lock
+	// inside recheckRecoveryGate) pass where ordinary batches refuse.
+	if _, err := recheckRecoveryGate(ctx, tx, s.cfg.ChainID, rcap); err != nil {
 		return err
 	}
 
@@ -360,6 +367,30 @@ func (s *DepositScanner) commitDepositUnit(
 		if storedContract != obs.contract || uint64(storedNumber) != obs.blockNumber ||
 			storedSender != obs.sender || storedRecipient != obs.recipient ||
 			!amountEqual || storedStatus != depositObservationStatusPending {
+			if storedStatus != depositObservationStatusPending {
+				// Ordinary rule UNCHANGED: any non-pending row fails the
+				// batch. Only 006's own re-reads exempt rows orphaned under
+				// the captured recovery version (the ordinary 004 path stays
+				// stopped during recovery anyway); exempt rows still face
+				// the content comparison below, never an overwrite.
+				exempt, xerr := s.exemptOwnedOrphan(ctx, tx, rcap, id)
+				if xerr != nil {
+					return xerr
+				}
+				if exempt {
+					if storedContract != obs.contract || uint64(storedNumber) != obs.blockNumber ||
+						storedSender != obs.sender || storedRecipient != obs.recipient ||
+						!amountEqual {
+						return &depositIdentityConflictError{
+							identity: id.String(),
+							detail: fmt.Sprintf(
+								"exempt orphan content differs: stored contract=%s block_number=%d sender=%s recipient=%s amount=%s",
+								storedContract, storedNumber, storedSender, storedRecipient, storedAmount),
+						}
+					}
+					continue
+				}
+			}
 			return &depositIdentityConflictError{
 				identity: id.String(),
 				detail: fmt.Sprintf(
@@ -410,6 +441,26 @@ func (s *DepositScanner) commitDepositUnit(
 		return fmt.Errorf("commit deposit unit [%d,%d] (outcome unknown, progress unchanged): %w", a, b, err)
 	}
 	return nil
+}
+
+// exemptOwnedOrphan scopes the 006-owned re-read exemption (T015): only a
+// row orphaned under the captured recovery identity passes, and only past
+// the status check — content is still compared by the caller, and the row is
+// never overwritten. Ordinary calls (Owned == nil) never reach here exempt.
+func (s *DepositScanner) exemptOwnedOrphan(ctx context.Context, tx pgx.Tx, rcap RecoveryCapture, id depositIdentity) (bool, error) {
+	if rcap.Owned == nil {
+		return false, nil
+	}
+	var scope string
+	err := tx.QueryRow(ctx, readDepositOrphanScopeSQL,
+		s.cfg.ChainID, id.blockHash, id.txHash, int64(id.logIndex)).Scan(&scope)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("re-read orphan scope %s: %w", id, err)
+	}
+	return scope != "" && scope == rcap.Owned.RecoveryID, nil
 }
 
 // commitResultVisible re-reads deposit_checkpoint after an uncertain COMMIT
@@ -513,6 +564,13 @@ WHERE chain_id = $1 AND block_hash = $2 AND tx_hash = $3 AND log_index = $4`
 INSERT INTO deposit_config_history
     (chain_id, version_seq, config_hash, prev_seq, start_block, assets, watches, replay_from, operator, request_id)
 VALUES ($1, 1, $2, NULL, $3, $4, $5, $3, 'bootstrap', NULL)`
+
+	// readDepositOrphanScopeSQL names the recovery an orphaned row belongs
+	// to (T015 exemption scope). It is deliberately separate from
+	// readDepositObservationSQL, whose pinned shape must not widen.
+	readDepositOrphanScopeSQL = `
+SELECT COALESCE(orphan_recovery_id, '') FROM deposit_observations
+WHERE chain_id = $1 AND block_hash = $2 AND tx_hash = $3 AND log_index = $4`
 
 	// insertDepositCheckpointSQL atomically creates the progress row on the
 	// first unit; zero rows means stale.

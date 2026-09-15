@@ -325,6 +325,32 @@ func (s *Scanner) ServeLoop(ctx context.Context, checkLost func() error) error {
 			return err
 		}
 
+		// 006 loop gate (T013): capture the recovery version BEFORE batch
+		// inputs and never start a batch under an active recovery row.
+		rcap, active, err := captureRecoveryVersion(ctx, s.pool, s.chainID)
+		if err != nil {
+			if ctx.Err() != nil {
+				return nil
+			}
+			d := back.next()
+			s.setState(StateRetrying, "recovery_capture")
+			s.logger.Warn("recovery capture failed; retrying",
+				"chain_id", s.chainID, "retry_in", d, "error", logx.Redact(err.Error()))
+			if !s.wait(ctx, d) {
+				return nil
+			}
+			continue
+		}
+		if active {
+			s.setState(StateWaiting, "recovery_active")
+			s.logger.Debug("recovery active; ordinary indexing waits",
+				"chain_id", s.chainID, "recovery_seq", rcap.Seq)
+			if !s.wait(ctx, pairPollInterval) {
+				return nil
+			}
+			continue
+		}
+
 		// Expected height and continuity anchor (FR-02/FR-05): the first
 		// block after an empty progress is S (no S-1 read, no parent check);
 		// afterwards it is checkpoint height + 1 and the parent must equal the
@@ -381,7 +407,7 @@ func (s *Scanner) ServeLoop(ctx context.Context, checkLost func() error) error {
 			})
 		}
 
-		err = s.commitBlock(ctx, blockWrite{number: n, hash: hash, parent: parentHash, first: first})
+		err = s.commitBlock(ctx, blockWrite{number: n, hash: hash, parent: parentHash, first: first}, rcap)
 		var hm *hashMismatchError
 		switch {
 		case err == nil:
@@ -419,10 +445,13 @@ func (s *Scanner) ServeLoop(ctx context.Context, checkLost func() error) error {
 			return fmt.Errorf("%w: durable pause row present", errPaused)
 		case errors.Is(err, ErrLeaseLost):
 			return err
-		case errors.Is(err, errStaleState):
+		case errors.Is(err, errStaleState) || isRecoveryGate(err):
 			// A concurrent writer (or an uncertain commit from the previous
-			// iteration) changed the durable state. Re-read it and continue
-			// idempotently; the exact guard decides what actually committed.
+			// iteration) changed the durable state — or a recovery version
+			// moved under us. Re-read and continue idempotently; the exact
+			// guard (or a fresh capture upstream) decides what actually
+			// committed. Recomputation starts a new batch, never re-labels
+			// old results.
 			old := cp
 			ncp, np, rerr := s.loadProgressRetry(ctx)
 			if rerr != nil {
@@ -595,7 +624,9 @@ type blockWrite struct {
 }
 
 // hashMismatchError reports that the same height is already stored with a
-// different hash (FR-12 first arm).
+// different hash (FR-12 first arm). Post-006-migration a height may hold a
+// non-canonical sibling; stored then names the canonical hash at the height
+// (the view the chain diverged from), never an arbitrary sibling.
 type hashMismatchError struct {
 	stored string
 	actual string
@@ -610,7 +641,12 @@ func (e *hashMismatchError) Error() string {
 // There is no special case for an uncertain COMMIT: the next iteration
 // re-fetches the same height and the exact guard settles what actually
 // committed, making reprocessing idempotent (FR-07/FR-13).
-func (s *Scanner) commitBlock(ctx context.Context, w blockWrite) error {
+//
+// rcap carries the loop's pre-inputs recovery capture (006 capture-first
+// discipline); it is a required parameter — there is no commit-entry
+// fallback, so a recovery that establishes and releases between input-read
+// and commit stays visible as a version mismatch.
+func (s *Scanner) commitBlock(ctx context.Context, w blockWrite, rcap RecoveryCapture) error {
 	if w.first && w.number != s.cfg.StartHeight {
 		return errStaleState
 	}
@@ -659,6 +695,13 @@ func (s *Scanner) commitBlock(ctx context.Context, w blockWrite) error {
 	if err != nil {
 		return fmt.Errorf("lease verdict: %w", err)
 	}
+	// 006 recovery gate (T013): capture-first/commit-triple beside the
+	// existing verdicts. An ordinary batch refuses on any active row or
+	// version mismatch with zero writes and zero progress, even on full
+	// content coincidence; recomputation starts a new batch upstream.
+	if _, err := recheckRecoveryGate(ctx, tx, s.chainID, rcap); err != nil {
+		return err
+	}
 	if w.first {
 		// First block: no checkpoint row may exist at all, and the number is
 		// S (checked above); no parent check for this boundary (FR-05).
@@ -680,16 +723,27 @@ func (s *Scanner) commitBlock(ctx context.Context, w blockWrite) error {
 		}
 	}
 
-	// Step 5: write the block, re-read the same height inside the transaction
-	// and never trust in-memory knowledge (FR-07: idempotent convergence).
+	// Step 5: write the block sibling-aware (006 R2 linkage), re-read the
+	// same height inside the transaction and never trust in-memory knowledge
+	// (FR-07: idempotent convergence). Same number+hash is an idempotent
+	// rescan (DO NOTHING, correct); same number + different hash inserts a
+	// sibling row (no conflict) as fork evidence for the adjudication below.
 	if _, err := tx.Exec(ctx, insertBlockSQL, s.chainID, w.number, w.hash, w.parent); err != nil {
 		return fmt.Errorf("insert block: %w", err)
 	}
-	var stored string
-	if err := tx.QueryRow(ctx, blockHashSQL, s.chainID, w.number).Scan(&stored); err != nil {
-		return fmt.Errorf("re-read block hash: %w", err)
+	storedHashes, err := queryBlockHashes(ctx, tx, s.chainID, w.number)
+	if err != nil {
+		return fmt.Errorf("re-read block hashes: %w", err)
 	}
-	if stored != w.hash {
+	if len(storedHashes) != 1 || storedHashes[0] != w.hash {
+		// Sibling fork evidence at this height (T008): the recovery gate
+		// above already refused every batch under an active recovery, so
+		// reaching here means the ordinary path owns this evidence — route
+		// to the preserved hash_mismatch pause.
+		stored, qerr := canonicalHashAtHeight(ctx, tx, s.chainID, w.number, storedHashes, w.hash)
+		if qerr != nil {
+			return qerr
+		}
 		return &hashMismatchError{stored: stored, actual: w.hash}
 	}
 
@@ -710,6 +764,50 @@ func (s *Scanner) commitBlock(ctx context.Context, w blockWrite) error {
 		return fmt.Errorf("commit block %d: %w", w.number, err)
 	}
 	return nil
+}
+
+// queryBlockHashes lists every stored hash at a height in hash order.
+// Callers run it inside their write transaction so the snapshot includes
+// the row just written above.
+func queryBlockHashes(ctx context.Context, tx pgx.Tx, chainID int64, number uint64) ([]string, error) {
+	rows, err := tx.Query(ctx, siblingHashesSQL, chainID, number)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []string
+	for rows.Next() {
+		var h string
+		if err := rows.Scan(&h); err != nil {
+			return nil, err
+		}
+		out = append(out, h)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+// canonicalHashAtHeight names the stored hash a same-height divergence is
+// reported against: the canonical hash when one is effective, otherwise the
+// first foreign hash from the in-txn sibling list (no extra read needed).
+func canonicalHashAtHeight(ctx context.Context, tx pgx.Tx, chainID int64, number uint64, siblings []string, actual string) (string, error) {
+	var stored string
+	err := tx.QueryRow(ctx, canonicalHashSQL, chainID, number).Scan(&stored)
+	switch {
+	case err == nil:
+		return stored, nil
+	case errors.Is(err, pgx.ErrNoRows):
+		for _, h := range siblings {
+			if h != actual {
+				return h, nil
+			}
+		}
+		return actual, nil
+	default:
+		return "", fmt.Errorf("re-read canonical hash: %w", err)
+	}
 }
 
 // pauseInfo describes one divergence to persist.
@@ -802,7 +900,7 @@ func (s *Scanner) commitPause(ctx context.Context, p pauseInfo) error {
 	switch p.kind {
 	case pauseHashMismatch:
 		var stored string
-		err := tx.QueryRow(ctx, blockHashSQL, s.chainID, p.height).Scan(&stored)
+		err := tx.QueryRow(ctx, canonicalHashSQL, s.chainID, p.height).Scan(&stored)
 		if errors.Is(err, pgx.ErrNoRows) || (err == nil && (stored != p.expected || stored == p.actual)) {
 			return errStaleState
 		}
@@ -1022,9 +1120,17 @@ WHERE chain_id = $1 AND height = $2 AND block_hash = $3`
 	insertBlockSQL = `
 INSERT INTO chain_blocks (chain_id, number, hash, parent_hash)
 VALUES ($1, $2, $3, $4)
-ON CONFLICT (chain_id, number) DO NOTHING`
+ON CONFLICT (chain_id, number, hash) DO NOTHING`
 
-	blockHashSQL = `SELECT hash FROM chain_blocks WHERE chain_id = $1 AND number = $2`
+	// siblingHashesSQL lists every stored hash at a height (post-006 the PK
+	// holds both forks). Rows arrive in hash order so the single-row case
+	// is deterministic.
+	siblingHashesSQL = `SELECT hash FROM chain_blocks WHERE chain_id = $1 AND number = $2 ORDER BY hash`
+
+	// canonicalHashSQL reads the single canonical hash at a height (the
+	// partial UNIQUE guarantees at most one row; no row means no canonical
+	// view is effective there).
+	canonicalHashSQL = `SELECT hash FROM chain_blocks WHERE chain_id = $1 AND number = $2 AND canonical`
 
 	insertCheckpointSQL = `
 INSERT INTO indexer_checkpoint (chain_id, height, block_hash, start_height)

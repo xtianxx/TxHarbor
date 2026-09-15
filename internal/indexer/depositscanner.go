@@ -1293,6 +1293,27 @@ func (s *DepositScanner) ServeLoop(ctx context.Context, lease *Lease, checkLost 
 			return err
 		}
 
+		// 006 loop gate (T015): capture the recovery version BEFORE batch
+		// inputs and never start a batch under an active recovery row.
+		rcap, active, err := captureRecoveryVersion(ctx, s.pool, s.cfg.ChainID)
+		if err != nil {
+			if ctx.Err() != nil {
+				return nil
+			}
+			s.depState.Store(2)
+			if !s.wait(ctx, back.next()) {
+				return nil
+			}
+			continue
+		}
+		if active {
+			s.depState.Store(1)
+			if !s.wait(ctx, poll) {
+				return nil
+			}
+			continue
+		}
+
 		progress, err := s.readProgress(ctx, s.pool)
 		if err != nil {
 			var corrupt *depositCorruptStateError
@@ -1390,7 +1411,7 @@ func (s *DepositScanner) ServeLoop(ctx context.Context, lease *Lease, checkLost 
 			return err
 		}
 
-		err = s.commitDepositUnit(ctx, lease, unit, batch, progress, a, b)
+		err = s.commitDepositUnit(ctx, lease, unit, batch, progress, a, b, rcap)
 		switch {
 		case err == nil:
 			// Only a committed unit is counted: rolled-back units are retried
@@ -1408,9 +1429,10 @@ func (s *DepositScanner) ServeLoop(ctx context.Context, lease *Lease, checkLost 
 			s.depNext.Store(b + 1)
 			s.depHasProgress.Store(true)
 			back.reset()
-		case errors.Is(err, errDepositVersionMismatch), errors.Is(err, errStaleState):
-			// The captured basis moved under us (version isolation or a
-			// concurrent writer): nothing committed, re-read and continue.
+		case errors.Is(err, errDepositVersionMismatch), errors.Is(err, errStaleState), isRecoveryGate(err):
+			// The captured basis moved under us (version isolation, a
+			// concurrent writer, or a recovery version): nothing committed,
+			// re-read and continue with a fresh capture upstream.
 			continue
 		case errors.Is(err, ErrLeaseLost):
 			return fmt.Errorf("%w (deposit commit: %v)", ErrLeaseLost, err)

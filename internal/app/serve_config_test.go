@@ -127,6 +127,7 @@ func fullServeEnv(addr string) map[string]string {
 		config.EnvDepositContracts:      "0x1111111111111111111111111111111111111111",
 		config.EnvDepositWatchAddresses: "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
 		config.EnvConfirmationDepth:     "10",
+		config.EnvReorgMaxDepth:         "100",
 		config.EnvHTTPAddr:              addr,
 	}
 }

@@ -322,7 +322,7 @@ func logscanSeedBlocks(t *testing.T, ctx context.Context, pool *pgxpool.Pool, ch
 	for _, r := range rows {
 		if _, err := tx.Exec(ctx, `
 INSERT INTO chain_blocks (chain_id, number, hash, parent_hash)
-VALUES ($1, $2, $3, $4) ON CONFLICT (chain_id, number) DO NOTHING`,
+VALUES ($1, $2, $3, $4) ON CONFLICT (chain_id, number, hash) DO NOTHING`,
 			chainID, int64(r.number), r.hash, r.parent); err != nil {
 			t.Fatalf("seed chain_blocks at %d: %v", r.number, err)
 		}
@@ -1123,6 +1123,7 @@ FROM erc20_transfer_logs WHERE chain_id = $1`, chainID).Scan(&rows, &distinct); 
 
 	// Replay the identical interval: the in-memory dedup converges, and the
 	// durable guard refuses a second delivery with zero new rows.
+	rcap := testRecoveryCap(t, ctx, pool, chainID)
 	coverage := logscanCoverage(t, chain, 0, 2)
 	typesLogs := make([]types.Log, 0, len(shuffled))
 	for _, want := range []uint64{2, 1, 0} {
@@ -1136,7 +1137,7 @@ FROM erc20_transfer_logs WHERE chain_id = $1`, chainID).Scan(&rows, &distinct); 
 		t.Fatalf("replayed batch = %d rows, want 3 after dedup", len(replayed))
 	}
 	before := logscanSnapshot(t, ctx, pool, chainID)
-	if err := ls.commitLogRange(ctx, 0, 2, true, coverage, replayed); !errors.Is(err, errStaleState) {
+	if err := ls.commitLogRange(ctx, 0, 2, true, coverage, replayed, rcap); !errors.Is(err, errStaleState) {
 		t.Fatalf("replayed interval = %v, want errStaleState", err)
 	}
 	logscanRequireStateUnchanged(t, before, logscanSnapshot(t, ctx, pool, chainID))
@@ -1184,6 +1185,7 @@ func TestLogScanConflictFailsWholeBatch(t *testing.T) {
 
 	// The batch carries the same identity at height 0 with one changed byte
 	// (its stored row must win) plus a genuinely new identity at height 1.
+	rcap := testRecoveryCap(t, ctx, pool, chainID)
 	conflict := logscanTypesLog(t, chain, 0, 0, contract, 999)
 	fresh := logscanTypesLog(t, chain, 1, 1, contract, 7)
 	coverage := logscanCoverage(t, chain, 0, 2)
@@ -1191,7 +1193,7 @@ func TestLogScanConflictFailsWholeBatch(t *testing.T) {
 	if err != nil {
 		t.Fatalf("validateLogs(conflict batch) = %v, want nil (conflict is a DB verdict)", err)
 	}
-	err = ls.commitLogRange(ctx, 0, 2, false, coverage, rows)
+	err = ls.commitLogRange(ctx, 0, 2, false, coverage, rows, rcap)
 	wantClass(t, err, classIdentityConflict)
 	if !errors.Is(err, errStaleState) && !errors.As(err, new(*logValidationError)) {
 		t.Fatalf("commit conflict error = %v, want *logValidationError", err)
@@ -1945,6 +1947,7 @@ FROM erc20_transfer_logs WHERE chain_id = $1`, chainID).Scan(&rows, &distinct); 
 	// Delayed stale-token commit for the very range the new owner committed:
 	// zero rows, zero progress change.
 	before := logscanSnapshot(t, ctx, pool, chainID)
+	rcap := testRecoveryCap(t, ctx, pool, chainID)
 	staleRows := make([]logRow, 0, 3)
 	for n := uint64(2); n <= head; n++ {
 		chain.mu.Lock()
@@ -1962,7 +1965,7 @@ FROM erc20_transfer_logs WHERE chain_id = $1`, chainID).Scan(&rows, &distinct); 
 			data:        "0x" + strings.Repeat("00", 32),
 		})
 	}
-	err = scA.commitLogRange(ctx, 2, head, false, logscanCoverage(t, chain, 2, head), staleRows)
+	err = scA.commitLogRange(ctx, 2, head, false, logscanCoverage(t, chain, 2, head), staleRows, rcap)
 	if !errors.Is(err, ErrLeaseLost) {
 		t.Fatalf("stale delayed commit = %v, want ErrLeaseLost", err)
 	}

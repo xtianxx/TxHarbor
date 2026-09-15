@@ -61,6 +61,7 @@ func TestReadyzFlipsAndRecoversWithRealDependencies(t *testing.T) {
 				"TXHARBOR_DEPOSIT_CONTRACTS":       "0x1111111111111111111111111111111111111111:0",
 				"TXHARBOR_DEPOSIT_WATCH_ADDRESSES": "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:0",
 				"TXHARBOR_CONFIRMATION_DEPTH":      "10",
+				"TXHARBOR_REORG_MAX_DEPTH":         "25",
 				"TXHARBOR_HTTP_ADDR":               addr,
 			}),
 			Stderr:  os.Stderr,

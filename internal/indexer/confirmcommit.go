@@ -125,7 +125,12 @@ func parseNumericConfirmations(s string) (uint64, error) {
 // the conditional UPDATE plus, on the first confirmation, the policy
 // bootstrap row land in one short transaction. basis carries the captured
 // (T, TH, S, N); the caller must hold the lease.
-func (c *ConfirmationCommitter) ConfirmDepositUnit(ctx context.Context, lease *Lease, basis ConfirmBasis) error {
+//
+// rcap carries the loop's pre-inputs recovery capture (006 capture-first
+// discipline); it is a required parameter — there is no commit-entry
+// fallback, so a recovery that establishes and releases between input-read
+// and commit stays visible as a version mismatch.
+func (c *ConfirmationCommitter) ConfirmDepositUnit(ctx context.Context, lease *Lease, basis ConfirmBasis, rcap RecoveryCapture) error {
 	if lease == nil {
 		return errors.New("confirmation commit: nil lease")
 	}
@@ -198,6 +203,15 @@ func (c *ConfirmationCommitter) ConfirmDepositUnit(ctx context.Context, lease *L
 		default:
 			return fmt.Errorf("read %s: %w", stream.name, err)
 		}
+	}
+	// 006 recovery gate (T016): same capture/commit-triple/refuse semantics.
+	// Orphaned rows route to the ChainViewError stop below (behavior
+	// unchanged, now reachable — status, never column non-NULLness, keys
+	// effectiveness; reconfirmation overwrites confirm_* with the NEW basis
+	// while the old survives only in transition rows; 005 policy/data meaning
+	// untouched).
+	if _, err := recheckRecoveryGate(ctx, tx, c.cfg.ChainID, rcap); err != nil {
+		return err
 	}
 
 	// Policy guard: the effective policy (MAX policy_seq row) must equal the
@@ -284,6 +298,10 @@ func (c *ConfirmationCommitter) ConfirmDepositUnit(ctx context.Context, lease *L
 		return fmt.Errorf("re-read confirmation candidate: %w", err)
 	}
 	if storedStatus != "confirmed" && storedStatus != "pending" {
+		// 006 orphaned rows land here (ChainViewError-stop, never a pause
+		// write): the candidate filter selects pending only, so an orphaned
+		// row reaching commit is a version race the gate above already
+		// refused — this is the second layer, behavior unchanged.
 		return &ConfirmationChainViewError{detail: fmt.Sprintf("candidate status %q is neither pending nor confirmed", storedStatus)}
 	}
 	if storedStatus != "pending" || storedNumber < 0 || uint64(storedNumber) != basis.Height || storedHash != basis.BlockHash {

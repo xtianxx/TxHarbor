@@ -97,10 +97,10 @@ func TestConfirmDepositUnitPreTransactionGuards(t *testing.T) {
 	ctx := context.Background()
 	c := &ConfirmationCommitter{cfg: ConfirmationConfig{ChainID: 7, ThresholdN: 10}}
 
-	if err := c.ConfirmDepositUnit(ctx, nil, ConfirmBasis{ThresholdN: 10, PolicySeq: 1}); err == nil {
+	if err := c.ConfirmDepositUnit(ctx, nil, ConfirmBasis{ThresholdN: 10, PolicySeq: 1}, RecoveryCapture{}); err == nil {
 		t.Fatal("ConfirmDepositUnit(nil lease) = nil error, want rejection")
 	}
-	if err := c.ConfirmDepositUnit(ctx, &Lease{}, ConfirmBasis{ThresholdN: 9, PolicySeq: 1}); err == nil {
+	if err := c.ConfirmDepositUnit(ctx, &Lease{}, ConfirmBasis{ThresholdN: 9, PolicySeq: 1}, RecoveryCapture{}); err == nil {
 		t.Fatal("ConfirmDepositUnit(N=9 vs cfg 10) = nil error, want rejection")
 	} else {
 		var drift *ConfirmationDriftError
@@ -108,7 +108,7 @@ func TestConfirmDepositUnitPreTransactionGuards(t *testing.T) {
 			t.Fatalf("ConfirmDepositUnit(N=9 vs cfg 10) = %v (%T), want *ConfirmationDriftError", err, err)
 		}
 	}
-	if err := c.ConfirmDepositUnit(ctx, &Lease{}, ConfirmBasis{ThresholdN: 10, PolicySeq: 0}); err == nil {
+	if err := c.ConfirmDepositUnit(ctx, &Lease{}, ConfirmBasis{ThresholdN: 10, PolicySeq: 0}, RecoveryCapture{}); err == nil {
 		t.Fatal("ConfirmDepositUnit(S=0) = nil error, want rejection")
 	} else {
 		var drift *ConfirmationDriftError

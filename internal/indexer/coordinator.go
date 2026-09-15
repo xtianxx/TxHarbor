@@ -63,6 +63,16 @@ func RunQuatro(ctx context.Context, lease leaseSession, headerServe, logServe, d
 	return runStreams(ctx, lease, []ServeFunc{headerServe, logServe, depositServe, confirmServe})
 }
 
+// RunQuatroPlusRecovery is the five-stream service (006 reorg recovery):
+// the four ordinary loops plus the recovery executor under the same single
+// lease acquisition loop and heartbeat (T017). It rides runStreams
+// unchanged — no new lock order, no second coordination primitive; lease.go
+// needs zero changes. Startup/loop/health readers observe the recovery row
+// via LoadRecoveryState the same way they read pause rows today.
+func RunQuatroPlusRecovery(ctx context.Context, lease leaseSession, headerServe, logServe, depositServe, confirmServe, recoveryServe ServeFunc) error {
+	return runStreams(ctx, lease, []ServeFunc{headerServe, logServe, depositServe, confirmServe, recoveryServe})
+}
+
 // runStreams is the shared acquisition loop behind RunPair/RunTrio/RunQuatro.
 func runStreams(ctx context.Context, lease leaseSession, serves []ServeFunc) error {
 	if lease == nil {

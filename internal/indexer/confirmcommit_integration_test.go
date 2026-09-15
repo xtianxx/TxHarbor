@@ -101,9 +101,10 @@ func TestConfirmCommitHappyPath(t *testing.T) {
 	confirmSeedPolicyRow(t, ctx, pool, chainID, 1, int64(n), nil, "bootstrap", nil)
 
 	c, lease := confirmCommitter(t, pool, chainID, n)
+	rcap := testRecoveryCap(t, ctx, pool, chainID)
 	basis := ConfirmBasis{BlockHash: bh, TxHash: txHash, Height: h,
 		TipNumber: tip, TipHash: depositBlockHash(tip), PolicySeq: 1, ThresholdN: n}
-	if err := c.ConfirmDepositUnit(ctx, lease, basis); err != nil {
+	if err := c.ConfirmDepositUnit(ctx, lease, basis, rcap); err != nil {
 		t.Fatalf("ConfirmDepositUnit(): %v", err)
 	}
 
@@ -134,9 +135,10 @@ func TestConfirmCommitBootstrap(t *testing.T) {
 	bh, txHash := confirmSeedPending(t, ctx, pool, chainID, h)
 
 	c, lease := confirmCommitter(t, pool, chainID, n)
+	rcap := testRecoveryCap(t, ctx, pool, chainID)
 	basis := ConfirmBasis{BlockHash: bh, TxHash: txHash, Height: h,
 		TipNumber: tip, TipHash: depositBlockHash(tip), PolicySeq: 1, ThresholdN: n}
-	if err := c.ConfirmDepositUnit(ctx, lease, basis); err != nil {
+	if err := c.ConfirmDepositUnit(ctx, lease, basis, rcap); err != nil {
 		t.Fatalf("ConfirmDepositUnit() bootstrap: %v", err)
 	}
 
@@ -173,9 +175,10 @@ func TestConfirmCommitPolicyDrift(t *testing.T) {
 	confirmSeedPolicyRow(t, ctx, pool, chainID, 2, 20, 1, "operator", "req-1")
 
 	c, lease := confirmCommitter(t, pool, chainID, n)
+	rcap := testRecoveryCap(t, ctx, pool, chainID)
 	basis := ConfirmBasis{BlockHash: bh, TxHash: txHash, Height: h,
 		TipNumber: tip, TipHash: depositBlockHash(tip), PolicySeq: 1, ThresholdN: n}
-	err := c.ConfirmDepositUnit(ctx, lease, basis)
+	err := c.ConfirmDepositUnit(ctx, lease, basis, rcap)
 	var drift *ConfirmationDriftError
 	if !errors.As(err, &drift) {
 		t.Fatalf("ConfirmDepositUnit() = %v (%T), want *ConfirmationDriftError", err, err)
@@ -197,9 +200,10 @@ func TestConfirmCommitTipMismatch(t *testing.T) {
 	confirmSeedPolicyRow(t, ctx, pool, chainID, 1, int64(n), nil, "bootstrap", nil)
 
 	c, lease := confirmCommitter(t, pool, chainID, n)
+	rcap := testRecoveryCap(t, ctx, pool, chainID)
 	basis := ConfirmBasis{BlockHash: bh, TxHash: txHash, Height: h,
 		TipNumber: tip, TipHash: depositBlockHash(tip), PolicySeq: 1, ThresholdN: n}
-	err := c.ConfirmDepositUnit(ctx, lease, basis)
+	err := c.ConfirmDepositUnit(ctx, lease, basis, rcap)
 	var chainView *ConfirmationChainViewError
 	if !errors.As(err, &chainView) {
 		t.Fatalf("ConfirmDepositUnit() = %v (%T), want *ConfirmationChainViewError", err, err)
@@ -226,9 +230,10 @@ INSERT INTO deposit_pause (chain_id, height, kind, detail) VALUES ($1, 10, 'upst
 	}
 
 	c, lease := confirmCommitter(t, pool, chainID, n)
+	rcap := testRecoveryCap(t, ctx, pool, chainID)
 	basis := ConfirmBasis{BlockHash: bh, TxHash: txHash, Height: h,
 		TipNumber: tip, TipHash: depositBlockHash(tip), PolicySeq: 1, ThresholdN: n}
-	err := c.ConfirmDepositUnit(ctx, lease, basis)
+	err := c.ConfirmDepositUnit(ctx, lease, basis, rcap)
 	var paused *streamPauseError
 	if !errors.As(err, &paused) || paused.stream != "deposit_pause" {
 		t.Fatalf("ConfirmDepositUnit() = %v (%T), want *streamPauseError for deposit_pause", err, err)
@@ -253,9 +258,10 @@ func TestConfirmCommitBelowDepth(t *testing.T) {
 	confirmSeedPolicyRow(t, ctx, pool, chainID, 1, int64(n), nil, "bootstrap", nil)
 
 	c, lease := confirmCommitter(t, pool, chainID, n)
+	rcap := testRecoveryCap(t, ctx, pool, chainID)
 	basis := ConfirmBasis{BlockHash: bh, TxHash: txHash, Height: h,
 		TipNumber: tip, TipHash: depositBlockHash(tip), PolicySeq: 1, ThresholdN: n}
-	err := c.ConfirmDepositUnit(ctx, lease, basis)
+	err := c.ConfirmDepositUnit(ctx, lease, basis, rcap)
 	var chainView *ConfirmationChainViewError
 	if !errors.As(err, &chainView) {
 		t.Fatalf("ConfirmDepositUnit() = %v (%T), want *ConfirmationChainViewError (below depth)", err, err)
@@ -279,9 +285,10 @@ func TestConfirmCommitReferenceDivergence(t *testing.T) {
 	confirmSeedPolicyRow(t, ctx, pool, chainID, 1, int64(n), nil, "bootstrap", nil)
 
 	c, lease := confirmCommitter(t, pool, chainID, n)
+	rcap := testRecoveryCap(t, ctx, pool, chainID)
 	basis := ConfirmBasis{BlockHash: forged, TxHash: depositTxHash(h, 0), Height: h,
 		TipNumber: tip, TipHash: depositBlockHash(tip), PolicySeq: 1, ThresholdN: n}
-	err := c.ConfirmDepositUnit(ctx, lease, basis)
+	err := c.ConfirmDepositUnit(ctx, lease, basis, rcap)
 	var chainView *ConfirmationChainViewError
 	if !errors.As(err, &chainView) {
 		t.Fatalf("ConfirmDepositUnit() = %v (%T), want *ConfirmationChainViewError (hash divergence)", err, err)
@@ -303,12 +310,13 @@ func TestConfirmCommitConvergesWhenAlreadyConfirmed(t *testing.T) {
 	confirmSeedPolicyRow(t, ctx, pool, chainID, 1, int64(n), nil, "bootstrap", nil)
 
 	c, lease := confirmCommitter(t, pool, chainID, n)
+	rcap := testRecoveryCap(t, ctx, pool, chainID)
 	basis := ConfirmBasis{BlockHash: bh, TxHash: txHash, Height: h,
 		TipNumber: tip, TipHash: depositBlockHash(tip), PolicySeq: 1, ThresholdN: n}
-	if err := c.ConfirmDepositUnit(ctx, lease, basis); err != nil {
+	if err := c.ConfirmDepositUnit(ctx, lease, basis, rcap); err != nil {
 		t.Fatalf("first ConfirmDepositUnit(): %v", err)
 	}
-	if err := c.ConfirmDepositUnit(ctx, lease, basis); err != nil {
+	if err := c.ConfirmDepositUnit(ctx, lease, basis, rcap); err != nil {
 		t.Fatalf("repeat ConfirmDepositUnit() = %v, want nil (converge)", err)
 	}
 	status, _, tipN, _, seq, _, conf := confirmReadBasis(t, ctx, pool, chainID, bh, txHash)
