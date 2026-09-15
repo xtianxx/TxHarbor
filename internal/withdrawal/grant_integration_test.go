@@ -427,6 +427,107 @@ func runTwin(t *testing.T, ctx context.Context, pool *pgxpool.Pool, a, b OpInput
 	}
 }
 
+// grantAuditCallerByOp reads the single audit row recorded for operationID and
+// returns its caller_id, failing unless exactly one row exists. It proves the
+// stored caller attribution directly, never inferring it from a return code.
+func grantAuditCallerByOp(t *testing.T, ctx context.Context, pool *pgxpool.Pool, operationID string) int64 {
+	t.Helper()
+	rows, err := pool.Query(ctx,
+		`SELECT caller_id FROM withdrawal_grant_audit WHERE operation_id = $1`, operationID)
+	if err != nil {
+		t.Fatalf("query audit caller for operation %q: %v", operationID, err)
+	}
+	defer rows.Close()
+	var (
+		callerID int64
+		n        int
+	)
+	for rows.Next() {
+		if err := rows.Scan(&callerID); err != nil {
+			t.Fatalf("scan audit caller for operation %q: %v", operationID, err)
+		}
+		n++
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("iterate audit caller for operation %q: %v", operationID, err)
+	}
+	if n != 1 {
+		t.Fatalf("audit rows for operation %q = %d, want exactly 1", operationID, n)
+	}
+	return callerID
+}
+
+// TestWithdrawalGrantRevokeMissingGrantRefusalRecordedCallerZero covers revoke
+// item #3: a revoke carries no caller input by design, so a revoke on a missing
+// grant records `supply_refused` with caller_id 0 — an honest unattributable
+// marker (never a fabricated caller, never operator-as-caller). That O is then
+// a recorded refusal forever: same-O retries add no row and never upgrade to
+// success, even after the grant is later supplied.
+func TestWithdrawalGrantRevokeMissingGrantRefusalRecordedCallerZero(t *testing.T) {
+	ctx, pool := grantSetup(t)
+	grantSeedCaller(t, ctx, pool, 7201)
+
+	const (
+		authID = "auth-revoke-miss"
+		opID   = "f0000000000000000000000000000001"
+	)
+
+	// Phase 1: revoke a grant that was never supplied → recorded refusal with
+	// caller_id 0, and zero grant rows.
+	out, err := RevokeGrant(ctx, pool, opID, authID, "operator-revoke", "no grant yet")
+	if err != nil {
+		t.Fatalf("revoke on missing grant: %v", err)
+	}
+	if out.Action != grantOutcomeSupplyRefused {
+		t.Fatalf("outcome = %+v, want %s", out, grantOutcomeSupplyRefused)
+	}
+	if n := grantCount(t, ctx, pool, authID); n != 0 {
+		t.Fatalf("grant rows after revoke-miss = %d, want 0 (nothing to revoke)", n)
+	}
+	if callerID := grantAuditCallerByOp(t, ctx, pool, opID); callerID != 0 {
+		t.Fatalf("audit caller_id = %d, want 0 (honest unattributable marker)", callerID)
+	}
+
+	// Phase 2: same-O retry with different operator/reason → the recorded
+	// refusal, still no second row (operator/reason are retry metadata).
+	retry, err := RevokeGrant(ctx, pool, opID, authID, "operator-retry", "retry reason")
+	if err != nil {
+		t.Fatalf("same-O revoke retry: %v", err)
+	}
+	if retry.Action != grantOutcomeSupplyRefused {
+		t.Fatalf("retry outcome = %+v, want recorded %s", retry, grantOutcomeSupplyRefused)
+	}
+	if n := grantAuditCountByOp(t, ctx, pool, opID); n != 1 {
+		t.Fatalf("audit rows for O after retry = %d, want 1 (no new row)", n)
+	}
+
+	// Phase 3: the grant is later supplied, then the SAME O retries yet again —
+	// the recorded refusal is never upgraded, the revoke UPDATE rolls back with
+	// the conflicting audit INSERT, and the newly supplied grant stays active.
+	if _, err := SupplyGrant(ctx, pool, grantTestOp("f0000000000000000000000000000002", authID, 7201, "100"), "op", "late supply"); err != nil {
+		t.Fatalf("late supply: %v", err)
+	}
+	late, err := RevokeGrant(ctx, pool, opID, authID, "operator-late", "retry after supply")
+	if err != nil {
+		t.Fatalf("same-O revoke retry after supply: %v", err)
+	}
+	if late.Action != grantOutcomeSupplyRefused {
+		t.Fatalf("retry-after-supply outcome = %+v, want recorded %s (never upgraded)", late, grantOutcomeSupplyRefused)
+	}
+	if state, _ := grantStateAndAmount(t, ctx, pool, authID); state != "active" {
+		t.Fatalf("grant state after refused-O retry = %q, want active (revoke rolled back)", state)
+	}
+	if callerID := grantAuditCallerByOp(t, ctx, pool, opID); callerID != 0 {
+		t.Fatalf("audit caller_id after retries = %d, want 0", callerID)
+	}
+	if n := grantAuditCountByOp(t, ctx, pool, opID); n != 1 {
+		t.Fatalf("audit rows for O = %d, want exactly 1", n)
+	}
+	if acted := grantAuditActions(t, ctx, pool, authID); !hasAction(acted, grantOutcomeSupplyRefused) || !hasAction(acted, grantOutcomeSupplied) {
+		t.Fatalf("audit actions = %v, want one supply_refused (the refused O) + one supplied (late supply)", acted)
+	}
+}
+
 func hasAction(actions []string, want string) bool {
 	for _, a := range actions {
 		if a == want {

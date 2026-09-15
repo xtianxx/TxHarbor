@@ -5,6 +5,7 @@
 package app
 
 import (
+	"encoding/base64"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -139,6 +140,55 @@ func TestWithdrawalHTTPErrorBodiesCarryTraceID(t *testing.T) {
 			}
 			if header := rec.Header().Get("X-Request-Trace-Id"); header != body.TraceID {
 				t.Fatalf("header trace = %q, body trace = %q; want equal", header, body.TraceID)
+			}
+		})
+	}
+}
+
+// TestWithdrawalHTTPNilPoolIs503 covers the miswired-pool defect on both routes:
+// with a well-formed Bearer credential and a nil Pool, GET and POST both answer
+// 503 temporarily_unavailable carrying the retry instruction, and neither
+// panics. No audit row can be written because no database call is reached.
+func TestWithdrawalHTTPNilPoolIs503(t *testing.T) {
+	wellFormedKey := "txh_" + base64.RawURLEncoding.EncodeToString(make([]byte, 32))
+	cases := []struct {
+		name, method, target, body string
+	}{
+		{
+			name:   "GET with valid Bearer",
+			method: http.MethodGet,
+			target: "/withdrawals/wr-00112233445566778899aabbccddeeff",
+		},
+		{
+			name:   "POST with valid JSON and Bearer",
+			method: http.MethodPost,
+			target: "/withdrawals",
+			body:   `{"idempotency_key":"idem-1","chain_id":31337,"asset":"0x0000000000000000000000000000000000000000","recipient":"0x0000000000000000000000000000000000000000","amount":"100"}`,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			h := &WithdrawalHandler{Pool: nil}
+			req := httptest.NewRequest(tc.method, tc.target, strings.NewReader(tc.body))
+			req.Header.Set("Authorization", "Bearer "+wellFormedKey)
+			rec := httptest.NewRecorder()
+			h.ServeHTTP(rec, req)
+
+			if rec.Code != http.StatusServiceUnavailable {
+				t.Fatalf("status = %d, want 503", rec.Code)
+			}
+			var body withdrawalErrorResponse
+			if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+				t.Fatalf("decode error body: %v", err)
+			}
+			if body.Code != string(withdrawal.CodeTemporarilyUnavailable) {
+				t.Fatalf("code = %q, want %q", body.Code, withdrawal.CodeTemporarilyUnavailable)
+			}
+			if body.Message != withdrawalUnavailableMessage {
+				t.Fatalf("message = %q, want %q", body.Message, withdrawalUnavailableMessage)
+			}
+			if !strings.Contains(body.Message, "retry with the same idempotency key") {
+				t.Fatalf("message %q lacks the retry instruction", body.Message)
 			}
 		})
 	}

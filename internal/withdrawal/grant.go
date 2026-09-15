@@ -444,7 +444,7 @@ func runRevokeTx(ctx context.Context, pool *pgxpool.Pool, op OpInput, operator, 
 		callerID int64
 	)
 	switch {
-	case grant == nil: // missing grant on revoke → refused, nothing to attribute
+	case grant == nil: // missing grant on revoke → refused; caller_id stays 0 = honest unattributable marker (no grant to attribute and no approved caller input; never operator-as-caller)
 		action = grantOutcomeSupplyRefused
 	case grant.state == "active":
 		tag, err := tx.Exec(ctx, grantRevokeSQL, op.AuthorizationID)

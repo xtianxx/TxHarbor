@@ -121,11 +121,15 @@ func parsePresented(presented string) bool {
 // enforce.
 //
 // pool may be nil when presented fails the pre-flight shape check (empty or
-// malformed), because that path returns before the pool is used; any
-// well-formed key requires a non-nil pool.
+// malformed), because that path returns before the pool is used; a well-formed
+// key with a nil pool is an internal miswiring and returns
+// *Error{Code: CodeTemporarilyUnavailable} instead of panicking.
 func Authenticate(ctx context.Context, pool *pgxpool.Pool, presented string) (*AuthResult, error) {
 	if !parsePresented(presented) {
 		return nil, New(CodeUnauthenticated, "missing or invalid API key")
+	}
+	if pool == nil {
+		return nil, storageUnavailable("authenticate api key", errors.New("nil pool"))
 	}
 	hash := HashKey(presented)
 

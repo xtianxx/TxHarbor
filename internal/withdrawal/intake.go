@@ -124,11 +124,21 @@ type SubmitRequest struct {
 // response is written (response-first rule). It is nil on a 201 (its in-tx
 // `created` row is written atomically inside the receipt transaction) and on
 // the 401/503 auth-failure paths (no verifiable caller identity).
+//
+// Asset/Recipient/Amount are the canonical persisted facts of a successful
+// create: the lowercase 0x addresses and the exact FR-06 amount string. They are
+// set from the canonicalized request on a 201 and from the STORED row on a 200
+// replay, so the transport echoes exactly what a later GET returns — never the
+// caller's original case form. They are empty on every error outcome (the 409
+// error shape carries no asset echo).
 type SubmitResult struct {
 	Status    int
 	Code      Code
 	Message   string
 	RequestID string
+	Asset     string
+	Recipient string
+	Amount    string
 	Audit     *AuditIntent
 }
 
@@ -233,6 +243,9 @@ func SubmitWithdrawal(ctx context.Context, pool *pgxpool.Pool, req SubmitRequest
 				Status:    200,
 				Message:   "withdrawal request already accepted",
 				RequestID: row.requestID,
+				Asset:     row.asset,
+				Recipient: row.recipient,
+				Amount:    row.amount,
 				Audit:     auditIntent(callerID, row.requestID, auditActionReplayed, "same key and parameters"),
 			}, nil
 		}
@@ -363,7 +376,14 @@ func submitInTx(ctx context.Context, pool *pgxpool.Pool, callerID int64, req Sub
 		// claim on an unconfirmed commit.
 		return classifyFixedOrder(ctx, pool, callerID, req.IdempotencyKey, p), nil
 	}
-	return &SubmitResult{Status: 201, Message: "withdrawal request accepted", RequestID: requestID}, nil
+	return &SubmitResult{
+		Status:    201,
+		Message:   "withdrawal request accepted",
+		RequestID: requestID,
+		Asset:     p.asset,
+		Recipient: p.recipient,
+		Amount:    p.amount,
+	}, nil
 }
 
 // classifyFixedOrder is the only allowed post-23505 diagnostic (R8): read by
@@ -382,6 +402,9 @@ func classifyFixedOrder(ctx context.Context, pool *pgxpool.Pool, callerID int64,
 				Status:    200,
 				Message:   "withdrawal request already accepted",
 				RequestID: row.requestID,
+				Asset:     row.asset,
+				Recipient: row.recipient,
+				Amount:    row.amount,
 				Audit:     auditIntent(callerID, row.requestID, auditActionReplayed, "same key and parameters"),
 			}
 		}

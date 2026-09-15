@@ -40,6 +40,7 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -444,13 +445,11 @@ func TestWithdrawalRecoveryPeriodNoExecutionArtefacts(t *testing.T) {
 // no row + no event → none. Every served view carries the standing
 // execution=not_started fact, never a claimed outcome.
 //
-// The EITHER-read-failure → unknown branch is NOT re-tested here by design: it
-// is a pure-function branch already covered exhaustively by T011's
-// TestQueryCombineRecoveryState (query_test.go) — both read-failure paths plus a
-// failure with an active row — and a black-box query test cannot make one of the
-// two 006 readers fail deterministically without faking the read, which this
-// suite refuses to do. T011-unit owns that evidence; no query-path substitute is
-// invented.
+// The EITHER-read-failure → unknown branch has both layers: the pure-function
+// precedence is covered exhaustively by T011's TestQueryCombineRecoveryState
+// (query_test.go), and the LIVE query-path proof appended at the end of this
+// file blocks each 006 reader's relation in the scratch database in turn and
+// drives the failure through GetWithdrawal.
 //
 // 007 rows carry NO chain height: no height-indexed validity call
 // (AnnotateRecoveryHeight or otherwise) appears anywhere below (§3).
@@ -668,4 +667,238 @@ type recoveryPeriodInvalidState struct{ state string }
 
 func (e *recoveryPeriodInvalidState) Error() string {
 	return "invalid recovery snapshot state: " + e.state
+}
+
+// --- Review gap #5: LIVE either-read-failure → unknown proof (FR-16/FR-17, V8;
+// contracts/api.md §3 "EITHER statement errors → ROLLBACK + state: unknown",
+// "A failed read MUST NOT map to none-or-released"). T011-unit covers the
+// combiner; the two cases below drive the failure through the REAL query path
+// (GetWithdrawal) on real PostgreSQL. The faults are test-local: a relation
+// rename in the scratch database plus a read-only pgx query tracer, never a
+// production fault flag. No production file is touched.
+//
+// A GET is (request read) → one REPEATABLE READ read-only tx running (a)
+// indexer.LoadRecoveryState then, only if (a) succeeded, (b)
+// indexer.RecoveryReleased (query.go queryReadRecoverySignal). The first case
+// blocks (a)'s relation; the second blocks (b)'s, so (a) demonstrably succeeds
+// first (observed through the staged pre-failure snapshot, a phase probe, and
+// the tracer's ordered statement sequence) before (b) fails.
+
+// recoveryPeriodRecoveryFaultName / recoveryPeriodEventsFaultName are the
+// scratch-database names the first/second reader relations are renamed to for
+// the fault. They live only in the per-test container and are never restored:
+// the container is torn down with the test.
+const (
+	recoveryPeriodRecoveryFaultName = "reorg_recovery_period_first_fault"
+	recoveryPeriodEventsFaultName   = "reorg_recovery_events_period_second_fault"
+)
+
+// recoveryPeriodRenameRelation renames a relation in the scratch database — the
+// test-local blocked-relation fault. Names are internal constants, so the
+// interpolation is safe.
+func recoveryPeriodRenameRelation(t *testing.T, ctx context.Context, pool *pgxpool.Pool, from, to string) {
+	t.Helper()
+	if _, err := pool.Exec(ctx, "ALTER TABLE "+from+" RENAME TO "+to); err != nil {
+		t.Fatalf("rename %s -> %s (fault staging): %v", from, to, err)
+	}
+}
+
+// recoveryPeriodTraceEntry is one traced statement: its SQL and the error the
+// driver/server returned for it.
+type recoveryPeriodTraceEntry struct {
+	sql string
+	err error
+}
+
+// recoveryPeriodTracer is a read-only pgx QueryTracer. It records the statement
+// sequence a pooled connection actually executed, in order, so a test can show
+// that the first recovery read succeeded before the second failed.
+type recoveryPeriodTracer struct {
+	mu      sync.Mutex
+	entries []recoveryPeriodTraceEntry
+}
+
+// recoveryPeriodTraceSQLKey carries the SQL from TraceQueryStart to
+// TraceQueryEnd (TraceQueryEndData has no SQL field).
+type recoveryPeriodTraceSQLKey struct{}
+
+func (tr *recoveryPeriodTracer) TraceQueryStart(ctx context.Context, _ *pgx.Conn, data pgx.TraceQueryStartData) context.Context {
+	return context.WithValue(ctx, recoveryPeriodTraceSQLKey{}, data.SQL)
+}
+
+func (tr *recoveryPeriodTracer) TraceQueryEnd(ctx context.Context, _ *pgx.Conn, data pgx.TraceQueryEndData) {
+	sql, _ := ctx.Value(recoveryPeriodTraceSQLKey{}).(string)
+	tr.mu.Lock()
+	defer tr.mu.Unlock()
+	tr.entries = append(tr.entries, recoveryPeriodTraceEntry{sql: sql, err: data.Err})
+}
+
+// recoveryReads returns the traced entries that touched a 006 recovery
+// relation, in execution order.
+func (tr *recoveryPeriodTracer) recoveryReads() []recoveryPeriodTraceEntry {
+	tr.mu.Lock()
+	defer tr.mu.Unlock()
+	var out []recoveryPeriodTraceEntry
+	for _, e := range tr.entries {
+		if strings.Contains(e.sql, "reorg_recovery") {
+			out = append(out, e)
+		}
+	}
+	return out
+}
+
+// recoveryPeriodIsFirstRead / recoveryPeriodIsSecondRead classify one traced
+// statement by the relation it reads: the active-row reader vs the terminal-
+// event reader (readRecoveryRowSQL / readRecoveryReleasedSQL).
+func recoveryPeriodIsFirstRead(sql string) bool {
+	return strings.Contains(sql, "reorg_recovery") && !strings.Contains(sql, "reorg_recovery_events")
+}
+
+func recoveryPeriodIsSecondRead(sql string) bool {
+	return strings.Contains(sql, "reorg_recovery_events")
+}
+
+// recoveryPeriodTracedPool opens a pgx pool over dsn whose every statement is
+// recorded by a fresh tracer — the statement-level probe the second-read case
+// uses to prove ordering. It never alters execution; it only observes.
+func recoveryPeriodTracedPool(t *testing.T, dsn string) (*pgxpool.Pool, *recoveryPeriodTracer) {
+	t.Helper()
+	cfg, err := pgxpool.ParseConfig(dsn)
+	if err != nil {
+		t.Fatalf("parse traced dsn: %v", err)
+	}
+	tracer := &recoveryPeriodTracer{}
+	cfg.ConnConfig.Tracer = tracer
+	pool, err := pgxpool.NewWithConfig(context.Background(), cfg)
+	if err != nil {
+		t.Fatalf("open traced pool: %v", err)
+	}
+	t.Cleanup(pool.Close)
+	return pool, tracer
+}
+
+// recoveryPeriodAssertUnknownFacts asserts a served view is exactly the
+// either-read-failure contract: state unknown (never none/released), execution
+// the standing not_started, and every request fact intact.
+func recoveryPeriodAssertUnknownFacts(t *testing.T, view *WithdrawalView, requestID string, callerID int64) {
+	t.Helper()
+	if view.Recovery.State != queryStateUnknown {
+		t.Fatalf("recovery.state = %q, want %q (a failed read is never none/released)", view.Recovery.State, queryStateUnknown)
+	}
+	if view.Recovery.Execution != queryExecutionNotStarted {
+		t.Fatalf("recovery.execution = %q, want %q", view.Recovery.Execution, queryExecutionNotStarted)
+	}
+	if view.RequestID != requestID || view.CallerID != callerID ||
+		view.ChainID != intakeChainID || view.Asset != intakeAsset ||
+		view.Recipient != intakeRecipient || view.Amount != intakeAmount || view.Status != "accepted" {
+		t.Fatalf("request facts = %+v, want request_id %q caller %d chain %d asset %s recipient %s amount %s status accepted",
+			view, requestID, callerID, intakeChainID, intakeAsset, intakeRecipient, intakeAmount)
+	}
+}
+
+// TestWithdrawalRecoveryPeriodQueryFirstReadFailsUnknown is review gap #5(a):
+// when the FIRST recovery read (reorg_recovery) fails inside the REPEATABLE
+// READ tx, a live GET yields state unknown with every request fact intact, and
+// the reader short-circuits — the second read is never attempted. An active row
+// AND a terminal release event are seeded up front so a failure wrongly folded
+// into the no-row path would surface as releasing/recovering, not unknown.
+func TestWithdrawalRecoveryPeriodQueryFirstReadFailsUnknown(t *testing.T) {
+	// Given an active recovery row plus a terminal release event on the
+	// request's chain (the two states a bad fallthrough could invent).
+	ctx, pool, dsn := failureSetup(t)
+	const (
+		callerID = int64(7601)
+		authID   = "auth-recovery-first-read-fault"
+		idemKey  = "idem-recovery-first-read-fault"
+	)
+	recoveryPeriodSeedActiveRecovery(t, ctx, pool, intakeChainID, "rec-first-read-fault", "detected")
+	recoveryPeriodSeedTerminalEvent(t, ctx, pool, intakeChainID, "rec-first-read-fault-rel", "auto_completed")
+	requestID := recoveryPeriodPersistedRequest(t, ctx, pool, callerID, authID, idemKey)
+
+	// When the first reader's relation is unavailable (test-local rename).
+	recoveryPeriodRenameRelation(t, ctx, pool, "reorg_recovery", recoveryPeriodRecoveryFaultName)
+
+	traced, tracer := recoveryPeriodTracedPool(t, dsn)
+	view, err := GetWithdrawal(ctx, traced, callerID, requestID)
+	if err != nil {
+		t.Fatalf("GetWithdrawal with a failing first recovery read: %v", err)
+	}
+
+	// Then the live query still serves the request facts with state unknown.
+	recoveryPeriodAssertUnknownFacts(t, view, requestID, callerID)
+
+	// And the traced sequence shows exactly the first read, and it failed: the
+	// second read was never attempted (the reader short-circuits).
+	reads := tracer.recoveryReads()
+	if len(reads) != 1 || !recoveryPeriodIsFirstRead(reads[0].sql) || reads[0].err == nil {
+		t.Fatalf("recovery reads = %+v, want exactly one FAILING read of reorg_recovery and no second read", reads)
+	}
+}
+
+// TestWithdrawalRecoveryPeriodQuerySecondReadFailsUnknown is review gap #5(b):
+// when the SECOND recovery read fails, the first read demonstrably succeeded
+// first and the live query still yields unknown with facts intact. The
+// pre-failure value is observed three ways — a staged snapshot through the real
+// path before the fault, a phase probe of the still-intact first relation while
+// the second is blocked, and the tracer's ordered in-call sequence (first read
+// nil error, then second read error).
+func TestWithdrawalRecoveryPeriodQuerySecondReadFailsUnknown(t *testing.T) {
+	// Given an active recovery row (phase detected) on the request's chain.
+	ctx, pool, dsn := failureSetup(t)
+	const (
+		callerID = int64(7602)
+		authID   = "auth-recovery-second-read-fault"
+		idemKey  = "idem-recovery-second-read-fault"
+	)
+	recoveryPeriodSeedActiveRecovery(t, ctx, pool, intakeChainID, "rec-second-read-fault", "detected")
+	requestID := recoveryPeriodPersistedRequest(t, ctx, pool, callerID, authID, idemKey)
+
+	// Pre-failure value observed through the real query path: with both reads
+	// intact, the first read's detected row maps to recovering. That state is
+	// only reachable because the first read succeeded.
+	recoveryPeriodAssertSnapshot(t, ctx, pool, callerID, requestID, queryStateRecovering)
+
+	// When ONLY the second reader's relation is unavailable.
+	recoveryPeriodRenameRelation(t, ctx, pool, "reorg_recovery_events", recoveryPeriodEventsFaultName)
+
+	// The first read's source is still intact and carries the known pre-failure
+	// phase while the second is blocked.
+	if phase, _ := recoveryPeriodRecoveryRow(t, ctx, pool, intakeChainID); phase != "detected" {
+		t.Fatalf("first-read phase after staging the second-read fault = %q, want detected", phase)
+	}
+
+	traced, tracer := recoveryPeriodTracedPool(t, dsn)
+	view, err := GetWithdrawal(ctx, traced, callerID, requestID)
+	if err != nil {
+		t.Fatalf("GetWithdrawal with a failing second recovery read: %v", err)
+	}
+
+	// Then the live query still serves the request facts with state unknown.
+	recoveryPeriodAssertUnknownFacts(t, view, requestID, callerID)
+
+	// And the ordered in-call trace demonstrates the first read SUCCEEDED
+	// before the second failed: a reorg_recovery read with nil error precedes
+	// the failing reorg_recovery_events read.
+	reads := tracer.recoveryReads()
+	first, second := -1, -1
+	for i, e := range reads {
+		switch {
+		case first < 0 && recoveryPeriodIsFirstRead(e.sql):
+			first = i
+			if e.err != nil {
+				t.Fatalf("first recovery read failed (%v); the staged fault must hit only the second read", e.err)
+			}
+		case first >= 0 && second < 0 && recoveryPeriodIsSecondRead(e.sql):
+			second = i
+			if e.err == nil {
+				t.Fatalf("second recovery read succeeded; the staged fault did not land")
+			}
+		}
+	}
+	if first < 0 {
+		t.Fatalf("first recovery read (reorg_recovery) never executed: %+v", reads)
+	}
+	if second < 0 {
+		t.Fatalf("second recovery read (reorg_recovery_events) never executed after the first: %+v", reads)
+	}
 }

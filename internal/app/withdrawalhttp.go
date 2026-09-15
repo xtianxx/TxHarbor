@@ -198,9 +198,9 @@ func (h *WithdrawalHandler) ServePOST(w http.ResponseWriter, r *http.Request) {
 		withdrawalWriteJSON(w, res.Status, trace, withdrawalPostResponse{
 			RequestID: res.RequestID,
 			ChainID:   body.ChainID,
-			Asset:     body.Asset,
-			Recipient: body.Recipient,
-			Amount:    body.Amount,
+			Asset:     res.Asset,
+			Recipient: res.Recipient,
+			Amount:    res.Amount,
 			Status:    "accepted",
 			TraceID:   trace,
 		})

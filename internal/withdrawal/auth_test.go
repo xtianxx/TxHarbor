@@ -120,3 +120,22 @@ func TestAuthenticateRejectsMalformedWithoutDB(t *testing.T) {
 		})
 	}
 }
+
+// TestAuthenticateWellFormedKeyWithNilPoolIs503 proves a well-formed credential
+// against a miswired nil pool is a retryable storage defect, not a panic: the
+// returned error is a *Error classified CodeTemporarilyUnavailable.
+func TestAuthenticateWellFormedKeyWithNilPoolIs503(t *testing.T) {
+	wellFormed := keyPrefix + base64.RawURLEncoding.EncodeToString(make([]byte, keyEntropyBytes))
+
+	result, err := Authenticate(context.Background(), nil, wellFormed)
+	if result != nil {
+		t.Fatalf("Authenticate(well-formed, nil pool) result = %+v, want nil", result)
+	}
+	var typed *Error
+	if !errors.As(err, &typed) {
+		t.Fatalf("Authenticate(well-formed, nil pool) error = %v (%T), want *Error", err, err)
+	}
+	if typed.Code != CodeTemporarilyUnavailable {
+		t.Fatalf("code = %q, want %q", typed.Code, CodeTemporarilyUnavailable)
+	}
+}

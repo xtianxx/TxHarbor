@@ -34,6 +34,10 @@ const (
 	withdrawalHTTPWatch            = "0x3333333333333333333333333333333333333333"
 	withdrawalHTTPRecipient        = "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 	withdrawalHTTPAmount           = "100"
+	// withdrawalHTTPRecipientEIP55 is the mixed-case EIP-55 checksummed form of
+	// withdrawalHTTPRecipient; FR-07 accepts it and canonicalizes it back to the
+	// all-lowercase withdrawalHTTPRecipient.
+	withdrawalHTTPRecipientEIP55 = "0xaAaAaAaaAaAaAaaAaAAAAAAAAaaaAaAaAaaAaaAa"
 )
 
 // withdrawalHTTPSetup boots a migrated scratch PostgreSQL, opens a pool, and
@@ -860,6 +864,102 @@ func TestWithdrawalHTTPReplaySurvivesPolicyLoss(t *testing.T) {
 	}
 	if _, err := pool.Exec(ctx, `ALTER TABLE deposit_config_history_hidden RENAME TO deposit_config_history`); err != nil {
 		t.Fatalf("restore policy table: %v", err)
+	}
+}
+
+// TestWithdrawalHTTPCreateEchoesCanonicalFacts covers the review defect that a
+// mixed-case EIP-55 POST echoed the raw request bytes: a create submitted with
+// the checksummed recipient returns the canonical lowercase asset/recipient, and
+// a later self-query returns the identical facts.
+func TestWithdrawalHTTPCreateEchoesCanonicalFacts(t *testing.T) {
+	ctx, pool, _ := withdrawalHTTPSetup(t)
+	key := withdrawalHTTPKey(t, ctx, pool, 8401)
+	withdrawalHTTPSupply(t, ctx, pool, 8401, "auth-canon")
+	withdrawalHTTPSeedPolicy(t, ctx, pool)
+
+	srv := httptest.NewServer(withdrawalHTTPHandler(pool))
+	defer srv.Close()
+
+	mixedBody := strings.Replace(
+		withdrawalHTTPCreateBody(t, "idem-canon", withdrawalHTTPAmount, "auth-canon"),
+		withdrawalHTTPRecipient, withdrawalHTTPRecipientEIP55, 1)
+	if !strings.Contains(mixedBody, withdrawalHTTPRecipientEIP55) {
+		t.Fatalf("test body lacks the mixed-case recipient: %s", mixedBody)
+	}
+
+	status, raw := withdrawalHTTPDo(t, http.MethodPost, srv.URL+"/withdrawals", key, mixedBody)
+	if status != http.StatusCreated {
+		t.Fatalf("create status = %d (%s), want 201", status, raw)
+	}
+	var created withdrawalPostResponse
+	if err := json.Unmarshal(raw, &created); err != nil {
+		t.Fatalf("decode create body %s: %v", raw, err)
+	}
+	if created.Asset != withdrawalHTTPAsset || created.Recipient != withdrawalHTTPRecipient {
+		t.Fatalf("create echo = (asset %q, recipient %q), want canonical (%q, %q)",
+			created.Asset, created.Recipient, withdrawalHTTPAsset, withdrawalHTTPRecipient)
+	}
+
+	status, raw = withdrawalHTTPDo(t, http.MethodGet, srv.URL+"/withdrawals/"+created.RequestID, key, "")
+	if status != http.StatusOK {
+		t.Fatalf("self-query status = %d (%s), want 200", status, raw)
+	}
+	var view withdrawalGetResponse
+	if err := json.Unmarshal(raw, &view); err != nil {
+		t.Fatalf("decode view body %s: %v", raw, err)
+	}
+	if view.Asset != created.Asset || view.Recipient != created.Recipient {
+		t.Fatalf("create echo = (asset %q, recipient %q), GET = (%q, %q); want identical canonical facts",
+			created.Asset, created.Recipient, view.Asset, view.Recipient)
+	}
+}
+
+// TestWithdrawalHTTPReplayDifferentCaseEchoesStoredFacts covers the replay half
+// of the defect: the same key and parameters submitted in a different case form
+// return 200 with the original request_id and the STORED (lowercase) facts,
+// byte-identical to the original 201 body — never the re-lowercased input.
+func TestWithdrawalHTTPReplayDifferentCaseEchoesStoredFacts(t *testing.T) {
+	ctx, pool, _ := withdrawalHTTPSetup(t)
+	key := withdrawalHTTPKey(t, ctx, pool, 8402)
+	withdrawalHTTPSupply(t, ctx, pool, 8402, "auth-canon-replay")
+	withdrawalHTTPSeedPolicy(t, ctx, pool)
+
+	srv := httptest.NewServer(withdrawalHTTPHandler(pool))
+	defer srv.Close()
+
+	mixedBody := strings.Replace(
+		withdrawalHTTPCreateBody(t, "idem-canon-replay", withdrawalHTTPAmount, "auth-canon-replay"),
+		withdrawalHTTPRecipient, withdrawalHTTPRecipientEIP55, 1)
+	status, raw201 := withdrawalHTTPDo(t, http.MethodPost, srv.URL+"/withdrawals", key, mixedBody)
+	if status != http.StatusCreated {
+		t.Fatalf("create status = %d (%s), want 201", status, raw201)
+	}
+	var first withdrawalPostResponse
+	if err := json.Unmarshal(raw201, &first); err != nil {
+		t.Fatalf("decode create body %s: %v", raw201, err)
+	}
+
+	lowerBody := withdrawalHTTPCreateBody(t, "idem-canon-replay", withdrawalHTTPAmount, "auth-canon-replay")
+	status, raw200 := withdrawalHTTPDo(t, http.MethodPost, srv.URL+"/withdrawals", key, lowerBody)
+	if status != http.StatusOK {
+		t.Fatalf("replay status = %d (%s), want 200", status, raw200)
+	}
+	var replay withdrawalPostResponse
+	if err := json.Unmarshal(raw200, &replay); err != nil {
+		t.Fatalf("decode replay body %s: %v", raw200, err)
+	}
+	if replay.RequestID != first.RequestID {
+		t.Fatalf("replay request_id = %q, want original %q", replay.RequestID, first.RequestID)
+	}
+	if replay.Asset != withdrawalHTTPAsset || replay.Recipient != withdrawalHTTPRecipient {
+		t.Fatalf("replay echo = (asset %q, recipient %q), want canonical stored (%q, %q)",
+			replay.Asset, replay.Recipient, withdrawalHTTPAsset, withdrawalHTTPRecipient)
+	}
+	if !bytes.Equal(raw201, raw200) {
+		t.Fatalf("replay body differs from the original create body:\n201=%s\n200=%s", raw201, raw200)
+	}
+	if n := withdrawalHTTPRequestCount(t, ctx, pool); n != 1 {
+		t.Fatalf("request rows = %d, want 1 (replay untouched)", n)
 	}
 }
 

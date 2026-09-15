@@ -387,6 +387,13 @@ func TestWithdrawalMigrationConstraintNames(t *testing.T) {
 		VALUES ($1, 1001, $2, $3, 1, $4, $5, $6)`
 	const insertGrantAudit = `INSERT INTO withdrawal_grant_audit
 		(operation_id, authorization_id, caller_id, action) VALUES ($1, $2, 1001, $3)`
+	// insertRequestStatus is insertRequest plus an explicit status: 007 writes
+	// only 'accepted' (the column DEFAULT), so any other value is a CHECK
+	// violation — the negative probe below uses it to name
+	// withdrawal_requests_status_check exactly.
+	const insertRequestStatus = `INSERT INTO withdrawal_requests
+		(request_id, caller_id, idempotency_key, authorization_id, chain_id, asset, recipient, amount, status)
+		VALUES ($1, 1001, $2, $3, 1, $4, $5, $6, $7)`
 	withdrawalMustExec(t, sqlDB, insertRequest, "req-1", "key-1", "auth-1", asset, recipient, "100")
 	withdrawalMustExec(t, sqlDB, insertGrantAudit, "op-1", "auth-g1", "supplied")
 
@@ -411,6 +418,12 @@ func TestWithdrawalMigrationConstraintNames(t *testing.T) {
 			[]any{"req-6", "key-6", "auth-6", "0x" + strings.Repeat("AB", 20), recipient, "100"}, "23514", "withdrawal_requests_asset_check"},
 		{"short recipient", insertRequest,
 			[]any{"req-7", "key-7", "auth-7", asset, "0x" + strings.Repeat("a", 39), "100"}, "23514", "withdrawal_requests_recipient_check"},
+		// status='pending' only ever violates the status CHECK: the row is
+		// otherwise fresh, so no unique carrier can fire. This pins 23514 on
+		// withdrawal_requests_status_check, distinct from the 23505
+		// idempotency/authorization conflicts above.
+		{"status pending is not accepted", insertRequestStatus,
+			[]any{"req-status", "key-status", "auth-status", asset, recipient, "100", "pending"}, "23514", "withdrawal_requests_status_check"},
 	}
 	for _, tc := range violations {
 		t.Run(tc.name, func(t *testing.T) {
@@ -469,6 +482,18 @@ func TestWithdrawalMigrationConstraintNames(t *testing.T) {
 				t.Fatalf("expected insert to succeed: %v", err)
 			}
 		})
+	}
+
+	// Zero illegal rows: the rejected status='pending' INSERT left no
+	// non-'accepted' row behind, so the CHECK is a true rejection and not a
+	// silent rewrite. This is the persistence half of the pending probe.
+	var illegalStatus int
+	if err := sqlDB.QueryRowContext(ctx,
+		`SELECT count(*) FROM withdrawal_requests WHERE status <> 'accepted'`).Scan(&illegalStatus); err != nil {
+		t.Fatalf("count non-accepted withdrawal_requests: %v", err)
+	}
+	if illegalStatus != 0 {
+		t.Fatalf("withdrawal_requests rows with status <> 'accepted' = %d, want 0", illegalStatus)
 	}
 }
 
