@@ -67,19 +67,20 @@ documents the closed check set; FR-11).
 - `recovery.execution` is **always** `not_started` in 007: "尚未执行" is a standing fact, never
   "执行结果未知" (Q8 correction — unknown-outcome vocabulary belongs to 006 in-flight *external*
   requests, FR-17, not to 007 rows).
-- `recovery.state`: 006 state at read time (`none`/`recovering`/`paused_reconcile`/`released`,
-  006 FR-18 subset); request facts stay servable in every state. Reader contract (§五修正):
-  every GET performs `LoadRecoveryState` + `RecoveryReleased` (`reorgquery.go:62-83` — nil-able
-  point reads, no side effects, derived from durable state at read time, never a cache flag).
-  The two reads are NOT one atomic snapshot: a release-then-re-establish landing between them
-  can combine a stale row with a newer terminal event (or vice versa). Combination rule
-  (locked here): if EITHER read fails → `state: unknown`; if the row is present → report its
-  phase-mapped state (`recovering`/`paused_reconcile`) regardless of the terminal-event read
-  (a live row is never contradicted by history — the row is the sole recovery authority per
-  006 R9); if no row AND a terminal release event exists → `released`; if no row AND no event
-  → `none`. A failed read MUST NOT map to none-or-released. `state` and the request row are two
-  independent reads, not an atomic global view — the contract promises per-read freshness plus
-  the precedence rule above, never cross-read atomicity.
+- `recovery.state`: 006 state at a stated read point (`none`/`recovering`/`paused_reconcile`/
+  `released`, 006 FR-18 subset); request facts stay servable in every state. Reader protocol
+  (§二 locked 三轮定点 — single-snapshot + version check, NOT two independent fresh reads):
+  every GET opens one `REPEATABLE READ` read-only tx and inside it runs (a) `readRecoveryRow`
+  (active row with `recovery_id` + fencing `recovery_seq`, `reorgcommit.go:71-133`) and
+  (b) `RecoveryReleased` (latest terminal event, `reorgquery.go:62-73`). Same-tx ⇒ same snapshot:
+  a release-then-re-establish landing *between* (a) and (b) is impossible. Combination inside
+  the snapshot: row present → its phase-mapped state (`recovering`/`paused_reconcile`);
+  no row + terminal event → `released`; no row + no event → `none`; EITHER statement errors →
+  ROLLBACK + `state: unknown`. The response is therefore strictly the state at one snapshot —
+  never a cross-version composite. No new recovery authority is created (read-only reuse of 006
+  rows/events); 006 pause semantics untouched. A failed read MUST NOT map to none-or-released.
+  Request row and recovery signal remain separate reads (no cross-table atomicity claimed);
+  only the two recovery signals share a snapshot.
 - 007 rows carry NO chain height: `AnnotateRecoveryHeight(row, released, height)` is NOT called
   with a fabricated height (the previous "ancestor-side facts" wording is withdrawn — 007 must
   not invent an observation height to reuse a height-indexed function). Height-indexed validity

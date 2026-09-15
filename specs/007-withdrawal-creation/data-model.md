@@ -127,19 +127,45 @@ chain-agnostic here (single deployment), keyed by grant id + action.
 | reason | TEXT | `NOT NULL DEFAULT ''` | |
 | detail | TEXT | `NOT NULL DEFAULT ''` | redacted params snapshot (no secrets) |
 | recorded_at | TIMESTAMPTZ | `NOT NULL DEFAULT now()` | |
-| CONSTRAINT `withdrawal_grant_audit_uniq` | `UNIQUE (authorization_id, action, recorded_at)` | converges concurrent duplicate supply/revoke reports; never blocks distinct actions | |
+| CONSTRAINT `withdrawal_grant_audit_uniq` | `UNIQUE (authorization_id, action, grant_state_seq)` — see attempt semantics below; `recorded_at` is deliberately NOT in the key (timestamps never converge) | idempotent actions converge; distinct attempts stay distinct | |
+| grant_state_seq | BIGINT | `NOT NULL DEFAULT 0` | stable operation identity: supply-family sequence for this grant (0 = first supply; increments only on param-changing re-supply, which is refused — so in practice 0 for supplied/resupplied/supply_refused); revoke-family sequence (increments per revoke attempt on an already-revoked grant → distinct `revoke_nop` rows) — derivation rule in attempt semantics; NOT wall-clock |
+
+Attempt semantics (locked 三轮定点 — an audit row records one *attempt*, not one state change;
+no timestamp-based dedup is claimed):
+- `supplied` (seq 0): first successful supply. Same-tx: grant INSERT + audit INSERT; both
+  `RowsAffected()==1` (grant row is new, so the check holds).
+- `resupplied` (seq 0): same grant id + same full params re-supplied. Same-tx: grant row
+  verified equal (zero mutation — NO `RowsAffected()==1` on the grant row; assert `0`) + audit
+  INSERT (`==1`). The UNIQUE key `(G,'resupplied',0)` converges concurrent duplicate re-supplies:
+  one commits, losers get 23505 on the audit constraint → they re-read the grant row (still equal)
+  and return the same success WITHOUT a second audit row. This is the only dedup the UNIQUE provides.
+- `supply_refused` (seq 0): same id + any param differ. Same-tx: zero grant mutation + audit
+  INSERT. Refused attempts MUST NOT roll back with the business refusal — the refusal and its
+  audit commit together (the tx commits a no-mutation + audit row; "refused" is the committed
+  outcome, not a rollback). No illegal grant data is ever written: the audit `detail` carries the
+  *attempted* params snapshot, the grant table carries nothing.
+- `revoked` (seq = revoke generation of the grant row, read under lock): active → revoked +
+  audit in one tx, both `==1`.
+- `revoke_nop` (seq = per-attempt counter: `SELECT count(*) FROM audit WHERE id=G AND action IN
+  ('revoked','revoke_nop')` + 1, computed in-tx): every repeat revoke attempt records its own row —
+  attempts stay distinct BY DESIGN (no convergence claimed). Concurrent duplicate revokes each
+  record their own `revoke_nop`; both report idempotent success.
+- Uncertain COMMIT on supply/revoke: re-read the grant row (durable state decides the report);
+  the audit row's presence/absence is reconciled by re-issuing the same action — `supplied` and
+  `revoked` converge via their UNIQUE keys on retry; `revoke_nop` appends (harmless duplicate
+  evidence, never a state change).
 
 Verifiable outcomes: successful supply → row + `supplied`; idempotent re-supply (same full
-params) → row + `resupplied`, grant row untouched; same-id异参 → `supply_refused`, zero grant
-mutation; revoke → row + `revoked`; revoke of already-revoked/missing → `revoke_nop`
-(idempotent success, zero mutation); uncertain COMMIT → re-read grant row and report durable
-state (same discipline as R8). Every supply/revoke commits its audit row in the same tx
-(`RowsAffected()==1` on both writes).
+params) → `resupplied` (grant untouched, `RowsAffected()==0` asserted); same-id异参 →
+`supply_refused` committed with zero grant mutation; revoke → `revoked`; repeat revoke →
+distinct `revoke_nop` rows, idempotent success; uncertain COMMIT → re-read + same-action retry.
 
 ## Transaction catalog (behavioral; SQL in contracts/)
 
-- **T-accept** (first receipt): pre-tx classify (fast path) → BEGIN → writeGuard →
-  `FOR SHARE` grant row + validate (403 + ROLLBACK on fail) → plain INSERT request →
+- **T-accept** (first receipt): pre-tx classify (fast path) → BEGIN → writeGuard
+  (`SET LOCAL statement_timeout='5s'`, per-statement timeout only — NOT a recovery gate;
+  007 persists during active recovery per FR-16) → `FOR SHARE` grant row + validate
+  (DB-`now()` expiry evaluated post-lock; 403 + ROLLBACK on fail) → plain INSERT request →
   INSERT audit → COMMIT; 23505 → rollback → fixed-order classify → 200/409/403;
   commit-error → re-classify.
 - **T-replay**: classify hit + FR-10 equality → return original + `replayed` audit (no new request).

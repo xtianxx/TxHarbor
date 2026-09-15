@@ -239,10 +239,26 @@ invariant table). Tasks/implement MUST NOT re-decide, add a global lock, or drop
   classify-miss (winner not yet visible → retryable, never fabricated) and uncertain COMMIT
   (re-classify → replay/conflict/retryable), mirroring `reorgpolicy.go:353-366`.
 - **Tx shape (locked)**: pre-tx opportunistic classify (fast path only) → `BEGIN` → `SET LOCAL
-  statement_timeout` (shared `writeGuard`) → `SELECT grant row … FOR SHARE` + validity check
-  (R7 FINAL, sole lock on this path) → plain `INSERT` request → `INSERT` audit
-  (same tx; repo precedent: DELETE + audit in one tx, `depositauth.go:1142-1159`) → `COMMIT` with
-  `RowsAffected()==1` checks, 23505/commit-error handling per above.
+  statement_timeout = '5s'` (shared `writeGuard`, `scanner.go:1084-1085` — a per-statement timeout
+  ONLY; it is not a recovery-pause gate and never refuses commits: 007 persists compliant receipts
+  during active recovery per FR-16, and writeGuard applies identically inside and outside recovery) →
+  `SELECT grant row … FOR SHARE` + validity check (R7 FINAL, sole lock on this path) → plain
+  `INSERT` request → `INSERT` audit (same tx; repo precedent: DELETE + audit in one tx,
+  `depositauth.go:1142-1159`) → `COMMIT` with `RowsAffected()==1` checks, 23505/commit-error
+  handling per above.
+- **Grant expiry clock and evaluation point (locked §三)**: clock is DB `now()` (constitution:
+  DB time is the only clock for validity; same rule as lease/version expiry). `expires_at` is
+  evaluated in the in-tx validity SELECT *after* the `FOR SHARE` lock is granted — so lock-wait
+  time is accounted: a grant expiring *during* the wait reads expired → 403, zero rows. The lock
+  coordinates *writes* (revoke), never time: post-check, pre-COMMIT expiry is bounded by the
+  remaining statements under writeGuard (microseconds-to-ms, not a semantic window), and no
+  additional re-check is claimed. This matches Q2 ("到期…对尚未接收请求生效"): "尚未接收" is
+  decided at the post-lock validity read, the last check before the INSERT.
+- **Deadlock statement corrected (§三)**: "no lock-order ring can form" is retained ONLY in its
+  precise form — one lock object, one fixed acquisition point ⇒ no *ordering* cycle. It does NOT
+  claim immunity from waiting: `FOR SHARE` waiters queue behind a revoke's `FOR UPDATE` (resolved
+  by writeGuard timeout → 503 retryable, never silent), and UNIQUE index waits resolve via
+  23505 classify. No full-DB audit is claimed; the two wait edges on this path are enumerated here.
 - **Dual-constraint race (locked semantics)**: one INSERT can violate both UNIQUEs at once, but
   PostgreSQL reports exactly one `ConstraintName`. Order of report is NOT a semantic signal and
   MUST NOT decide the response. Rule: after any 23505, rollback, then classify **deterministically

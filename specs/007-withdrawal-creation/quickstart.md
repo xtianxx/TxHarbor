@@ -55,9 +55,10 @@ existing Accepted rows unaffected, replays still 200.
 ## V8 — recovery period
 With an active 006 recovery row: compliant POST → persisted, zero nonce/sign/broadcast
 artefacts (assert via absence: no new tables/rows outside 007 scope, no RPC broadcast);
-GET → facts servable with live `recovery.state` (fresh LoadRecoveryState + RecoveryReleased
-read per request; kill either read path in test → `state: unknown`, same body, still 200;
-release-then-re-establish between the two reads → row-present precedence rule applies, never a
+GET → facts servable with `recovery.state` from one REPEATABLE READ snapshot (row + terminal
+event read inside it; kill either statement → `state: unknown`, same body, still 200;
+release-then-re-establish cannot land inside the snapshot — assert by concurrent establish
+during a held-open read tx in test: response still reflects exactly one snapshot, never a
 forged `released`/`none`);
 direct unit assertion that no recovery governance rows were written or deleted by 007 paths.
 POST-then-lost-response during recovery → same-key retry → 200 with identical `request_id`;

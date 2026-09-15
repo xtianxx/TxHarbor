@@ -98,9 +98,9 @@ internal/withdrawal/
 │                           # three-layer amount enforcement: shape → big.Int range → DB CHECK)
 ├── intake.go               # T-accept/T-replay/T-conflict/T-auth-bound/T-reject/T-unavailable/
 │                           # T-dual-race txns (R7 FINAL: constraints + grant-row FOR SHARE; fixed-order classify)
-├── query.go                # ownership-enforced read + LoadRecoveryState/RecoveryReleased
-│                           # annotation with row-present precedence (contracts/api.md §3; unknown
-│                           # on either-read failure, never forged; no height-indexed validity)
+├── query.go                # ownership-enforced read + single-snapshot recovery annotation
+│                           # (REPEATABLE READ tx: row + terminal event; unknown on either
+│                           # failure; no height-indexed validity)
 ├── grant.go                # upstream grant supply entry (R9 withdrawal-authz carrier; NOT caller-writable)
 └── ..._test.go             # unit: vectors, equivalence, error mapping (no DB where possible)
 
