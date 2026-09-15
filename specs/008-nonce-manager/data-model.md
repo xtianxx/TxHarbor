@@ -249,10 +249,13 @@ immediately before the tx and are passed in as data.
   requires → update `last_*` + `last_observation_id` → COMMIT.
 - **T-hold-release**: pre-tx fresh observation → BEGIN → lock → `SELECT … FOR UPDATE` the named
   hold (missing/already released → `nop` audit, zero change) → re-verify: fresh observation
-  consistent (or the specific remedy the cause demands), no unresolved scope conflicts → mark
-  this hold `released` (only this row) → `UPDATE nonce_scope_state SET reconciled_floor =
+  consistent (or the specific remedy the cause demands), no unresolved scope conflicts, and the
+  recorded evidence version re-read (`hold_id` still `active`, supplied `--observation-id` in
+  scope, current `registry_seq`/`state`, current active-hold set, 006 state) → mark this hold
+  `released` (only this row) → `UPDATE nonce_scope_state SET reconciled_floor =
   GREATEST(COALESCE(reconciled_floor, 0), $observed_pending)` → audit row (`applied`) → COMMIT.
-  Any verification failure → audit row (`refused`) + zero hold/floor change.
+  Any verification failure or version drift versus the operator's evidence → audit row (`refused`)
+  + zero hold/floor change (contracts/observation.md §3.1).
 - **T-binding-release**: same carrier; `FOR UPDATE` the binding; require non-terminal; require
   the no-side-effect evidence re-check; set `state='released'` + terminal columns + event + audit;
   refusal path records `refused` audit with zero binding change.

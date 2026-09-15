@@ -40,6 +40,36 @@ Healthy bootstrap is explicitly **not** a hold: a first-time scope with pre-exis
 records `bootstrap_external_consumed` evidence for `[0, P)` and admits at `P` (R2). It is durable,
 auditable, and never a silent adoption.
 
+### 2.1 Observation basis, validity window, and commit-time re-verification
+
+- **Basis and applicability**: a 008 observation is exactly the two reads
+  `eth_getTransactionCount(sender, "latest")` / `eth_getTransactionCount(sender, "pending")`
+  plus the head identity, taken for one `(chain_id, sender)` scope outside any DB transaction
+  (R4). It is evidence for that scope only; it is not a chain lock, never applies to another
+  scope, and by itself never mutates domain state.
+- **Invalidation during the window (no stale reuse)**: the pre-tx observation is only valid for
+  the tx it fronts. If, after it was taken, another allocation commits, 006 recovery establishes
+  or pauses, or the registry changes, the observation is stale for that decision: the
+  coordination-row `FOR UPDATE` lock (R1) plus the in-tx re-reads below make the outcome
+  fail-closed rather than silently taken from the stale view (candidate selection is always
+  recomputed from durable `nonce_bindings` / `nonce_scope_state` under the lock, R2; a concurrent
+  same-scope allocation is absorbed by the recomputed `M` and, as a backstop, by
+  `nonce_bindings_scope_nonce_uniq`). A stale observation MUST NEVER lower `reconciled_floor`,
+  release a hold, reset/recycle/reassign an existing binding, or re-derive a candidate.
+- **Commit-time re-verify checklist (row lock + re-read items)**: inside the locked tx every 008
+  write re-reads (a) the three 006 pause rows (`indexer_pause`/`log_pause`/`deposit_pause`) and
+  the active `reorg_recovery` row; (b) the registry row (`state`, `registry_seq`); (c)
+  `nonce_bindings` by `intent_id` and the scope max `M`; (d) `nonce_scope_state`
+  (`reconciled_floor`, `last_*`); (e) the scope's active `nonce_scope_holds`. Any item that
+  differs from the pre-tx basis, and any 006/registry/hold gate hit, refuses with the cause
+  recorded and zero writes (data-model transaction catalog).
+- **Non-atomicity with the chain (stated limit)**: the DB lock serializes 008 writers (and, because
+  006 shares the coordination row, 006 establish/pause/release) only. It does **not** and cannot
+  prevent an external transaction from being mined or queued during the observation window; no
+  DB lock claim is made against chain state. Such an external consumption is surfaced by the next
+  observation as `unattributed_consumption` / `unexplained_gap` / `divergence` → refusal + hold +
+  reconcile (Section 2), and is never silently merged or used to free the consumed nonce.
+
 ## 3. Release path (operator-only; 006 Q2b-style existing carrier)
 
 Carrier: `txharbor nonce-admin <hold-release|binding-release|register|disable> …`, the same
@@ -74,6 +104,25 @@ Evidence standard (OC-6; FR-08; US5-7) — release succeeds only when **all** ho
    `reconciled_floor = GREATEST(reconciled_floor, observed pending)` so subsequent admissions
    resume above the reconciled consumption (explicit, audited — never a max-value shortcut);
 5. an audit row (`outcome=applied`) commits in the same tx.
+
+**Evidence version and re-verify point**: a release is valid only for the exact evidence version
+re-verified at the in-tx lock point. That version set is read under the same coordination-row lock
+and recorded on the hold: the named `hold_id` still `active`; the operator-supplied
+`--observation-id` (which MUST belong to the scope) plus the fresh pre-tx observation recorded as
+`release_observation_id`; the current `registry_seq` (config-change version) and registry `state`;
+the current active-hold set for the scope; and the 006 recovery state observed at release time
+(recorded as evidence only — 008 never writes it). If any of these differs from the version the
+operator's evidence asserts, the release MUST be refused (`outcome=refused`, zero hold/floor
+change) — it is never applied against the newer version. The 006 recovery-completion marker is a
+read-only version input, not a release trigger: a change to it after the release is a separate
+cause handled by its own gate and never retroactively rewrites or re-opens the applied release. An
+already-applied release is never reinterpreted against later evidence — its recorded
+`release_observation_id` / `evidence_observation_id` are immutable, and a re-detected cause
+creates a **new** hold instance (Section 2), never a silent re-open. Operator instruction versions
+follow the same rule: one `operation_id` = one audit row; a replay with the same op-input reports
+the recorded `applied`/`refused`/`nop` outcome unchanged; a differing op-input is
+`operation_conflict` with zero writes; a new attempt requires a newly minted operation id (never
+re-minted for the same attempt).
 
 Refusal is a first-class committed outcome: evidence missing, observation not found, re-read
 failure, re-verification failure, fresh observation still classifying the cause, or insufficient

@@ -121,12 +121,21 @@ Pre-Phase-0 (2026-09-16, against Constitution 1.1.0):
 No violations, no complexity-tracking entries.
 
 Post-Phase-1 re-check (2026-09-16, after research/data-model/contracts/quickstart): all gates
-still pass; two points verified rather than waived — (1) the five-outcome read API and the
+still pass; three points verified rather than waived — (1) the five-outcome read API and the
 operator release path share no writable state (reads are `REPEATABLE READ, READ ONLY`; OC-6
 "查询 MUST NOT 新增、变更、释放或重分配" holds by construction); (2) the seven new tables are
 required carriers (006/007 tables cannot hold bindings, holds, evidence, or registry state
 without redefining their locked contracts), and every chain-dependent classification is
-evidence-persisted so no hidden state exists. No new violations.
+evidence-persisted so no hidden state exists; (3) observation concurrency is explicit and bounded
+(`contracts/observation.md` §2.1/§3.1) — the pre-tx chain observation (two
+`eth_getTransactionCount` reads per scope) is valid only for the tx it fronts; a concurrent
+allocation, a 006 recovery establish/pause, or a registry change makes it stale, and the
+coordination-row lock plus the in-tx re-read checklist (006 gate rows, registry `state`/`seq`,
+bindings/`M`, floor/`last_*`, active holds) refuses on drift; the lock serializes 008/006 writers
+only and makes no chain-atomicity claim, so an external consumption in the window surfaces as the
+next observation's hold/reconcile — a stale observation never lowers the floor, releases a hold,
+or resets/recycles an existing binding, and a pause release is valid only for the exact evidence
+version re-verified under the lock. No new violations.
 
 ## Project Structure
 
