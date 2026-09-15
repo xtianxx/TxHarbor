@@ -310,3 +310,29 @@ func TestWithdrawalAuthCrossCallerIsolation(t *testing.T) {
 		t.Fatal("caller A's key resolved to caller B's identity")
 	}
 }
+
+// TestWithdrawalAuthRotationFailureLeavesNoPartialState proves rotation is
+// atomic: a failed rotation (unknown caller, FK violation) leaves zero
+// api_key rows and no caller row behind — never a half-written successor.
+func TestWithdrawalAuthRotationFailureLeavesNoPartialState(t *testing.T) {
+	pool := withdrawalAuthPool(t)
+	ctx := context.Background()
+
+	const missingCaller int64 = 99991
+	_, _, err := RotateKey(ctx, pool, missingCaller, 60)
+	if err == nil {
+		t.Fatal("RotateKey(unknown caller) = nil, want storage error")
+	}
+	withdrawalAuthWantCode(t, err, CodeTemporarilyUnavailable)
+
+	var apiKeys int
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM api_key WHERE caller_id = $1`, missingCaller).Scan(&apiKeys); err != nil {
+		t.Fatalf("count api_key rows: %v", err)
+	}
+	if apiKeys != 0 {
+		t.Fatalf("api_key rows for failed rotation = %d, want 0 (no half-written successor)", apiKeys)
+	}
+	if withdrawalAuthCallerExists(t, ctx, pool, missingCaller) {
+		t.Fatal("caller row created by failed rotation, want none")
+	}
+}
