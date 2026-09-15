@@ -2226,6 +2226,52 @@ func rrecRunDepositTo(t *testing.T, ctx context.Context, s *rrecScene, cfg Depos
 	return next
 }
 
+// rrecCommitLogHeights advances the 003 checkpoint to exactly wantNext by
+// committing one height per real pipeline step (coverage read + FilterLogs +
+// validate + commitLogRange). It replaces the async logscanServeTo staging
+// wherever an exact lag ceiling is required: poll-then-cancel can commit one
+// batch past the observed target before seeing cancel (the documented
+// runScanTo overshoot), which breaks tight skew bounds. Every step below is
+// the production code path — no checkpoint edits, no sleeps.
+func rrecCommitLogHeights(t *testing.T, ctx context.Context, s *rrecScene, cfg LogConfig, wantNext uint64) uint64 {
+	t.Helper()
+	sc := logscanNewScanner(t, s.pool, s.client, s.client, s.lease, cfg)
+	for {
+		next, ok := logscanCheckpointNext(ctx, s.pool, s.chainID)
+		first := !ok
+		if ok && next >= wantNext {
+			return next
+		}
+		h := uint64(0)
+		if ok {
+			h = next
+		} else {
+			h = cfg.StartBlock
+		}
+		var canon string
+		if err := s.pool.QueryRow(ctx, `SELECT hash FROM chain_blocks WHERE chain_id=$1 AND number=$2 AND canonical`,
+			s.chainID, int64(h)).Scan(&canon); err != nil {
+			t.Fatalf("coverage read at %d: %v", h, err)
+		}
+		coverage := map[uint64]string{h: canon}
+		logs, err := sc.filterLogs(ctx, h, h)
+		if err != nil {
+			t.Fatalf("filterLogs [%d,%d]: %v", h, h, err)
+		}
+		rows, err := sc.validateLogs(h, h, coverage, logs)
+		if err != nil {
+			t.Fatalf("validateLogs [%d,%d]: %v", h, h, err)
+		}
+		rcap, active, err := captureRecoveryVersion(ctx, s.pool, s.chainID)
+		if err != nil || active {
+			t.Fatalf("capture recovery = (%v active=%v err=%v), want inactive version", rcap, active, err)
+		}
+		if err := sc.commitLogRange(ctx, h, h, first, coverage, rows, rcap); err != nil {
+			t.Fatalf("commitLogRange [%d,%d]: %v", h, h, err)
+		}
+	}
+}
+
 // rrecConfirmLoop starts the REAL 005 loop with the scene cadence; the caller
 // waits its own condition, settles, then stops (the rrecIndexForkA shape).
 func rrecConfirmLoop(t *testing.T, ctx context.Context, s *rrecScene) func() {
@@ -2522,10 +2568,10 @@ func TestReorgRecoveryUS3SkewedRollback(t *testing.T) {
 	runScanTo(t, sc002, s.hTip, 60*time.Second)
 
 	// 003 runs short (batch 1, exact stop): covers C, never P's height.
-	ls1 := logscanNewScanner(t, s.pool, s.client, s.client, s.lease, rrecLogCfgStart(s, 0, 1))
-	logscanServeTo(t, ctx, s.pool, s.chainID, ls1, uint64(s.hC+1), 60*time.Second)
-	logShort, ok := logscanCheckpointNext(ctx, s.pool, s.chainID)
-	if !ok || logShort < uint64(s.hC+1) || logShort > uint64(s.hC+2) {
+	// Deterministic staging (one height per real commit): the async
+	// logscanServeTo stop can land one batch past the target.
+	logShort := rrecCommitLogHeights(t, ctx, s, rrecLogCfgStart(s, 0, 1), uint64(s.hC+1))
+	if logShort < uint64(s.hC+1) || logShort > uint64(s.hC+2) {
 		t.Fatalf("log checkpoint after short run = %d, want [%d,%d] (covers C, never P)", logShort, s.hC+1, s.hC+2)
 	}
 	// 004 runs short (batch 1, immediate stop): observes K+C, never P, and
@@ -2536,10 +2582,11 @@ func TestReorgRecoveryUS3SkewedRollback(t *testing.T) {
 	}
 	// 003 advances again over P's height (batch 1): strict log-behind-block
 	// AND deposit-behind-log with every lag point above the coming floor.
-	ls2 := logscanNewScanner(t, s.pool, s.client, s.client, s.lease, rrecLogCfgStart(s, 0, 1))
-	logscanServeTo(t, ctx, s.pool, s.chainID, ls2, uint64(s.hP), 60*time.Second)
-	logPre, ok := logscanCheckpointNext(ctx, s.pool, s.chainID)
-	if !ok || logPre < uint64(s.hP) || logPre > uint64(s.hP+1) {
+	// Deterministic staging (one height per real commit): the async
+	// logscanServeTo stop can land one batch past the target, which breaks
+	// the tight skew bound below.
+	logPre := rrecCommitLogHeights(t, ctx, s, rrecLogCfgStart(s, 0, 1), uint64(s.hP+1))
+	if logPre < uint64(s.hP) || logPre > uint64(s.hP+1) {
 		t.Fatalf("log checkpoint after extend = %d, want [%d,%d]", logPre, s.hP, s.hP+1)
 	}
 	if !(depPre < logPre && logPre < uint64(s.hTip+1)) {
