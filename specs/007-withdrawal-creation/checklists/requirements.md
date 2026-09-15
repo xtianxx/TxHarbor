@@ -13,7 +13,7 @@
 
 ## Requirement Completeness
 
-- [ ] No [NEEDS CLARIFICATION] markers remain — 计 16 处标记（FR-03/06/07/09/10/11/14/15/18 及 US/Edge 引用），均为无上游已批准依据的真实业务选择（认证机制、金额/地址规范化、键格式、比较参数集、保留期、响应编码、404/403 策略、上游供给方式）。按任务指令不执行 clarify、不自行假设消除，已如实保留，留待用户下一步决定。
+- [x] No [NEEDS CLARIFICATION] markers remain — clarify Session 2026-09-15 五问全部裁决并落盘（Q1 认证 FR-03、Q2 授权 FR-03b/FR-18、Q3 键与等价 FR-06/07/09/10、Q4 永久保留 FR-11、Q5 响应编码 FR-14/FR-15），残留引用同步清除；标记计数 0（grep 验证）。
 - [x] Requirements are testable and unambiguous — FR-01–FR-21 每条均为 MUST/MUST NOT 可测断言；拒绝类、幂等行为类、恢复期零副作用类均可在 Anvil + PostgreSQL 本地环境验证（SC-01–SC-08 对应）。
 - [x] Success criteria are measurable — SC-01–SC-08 均为 100%/0 次/有且仅 1 个的可计数断言，无"正确/安全/高效"裸词。
 - [x] Success criteria are technology-agnostic (no implementation details) — SC 只谈请求行为结果（持久化、返回、拒绝、收敛计数、零副作用），未提语言、框架、表结构、锁机制。
@@ -40,16 +40,9 @@
 
 ## Notes
 
-- 本清单为 specify 步骤的质量清单。标记为 `[ ]` 的两项均为有意的、按指令保留的状态：非技术读者友好度（基础设施规格层级）与 NEEDS CLARIFICATION 标记（真实业务歧义，IN-007-Q1–Q8，见下）。DO NOT 为清单全绿擅自裁决。
-- 待业务澄清清单（IN-007-Q1–Q8，建议选项与影响见报告正文，不冒充已批准要求）：
-  1. IN-007-Q1（FR-03）：认证机制与身份来源。
-  2. IN-007-Q2（FR-03/FR-18）：业务授权证明载体与上游供给方式。
-  3. IN-007-Q3（FR-09）：幂等键格式。
-  4. IN-007-Q4（FR-10/FR-06/FR-07）：幂等比较参数集与金额/地址规范化。
-  5. IN-007-Q5（FR-11）：幂等保留期与到期语义。
-  6. IN-007-Q6（FR-14）：响应编码映射。
-  7. IN-007-Q7（FR-15）：未找到 vs 无权访问的可观察区分。
-  8. IN-007-Q8（FR-15/US6-2）：查询返回确切字段与恢复期标注映射（部分留给 plan，部分需业务确认措辞）。
+- 本清单为 specify/clarify 步骤的质量清单。`[ ]` 保留一项为有意的规格层级选择：非技术读者友好度（基础设施规格层级，见清单原文；已批准技术边界集中于 FR 约束，需求与成功标准以可观察行为表述；本步骤未修改检查标准）。
+- clarify Session 2026-09-15（5/5 问，配额用满）：Q1 认证（A 服务端 API Key）、Q2 授权（A 收紧版：上游逐笔授权记录 + 固定接口权限）、Q3 键与等价（A + 明确规则：opaque 1–128 / 金额 [1-9][0-9]* / 地址 EIP-55 + 20 字节比较 / 比较集含授权 ID）、Q4 保留（A 永久保留）、Q5 响应（A 全归一 404 + 201/200/409/400/422/401/403/503 映射 + 不确定时原键重试）。用户裁决逐条写入 ## Clarifications 并同步 FR/场景/Key Entities/Assumptions/Non-Goals。
+- 已修正上一轮报告框架偏差：本地保存上游授权证据 ≠ 接管批准权（FR-03b 明确只验证）；保留期与到期重用合并为永久保留单决策（FR-11）；007 Accepted 表述为"已持久化接收、尚未执行"，未使用 received-unknown-execution（FR-08/US6-2；未知语义仅适用于 006 在途外部请求，FR-17）。
 - 上游依据：006 spec FR-02/FR-18/FR-23/FR-26、006 contracts/downstream.md、006 contracts/observability.md（基线 `8e1a440`）；003/004/005 白名单与确认语义；Constitution 1.1.0。
-- Validation iterations run: 1（specify 内自检：模板节完整性、FR 可测性、SC 可数性、006 契约逐项核对、标记计数 16）。
-- Readiness：规格已就绪进入 clarify（8 个业务问题待用户决策）；plan 输入已分离（存储/并发/字段形状留给 plan，不阻塞 clarify）。
+- Validation iterations run: 2（specify 自检 + clarify 五问落盘：标记计数 16→0，残留引用清除，FR/SC/US 交叉核对）。
+- Readiness：澄清完成，零标记，可进入 `/speckit.plan`。plan 输入：表结构/约束/事务划分、并发算法、字段命名（沿用仓库统一约定）、密钥存储与授权供给入口设计。
