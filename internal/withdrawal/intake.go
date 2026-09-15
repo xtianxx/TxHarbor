@@ -93,18 +93,25 @@ VALUES ($1, $2, $3, $4)`
 // SubmitRequest is one create-withdrawal attempt as the transport hands it to
 // the core. caller_id is never carried: it comes from Authenticate. The
 // addresses may be any FR-07 legal case form; they are canonicalized before
-// compare and persist. Allowlist is the configured asset whitelist (the core
-// never inherits one silently).
+// compare and persist. Allowlist is a pre-resolved asset whitelist for tests
+// and embedded callers; ResolveAllowlist, when non-nil, is the live FR-05
+// source (e.g. ResolveAssetAllowlist over deposit_config_history) and takes
+// precedence. Whichever supplies the list, membership is enforced ONLY on the
+// first-create path, after the step-4 replay fast path (contracts §2
+// permanent-replay invariant: only steps (1)–(2) are re-evaluated on replay).
+// The core never inherits a list silently and never falls back to an
+// empty/full-chain default.
 type SubmitRequest struct {
-	PresentedKey    string
-	IdempotencyKey  string
-	ChainID         int64
-	ExpectedChainID int64
-	Asset           string
-	Recipient       string
-	Amount          string
-	AuthorizationID string
-	Allowlist       []string
+	PresentedKey     string
+	IdempotencyKey   string
+	ChainID          int64
+	ExpectedChainID  int64
+	Asset            string
+	Recipient        string
+	Amount           string
+	AuthorizationID  string
+	Allowlist        []string
+	ResolveAllowlist func(context.Context) ([]string, error)
 }
 
 // SubmitResult is the classified outcome of one attempt. Status is the HTTP
@@ -167,9 +174,12 @@ func (r requestRow) matches(p submitParams) bool {
 
 // SubmitWithdrawal runs one withdrawal create attempt in the contracts §2
 // order: (1) auth, (2) interface permission, (3) input shape/semantics, (4)
-// pre-tx existing-key fast path, (5) the receipt transaction. Every defined
-// outcome returns (*SubmitResult, nil); a non-nil error means an internal
-// defect (nil pool, already-dead context) before any work started.
+// pre-tx existing-key fast path, (4b) first-create-only live allowlist gate,
+// (5) the receipt transaction. Step (1) is the single authentication origin:
+// the transport passes only the presented key, never a pre-authenticated
+// identity. Every defined outcome returns (*SubmitResult, nil); a non-nil
+// error means an internal defect (nil pool, already-dead context) before any
+// work started.
 func SubmitWithdrawal(ctx context.Context, pool *pgxpool.Pool, req SubmitRequest) (*SubmitResult, error) {
 	if pool == nil {
 		return nil, storageUnavailable("submit withdrawal", errors.New("nil pool"))
@@ -232,6 +242,34 @@ func SubmitWithdrawal(ctx context.Context, pool *pgxpool.Pool, req SubmitRequest
 			Message:   "idempotency key already used with different parameters",
 			RequestID: row.requestID,
 			Audit:     auditIntent(callerID, row.requestID, auditActionConflict, "same idempotency key with different parameters"),
+		}, nil
+	}
+
+	// (4b) First-create-only FR-05 gate, reached solely on a fast-path miss:
+	// resolve the live list when the transport supplied a resolver, then
+	// enforce membership. A replay never reaches this point, so a later
+	// policy removal cannot turn an accepted request's replay into a 422
+	// (contracts §2). An unreadable source is retryable, never a fallback.
+	allowlist := req.Allowlist
+	if req.ResolveAllowlist != nil {
+		resolved, rerr := req.ResolveAllowlist(ctx)
+		if rerr != nil {
+			return &SubmitResult{
+				Status:  503,
+				Code:    CodeTemporarilyUnavailable,
+				Message: intakeUnavailableMessage,
+				Audit:   auditIntent(callerID, "", auditActionUnavailable, "storage failure while resolving withdrawal allowlist"),
+			}, nil
+		}
+		allowlist = resolved
+	}
+	if werr := ValidateAssetWhitelisted(norm.asset, allowlist); werr != nil {
+		verr := intakeAsError(werr)
+		return &SubmitResult{
+			Status:  422,
+			Code:    CodeValidationFailed,
+			Message: intakeErrorMessage(verr),
+			Audit:   auditIntent(callerID, "", auditActionRejected, verr.Error()),
 		}, nil
 	}
 
@@ -404,8 +442,11 @@ func requestBoundToAuthorization(ctx context.Context, pool *pgxpool.Pool, author
 
 // normalizeSubmit validates and canonicalizes one attempt before any pool use:
 // key shape (FR-09), chain bind (FR-04), authorization id presence, asset shape
-// + whitelist (FR-05/FR-07), recipient shape (FR-07), amount shape + range
-// (FR-06). Addresses are lowercased here, so stored rows compare by equality.
+// (FR-07), recipient shape (FR-07), amount shape + range (FR-06). Addresses are
+// lowercased here, so stored rows compare by equality. FR-05 whitelist
+// membership is deliberately NOT checked here: it is a mutable policy read and
+// belongs to the first-create path after the step-4 replay fast path
+// (contracts §2 permanent-replay invariant).
 func normalizeSubmit(req SubmitRequest) (submitParams, *Error) {
 	if err := ValidateIdempotencyKey(req.IdempotencyKey); err != nil {
 		return submitParams{}, intakeAsError(err)
@@ -418,9 +459,6 @@ func normalizeSubmit(req SubmitRequest) (submitParams, *Error) {
 	}
 	asset, err := canonicalAddressField(req.Asset, "asset")
 	if err != nil {
-		return submitParams{}, intakeAsError(err)
-	}
-	if err := ValidateAssetWhitelisted(asset, req.Allowlist); err != nil {
 		return submitParams{}, intakeAsError(err)
 	}
 	recipient, err := canonicalAddressField(req.Recipient, "recipient")

@@ -690,12 +690,11 @@ func TestWithdrawalHTTPPolicySourceUnreadableIs503(t *testing.T) {
 	withdrawalHTTPWaitAuditAction(t, ctx, pool, "unavailable", 1)
 }
 
-// TestWithdrawalHTTPReplayPreservedAcrossPolicyUpdate covers T020: a same-key
-// replay is not re-evaluated against a policy change and still returns 200 with
-// the original request_id, row count unchanged. The core's step order (whitelist
-// validation at step 3 before the step-4 replay fast path) is untouched, so the
-// test then pins the frozen-order boundary: a policy that drops the persisted
-// request's own asset makes the next same-key POST a 422, not a replay.
+// TestWithdrawalHTTPReplayPreservedAcrossPolicyUpdate covers the contracts §2
+// permanent-replay invariant: a same-key replay is served 200 with the
+// original request_id even when the live policy later drops the persisted
+// request's own asset. FR-05 membership is a first-create-only gate (core step
+// 4b, after the step-4 fast path); only steps (1)–(2) are re-evaluated.
 func TestWithdrawalHTTPReplayPreservedAcrossPolicyUpdate(t *testing.T) {
 	ctx, pool, _ := withdrawalHTTPSetup(t)
 	key := withdrawalHTTPKey(t, ctx, pool, 8305)
@@ -735,14 +734,21 @@ func TestWithdrawalHTTPReplayPreservedAcrossPolicyUpdate(t *testing.T) {
 		t.Fatalf("request rows = %d, want 1 (replay untouched)", n)
 	}
 
-	// Frozen order boundary: a policy dropping the persisted asset is checked at
-	// step 3 before the step-4 replay fast path, so the same-key POST becomes a
-	// 422 with the original untouched. A 200 here would require reordering the
-	// core step 3/4, which T020 explicitly does not do.
+	// Permanent-replay boundary: a policy dropping the persisted asset must NOT
+	// turn the accepted request's replay into a failure. Same key + same
+	// params is a 200 with the original request_id; the row is untouched and
+	// no new audit row is written for the replay beyond its `replayed` intent.
 	withdrawalHTTPPolicy(t, ctx, pool, 3, withdrawalHTTPOtherAsset+":0")
 	status, raw = withdrawalHTTPDo(t, http.MethodPost, srv.URL+"/withdrawals", key, body)
-	if status != http.StatusUnprocessableEntity {
-		t.Fatalf("dropped-asset status = %d (%s), want 422 (frozen step order)", status, raw)
+	if status != http.StatusOK {
+		t.Fatalf("dropped-asset replay status = %d (%s), want 200 (permanent replay)", status, raw)
+	}
+	var dropped withdrawalPostResponse
+	if err := json.Unmarshal(raw, &dropped); err != nil {
+		t.Fatalf("decode dropped-asset replay body: %v", err)
+	}
+	if dropped.RequestID != first.RequestID {
+		t.Fatalf("dropped-asset replay request_id = %q, want original %q", dropped.RequestID, first.RequestID)
 	}
 	if n := withdrawalHTTPRequestCount(t, ctx, pool); n != 1 {
 		t.Fatalf("request rows after dropped-asset = %d, want 1", n)
@@ -780,4 +786,131 @@ func TestWithdrawalHTTPRejectedCreateWritesNoBindRows(t *testing.T) {
 		t.Fatalf("withdrawal_grant_audit rows = %d, want baseline %d (rejected create adds none)", n, grantAuditBefore)
 	}
 	withdrawalHTTPWaitAuditAction(t, ctx, pool, "rejected", 1)
+}
+
+// TestWithdrawalHTTPReplaySurvivesPolicyLoss covers the contracts §2
+// permanent-replay invariant against the live FR-05 source itself: once a
+// request is accepted, later policy absence (deleted rows) or unreadability
+// (renamed table) MUST NOT turn its same-key replay into a failure. A new key
+// attempting a first create under the same outage is still fail-closed 503
+// with zero binds.
+func TestWithdrawalHTTPReplaySurvivesPolicyLoss(t *testing.T) {
+	ctx, pool, _ := withdrawalHTTPSetup(t)
+	key := withdrawalHTTPKey(t, ctx, pool, 8307)
+	withdrawalHTTPSupply(t, ctx, pool, 8307, "auth-replay-loss")
+	withdrawalHTTPSeedPolicy(t, ctx, pool)
+
+	srv := httptest.NewServer(withdrawalHTTPHandler(pool))
+	defer srv.Close()
+
+	body := withdrawalHTTPCreateBody(t, "idem-replay-loss", withdrawalHTTPAmount, "auth-replay-loss")
+	status, raw := withdrawalHTTPDo(t, http.MethodPost, srv.URL+"/withdrawals", key, body)
+	if status != http.StatusCreated {
+		t.Fatalf("create status = %d (%s), want 201", status, raw)
+	}
+	var first withdrawalPostResponse
+	if err := json.Unmarshal(raw, &first); err != nil {
+		t.Fatalf("decode create body: %v", err)
+	}
+
+	// Phase 1: policy rows vanish. Same-key replay is still 200 same id.
+	if _, err := pool.Exec(ctx, `DELETE FROM deposit_config_history WHERE chain_id = $1`, withdrawalHTTPChainID); err != nil {
+		t.Fatalf("delete policy rows: %v", err)
+	}
+	status, raw = withdrawalHTTPDo(t, http.MethodPost, srv.URL+"/withdrawals", key, body)
+	if status != http.StatusOK {
+		t.Fatalf("replay under missing policy = %d (%s), want 200", status, raw)
+	}
+	var replay withdrawalPostResponse
+	if err := json.Unmarshal(raw, &replay); err != nil {
+		t.Fatalf("decode replay body: %v", err)
+	}
+	if replay.RequestID != first.RequestID {
+		t.Fatalf("replay request_id = %q, want original %q", replay.RequestID, first.RequestID)
+	}
+
+	// Phase 2: a NEW key under the same outage is fail-closed 503, zero binds.
+	withdrawalHTTPSupply(t, ctx, pool, 8307, "auth-replay-loss-new")
+	status, raw = withdrawalHTTPDo(t, http.MethodPost, srv.URL+"/withdrawals", key,
+		withdrawalHTTPCreateBody(t, "idem-replay-loss-new", withdrawalHTTPAmount, "auth-replay-loss-new"))
+	if status != http.StatusServiceUnavailable {
+		t.Fatalf("new-key create under missing policy = %d (%s), want 503", status, raw)
+	}
+	if n := withdrawalHTTPRequestCount(t, ctx, pool); n != 1 {
+		t.Fatalf("request rows = %d, want 1 (only the accepted request)", n)
+	}
+	if n := withdrawalHTTPGrantBindCount(t, ctx, pool, "auth-replay-loss-new"); n != 0 {
+		t.Fatalf("grant binds for the refused key = %d, want 0", n)
+	}
+
+	// Phase 3: the source itself becomes unreadable. The accepted request's
+	// replay is still 200; policy is never consulted on the replay path.
+	if _, err := pool.Exec(ctx, `ALTER TABLE deposit_config_history RENAME TO deposit_config_history_hidden`); err != nil {
+		t.Fatalf("make policy source unreadable: %v", err)
+	}
+	status, raw = withdrawalHTTPDo(t, http.MethodPost, srv.URL+"/withdrawals", key, body)
+	if status != http.StatusOK {
+		t.Fatalf("replay under unreadable policy = %d (%s), want 200", status, raw)
+	}
+	if err := json.Unmarshal(raw, &replay); err != nil {
+		t.Fatalf("decode replay body: %v", err)
+	}
+	if replay.RequestID != first.RequestID {
+		t.Fatalf("replay request_id = %q, want original %q", replay.RequestID, first.RequestID)
+	}
+	if _, err := pool.Exec(ctx, `ALTER TABLE deposit_config_history_hidden RENAME TO deposit_config_history`); err != nil {
+		t.Fatalf("restore policy table: %v", err)
+	}
+}
+
+// TestWithdrawalHTTPReplayHonorsLaterAuthLoss covers steps (1)–(2) as the only
+// re-evaluated checks: a key revoked after accept makes the next same-key
+// replay 401, and a caller whose interface permission is withdrawn makes it
+// 403. Post-startpoint auth loss is observed at the replay's own startpoint;
+// nothing later in the pipeline is consulted.
+func TestWithdrawalHTTPReplayHonorsLaterAuthLoss(t *testing.T) {
+	ctx, pool, _ := withdrawalHTTPSetup(t)
+	key := withdrawalHTTPKey(t, ctx, pool, 8308)
+	withdrawalHTTPSupply(t, ctx, pool, 8308, "auth-replay-revoke")
+	withdrawalHTTPSeedPolicy(t, ctx, pool)
+
+	srv := httptest.NewServer(withdrawalHTTPHandler(pool))
+	defer srv.Close()
+
+	body := withdrawalHTTPCreateBody(t, "idem-replay-revoke", withdrawalHTTPAmount, "auth-replay-revoke")
+	status, raw := withdrawalHTTPDo(t, http.MethodPost, srv.URL+"/withdrawals", key, body)
+	if status != http.StatusCreated {
+		t.Fatalf("create status = %d (%s), want 201", status, raw)
+	}
+
+	// Revoke the key after accept: the replay's own startpoint observes it.
+	if _, err := pool.Exec(ctx, `UPDATE api_key SET revoked_at = now() WHERE caller_id = $1`, 8308); err != nil {
+		t.Fatalf("revoke key: %v", err)
+	}
+	status, raw = withdrawalHTTPDo(t, http.MethodPost, srv.URL+"/withdrawals", key, body)
+	if status != http.StatusUnauthorized {
+		t.Fatalf("replay after revoke = %d (%s), want 401", status, raw)
+	}
+	if n := withdrawalHTTPRequestCount(t, ctx, pool); n != 1 {
+		t.Fatalf("request rows = %d, want 1 (replay rejected pre-store)", n)
+	}
+
+	// A second caller keeps a valid key but loses interface permission: 403.
+	key2 := withdrawalHTTPKey(t, ctx, pool, 8309)
+	withdrawalHTTPSupply(t, ctx, pool, 8309, "auth-replay-noperm")
+	body2 := withdrawalHTTPCreateBody(t, "idem-replay-noperm", withdrawalHTTPAmount, "auth-replay-noperm")
+	status, raw = withdrawalHTTPDo(t, http.MethodPost, srv.URL+"/withdrawals", key2, body2)
+	if status != http.StatusCreated {
+		t.Fatalf("second create status = %d (%s), want 201", status, raw)
+	}
+	if _, err := pool.Exec(ctx, `UPDATE caller SET can_create = false WHERE caller_id = $1`, 8309); err != nil {
+		t.Fatalf("drop permission: %v", err)
+	}
+	status, raw = withdrawalHTTPDo(t, http.MethodPost, srv.URL+"/withdrawals", key2, body2)
+	if status != http.StatusForbidden {
+		t.Fatalf("replay after permission loss = %d (%s), want 403", status, raw)
+	}
+	if n := withdrawalHTTPRequestCount(t, ctx, pool); n != 2 {
+		t.Fatalf("request rows = %d, want 2 (both originals, no new rows)", n)
+	}
 }

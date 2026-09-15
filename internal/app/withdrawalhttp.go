@@ -11,12 +11,13 @@
 // flushed, so a slow audit write (up to the 2s detached bound in
 // withdrawal.WriteRejectAudit) can never delay or alter the response.
 //
-// Allowlist source (T020): every POST resolves the live FR-05 whitelist from
-// the newest 003/004 deposit_config_history row via
-// withdrawal.ResolveAssetAllowlist, AFTER the Bearer credential is checked and
-// BEFORE the frozen core runs. An absent, blank, or unreadable policy row is a
-// retryable 503 with the core's retry text plus one best-effort `unavailable`
-// audit row — never an empty/full-chain fallback. T015 wires the outcome
+// Allowlist source (T020): POST passes a live FR-05 resolver
+// (withdrawal.ResolveAssetAllowlist over the newest 003/004
+// deposit_config_history row) into the core, which invokes it solely on the
+// first-create path after the step-4 replay fast path — replays never touch
+// policy (contracts §2 permanent-replay invariant). An absent, blank, or
+// unreadable policy row fails first creates retryably (503 + one best-effort
+// `unavailable` audit) — never an empty/full-chain fallback. T015 wires the outcome
 // counters and builds no new logging plumbing: the handler emits no per-request
 // logger of its own and rides the process logger the serve lifecycle already
 // runs, with every value funnelled through logx.Redact (FR-20/FR-21, zero
@@ -24,6 +25,7 @@
 package app
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
@@ -161,38 +163,13 @@ func (h *WithdrawalHandler) ServePOST(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// (1) Authenticate before the policy read: a missing/revoked key stays a
-	// 401, and a storage failure is the core's 503 shape with no audit row
-	// (there is no verified caller to attribute it to).
-	auth, err := withdrawal.Authenticate(r.Context(), h.Pool, token)
-	if err != nil {
-		trace := newWithdrawalTraceID()
-		var e *withdrawal.Error
-		if errors.As(err, &e) && e.Code == withdrawal.CodeUnauthenticated {
-			withdrawalWriteError(w, http.StatusUnauthorized, string(withdrawal.CodeUnauthenticated), "missing or invalid API key", "", trace, trace)
-			h.observeWithdrawal(http.StatusUnauthorized)
-			return
-		}
-		withdrawalWriteError(w, http.StatusServiceUnavailable, string(withdrawal.CodeTemporarilyUnavailable), withdrawalUnavailableMessage, "", trace, trace)
-		h.observeWithdrawal(http.StatusServiceUnavailable)
-		return
-	}
-
-	// (3) FR-05: resolve the live whitelist from the newest 003/004 policy row
-	// on every attempt. A missing, blank, or unreadable source is retryable —
-	// never an empty/full-chain fallback that could allow an asset. The 503 is
-	// flushed first, then exactly one best-effort `unavailable` audit row is
-	// written for the authenticated caller (mirrors the core's 503 rule).
-	allowlist, err := withdrawal.ResolveAssetAllowlist(r.Context(), h.Pool, h.ChainID)
-	if err != nil {
-		trace := newWithdrawalTraceID()
-		withdrawalWriteError(w, http.StatusServiceUnavailable, string(withdrawal.CodeTemporarilyUnavailable), withdrawalUnavailableMessage, "", trace, trace)
-		h.observeWithdrawal(http.StatusServiceUnavailable)
-		_ = withdrawal.WriteRejectAudit(r.Context(), h.Pool, auth.Caller.ID, "",
-			"unavailable", "storage failure while resolving withdrawal allowlist")
-		return
-	}
-
+	// Single authentication origin is the core's step (1): the handler passes
+	// only the presented key plus a live FR-05 resolver. The core
+	// authenticates once, re-checks permission on replay, serves a same-key
+	// replay 200/409 before any policy read, and resolves the newest 003/004
+	// policy row solely for first creates. A second handler-side
+	// Authenticate would open a revocation race between the two reads, so it
+	// is deliberately absent here.
 	res, err := withdrawal.SubmitWithdrawal(r.Context(), h.Pool, withdrawal.SubmitRequest{
 		PresentedKey:    token,
 		IdempotencyKey:  body.IdempotencyKey,
@@ -202,7 +179,9 @@ func (h *WithdrawalHandler) ServePOST(w http.ResponseWriter, r *http.Request) {
 		Recipient:       body.Recipient,
 		Amount:          body.Amount,
 		AuthorizationID: body.AuthorizationID,
-		Allowlist:       allowlist,
+		ResolveAllowlist: func(ctx context.Context) ([]string, error) {
+			return withdrawal.ResolveAssetAllowlist(ctx, h.Pool, h.ChainID)
+		},
 	})
 	if err != nil {
 		trace := newWithdrawalTraceID()
