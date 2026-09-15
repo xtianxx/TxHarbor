@@ -170,12 +170,19 @@ func TestWithdrawalAuthRotationGracePreservesIdentity(t *testing.T) {
 		}
 	}
 
-	// The graced predecessor is not active: RevokeKey is a no-op, not a silent
-	// grace-shortening. The old key stays valid inside the window.
-	withdrawalAuthWantCode(t, RevokeKey(ctx, pool, oldRef.KeyID), CodeNotFound)
-	if _, err := Authenticate(ctx, pool, oldPlaintext); err != nil {
-		t.Fatalf("Authenticate(predecessor) after no-op revoke error = %v, want nil", err)
+	// An explicit revoke terminates a still-valid graced predecessor: the old
+	// key is 401 on the next authentication while the successor keeps working
+	// under the same caller identity. The revoke always wins over a grace stamp.
+	if err := RevokeKey(ctx, pool, oldRef.KeyID); err != nil {
+		t.Fatalf("RevokeKey(predecessor in grace) error = %v, want nil", err)
 	}
+	_, err = Authenticate(ctx, pool, oldPlaintext)
+	withdrawalAuthWantCode(t, err, CodeUnauthenticated)
+	if _, err := Authenticate(ctx, pool, newPlaintext); err != nil {
+		t.Fatalf("Authenticate(successor) after predecessor revoke error = %v", err)
+	}
+	// Revoking an already-terminated credential reports not-found.
+	withdrawalAuthWantCode(t, RevokeKey(ctx, pool, oldRef.KeyID), CodeNotFound)
 
 	// Revoking the active successor takes effect on the next authentication.
 	if err := RevokeKey(ctx, pool, newRef.KeyID); err != nil {
@@ -334,5 +341,58 @@ func TestWithdrawalAuthRotationFailureLeavesNoPartialState(t *testing.T) {
 	}
 	if withdrawalAuthCallerExists(t, ctx, pool, missingCaller) {
 		t.Fatal("caller row created by failed rotation, want none")
+	}
+}
+
+// TestWithdrawalAuthRotationMidTransactionFailureRollsBack proves the rotation
+// transaction rolls back past the successor INSERT: with the predecessor row
+// locked by another transaction, RotateKey's predecessor UPDATE blocks until
+// the caller's context deadline, the whole transaction aborts, and no
+// half-written successor remains — the old credential keeps working.
+func TestWithdrawalAuthRotationMidTransactionFailureRollsBack(t *testing.T) {
+	pool := withdrawalAuthPool(t)
+	ctx := context.Background()
+
+	oldPlaintext, oldRef, err := IssueKey(ctx, pool, 55, "rollback")
+	if err != nil {
+		t.Fatalf("IssueKey() error = %v", err)
+	}
+
+	// Hold the predecessor row so RotateKey's UPDATE must wait on the lock;
+	// its successor INSERT has already landed in-tx at that point.
+	blocker, err := pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin blocker tx: %v", err)
+	}
+	defer func() { _ = blocker.Rollback(ctx) }()
+	var one int
+	if err := blocker.QueryRow(ctx, `SELECT 1 FROM api_key WHERE key_id = $1 FOR UPDATE`, oldRef.KeyID).Scan(&one); err != nil {
+		t.Fatalf("lock predecessor row: %v", err)
+	}
+
+	callCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
+	defer cancel()
+	_, _, err = RotateKey(callCtx, pool, 55, 60)
+	if err == nil {
+		t.Fatal("RotateKey(blocked predecessor) = nil, want storage error")
+	}
+	withdrawalAuthWantCode(t, err, CodeTemporarilyUnavailable)
+
+	var apiKeys int
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM api_key WHERE caller_id = $1`, 55).Scan(&apiKeys); err != nil {
+		t.Fatalf("count api_key rows: %v", err)
+	}
+	if apiKeys != 1 {
+		t.Fatalf("api_key rows after rolled-back rotation = %d, want 1 (no half-written successor)", apiKeys)
+	}
+	var revokedAt *time.Time
+	if err := pool.QueryRow(ctx, `SELECT revoked_at FROM api_key WHERE key_id = $1`, oldRef.KeyID).Scan(&revokedAt); err != nil {
+		t.Fatalf("read predecessor revoked_at: %v", err)
+	}
+	if revokedAt != nil {
+		t.Fatalf("predecessor revoked_at = %v, want NULL (rollback must undo nothing — nothing committed)", *revokedAt)
+	}
+	if _, err := Authenticate(ctx, pool, oldPlaintext); err != nil {
+		t.Fatalf("Authenticate(predecessor) after rolled-back rotation error = %v, want nil", err)
 	}
 }

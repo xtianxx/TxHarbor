@@ -251,14 +251,16 @@ WHERE caller_id = $1 AND key_id <> $3 AND revoked_at IS NULL`, callerID, grace, 
 	return plaintext, KeyRef{KeyID: keyID, CallerID: callerID, Prefix: prefix}, nil
 }
 
-// RevokeKey immediately revokes one active credential (revoked_at = now()).
-// Only a currently active row is revocable: a credential already revoked, or
-// one inside a rotation grace window, has revoked_at set, so RowsAffected is
-// zero and RevokeKey returns *Error{Code: CodeNotFound}. A storage failure
+// RevokeKey immediately revokes one still-effective credential
+// (revoked_at = now()). A row with revoked_at IS NULL or in the future
+// (rotation grace window) is still accepted by Authenticate, so an explicit
+// revoke terminates it — the revoke always wins over a grace stamp. Only an
+// already-terminated credential (revoked_at <= now()) or a missing key_id
+// affects zero rows and returns *Error{Code: CodeNotFound}. A storage failure
 // returns *Error{Code: CodeTemporarilyUnavailable}.
 func RevokeKey(ctx context.Context, pool *pgxpool.Pool, keyID int64) error {
 	tag, err := pool.Exec(ctx,
-		`UPDATE api_key SET revoked_at = now() WHERE key_id = $1 AND revoked_at IS NULL`, keyID)
+		`UPDATE api_key SET revoked_at = now() WHERE key_id = $1 AND (revoked_at IS NULL OR revoked_at > now())`, keyID)
 	if err != nil {
 		return storageUnavailable("revoke api key", err)
 	}
