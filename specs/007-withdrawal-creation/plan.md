@@ -166,7 +166,9 @@ identity + immutable params + one-request↔one-intent association + re-auth/can
 
 ## Verification plan (this step writes the plan; execution belongs to tasks/implement)
 
-- Migration verification: goose up/down reproducibility on scratch DB; CHECK/UNIQUE negative tests.
+- Migration verification (owned by T006, scratch instance only): 000007 `down`/`up`
+  reproducibility; negative probes — UNIQUE/PK conflicts expect SQLSTATE 23505 with exact
+  `ConstraintName`, CHECK violations expect 23514 (never in the 23505 classify list).
 - 002–006 regression: `go test ./...` + `make test-integration` must stay green; zero 002–006 file
   modifications outside the app-wiring extension points listed above (diff-gated in tasks).
 - Interface tests: contract-shape tests for every row of contracts/api.md §1 table (status codes,

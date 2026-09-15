@@ -121,15 +121,23 @@ own rows. Never updated or deleted (FR-11).
 Pre-tx reject audit writer (C3 — no fictitious identity): rows are written ONLY when a
 `caller_id` is known. Authenticated pre-tx rejections (422 validation, 403 permission/grant
 fast-path, 400 malformed with valid key, 409 fast-path conflict) → the HTTP handler issues ONE
-best-effort single-statement `INSERT` into this table in its own tx AFTER sending the response
-decision (never blocks the response; failure → structured log + metric, never 503). The
-`request_id` column carries the returned-or-would-be `request_id` (`wr-…` for replays/conflicts
-of an existing row; a `rej-…` opaque marker for never-created rejects — never a fabricated
-`withdrawal_requests` identity). Unauthenticated rejections (401, no verifiable identity) write
-NO Table 5 row — there is no caller to attribute; they are covered by structured logs
-(`logx.Redact`, no key material) + `unauthenticated_total` metric. In-tx rejections (validity
-fails after BEGIN, T-auth-bound, T-unavailable-attempt) ride the receipt tx or its rollback
-branch per the catalog. T010 owns the writer; T026 asserts the 401-no-row rule.
+best-effort single-statement `INSERT` into this table in its own tx AFTER the business response
+has been decided and sent (never blocks or alters the returned response). Failure boundary
+(locked N1 — single attempt, no retry, no queue, no background补记): the write uses a detached
+`context.WithTimeout(context.Background(), 2s)` — independent of the request context, so it is
+still attempted once even if the request context is already cancelled; it MUST NOT reuse the
+cancelled request context. Write failure, context expiry, or process exit MAY leave zero audit
+rows for that rejection — the fallback is a structured log + metric only (auxiliary signal, NOT
+a补回 of the audit row, and crash-time logging itself is best-effort). `recorded_at`
+(`DEFAULT now()`) records the audit-write time, never the response time. `request_id` carries
+the returned-or-would-be id (`wr-…` for replays/conflicts of an existing row; a `rej-…` opaque
+marker for never-created rejects — never a fabricated `withdrawal_requests` identity).
+Unauthenticated rejections (401, no verifiable identity) write NO Table 5 row — there is no
+caller to attribute; they are covered by structured logs (`logx.Redact`, no key material) +
+`unauthenticated_total` metric. In-tx rejections (validity fails after BEGIN, T-auth-bound,
+T-unavailable-attempt) ride the receipt tx or its rollback branch per the catalog. T010 owns
+the writer; T026 asserts success-path exactly-one, failure/cancel-path zero-or-one (never
+duplicated), and the 401-zero-row rule.
 
 ## Table 6 — `withdrawal_grant_audit` (append-only grant-supply log; R9 carrier)
 
@@ -139,7 +147,7 @@ chain-agnostic here (single deployment), keyed by grant id + action.
 | Column | Type | Constraints | Notes |
 |--------|------|-------------|-------|
 | audit_id | BIGINT | PK (`GENERATED ALWAYS AS IDENTITY`) | sole identity; every attempt gets its own row |
-| operation_id | TEXT | `NOT NULL` (UNIQUE via `CONSTRAINT withdrawal_grant_audit_operation_id_uniq` row below) | stable operation identity, caller-supplied per attempt (see below); the ONLY dedup key |
+| operation_id | TEXT | `NOT NULL` (uniqueness ONLY via the named `CONSTRAINT withdrawal_grant_audit_operation_id_uniq` row below — never inline) | stable operation identity, caller-supplied per attempt (see below); the ONLY dedup key |
 | authorization_id | TEXT | `NOT NULL` (no FK — audit must survive and must key unbound grants; a grant row may never exist for a refused supply) | §三: unbound-grant audit keys here, not Table 5 |
 | CONSTRAINT `withdrawal_grant_audit_operation_id_uniq` | `UNIQUE (operation_id)` | attempt-dedup carrier (Table 6 23505 classify key) | |
 | caller_id | BIGINT | `NOT NULL` | grant's caller (or attempted caller on refused supply) |
