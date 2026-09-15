@@ -23,10 +23,9 @@ import (
 // pointer that serve.go passes into construction.
 func withdrawalMetricsHandler(pool *pgxpool.Pool, m *metrics.Metrics) *WithdrawalHandler {
 	return &WithdrawalHandler{
-		Pool:      pool,
-		ChainID:   withdrawalHTTPChainID,
-		Allowlist: []string{withdrawalHTTPAsset},
-		Metrics:   m,
+		Pool:    pool,
+		ChainID: withdrawalHTTPChainID,
+		Metrics: m,
 	}
 }
 
@@ -53,6 +52,7 @@ func TestWithdrawalMetricsOutcomesFromRealRequests(t *testing.T) {
 	withdrawalHTTPSupply(t, ctx, pool, 8201, "auth-metrics-1")
 	badKey := withdrawalHTTPKey(t, ctx, pool, 8202)
 	withdrawalHTTPSupply(t, ctx, pool, 8202, "auth-metrics-2")
+	withdrawalHTTPSeedPolicy(t, ctx, pool)
 
 	srv := httptest.NewServer(withdrawalMetricsHandler(pool, m))
 	defer srv.Close()

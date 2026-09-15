@@ -287,19 +287,14 @@ func Serve(ctx context.Context, d Deps) int {
 
 	// 007 withdrawal routes mount on the same probe listener: the parent mux
 	// takes precedence over the health handler's "/" subtree, and health/metrics
-	// stay unchanged on the child mux. No new listener or address.
+	// stay unchanged on the child mux. No new listener or address. The FR-05
+	// whitelist is resolved per POST from the live 003/004 policy row, so no
+	// policy read is wired into startup: the row is written by the privileged
+	// out-of-loop authorization and may not exist yet.
 	withdrawH := &WithdrawalHandler{
 		Pool:    pool,
 		ChainID: chainID,
-		// T020 deferred handoff: the FR-05 live source is
-		// withdrawal.ResolveAssetAllowlist (the newest 004
-		// deposit_config_history row). It stays out of startup because that
-		// row is written by the privileged out-of-loop authorization and may
-		// not exist yet; the interim cfg.DepositContracts projection carries
-		// the same approved 004 asset set until the handler reads the live
-		// source per attempt.
-		Allowlist: withdrawalAllowlist(cfg.DepositContracts),
-		Metrics:   m,
+		Metrics: m,
 	}
 	mux := http.NewServeMux()
 	mux.Handle("/withdrawals", withdrawH)

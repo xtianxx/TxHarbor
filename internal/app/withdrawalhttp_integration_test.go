@@ -11,6 +11,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -27,10 +28,12 @@ import (
 )
 
 const (
-	withdrawalHTTPChainID   int64 = 31337
-	withdrawalHTTPAsset           = "0x1111111111111111111111111111111111111111"
-	withdrawalHTTPRecipient       = "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-	withdrawalHTTPAmount          = "100"
+	withdrawalHTTPChainID    int64 = 31337
+	withdrawalHTTPAsset            = "0x1111111111111111111111111111111111111111"
+	withdrawalHTTPOtherAsset       = "0x2222222222222222222222222222222222222222"
+	withdrawalHTTPWatch            = "0x3333333333333333333333333333333333333333"
+	withdrawalHTTPRecipient        = "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	withdrawalHTTPAmount           = "100"
 )
 
 // withdrawalHTTPSetup boots a migrated scratch PostgreSQL, opens a pool, and
@@ -83,13 +86,70 @@ func withdrawalHTTPSupply(t *testing.T, ctx context.Context, pool *pgxpool.Pool,
 	}
 }
 
-// withdrawalHTTPHandler builds the handler under test for one pool.
+// withdrawalHTTPHandler builds the handler under test for one pool. The FR-05
+// allowlist is resolved per request from deposit_config_history, so no static
+// allowlist is injected.
 func withdrawalHTTPHandler(pool *pgxpool.Pool) *WithdrawalHandler {
 	return &WithdrawalHandler{
-		Pool:      pool,
-		ChainID:   withdrawalHTTPChainID,
-		Allowlist: []string{withdrawalHTTPAsset},
+		Pool:    pool,
+		ChainID: withdrawalHTTPChainID,
 	}
+}
+
+// withdrawalHTTPPolicy appends one 004 policy version whose asset set is the
+// canonical `<address>:<effective>` snapshot lines. The FR-05 reader consumes
+// only the newest version's assets.
+func withdrawalHTTPPolicy(t *testing.T, ctx context.Context, pool *pgxpool.Pool, version int64, assets string) {
+	t.Helper()
+	_, err := pool.Exec(ctx, `
+INSERT INTO deposit_config_history
+    (chain_id, version_seq, config_hash, start_block, assets, watches, replay_from, request_id)
+VALUES ($1, $2, $3, 0, $4, $5, 0, $6)`,
+		withdrawalHTTPChainID, version, strings.Repeat("a", 64), assets,
+		withdrawalHTTPWatch+":0", fmt.Sprintf("req-http-%d", version))
+	if err != nil {
+		t.Fatalf("insert deposit_config_history v%d: %v", version, err)
+	}
+}
+
+// withdrawalHTTPSeedPolicy seeds the v1 policy carrying withdrawalHTTPAsset.
+func withdrawalHTTPSeedPolicy(t *testing.T, ctx context.Context, pool *pgxpool.Pool) {
+	t.Helper()
+	withdrawalHTTPPolicy(t, ctx, pool, 1, withdrawalHTTPAsset+":0")
+}
+
+// withdrawalHTTPAuditActionCount counts the Table 5 audit rows for one action.
+func withdrawalHTTPAuditActionCount(t *testing.T, ctx context.Context, pool *pgxpool.Pool, action string) int {
+	t.Helper()
+	var n int
+	if err := pool.QueryRow(ctx,
+		`SELECT count(*) FROM withdrawal_request_audit WHERE action = $1`, action).Scan(&n); err != nil {
+		t.Fatalf("count withdrawal_request_audit action %q: %v", action, err)
+	}
+	return n
+}
+
+// withdrawalHTTPGrantBindCount counts withdrawal_requests bound to one grant
+// (the authorization_id UNIQUE carrier).
+func withdrawalHTTPGrantBindCount(t *testing.T, ctx context.Context, pool *pgxpool.Pool, authorizationID string) int {
+	t.Helper()
+	var n int
+	if err := pool.QueryRow(ctx,
+		`SELECT count(*) FROM withdrawal_requests WHERE authorization_id = $1`, authorizationID).Scan(&n); err != nil {
+		t.Fatalf("count grant binds for %q: %v", authorizationID, err)
+	}
+	return n
+}
+
+// withdrawalHTTPGrantAuditCount counts the operator supply/revoke audit rows
+// (withdrawal_grant_audit); the create path MUST never touch this table.
+func withdrawalHTTPGrantAuditCount(t *testing.T, ctx context.Context, pool *pgxpool.Pool) int {
+	t.Helper()
+	var n int
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM withdrawal_grant_audit`).Scan(&n); err != nil {
+		t.Fatalf("count withdrawal_grant_audit: %v", err)
+	}
+	return n
 }
 
 // withdrawalHTTPDo fires one request and returns status + full body bytes.
@@ -157,6 +217,7 @@ func TestWithdrawalHTTPCreateThenSelfQuery(t *testing.T) {
 	ctx, pool, _ := withdrawalHTTPSetup(t)
 	key := withdrawalHTTPKey(t, ctx, pool, 8101)
 	withdrawalHTTPSupply(t, ctx, pool, 8101, "auth-http-1")
+	withdrawalHTTPSeedPolicy(t, ctx, pool)
 
 	srv := httptest.NewServer(withdrawalHTTPHandler(pool))
 	defer srv.Close()
@@ -203,6 +264,7 @@ func TestWithdrawalHTTPReplayAndConflict(t *testing.T) {
 	ctx, pool, _ := withdrawalHTTPSetup(t)
 	key := withdrawalHTTPKey(t, ctx, pool, 8102)
 	withdrawalHTTPSupply(t, ctx, pool, 8102, "auth-http-2")
+	withdrawalHTTPSeedPolicy(t, ctx, pool)
 
 	srv := httptest.NewServer(withdrawalHTTPHandler(pool))
 	defer srv.Close()
@@ -251,6 +313,7 @@ func TestWithdrawalHTTPBadParams(t *testing.T) {
 	ctx, pool, _ := withdrawalHTTPSetup(t)
 	key := withdrawalHTTPKey(t, ctx, pool, 8103)
 	withdrawalHTTPSupply(t, ctx, pool, 8103, "auth-http-3")
+	withdrawalHTTPSeedPolicy(t, ctx, pool)
 
 	srv := httptest.NewServer(withdrawalHTTPHandler(pool))
 	defer srv.Close()
@@ -302,6 +365,7 @@ func TestWithdrawalHTTPCrossCallerNotFoundByteEqual(t *testing.T) {
 	keyA := withdrawalHTTPKey(t, ctx, pool, 8104)
 	keyB := withdrawalHTTPKey(t, ctx, pool, 8105)
 	withdrawalHTTPSupply(t, ctx, pool, 8104, "auth-http-4a")
+	withdrawalHTTPSeedPolicy(t, ctx, pool)
 
 	srv := httptest.NewServer(withdrawalHTTPHandler(pool))
 	defer srv.Close()
@@ -336,6 +400,7 @@ func TestWithdrawalHTTPRecoveryStateServed(t *testing.T) {
 	ctx, pool, _ := withdrawalHTTPSetup(t)
 	key := withdrawalHTTPKey(t, ctx, pool, 8106)
 	withdrawalHTTPSupply(t, ctx, pool, 8106, "auth-http-6")
+	withdrawalHTTPSeedPolicy(t, ctx, pool)
 
 	srv := httptest.NewServer(withdrawalHTTPHandler(pool))
 	defer srv.Close()
@@ -386,6 +451,7 @@ func TestWithdrawalHTTPRecoveryStateServed(t *testing.T) {
 func TestWithdrawalHTTPResponseFirst(t *testing.T) {
 	ctx, pool, dsn := withdrawalHTTPSetup(t)
 	key := withdrawalHTTPKey(t, ctx, pool, 8107)
+	withdrawalHTTPSeedPolicy(t, ctx, pool)
 
 	poolCfg, err := pgxpool.ParseConfig(dsn)
 	if err != nil {
@@ -448,4 +514,270 @@ func TestWithdrawalHTTPResponseFirst(t *testing.T) {
 		}
 		time.Sleep(100 * time.Millisecond)
 	}
+}
+
+// withdrawalHTTPWaitAuditAction polls until action has at least want rows: the
+// handler flushes the response before its detached audit write, so the row can
+// land just after the client returns.
+func withdrawalHTTPWaitAuditAction(t *testing.T, ctx context.Context, pool *pgxpool.Pool, action string, want int) {
+	t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		if n := withdrawalHTTPAuditActionCount(t, ctx, pool, action); n >= want {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("audit action %q never reached %d rows", action, want)
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+}
+
+// TestWithdrawalHTTPColdStartNoPolicyIs503Then201 covers T020's live policy
+// source at cold start: with no deposit_config_history row the create is a
+// retryable 503 (never an empty/full-chain fallback), exactly one `unavailable`
+// audit row is written for the authenticated caller, no request/grant row is
+// bound, and the SAME idempotency key converges to 201 once the policy lands —
+// no restart required.
+func TestWithdrawalHTTPColdStartNoPolicyIs503Then201(t *testing.T) {
+	ctx, pool, _ := withdrawalHTTPSetup(t)
+	key := withdrawalHTTPKey(t, ctx, pool, 8301)
+	withdrawalHTTPSupply(t, ctx, pool, 8301, "auth-cold")
+
+	srv := httptest.NewServer(withdrawalHTTPHandler(pool))
+	defer srv.Close()
+
+	body := withdrawalHTTPCreateBody(t, "idem-cold-1", withdrawalHTTPAmount, "auth-cold")
+	status, raw := withdrawalHTTPDo(t, http.MethodPost, srv.URL+"/withdrawals", key, body)
+	if status != http.StatusServiceUnavailable {
+		t.Fatalf("cold-start status = %d (%s), want 503", status, raw)
+	}
+	var errBody withdrawalErrorResponse
+	if err := json.Unmarshal(raw, &errBody); err != nil {
+		t.Fatalf("decode 503 body %s: %v", raw, err)
+	}
+	if errBody.Code != string(withdrawal.CodeTemporarilyUnavailable) ||
+		!strings.Contains(errBody.Message, "retry with the same idempotency key") {
+		t.Fatalf("503 body = %+v, want temporarily_unavailable with the same-key retry instruction", errBody)
+	}
+	if n := withdrawalHTTPRequestCount(t, ctx, pool); n != 0 {
+		t.Fatalf("request rows at cold start = %d, want 0", n)
+	}
+	if n := withdrawalHTTPGrantBindCount(t, ctx, pool, "auth-cold"); n != 0 {
+		t.Fatalf("grant binds at cold start = %d, want 0", n)
+	}
+	withdrawalHTTPWaitAuditAction(t, ctx, pool, "unavailable", 1)
+
+	// Same key and parameters after the policy lands: no restart, 201.
+	withdrawalHTTPSeedPolicy(t, ctx, pool)
+	status, raw = withdrawalHTTPDo(t, http.MethodPost, srv.URL+"/withdrawals", key, body)
+	if status != http.StatusCreated {
+		t.Fatalf("retry-after-policy status = %d (%s), want 201", status, raw)
+	}
+	var created withdrawalPostResponse
+	if err := json.Unmarshal(raw, &created); err != nil {
+		t.Fatalf("decode 201 body %s: %v", raw, err)
+	}
+	if created.RequestID == "" {
+		t.Fatalf("retry-after-policy body = %+v, want a request_id", created)
+	}
+	if n := withdrawalHTTPRequestCount(t, ctx, pool); n != 1 {
+		t.Fatalf("request rows after policy = %d, want 1", n)
+	}
+}
+
+// TestWithdrawalHTTPLivePolicyAllowVsDeny covers T020: with a policy row the
+// allowed asset persists 201, while a shape-valid non-allowed asset is rejected
+// per contract (422) with zero request/grant bind rows and no operator
+// grant-audit row.
+func TestWithdrawalHTTPLivePolicyAllowVsDeny(t *testing.T) {
+	ctx, pool, _ := withdrawalHTTPSetup(t)
+	key := withdrawalHTTPKey(t, ctx, pool, 8302)
+	withdrawalHTTPSupply(t, ctx, pool, 8302, "auth-deny")
+	withdrawalHTTPSeedPolicy(t, ctx, pool)
+	grantAuditBefore := withdrawalHTTPGrantAuditCount(t, ctx, pool)
+
+	srv := httptest.NewServer(withdrawalHTTPHandler(pool))
+	defer srv.Close()
+
+	status, raw := withdrawalHTTPDo(t, http.MethodPost, srv.URL+"/withdrawals", key,
+		withdrawalHTTPCreateBody(t, "idem-allow", withdrawalHTTPAmount, "auth-deny"))
+	if status != http.StatusCreated {
+		t.Fatalf("allowed status = %d (%s), want 201", status, raw)
+	}
+
+	denyBody := strings.Replace(
+		withdrawalHTTPCreateBody(t, "idem-deny", withdrawalHTTPAmount, "auth-deny"),
+		withdrawalHTTPAsset, withdrawalHTTPOtherAsset, 1)
+	status, raw = withdrawalHTTPDo(t, http.MethodPost, srv.URL+"/withdrawals", key, denyBody)
+	if status != http.StatusUnprocessableEntity {
+		t.Fatalf("non-allowed status = %d (%s), want 422", status, raw)
+	}
+	var errBody withdrawalErrorResponse
+	if err := json.Unmarshal(raw, &errBody); err != nil {
+		t.Fatalf("decode 422 body %s: %v", raw, err)
+	}
+	if errBody.Code != string(withdrawal.CodeValidationFailed) {
+		t.Fatalf("non-allowed code = %q, want %q", errBody.Code, withdrawal.CodeValidationFailed)
+	}
+	if n := withdrawalHTTPRequestCount(t, ctx, pool); n != 1 {
+		t.Fatalf("request rows = %d, want 1 (only the allowed create)", n)
+	}
+	if n := withdrawalHTTPGrantBindCount(t, ctx, pool, "auth-deny"); n != 1 {
+		t.Fatalf("grant binds = %d, want 1", n)
+	}
+	if n := withdrawalHTTPGrantAuditCount(t, ctx, pool); n != grantAuditBefore {
+		t.Fatalf("withdrawal_grant_audit rows = %d, want baseline %d (create path never touches it)", n, grantAuditBefore)
+	}
+}
+
+// TestWithdrawalHTTPPolicyUpdateWithoutRestart covers T020: a new policy version
+// is honored by the already-running server on the next request.
+func TestWithdrawalHTTPPolicyUpdateWithoutRestart(t *testing.T) {
+	ctx, pool, _ := withdrawalHTTPSetup(t)
+	key := withdrawalHTTPKey(t, ctx, pool, 8303)
+	withdrawalHTTPSupply(t, ctx, pool, 8303, "auth-update")
+	withdrawalHTTPPolicy(t, ctx, pool, 1, withdrawalHTTPAsset+":0")
+
+	srv := httptest.NewServer(withdrawalHTTPHandler(pool))
+	defer srv.Close()
+
+	status, raw := withdrawalHTTPDo(t, http.MethodPost, srv.URL+"/withdrawals", key,
+		withdrawalHTTPCreateBody(t, "idem-update-1", withdrawalHTTPAmount, "auth-update"))
+	if status != http.StatusCreated {
+		t.Fatalf("pre-update status = %d (%s), want 201", status, raw)
+	}
+
+	// Advance the live policy to a version that drops the asset; no restart.
+	withdrawalHTTPPolicy(t, ctx, pool, 2, withdrawalHTTPOtherAsset+":0")
+
+	status, raw = withdrawalHTTPDo(t, http.MethodPost, srv.URL+"/withdrawals", key,
+		withdrawalHTTPCreateBody(t, "idem-update-2", "101", "auth-update"))
+	if status != http.StatusUnprocessableEntity {
+		t.Fatalf("post-update status = %d (%s), want 422 from the new policy", status, raw)
+	}
+	if n := withdrawalHTTPRequestCount(t, ctx, pool); n != 1 {
+		t.Fatalf("request rows = %d, want 1 (update rejected before persist)", n)
+	}
+}
+
+// TestWithdrawalHTTPPolicySourceUnreadableIs503 covers T020's fail-closed read:
+// when the policy source cannot be read the create is a retryable 503, never an
+// allow, and no request row is written.
+func TestWithdrawalHTTPPolicySourceUnreadableIs503(t *testing.T) {
+	ctx, pool, _ := withdrawalHTTPSetup(t)
+	key := withdrawalHTTPKey(t, ctx, pool, 8304)
+	withdrawalHTTPSupply(t, ctx, pool, 8304, "auth-unreadable")
+	withdrawalHTTPSeedPolicy(t, ctx, pool)
+
+	// Make the live source unreadable for this throwaway database: the reader
+	// query then fails rather than returning a policy.
+	if _, err := pool.Exec(ctx, `ALTER TABLE deposit_config_history RENAME TO deposit_config_history_hidden`); err != nil {
+		t.Fatalf("make policy source unreadable: %v", err)
+	}
+
+	srv := httptest.NewServer(withdrawalHTTPHandler(pool))
+	defer srv.Close()
+
+	status, raw := withdrawalHTTPDo(t, http.MethodPost, srv.URL+"/withdrawals", key,
+		withdrawalHTTPCreateBody(t, "idem-unreadable", withdrawalHTTPAmount, "auth-unreadable"))
+	if status != http.StatusServiceUnavailable {
+		t.Fatalf("unreadable-source status = %d (%s), want 503 (never allow)", status, raw)
+	}
+	if n := withdrawalHTTPRequestCount(t, ctx, pool); n != 0 {
+		t.Fatalf("request rows = %d, want 0", n)
+	}
+	withdrawalHTTPWaitAuditAction(t, ctx, pool, "unavailable", 1)
+}
+
+// TestWithdrawalHTTPReplayPreservedAcrossPolicyUpdate covers T020: a same-key
+// replay is not re-evaluated against a policy change and still returns 200 with
+// the original request_id, row count unchanged. The core's step order (whitelist
+// validation at step 3 before the step-4 replay fast path) is untouched, so the
+// test then pins the frozen-order boundary: a policy that drops the persisted
+// request's own asset makes the next same-key POST a 422, not a replay.
+func TestWithdrawalHTTPReplayPreservedAcrossPolicyUpdate(t *testing.T) {
+	ctx, pool, _ := withdrawalHTTPSetup(t)
+	key := withdrawalHTTPKey(t, ctx, pool, 8305)
+	withdrawalHTTPSupply(t, ctx, pool, 8305, "auth-replay")
+	// v1 carries both assets so a later version can drop one without touching
+	// the persisted asset.
+	withdrawalHTTPPolicy(t, ctx, pool, 1, withdrawalHTTPAsset+":0\n"+withdrawalHTTPOtherAsset+":0")
+
+	srv := httptest.NewServer(withdrawalHTTPHandler(pool))
+	defer srv.Close()
+
+	body := withdrawalHTTPCreateBody(t, "idem-replay", withdrawalHTTPAmount, "auth-replay")
+	status, raw := withdrawalHTTPDo(t, http.MethodPost, srv.URL+"/withdrawals", key, body)
+	if status != http.StatusCreated {
+		t.Fatalf("create status = %d (%s), want 201", status, raw)
+	}
+	var first withdrawalPostResponse
+	if err := json.Unmarshal(raw, &first); err != nil {
+		t.Fatalf("decode create body: %v", err)
+	}
+
+	// Policy advances and keeps withdrawalHTTPAsset: the replay is a 200 with
+	// the original id, and no row changes.
+	withdrawalHTTPPolicy(t, ctx, pool, 2, withdrawalHTTPAsset+":0")
+	status, raw = withdrawalHTTPDo(t, http.MethodPost, srv.URL+"/withdrawals", key, body)
+	if status != http.StatusOK {
+		t.Fatalf("replay status = %d (%s), want 200", status, raw)
+	}
+	var replay withdrawalPostResponse
+	if err := json.Unmarshal(raw, &replay); err != nil {
+		t.Fatalf("decode replay body: %v", err)
+	}
+	if replay.RequestID != first.RequestID {
+		t.Fatalf("replay request_id = %q, want original %q", replay.RequestID, first.RequestID)
+	}
+	if n := withdrawalHTTPRequestCount(t, ctx, pool); n != 1 {
+		t.Fatalf("request rows = %d, want 1 (replay untouched)", n)
+	}
+
+	// Frozen order boundary: a policy dropping the persisted asset is checked at
+	// step 3 before the step-4 replay fast path, so the same-key POST becomes a
+	// 422 with the original untouched. A 200 here would require reordering the
+	// core step 3/4, which T020 explicitly does not do.
+	withdrawalHTTPPolicy(t, ctx, pool, 3, withdrawalHTTPOtherAsset+":0")
+	status, raw = withdrawalHTTPDo(t, http.MethodPost, srv.URL+"/withdrawals", key, body)
+	if status != http.StatusUnprocessableEntity {
+		t.Fatalf("dropped-asset status = %d (%s), want 422 (frozen step order)", status, raw)
+	}
+	if n := withdrawalHTTPRequestCount(t, ctx, pool); n != 1 {
+		t.Fatalf("request rows after dropped-asset = %d, want 1", n)
+	}
+}
+
+// TestWithdrawalHTTPRejectedCreateWritesNoBindRows covers T020's zero-bind rule:
+// a rejected create writes no withdrawal_requests row, binds no grant
+// (withdrawal_requests.authorization_id), and writes no withdrawal_grant_audit
+// row; only the response-first `rejected` audit intent lands.
+func TestWithdrawalHTTPRejectedCreateWritesNoBindRows(t *testing.T) {
+	ctx, pool, _ := withdrawalHTTPSetup(t)
+	key := withdrawalHTTPKey(t, ctx, pool, 8306)
+	withdrawalHTTPSupply(t, ctx, pool, 8306, "auth-reject-bind")
+	withdrawalHTTPSeedPolicy(t, ctx, pool)
+	grantAuditBefore := withdrawalHTTPGrantAuditCount(t, ctx, pool)
+
+	srv := httptest.NewServer(withdrawalHTTPHandler(pool))
+	defer srv.Close()
+
+	denyBody := strings.Replace(
+		withdrawalHTTPCreateBody(t, "idem-reject-bind", withdrawalHTTPAmount, "auth-reject-bind"),
+		withdrawalHTTPAsset, withdrawalHTTPOtherAsset, 1)
+	status, raw := withdrawalHTTPDo(t, http.MethodPost, srv.URL+"/withdrawals", key, denyBody)
+	if status != http.StatusUnprocessableEntity {
+		t.Fatalf("rejected status = %d (%s), want 422", status, raw)
+	}
+	if n := withdrawalHTTPRequestCount(t, ctx, pool); n != 0 {
+		t.Fatalf("withdrawal_requests rows = %d, want 0", n)
+	}
+	if n := withdrawalHTTPGrantBindCount(t, ctx, pool, "auth-reject-bind"); n != 0 {
+		t.Fatalf("grant binds = %d, want 0", n)
+	}
+	if n := withdrawalHTTPGrantAuditCount(t, ctx, pool); n != grantAuditBefore {
+		t.Fatalf("withdrawal_grant_audit rows = %d, want baseline %d (rejected create adds none)", n, grantAuditBefore)
+	}
+	withdrawalHTTPWaitAuditAction(t, ctx, pool, "rejected", 1)
 }

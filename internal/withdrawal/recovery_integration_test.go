@@ -18,15 +18,21 @@
 // Scene mapping: (a) crash after O-capture — never landed
 // (TestWithdrawalRecoveryUnknownRetryableSameOperation) and committed
 // (TestWithdrawalRecoveryCommittedResponseLostConverges); (b) crash before
-// O-capture — TestWithdrawalRecoveryCrashBeforeCaptureNewAttempt; (c) kill-9
-// mid-response — TestWithdrawalRecoveryKill9MidResponse. Table 6's
-// grant-pre-exists + this-attempt-refused rule is
+// O-capture — TestWithdrawalRecoveryCrashBeforeCaptureNewAttempt; (c) committed
+// response lost — TestWithdrawalRecoveryCommittedResponseLostNewPoolReRead.
+// Table 6's grant-pre-exists + this-attempt-refused rule is
 // TestWithdrawalRecoveryGrantPreExistsAttemptRefused.
 //
-// Crash mechanism: the caller's context is cancelled and the acting pool is
-// closed — no real SIGKILL, no sleeps. A "restart" always opens a NEW pool
-// instance over the same DSN, re-reading durable state; the old in-memory pool
-// is never called again.
+// Fault mechanism HONESTLY: every "crash" in THIS file is a cancelled caller
+// context plus a closed actor pool, then a NEW pool over the same DSN. That is
+// a LOST CALLER, not a dead PROCESS: no signal is sent and the OS process stays
+// alive. It proves durable-row recovery from a dropped connection, and it is
+// NOT proof of kill-9 / process-death equivalence — no phrase here is backed by
+// a signal. The genuine SIGKILL evidence (a real child process running the real
+// WithdrawalHandler, killed mid-request and restarted) lives in
+// recovery_kill_integration_test.go
+// (TestWithdrawalRecoverySigkillChildPreCommit /
+// TestWithdrawalRecoverySigkillChildUnknownCommit).
 //
 // It reuses the T006 container/migration helpers (withdrawalStartPostgres,
 // withdrawalMigrateOptions) and the T008 grant fixtures (grantSeedCaller,
@@ -129,13 +135,14 @@ func TestWithdrawalRecoveryPreCommitZeroRows(t *testing.T) {
 		recoveryAssertZeroDurableRows(t, ctx, pool, op)
 	})
 
-	t.Run("caller_death_before_commit", func(t *testing.T) {
-		// Given a captured O and a caller context that dies with the process
+	t.Run("caller_context_cancel_before_commit", func(t *testing.T) {
+		// Given a captured O and a caller context cancelled before any
+		// statement lands (a lost caller; the process stays alive)
 		ctx, _, pool := recoverySetup(t)
 		grantSeedCaller(t, ctx, pool, 7212)
 		op := grantTestOp(recoveryMint(t), "auth-precommit-dead", 7212, "100")
 		crashCtx, cancel := context.WithCancel(ctx)
-		cancel() // the caller process is gone before any statement lands
+		cancel() // caller context cancelled before any statement lands
 
 		// When the attempt runs on the dead context
 		_, err := SupplyGrant(crashCtx, pool, op, "op", "pre-commit crash")
@@ -152,8 +159,8 @@ func TestWithdrawalRecoveryPreCommitZeroRows(t *testing.T) {
 // O-miss + grant-miss is "still unknown", never proof of rollback. The caller
 // retries with the SAME O and SAME op-input — a fresh O would be a NEW attempt.
 func TestWithdrawalRecoveryUnknownRetryableSameOperation(t *testing.T) {
-	// Given a candidate grant and a supply attempt whose caller died before any
-	// statement landed (mint O, then crash)
+	// Given a candidate grant and a supply attempt whose caller context was
+	// cancelled before any statement landed (mint O, then cancel)
 	ctx, dsn, pool := recoverySetup(t)
 	grantSeedCaller(t, ctx, pool, 7221)
 	op := grantTestOp(recoveryMint(t), "auth-unknown-retry", 7221, "100")
@@ -285,32 +292,34 @@ func TestWithdrawalRecoveryCrashBeforeCaptureNewAttempt(t *testing.T) {
 	}
 }
 
-// TestWithdrawalRecoveryKill9MidResponse covers scene (c): the kill-9
-// mid-response equivalent. The attempt reaches COMMIT, the caller is abandoned
-// without reading the result, then the process restarts. Re-reading the SAME O
-// on a NEW pool returns the recorded outcome with no duplicate rows.
-func TestWithdrawalRecoveryKill9MidResponse(t *testing.T) {
+// TestWithdrawalRecoveryCommittedResponseLostNewPoolReRead covers scene (c) as
+// THIS file can actually produce it: a committed attempt whose caller context
+// is cancelled and whose actor pool is closed, then a NEW pool over the same
+// DSN. It proves a committed outcome survives a dropped caller connection; it
+// is NOT kill-9 (no process is signalled) — the genuine SIGKILL evidence lives
+// in recovery_kill_integration_test.go.
+func TestWithdrawalRecoveryCommittedResponseLostNewPoolReRead(t *testing.T) {
 	// Given an in-flight attempt whose caller never reads the result
 	ctx, dsn, actor := recoverySetup(t)
 	grantSeedCaller(t, ctx, actor, 7251)
-	op := grantTestOp(recoveryMint(t), "auth-kill9", 7251, "100")
+	op := grantTestOp(recoveryMint(t), "auth-committed-lost", 7251, "100")
 	actCtx, cancel := context.WithCancel(ctx)
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		_, _ = SupplyGrant(actCtx, actor, op, "op", "kill-9 mid-response")
+		_, _ = SupplyGrant(actCtx, actor, op, "op", "committed response lost")
 	}()
 	<-done
-	cancel()      // the caller's context dies with the process
-	actor.Close() // ALL in-memory state is dropped
+	cancel()      // the caller connection is abandoned (no process death)
+	actor.Close() // the actor pool is dropped; the process stays alive
 
-	// When the operator restarts and re-reads the SAME O on a NEW pool
+	// When a NEW pool re-reads the SAME O over the same durable database
 	restarted := recoveryRestart(t, dsn)
 	readBack, found, err := ReadAttempt(ctx, restarted, op.OperationID)
 
 	// Then the recorded outcome is visible and no duplicate row exists
 	if err != nil || !found {
-		t.Fatalf("ReadAttempt after kill-9 = (%+v, %v, %v), want found", readBack, found, err)
+		t.Fatalf("ReadAttempt after committed response loss = (%+v, %v, %v), want found", readBack, found, err)
 	}
 	if readBack.Action != grantOutcomeSupplied {
 		t.Fatalf("recorded outcome = %q, want %s", readBack.Action, grantOutcomeSupplied)

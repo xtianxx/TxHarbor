@@ -11,13 +11,16 @@
 // flushed, so a slow audit write (up to the 2s detached bound in
 // withdrawal.WriteRejectAudit) can never delay or alter the response.
 //
-// Allowlist source: this wiring consumes the operator-configured
-// cfg.DepositContracts (004 canonical asset set) as the interim whitelist.
-// T020 owns the live 003/004 policy-source wiring; this is the handoff point,
-// not the policy source. T015 wires the outcome counters and builds no new
-// logging plumbing: the handler emits no per-request logger of its own and
-// rides the process logger the serve lifecycle already runs, with every value
-// funnelled through logx.Redact (FR-20/FR-21, zero secrets).
+// Allowlist source (T020): every POST resolves the live FR-05 whitelist from
+// the newest 003/004 deposit_config_history row via
+// withdrawal.ResolveAssetAllowlist, AFTER the Bearer credential is checked and
+// BEFORE the frozen core runs. An absent, blank, or unreadable policy row is a
+// retryable 503 with the core's retry text plus one best-effort `unavailable`
+// audit row — never an empty/full-chain fallback. T015 wires the outcome
+// counters and builds no new logging plumbing: the handler emits no per-request
+// logger of its own and rides the process logger the serve lifecycle already
+// runs, with every value funnelled through logx.Redact (FR-20/FR-21, zero
+// secrets).
 package app
 
 import (
@@ -31,7 +34,6 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
-	"github.com/xtianxx/txharbor/internal/config"
 	"github.com/xtianxx/txharbor/internal/metrics"
 	"github.com/xtianxx/txharbor/internal/withdrawal"
 )
@@ -50,12 +52,10 @@ const withdrawalUnavailableMessage = "withdrawal storage unavailable or the subm
 
 // WithdrawalHandler serves the two 007 endpoints on the shared probe listener.
 // Pool is the read/write connection pool; ChainID is the deployment chain bind
-// (FR-04); Allowlist is the configured asset whitelist (the interim
-// cfg.DepositContracts set until T020 wires the live policy source).
+// (FR-04) and selects the live FR-05 policy row resolved per create attempt.
 type WithdrawalHandler struct {
-	Pool      *pgxpool.Pool
-	ChainID   int64
-	Allowlist []string
+	Pool    *pgxpool.Pool
+	ChainID int64
 	// Metrics, when non-nil, receives one outcome bump per create attempt.
 	// Wire-shape unit tests construct the handler without a registry, so every
 	// increment is guarded.
@@ -124,17 +124,6 @@ type withdrawalGetResponse struct {
 	Recovery  withdrawalRecoveryBody `json:"recovery"`
 }
 
-// withdrawalAllowlist projects the 004 deposit contract entries onto the plain
-// asset-address whitelist the core consumes. T020 replaces this interim source
-// with the live 003/004 policy wiring.
-func withdrawalAllowlist(entries []config.DepositEntry) []string {
-	out := make([]string, 0, len(entries))
-	for _, e := range entries {
-		out = append(out, e.Address)
-	}
-	return out
-}
-
 // ServeHTTP dispatches the two mounted routes; the collection path is POST,
 // every "/withdrawals/{id}" path is GET.
 func (h *WithdrawalHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -172,6 +161,38 @@ func (h *WithdrawalHandler) ServePOST(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// (1) Authenticate before the policy read: a missing/revoked key stays a
+	// 401, and a storage failure is the core's 503 shape with no audit row
+	// (there is no verified caller to attribute it to).
+	auth, err := withdrawal.Authenticate(r.Context(), h.Pool, token)
+	if err != nil {
+		trace := newWithdrawalTraceID()
+		var e *withdrawal.Error
+		if errors.As(err, &e) && e.Code == withdrawal.CodeUnauthenticated {
+			withdrawalWriteError(w, http.StatusUnauthorized, string(withdrawal.CodeUnauthenticated), "missing or invalid API key", "", trace, trace)
+			h.observeWithdrawal(http.StatusUnauthorized)
+			return
+		}
+		withdrawalWriteError(w, http.StatusServiceUnavailable, string(withdrawal.CodeTemporarilyUnavailable), withdrawalUnavailableMessage, "", trace, trace)
+		h.observeWithdrawal(http.StatusServiceUnavailable)
+		return
+	}
+
+	// (3) FR-05: resolve the live whitelist from the newest 003/004 policy row
+	// on every attempt. A missing, blank, or unreadable source is retryable —
+	// never an empty/full-chain fallback that could allow an asset. The 503 is
+	// flushed first, then exactly one best-effort `unavailable` audit row is
+	// written for the authenticated caller (mirrors the core's 503 rule).
+	allowlist, err := withdrawal.ResolveAssetAllowlist(r.Context(), h.Pool, h.ChainID)
+	if err != nil {
+		trace := newWithdrawalTraceID()
+		withdrawalWriteError(w, http.StatusServiceUnavailable, string(withdrawal.CodeTemporarilyUnavailable), withdrawalUnavailableMessage, "", trace, trace)
+		h.observeWithdrawal(http.StatusServiceUnavailable)
+		_ = withdrawal.WriteRejectAudit(r.Context(), h.Pool, auth.Caller.ID, "",
+			"unavailable", "storage failure while resolving withdrawal allowlist")
+		return
+	}
+
 	res, err := withdrawal.SubmitWithdrawal(r.Context(), h.Pool, withdrawal.SubmitRequest{
 		PresentedKey:    token,
 		IdempotencyKey:  body.IdempotencyKey,
@@ -181,7 +202,7 @@ func (h *WithdrawalHandler) ServePOST(w http.ResponseWriter, r *http.Request) {
 		Recipient:       body.Recipient,
 		Amount:          body.Amount,
 		AuthorizationID: body.AuthorizationID,
-		Allowlist:       h.Allowlist,
+		Allowlist:       allowlist,
 	})
 	if err != nil {
 		trace := newWithdrawalTraceID()
