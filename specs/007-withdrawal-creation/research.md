@@ -138,16 +138,20 @@ endpoint, or infrastructure; upstream is NOT required to hold a DB connection as
   function, and this subcommand is the only *reviewed* binary path that executes them.
   `--operator` is a declared audit identity, not a verified identity; the trust root is DSN
   possession, identical to every existing privileged path.
-- **Actions**: `supply --authorization-id G --caller-id C --chain-id N --asset 0x… --recipient 0x…
-  --amount D [--expires-at T] --operator OP --reason R` (upserts the Table 4 row; same grant id +
-  same full param set → idempotent re-supply returning the row; same id + any param differ →
-  refused, row untouched); `revoke --authorization-id G --operator OP --reason R` (`active` →
-  `revoked`; already-bound requests keep their rows — revocation affects only not-yet-accepted
-  receipts per FR-03b; already-`revoked` → idempotent success).
+- **Actions** (full per-action tx in data-model Table 6 attempt semantics): `supply --operation-id O
+  --authorization-id G --caller-id C --chain-id N --asset 0x… --recipient 0x…
+  --amount D [--expires-at T] --operator OP --reason R` (omitted `--operation-id` ⇒ tool mints +
+  echoes for runbook retry); `revoke --operation-id O --authorization-id G --operator OP --reason R`
+  (same O rule). Same attempt retried (same O) converges via `UNIQUE (operation_id)`; a NEW attempt
+  MUST mint a new O — grant state is never reverse-derived into identity. Already-bound requests
+  keep their rows (revocation affects only not-yet-accepted receipts per FR-03b).
 - **Field/param validation**: identical validators as intake (`validate.go` shared): FR-06 amount,
   FR-07 addresses, FR-04 chain bind, caller existence; `expires_at` must be future if given.
-- **Atomicity**: supply/revoke + its audit row commit in one tx (`RowsAffected()==1` checks;
-  uncertain COMMIT → re-read the grant row and report its durable state, same discipline as R8).
+- **Atomicity**: supply/revoke + its audit row commit in one tx; per-action `RowsAffected`
+  expectations in Table 6 (grant-INSERT `==1` on first supply, `==0`-assert on equal re-supply;
+  audit-INSERT `==1` per NEW attempt). Uncertain COMMIT ⇒ dual re-read (grant row for the business
+  report + audit by `operation_id` for the evidence report) then same-O or new-O retry per Table 6 —
+  grant state alone never proves the audit committed.
 - **Ops/acceptance**: runbook lines in quickstart V3/V7; integration tests drive the subcommand
   function in-process (like `confirmauth_test.go`) against real PostgreSQL — no shell-out.
 - **"007 只读验授权" boundary clarified**: request-handling paths (`intake.go`, `query.go`) never
@@ -246,19 +250,39 @@ invariant table). Tasks/implement MUST NOT re-decide, add a global lock, or drop
   `INSERT` request → `INSERT` audit (same tx; repo precedent: DELETE + audit in one tx,
   `depositauth.go:1142-1159`) → `COMMIT` with `RowsAffected()==1` checks, 23505/commit-error
   handling per above.
-- **Grant expiry clock and evaluation point (locked §三)**: clock is DB `now()` (constitution:
-  DB time is the only clock for validity; same rule as lease/version expiry). `expires_at` is
-  evaluated in the in-tx validity SELECT *after* the `FOR SHARE` lock is granted — so lock-wait
-  time is accounted: a grant expiring *during* the wait reads expired → 403, zero rows. The lock
-  coordinates *writes* (revoke), never time: post-check, pre-COMMIT expiry is bounded by the
-  remaining statements under writeGuard (microseconds-to-ms, not a semantic window), and no
-  additional re-check is claimed. This matches Q2 ("到期…对尚未接收请求生效"): "尚未接收" is
-  decided at the post-lock validity read, the last check before the INSERT.
-- **Deadlock statement corrected (§三)**: "no lock-order ring can form" is retained ONLY in its
-  precise form — one lock object, one fixed acquisition point ⇒ no *ordering* cycle. It does NOT
-  claim immunity from waiting: `FOR SHARE` waiters queue behind a revoke's `FOR UPDATE` (resolved
-  by writeGuard timeout → 503 retryable, never silent), and UNIQUE index waits resolve via
-  23505 classify. No full-DB audit is claimed; the two wait edges on this path are enumerated here.
+- **Grant expiry clock and evaluation point (locked §三; corrected 四轮定点)**: DB time stays the
+  only clock for validity, but `now()`/`transaction_timestamp()` is FIXED at transaction start
+  (PG docs) — it MUST NOT back the post-lock check. Protocol: (1) `SELECT grant row … FOR SHARE`
+  (blocks until granted; the returned row proves state but NOT current time); (2) a SEPARATE
+  statement `SELECT clock_timestamp()` — evaluated when executed, i.e. after the lock wait —
+  binds `t_check`; (3) validity decided as `state='active' AND (expires_at IS NULL OR
+  expires_at > t_check)` in a third statement (or client-side on the two result sets — same
+  values, no earlier snapshot reused). `clock_timestamp()` MUST NOT be folded into the locking
+  SELECT's target list as proof of post-lock time: expressions may evaluate before the lock wait.
+  Boundary: `expires_at = t_check` is expired (`>` strict, locked here). Counter-example closed:
+  tx-start-valid → lock wait → expiry passes mid-wait → post-lock `clock_timestamp()` reads past
+  `expires_at` → 403, zero request rows. Q2 ("到期…对尚未接收请求生效") is decided at this
+  post-lock check — the last check before the INSERT.
+- **Timeout scope correction (四轮定点)**: `statement_timeout='5s'` bounds EACH statement only; it
+  does NOT bound total tx time or inter-statement stalls. The previous "microseconds-to-ms under
+  writeGuard" promise is withdrawn. No request/tx-level deadline mechanism exists in the repo
+  today (no `idle_in_transaction_session_timeout`, no statement-count budget — recorded so no
+  later step invents one); post-check pre-COMMIT expiry therefore has no time bound CLAIMED — it
+  is accepted as residual (bounded in practice to a handful of indexed writes, unbounded in
+  theory). Lock-wait itself IS bounded per-statement (the waiting SELECT dies at 5s → 503
+  retryable).
+- **Waiting and tx-error handling (§二后半; narrowed 四轮定点)**: the receipt path has TWO
+  characterized wait edges — (a) `FOR SHARE` queuing behind a revoke's row write, (b) UNIQUE
+  index arbitration between concurrent inserters. This enumerates *this path's* waits; it is NOT
+  a whole-DB claim. Failure mapping (locked): per-statement timeout (`statement_timeout`, incl.
+  lock-wait expiry) → ROLLBACK → 503 retryable; deadlock `40P01` → ROLLBACK → 503 retryable
+  (deadlock is possible in principle wherever two txns touch the same rows in overlapping order —
+  receipt takes grant-share-then-request-insert while revoke takes grant-update; the window is
+  narrow but NOT proven absent, so the handler is specified rather than the impossibility);
+  `23505` → ROLLBACK → fixed-order classify (R8; the ONLY non-rollback diagnostic read allowed —
+  any other post-error statement in the aborted tx is forbidden); COMMIT error → dual re-read
+  (R8/Table 6). No wait failure is ever mapped to 23505 semantics, and no 23505 is ever mapped
+  to a wait/timeout. Full-DB lock auditing is explicitly out of scope.
 - **Dual-constraint race (locked semantics)**: one INSERT can violate both UNIQUEs at once, but
   PostgreSQL reports exactly one `ConstraintName`. Order of report is NOT a semantic signal and
   MUST NOT decide the response. Rule: after any 23505, rollback, then classify **deterministically

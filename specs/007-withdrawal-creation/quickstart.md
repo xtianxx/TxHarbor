@@ -22,9 +22,11 @@ No header / wrong key / revoked key → 401; key without `can_create` → 403; b
 ## V3 — grant matrix
 Missing/inactive/revoked/mismatched grant → 403, zero rows in `withdrawal_requests`;
 grant reuse across a second key → 403-path (T-auth-bound), first row untouched.
-Supply entry: `withdrawal-authz supply` (idempotent re-supply on same full params;
-same id + differ → refused, row untouched); `withdrawal-authz revoke` (active → revoked;
-already-revoked → idempotent success; bound requests keep rows).
+Supply entry: `withdrawal-authz supply --operation-id O …` (equal re-supply → `resupplied`,
+grant `RowsAffected()==0`; same-O concurrent retry converges via `UNIQUE (operation_id)`);
+A-then-B异参 → TWO `supply_refused` rows (new O each); `withdrawal-authz revoke --operation-id P …`
+(active → `revoked`; repeat → distinct `revoke_nop` rows); uncertain COMMIT → dual re-read
+(state + O) then same-O/new-O retry.
 Revocation interleaved with first receipt: revoke-committed-before-grant-lock → 403 zero rows;
 revoke-blocked-on-grant-lock (receipt first) → receipt stands, revoke applies after COMMIT,
 subsequent replays 200. Assert the three-case table from research R7.
@@ -45,7 +47,8 @@ dual-constraint race (same key + bound-elsewhere grant in one INSERT) → respon
 fixed-order classify (key-hit equality → 200; key-hit inequality → 409), never report order;
 kill -9 between COMMIT and response → retry same key → 200 original;
 restart → retry → 200 original; storage down → 503, zero Accepted;
-uncertain COMMIT → re-classify (hit → 200/409/403 per order; miss → retryable, never "not created").
+uncertain COMMIT → re-classify (hit → 200/409/403 per order; miss → retryable, never "not created");
+lock-wait timeout → 503 retryable; deadlock → 503 retryable (assert no silent mapping to 23505).
 
 ## V7 — rotation & revocation
 Rotate key (same `caller_id`) → old key 401 (or dual-accept inside grace), new key works,
