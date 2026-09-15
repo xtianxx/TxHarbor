@@ -178,7 +178,10 @@ the request content set (FR-18/OC-3). A binding's existence is not authorization
 or registry disable that commits before the read MUST be visible to it, and one racing the read
 MUST block it (or the read MUST be re-evaluated on the same guarantee). Only then is the
 "008 pause since the last attempt" ordering in research R6 sound; 009 records the observed class
-and never substitutes its own release evidence (OC-6/OC-7).
+and never substitutes its own release evidence (OC-6/OC-7). **Bilateral acceptance**: provided by
+008 `contracts/read-api.md` §4 (scope-row `FOR SHARE` during the snapshot; 008-owned writers take
+the same row `FOR UPDATE`); 006 ordering for this read stays best-effort here and is covered
+009-side by the R6 gate-table lock, not by this read.
 
 **Delivery re-check**: every delivery attempt re-reads the binding and requires
 `BindingMatches`. Any non-matching class at delivery — `BindingPaused`, `BindingReadFailed`,

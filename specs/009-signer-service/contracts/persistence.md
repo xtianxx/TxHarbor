@@ -64,6 +64,14 @@ Delivery is never a pure read of Table 4; it is a recorded assessment (research 
    re-admission is `blocked`; a lost marker leaves `admitted` = "write outcome unknown" (unknown
    reconcile), never a standing permission. Only bytes already written are in-flight approved.
    Linearization: the admission `COMMIT`, ordered by the gate-table `SHARE` lock (R6).
+   **Immediate-write rule**: the admission authorizes only the causally-immediate write in the
+   same task execution (no yield to retry/restart/scheduler between `COMMIT` and the socket
+   write). A pause/revoke/`can_sign`-off that commits after the admission `COMMIT` is ordered
+   after the admission and does not cancel that immediate write (in-flight approved); any
+   non-immediate send is a delayed send and MUST re-admit. Locks are never held across network
+   I/O (held to `COMMIT` only, `statement_timeout` guard); a post-`COMMIT` crash or lost marker
+   leaves `admitted` = "write outcome unknown" (`unknown_reconcile`), never permission to assume
+   delivery.
 
 Consequences:
 
