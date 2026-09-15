@@ -22,11 +22,16 @@ No header / wrong key / revoked key → 401; key without `can_create` → 403; b
 ## V3 — grant matrix
 Missing/inactive/revoked/mismatched grant → 403, zero rows in `withdrawal_requests`;
 grant reuse across a second key → 403-path (T-auth-bound), first row untouched.
-Supply entry: `withdrawal-authz supply --operation-id O …` (O minted before any DB effect;
-equal re-supply → `resupplied`, grant `RowsAffected()==0`; same-O retry compares seven first —
-equal ⇒ recorded outcome (incl. refusal), differ ⇒ `operation_conflict`);
-A-then-B异参 (new O each) → TWO `supply_refused` rows; `withdrawal-authz revoke --operation-id P …`
-(active → `revoked`; repeat → distinct `revoke_nop` rows); uncertain COMMIT → same-O retry only
+Supply entry: `withdrawal-authz mint` (capture O first; no O ⇒ no DB effects), then
+`withdrawal-authz supply --operation-id O …` (O REQUIRED, no auto-mint). Equal re-supply →
+`resupplied`, grant `RowsAffected()==0`; same-O retry compares op-input first —
+equal ⇒ recorded outcome (incl. refusal), differ ⇒ `operation_conflict`;
+A-then-B异参 (new O each) → TWO `supply_refused` rows. Concurrent first-supplies:
+same-O same-op-input ⇒ ONE grant + ONE `supplied` (loser restarts into resupply, same O);
+different-O same-op-input ⇒ ONE grant + per-O audits; different-O异参 ⇒ winner `supplied`,
+loser `supply_refused` (never `operation_conflict`, never 503).
+`withdrawal-authz revoke --operation-id P …`
+(active → `revoked`; repeat → distinct `revoke_nop` rows). Uncertain COMMIT → same-O retry only
 (O-miss ⇒ unknown/retryable with same O; grant-present + attempt-refused ⇒ refusal, never success).
 Revocation interleaved with first receipt: revoke-committed-before-grant-lock → 403 zero rows;
 revoke-blocked-on-grant-lock (receipt first) → receipt stands, revoke applies after COMMIT,

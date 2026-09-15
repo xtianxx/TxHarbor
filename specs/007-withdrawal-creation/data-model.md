@@ -129,20 +129,28 @@ chain-agnostic here (single deployment), keyed by grant id + action.
 | detail | TEXT | `NOT NULL DEFAULT ''` | redacted params snapshot (no secrets) |
 | recorded_at | TIMESTAMPTZ | `NOT NULL DEFAULT now()` | wall-clock evidence only; never a dedup input |
 
-Attempt semantics (locked 五轮定点 — one attempt = one row; `operation_id` binds the FULL
-normalized input; the 三轮 `grant_state_seq` key and its narrative stay withdrawn):
-- `operation_id` binds (action, authorization_id, caller_id, chain_id, asset, recipient, amount,
-  expires_at): the audit row persists all seven (action/authorization_id/caller_id columns +
-  `detail` canonical params snapshot). Any read by O MUST compare the presented seven against
-  the stored seven BEFORE reporting: all equal → return the recorded outcome (whatever the
+Attempt semantics (locked 六轮定点 — one attempt = one row; `operation_id` binds the FULL
+normalized op-input; the 三轮 `grant_state_seq` key and its narrative stay withdrawn):
+- `operation_id` binds the op-input (action, authorization_id, caller_id, chain_id, asset,
+  recipient, amount, expires_at): the audit row persists all eight (action/authorization_id/
+  caller_id columns + `detail` canonical params snapshot). NOTE on naming: prior revisions called
+  this "七元组" while listing eight fields — corrected here to **op-input (8 fields)**; no semantic
+  change, only the miscount is fixed. Any read by O MUST compare the presented op-input against
+  the stored op-input BEFORE reporting: all equal → return the recorded outcome (whatever the
   action, INCLUDING `supply_refused` — a refusal is a recorded outcome, never re-executed, never
   upgraded to success); ANY differ → `operation_conflict`, zero business writes, original audit
   row untouched, original outcome NOT impersonated. O alone never proves success.
-- O source: the operator caller mints one opaque id per attempt (e.g. UUID). Retries of the SAME
-  attempt MUST reuse it with IDENTICAL seven; a NEW attempt MUST mint a new one. The subcommand
-  takes `--operation-id`: when omitted the tool mints, prints, and (single-machine runbook flow)
-  the operator reuses the printed O — but crash-before-capture loses it (see generation rule).
-  Grant state or audit counts are NEVER reverse-derived into an operation identity.
+- operator/reason classification (locked 六轮定点): `operator` + `reason` are RETRY METADATA, not
+  bound op-input. Same-O retry with different operator/reason text MUST NOT create a new row and
+  MUST NOT silently rewrite the recorded row — the retry returns the recorded outcome; if the
+  caller needs the new text preserved it MUST mint a new O (a new attempt by definition).
+- O source (locked 六轮定点 — explicit-only): `supply`/`revoke` REQUIRE `--operation-id`;
+  no in-command auto-mint, no echo-fallback path (both DELETED — print ≠ saved, and echo-loss
+  left an unrecoverable O, contradicting "attempt never existed"). Minting is a SEPARATE step:
+  `withdrawal-authz mint` prints one opaque id (e.g. UUID) and the caller durably captures it
+  BEFORE invoking supply/revoke. Rule: no reusable O ⇒ no DB side effects, full stop. A crash
+  before capture means the operator never had an O, so no attempt exists and nothing needs
+  recovery; a crash after capture ⇒ retry with the captured O (same op-input).
 - Business idempotency and audit attempts are stated separately: grant-table convergence
   (`supplied` once; re-supply-equal returns success) is a property of the Table 4 row, NOT of
   audit rows. Two different异参 supplies A then B record TWO `supply_refused` rows (different
@@ -153,7 +161,7 @@ normalized input; the 三轮 `grant_state_seq` key and its narrative stay withdr
 - `supply_refused` (new `operation_id` per attempt): zero grant mutation + audit INSERT commit
   together (refusal is the committed outcome, not a rollback). Attempted params live in `detail`;
   the grant table carries nothing. 23505 on `operation_id` (same attempt retried concurrently) →
-  rollback → re-read by O → compare seven → equal: report recorded outcome WITHOUT a second row
+  rollback → re-read by O → compare op-input → equal: report recorded outcome WITHOUT a second row
   (the only audit convergence, and it converges to the *same attempt*); differ: `operation_conflict`.
 - `revoked` (new `operation_id`): active → revoked + audit, both `==1`.
 - `revoke_nop` (new `operation_id` per attempt): each repeat records its own row; idempotent success.
@@ -165,10 +173,10 @@ normalized input; the 三轮 `grant_state_seq` key and its narrative stay withdr
   business success. Grant state is reported separately as current-state info, never conflated
   with this attempt's outcome.
 - Uncertain COMMIT (unified recovery — "双缺→新O" rule DELETED): ALWAYS retry with the SAME O
-  and the SAME seven. O-miss does NOT mean rolled back or finished (the tx may still be open) —
+  and the SAME op-input. O-miss does NOT mean rolled back or finished (the tx may still be open) —
   re-issuing the same O lets the tx + UNIQUE converge. Read failure or still-indeterminate ⇒
   report unknown/retryable WITH the same O for the next retry; NEVER mint a new O for the same
-  operation. Outcome basis: the audit row matching O + seven; grant state is current-state info only.
+  operation. Outcome basis: the audit row matching O + op-input; grant state is current-state info only.
 
 Verifiable outcomes: supply → `supplied` + grant row; equal re-supply → `resupplied`,
 grant `RowsAffected()==0`; A-then-B异参 → TWO `supply_refused` rows with distinct details;
@@ -197,51 +205,71 @@ COMMIT → same-O retry only (O-miss ⇒ unknown/retryable with same O, never ne
   semantic; fixed-order classify decides (key-hit equality → 200; key-hit inequality → 409;
   else auth-hit → 403; else retryable). Never derive the response from report order.
 
-## Supply pseudocode (locked 五轮定点 — entry → commit → 23505 classify → uncertain recovery)
+## Supply pseudocode (locked 六轮定点 — entry → commit → 23505 classify → uncertain recovery)
 
 ```
-O, SEVEN = capture_operation()          # O minted BEFORE any DB side effect (R9 rule);
-                                        # SEVEN = (action, G, caller, chain, asset, recipient, amount, expires_at)
+O = require(--operation-id)                 # explicit-only (mint step precedes; R9 rule);
+                                            # no O ⇒ no DB side effects, full stop
+OPIN = (action, G, caller, chain, asset, recipient, amount, expires_at)  # op-input, 8 fields
 BEGIN
 SET LOCAL statement_timeout = '5s'
 grant = SELECT * FROM withdrawal_authorizations WHERE authorization_id = $G FOR UPDATE
+        # MISS ⇒ no row locked: concurrent first-supplies serialize ONLY on the PK below
 if grant.missing and action = supply:
-    INSERT INTO withdrawal_authorizations (G, ...SEVEN...)      # first supply
-    INSERT INTO withdrawal_grant_audit (O, G, ...SEVEN, 'supplied', ...)
-elif grant.present and equal(SEVEN, grant_SEVEN) and action = supply:
+    INSERT INTO withdrawal_authorizations (G, ...OPIN...)      # first supply
+    INSERT INTO withdrawal_grant_audit (O, G, ...OPIN, 'supplied', ...)
+elif grant.present and equal(OPIN, grant_OPIN) and action = supply:
     assert RowsAffected(grant_check) == 0
-    INSERT INTO withdrawal_grant_audit (O, G, ...SEVEN, 'resupplied', ...)
+    INSERT INTO withdrawal_grant_audit (O, G, ...OPIN, 'resupplied', ...)
 elif action = revoke and grant.state = 'active':
     UPDATE withdrawal_authorizations SET state='revoked' WHERE authorization_id=$G
-    INSERT INTO withdrawal_grant_audit (O, G, ...SEVEN, 'revoked', ...)
+    INSERT INTO withdrawal_grant_audit (O, G, ...OPIN, 'revoked', ...)
 elif action = revoke and grant.state != 'active':
-    INSERT INTO withdrawal_grant_audit (O, G, ...SEVEN, 'revoke_nop', ...)
-else:  # grant missing (non-supply), or SEVEN != grant_SEVEN
-    INSERT INTO withdrawal_grant_audit (O, G, ...SEVEN-attempted, 'supply_refused', ...)
+    INSERT INTO withdrawal_grant_audit (O, G, ...OPIN, 'revoke_nop', ...)
+else:  # grant missing (non-supply), or OPIN != grant_OPIN
+    INSERT INTO withdrawal_grant_audit (O, G, ...OPIN-attempted, 'supply_refused', ...)
 COMMIT
 on 23505(constraint = operation_id_uniq):
-    ROLLBACK
+    ROLLBACK                                 # aborted tx: NO further statement in it
     row = SELECT * FROM withdrawal_grant_audit WHERE operation_id = $O
-    if row.missing: return retryable(same O, same SEVEN)   # tx may still be open; never new O
-    if equal(SEVEN, row.seven): return row.outcome          # incl. refusal — never upgraded
+    if row.missing: return retryable(same O, same OPIN)   # tx may still be open; never new O
+    if equal(OPIN, row.opin): return row.outcome          # incl. refusal — never upgraded
     else: return operation_conflict, zero writes
+on 23505(constraint = withdrawal_authorizations_pkey):   # FIRST-SUPPLY RACE branch (六轮定点):
+    ROLLBACK                                 # concurrent first-supply won; loser restarts BOUNDED:
+    grant2 = SELECT * FROM withdrawal_authorizations WHERE authorization_id = $G  # no lock, read-only
+    if equal(OPIN, grant2_OPIN) and action = supply:
+        # winner's params == mine: my attempt becomes a resupply — SAME O, SAME OPIN, one retry
+        INSERT INTO withdrawal_grant_audit (O, G, ...OPIN, 'resupplied', ...)  # own single-statement tx
+        # 23505(operation_id_uniq) here ⇒ my twin already recorded ⇒ re-read by O ⇒ report it
+    else:
+        INSERT INTO withdrawal_grant_audit (O, G, ...OPIN-attempted, 'supply_refused', ...)
+    # retry budget: at most ONE re-execution per call (bounded — never a loop); a second 23505 or
+    # error ⇒ retryable(same O, same OPIN) for the OUTER caller, which retries the whole call.
+    # NEVER map the grant-PK conflict to operation_conflict (it is not an O-binding mismatch)
+    # and NEVER to 503-unavailable (storage is healthy; this is contention with a known outcome).
 on 23505(other) / 40P01 / timeout / conn-error:
-    ROLLBACK; return retryable(same O, same SEVEN)
+    ROLLBACK; return retryable(same O, same OPIN)
 on COMMIT-unknown:
     row = SELECT * FROM withdrawal_grant_audit WHERE operation_id = $O
-    if row.present and equal(SEVEN, row.seven): return row.outcome
+    if row.present and equal(OPIN, row.opin): return row.outcome
     if row.present and differ: return operation_conflict
     # row missing: grant state is CURRENT-STATE INFO ONLY — never this attempt's proof
-    return unknown_retryable(same O, same SEVEN)            # "双缺→新O" DELETED
+    return unknown_retryable(same O, same OPIN)            # "双缺→新O" DELETED
 ```
 
-Fixed verification scenarios (§四): (1) same-O same-SEVEN concurrent ⇒ one audit row, all
+Fixed verification scenarios (§四): (1) same-O same-OPIN concurrent ⇒ one audit row, all
 report its outcome; (2) same-O different-G-or-params ⇒ `operation_conflict`, zero writes,
 original intact; (3) original tx still open + double-miss ⇒ same-O retry (converges or stays
 unknown, never new O); (4) grant pre-exists + this-attempt-refused ⇒ refusal (never business
-success, even though a grant row exists); (5) crash after O-mint before COMMIT ⇒ recovery
+success, even though a grant row exists); (5) crash after O-capture before COMMIT ⇒ recovery
 reuses the SAME O (durable capture per R9); crash before capture ⇒ the attempt never existed,
 a fresh mint is a NEW attempt by definition.
+First-supply concurrency (§二): (i) same-O same-OPIN twins ⇒ ONE grant row + ONE `supplied`
+audit row (loser restarts into resupply with the SAME O); (ii) different-O same-OPIN ⇒ ONE grant
+row + one audit row PER O (`supplied` + `resupplied`); (iii) different-O different-OPIN ⇒ ONE
+grant row (winner's params) + winner `supplied` + loser `supply_refused` (loser's params in
+`detail`, grant untouched).
 
 ## Concurrency argument (why two writers cannot both win; R7 FINAL)
 

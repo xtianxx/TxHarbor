@@ -138,16 +138,18 @@ endpoint, or infrastructure; upstream is NOT required to hold a DB connection as
   function, and this subcommand is the only *reviewed* binary path that executes them.
   `--operator` is a declared audit identity, not a verified identity; the trust root is DSN
   possession, identical to every existing privileged path.
-- **Actions** (full per-action tx in data-model Table 6 attempt semantics): `supply --operation-id O
-  --authorization-id G --caller-id C --chain-id N --asset 0x… --recipient 0x…
-  --amount D [--expires-at T] --operator OP --reason R`; `revoke --operation-id O --authorization-id G --operator OP --reason R`.
-  O generation rule (locked 五轮定点): generate-before-execute — the operator mints O BEFORE any
-  DB side effect and durably captures it FIRST (explicit `--operation-id` passthrough, or
-  two-step `withdrawal-authz mint` printing O to the runbook log before `supply` runs). Auto-mint
-  inside `supply` is allowed ONLY as convenience when the minted O is echoed AND the runbook
-  treats echo-loss as attempt-unknown (retry requires re-running mint ⇒ a NEW O ⇒ a NEW attempt
-  by definition — never a retry of the lost one). No crash-recoverable auto-O without a durable
-  capture point; no new platform. Same attempt retried (same O + same seven) converges via
+- **Actions** (full per-action tx in data-model Table 6 attempt semantics + supply pseudocode):
+  `withdrawal-authz mint` (standalone; prints one opaque id; caller durably captures BEFORE any
+  supply/revoke) then `supply --operation-id O --authorization-id G --caller-id C --chain-id N
+  --asset 0x… --recipient 0x… --amount D [--expires-at T] --operator OP --reason R` and
+  `revoke --operation-id O --authorization-id G --operator OP --reason R`.
+  `--operation-id` is REQUIRED on supply/revoke (no auto-mint, no echo-fallback — both DELETED
+  六轮定点: print ≠ saved, and echo-loss left an unrecoverable O).
+  First-supply miss-branch: `SELECT … FOR UPDATE` on a missing row locks nothing, so concurrent
+  first-supplies serialize on the grant PK; the loser gets 23505 on `withdrawal_authorizations_pkey`
+  → rollback → read-only re-read → equal ⇒ resupply-audit with SAME O (one bounded re-execution),
+  differ ⇒ `supply_refused`-audit. Grant-PK conflict is NEVER `operation_conflict` and NEVER
+  503-unavailable. Same attempt retried (same O + same op-input) converges via
   `UNIQUE (operation_id)`; same O + any differ ⇒ `operation_conflict`; a NEW attempt MUST mint
   a new O — grant state is never reverse-derived into identity. Already-bound requests
   keep their rows (revocation affects only not-yet-accepted receipts per FR-03b).
@@ -155,9 +157,9 @@ endpoint, or infrastructure; upstream is NOT required to hold a DB connection as
   FR-07 addresses, FR-04 chain bind, caller existence; `expires_at` must be future if given.
 - **Atomicity**: supply/revoke + its audit row commit in one tx; per-action `RowsAffected`
   expectations in Table 6 (grant-INSERT `==1` on first supply, `==0`-assert on equal re-supply;
-  audit-INSERT `==1` per NEW attempt). Uncertain COMMIT ⇒ retry with the SAME O and SAME seven
+  audit-INSERT `==1` per NEW attempt). Uncertain COMMIT ⇒ retry with the SAME O and SAME op-input
   (O-miss ⇒ unknown/retryable with same O; "missing both ⇒ new O" DELETED — a missing audit row
-  never proves rollback). Outcome basis is the audit row matching O + seven; grant state is
+  never proves rollback). Outcome basis is the audit row matching O + op-input; grant state is
   current-state info only (covers: grant pre-exists + this-attempt-refused ⇒ refusal, never
   business success).
 - **Ops/acceptance**: runbook lines in quickstart V3/V7; integration tests drive the subcommand
