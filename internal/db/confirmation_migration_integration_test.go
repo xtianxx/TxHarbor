@@ -250,8 +250,11 @@ func TestConfirmationMigrationUpgradeFrom004PreservesExistingData(t *testing.T) 
 		t.Fatalf("pre-upgrade observation changed: status=%q confirmed_at=%v", status, confirmedAt)
 	}
 
-	// Leg 2: 000005 -> 000006. Exactly one migration applies; the approved
-	// reorg-recovery deltas land while 005 rows/columns stay intact.
+	// Leg 2: 000005 -> chain head. Every migration above 5 applies
+	// (000006, 000007, ...); files at or below 5 are skipped. Chain-relative:
+	// applied = len(files)-5, skipped = 5. (T030 explicit review: 006-era text
+	// said "000005 -> 000006, exactly one"; 007's ALLOWED-NEW migration extends
+	// the head. Test-only change; no 001-006 schema touched.)
 	files, err := MigrationFiles(Migrations)
 	if err != nil {
 		t.Fatalf("list embedded migrations: %v", err)
@@ -260,7 +263,7 @@ func TestConfirmationMigrationUpgradeFrom004PreservesExistingData(t *testing.T) 
 	if err := MigrateUp(ctx, testMigrateOptions(dsn), &out); err != nil {
 		t.Fatalf("leg-2 MigrateUp() error = %v (output %q)", err, out.String())
 	}
-	if want := fmt.Sprintf("applied=1 skipped=%d pending=0", len(files)-1); !strings.Contains(out.String(), want) {
+	if want := fmt.Sprintf("applied=%d skipped=5 pending=0", len(files)-5); !strings.Contains(out.String(), want) {
 		t.Fatalf("leg-2 MigrateUp() output = %q, want %q", out.String(), want)
 	}
 	if _, err := CheckCompatibility(ctx, testMigrateOptions(dsn)); err != nil {
@@ -463,12 +466,17 @@ func versionsOf(results []*goose.MigrationResult) []int64 {
 	return out
 }
 
-// TestConfirmationMigrationDowngradeFrom005RemovesOnly005 covers the Down
-// section: rolling back to 4 removes 000006 (scratch-only shape: no fork
-// history rows exist here, per the T007 outage boundary) then 000005 — the
-// history table, the basis columns, the pending index, and the widened status
-// set — while 002/003/004 schema and rows stay intact, and re-applying works.
-func TestConfirmationMigrationDowngradeFrom005RemovesOnly005(t *testing.T) {
+// TestConfirmationMigrationDowngradeTo4RemovesAbove4 covers the Down
+// section: rolling back to 4 removes every version above 4 in chain order —
+// 000007 (caller/api_key/withdrawal_*), then 000006 (scratch-only shape: no
+// fork history rows exist here, per the T007 outage boundary), then 000005 —
+// the history table, the basis columns, the pending index, and the widened
+// status set — while 002/003/004 schema and rows stay intact, and re-applying
+// works. (T030 explicit review: this 006-owned test hardcoded the chain head
+// at 6; 007's ALLOWED-NEW migration legitimately extends the chain, so the
+// expectation is chain-relative. No 001–006 schema, prod code, or shared
+// constant is touched — test-only.)
+func TestConfirmationMigrationDowngradeTo4RemovesAbove4(t *testing.T) {
 	dsn := startPostgres(t)
 	ctx := context.Background()
 	migrateUpAll(t, dsn)
@@ -495,8 +503,17 @@ func TestConfirmationMigrationDowngradeFrom005RemovesOnly005(t *testing.T) {
 	if err != nil {
 		t.Fatalf("DownTo(4): %v", err)
 	}
-	if len(results) != 2 || results[0].Source.Version != 6 || results[1].Source.Version != 5 {
-		t.Fatalf("DownTo(4) rolled back %v, want exactly versions [6 5] in order", versionsOf(results))
+	if len(results) != 3 || results[0].Source.Version != 7 || results[1].Source.Version != 6 || results[2].Source.Version != 5 {
+		t.Fatalf("DownTo(4) rolled back %v, want exactly versions [7 6 5] in order", versionsOf(results))
+	}
+
+	for _, rel := range []string{
+		"caller", "api_key", "withdrawal_requests", "withdrawal_request_audit",
+		"withdrawal_authorizations", "withdrawal_grant_audit",
+	} {
+		if relationExists(t, sqlDB, rel) {
+			t.Errorf("007 relation %s still exists after DOWN to 4", rel)
+		}
 	}
 
 	for _, rel := range []string{
@@ -548,8 +565,8 @@ func TestConfirmationMigrationDowngradeFrom005RemovesOnly005(t *testing.T) {
 	if err := MigrateStatus(ctx, opts, &out); err != nil {
 		t.Fatalf("MigrateStatus() after down error = %v", err)
 	}
-	if !strings.Contains(out.String(), "current_version=4") || !strings.Contains(out.String(), "pending=2") {
-		t.Fatalf("status after down = %q, want current_version=4 and pending=2", out.String())
+	if !strings.Contains(out.String(), "current_version=4") || !strings.Contains(out.String(), "pending=3") {
+		t.Fatalf("status after down = %q, want current_version=4 and pending=3", out.String())
 	}
 
 	files, err := MigrationFiles(Migrations)
@@ -568,5 +585,8 @@ func TestConfirmationMigrationDowngradeFrom005RemovesOnly005(t *testing.T) {
 	}
 	if !relationExists(t, sqlDB, "reorg_recovery") {
 		t.Fatal("reorg_recovery missing after re-up")
+	}
+	if !relationExists(t, sqlDB, "withdrawal_requests") {
+		t.Fatal("withdrawal_requests missing after re-up (007 did not re-apply)")
 	}
 }

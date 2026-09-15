@@ -48,12 +48,15 @@ auth-interface permission but MUST NOT re-fail on the original grant's later sta
 ## 2. Validation order (绑定顺序; §三.3)
 
 Per request, in order: (1) auth (401) → (2) interface permission + grant check (403) →
-(3) input shape/semantics incl. whitelist (400/422) → (4) existing-key lookup (200/409 fast path) →
-(5) grant re-validation in-tx (403) → (6) atomic persist. The in-tx grant re-check is
+(3) input shape/semantics excl. whitelist (400/422) → (4) existing-key lookup (200/409 fast path) →
+(4b) first-create-only live whitelist gate (422/503) → (5) grant re-validation in-tx (403) →
+(6) atomic persist. The in-tx grant re-check is
 authoritative; the pre-tx lookup is an optimization only. Permanent-replay invariant: only steps
 (1)–(2) are re-evaluated on replay; a later grant expiry/revocation MUST NOT turn a replay into
 a failure, and no other mutable check may be added later that breaks permanent replay (plan
-documents the closed check set; FR-11).
+documents the closed check set; FR-11). Per-request grant validity (active/expiry/binding)
+belongs to first receipt (steps (2)/(5)); replay re-checks only the current key auth and the
+caller's current interface permission — never the original grant's later state.
 
 ## 3. Query shape (Q8落盘: 请求事实; 字段名沿仓库 snake_case)
 

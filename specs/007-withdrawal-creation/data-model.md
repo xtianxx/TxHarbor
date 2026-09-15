@@ -52,7 +52,7 @@ Key format: `txh_` + base64url(32 CSPRNG bytes); presented via `Authorization: B
 | idempotency_key | TEXT | `NOT NULL CHECK (length BETWEEN 1 AND 128 AND key ~ '^[\x21-\x7e]+$')` | opaque, case-sensitive, verbatim (FR-09) |
 | authorization_id | TEXT | `NOT NULL` | upstream per-attempt grant id (FR-03b) |
 | chain_id | BIGINT | `NOT NULL CHECK (> 0)` | must equal deployment chain (FR-04) |
-| asset | TEXT | `NOT NULL CHECK ~ '^0x[0-9a-f]{40}$'` | canonical lowercase; whitelist-checked pre-insert (FR-05) |
+| asset | TEXT | `NOT NULL CHECK ~ '^0x[0-9a-f]{40}$'` | canonical lowercase; whitelist-checked pre-insert on the first-create path only (FR-05; replays never re-check) |
 | recipient | TEXT | `NOT NULL CHECK ~ '^0x[0-9a-f]{40}$'` | canonical lowercase (FR-07) |
 | amount | NUMERIC(78,0) | `NOT NULL CHECK (amount >= 1 AND amount <= 115792089237316195423570985008687907853269984665640564039457584007913129639935)` (literal = 2²⁵⁶−1; §四 DB upper bound) | uint256 integer; transport form `[1-9][0-9]*` (FR-06); never float |
 | status | TEXT | `NOT NULL DEFAULT 'accepted' CHECK (= 'accepted')` | 007 writes no other status; Accepted = received, not executed (FR-08) |
