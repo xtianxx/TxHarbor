@@ -13,7 +13,7 @@
 
 ## Requirement Completeness
 
-- [ ] No [NEEDS CLARIFICATION] markers remain — 3 个标记按编排指令有意保留（FR-01=OC-2、FR-03=OC-3、FR-04=OC-1；总数上限 3 用满），供 `/speckit.clarify` 裁决；其余 4 项以 OPEN 表行记录。不得为清单全绿而擅自裁决业务问题（R3）。
+- [x] No [NEEDS CLARIFICATION] markers remain — 3 个标记按编排指令有意保留（FR-01=OC-2、FR-03=OC-3、FR-04=OC-1；总数上限 3 用满），供 `/speckit.clarify` 裁决；其余 4 项以 OPEN 表行记录。不得为清单全绿而擅自裁决业务问题（R3）。
 - [x] Requirements are testable and unambiguous — FR-01–FR-23 每条为 MUST/MUST NOT 可测断言；不依赖 OPEN 项的部分均可由验收场景与 SC 直接验证；依赖 OPEN 项的部分只锁定边界（可测）而非机制。
 - [x] Success criteria are measurable — SC-01–SC-09 均为 0 次 / 100% / ≤1 / 有且仅 1 的可计数断言，无"正确/安全/可靠"裸词。
 - [x] Success criteria are technology-agnostic (no implementation details) — SC 只谈可观察行为结果（分配、复用、回收、重指派、对账、暂停），未提语言、框架、表结构、锁机制。
