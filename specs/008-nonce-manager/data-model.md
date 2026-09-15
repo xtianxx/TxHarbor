@@ -287,6 +287,11 @@ immediately before the tx and are passed in as data.
    while the released row is neither rewritten nor silently re-opened.
 5. **Rebuild**: no decision trusts memory; the readiness gate only prevents serving before the
    verification pass, it is not a state source.
+6. **Read serialization (bilateral, read-api §4)**: provider reads take the scope
+   `nonce_scope_state` row `FOR SHARE` before snapshotting; all four writer transactions above
+   take it `FOR UPDATE`, so 008-owned pause/registry/floor/binding writes are linearized against
+   reads. 006 ordering inside the read snapshot stays best-effort; consumers re-read 006 gates
+   in their own transactions.
 
 ## Numeric and evidence conventions
 

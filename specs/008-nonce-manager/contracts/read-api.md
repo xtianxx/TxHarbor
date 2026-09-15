@@ -118,6 +118,14 @@ never claims absence.
 - Reads are linearly preceded by whatever admission committed; a concurrent allocation may not be
   visible to an older snapshot — consumers retry after `not_bound` if they expect a fresh
   admission (no cross-request ordering claim).
+- Serialization against 008 writers (bilateral with 009 R6): the read takes `SELECT … FOR SHARE`
+  on the scope's `nonce_scope_state` row (when the scope row exists) before opening the snapshot;
+  every 008 writer takes the same row `FOR UPDATE` (data-model T-allocate/T-observe/T-hold-release/
+  T-binding-release), so a pause/registry/floor/binding write that commits before the read's lock
+  is visible in the snapshot, and one racing the read blocks until the snapshot is taken (ordered
+  after). Absent scope row ⇒ `not_bound` under the retry rule above. 006 state in this snapshot
+  stays best-effort (007 single-snapshot protocol); cross-process 006 ordering is the consumer's
+  own gate re-read (009 R6 gate-table lock), not this read.
 - No mutation, no delivery: 008's delivery point is the allocation-commit admission
   (OC-7 mapping); a read never advances state.
 
