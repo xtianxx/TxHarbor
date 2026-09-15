@@ -97,9 +97,10 @@ internal/withdrawal/
 ├── validate.go             # FR-04–FR-07 input validation + EIP-55 + canonicalization (+ FR-06
 │                           # three-layer amount enforcement: shape → big.Int range → DB CHECK)
 ├── intake.go               # T-accept/T-replay/T-conflict/T-auth-bound/T-reject/T-unavailable/
-│                           # T-dual-race txns (R7 FINAL constraints-only; fixed-order classify)
-├── query.go                # ownership-enforced read + LoadRecoveryState/AnnotateRecoveryHeight
-│                           # annotation (contracts/api.md §3; unknown on read-failure, never forged)
+│                           # T-dual-race txns (R7 FINAL: constraints + grant-row FOR SHARE; fixed-order classify)
+├── query.go                # ownership-enforced read + LoadRecoveryState/RecoveryReleased
+│                           # annotation with row-present precedence (contracts/api.md §3; unknown
+│                           # on either-read failure, never forged; no height-indexed validity)
 ├── grant.go                # upstream grant supply entry (R9 withdrawal-authz carrier; NOT caller-writable)
 └── ..._test.go             # unit: vectors, equivalence, error mapping (no DB where possible)
 
@@ -141,7 +142,7 @@ rejected. Constraints-only intake adds no lock object.)
 | FR-08 (Accepted semantics) | status CHECK + contracts §3 | V1, V8 |
 | FR-09/FR-10 (key scope/compare) | `caller_key_uniq` + FR-10 set (R6) | V5, V6 |
 | FR-11 (permanent) | no cleanup path; full UNIQUEs (R1/R4) | V6, V7 |
-| FR-12/FR-13 (atomic/concurrent) | txn catalog T-* + concurrency argument (R7 FINAL: constraints-only, fixed-order classify, T-dual-race) | V6 |
+| FR-12/FR-13 (atomic/concurrent) | txn catalog T-* + concurrency argument (R7 FINAL: constraints + grant-row FOR SHARE, fixed-order classify, T-dual-race) | V6 |
 | FR-14/FR-15 (responses/privacy) | contracts/api.md §§1–3 (403 locked for auth-bound; dual-race order rule) | V1–V3, V9 |
 | FR-16/FR-17 (recovery) | contracts §4; read-only 006 consumption | V8 |
 | FR-18/FR-19 (upstream/downstream) | grant supply + downstream handoff | V3 + review |
@@ -164,8 +165,9 @@ identity + immutable params + one-request↔one-intent association + re-auth/can
   build, lint). Historical CI (34918673432) is 006 evidence, NOT 007 verification — stated here so
   no later step miscites it.
 - Residual risks: EIP-55 dependency surface (go-ethereum already vendored); operator-tooling UX
-  (no admin UI by design). R7 strictness CLOSED as constraints-only (no FOR SHARE, no coordinator
-  lock — not deferred). R9 supply entry closed as `withdrawal-authz` subcommand (confirm-auth carrier).
+  (no admin UI by design). R7 CLOSED as constraints + grant-row FOR SHARE (sole lock;
+  coordinator lock rejected; see research R7 interleave proof). R9 supply entry closed as
+  `withdrawal-authz` subcommand (confirm-auth carrier).
 
 ## Evidence separation (per instruction — status, not proof)
 

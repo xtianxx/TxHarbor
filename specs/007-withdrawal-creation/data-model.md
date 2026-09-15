@@ -54,19 +54,24 @@ Key format: `txh_` + base64url(32 CSPRNG bytes); presented via `Authorization: B
 | chain_id | BIGINT | `NOT NULL CHECK (> 0)` | must equal deployment chain (FR-04) |
 | asset | TEXT | `NOT NULL CHECK ~ '^0x[0-9a-f]{40}$'` | canonical lowercase; whitelist-checked pre-insert (FR-05) |
 | recipient | TEXT | `NOT NULL CHECK ~ '^0x[0-9a-f]{40}$'` | canonical lowercase (FR-07) |
-| amount | NUMERIC(78,0) | `NOT NULL CHECK (> 0)` | uint256 integer; transport form `[1-9][0-9]*` (FR-06); never float |
+| amount | NUMERIC(78,0) | `NOT NULL CHECK (amount >= 1 AND amount <= 115792089237316195423570985008687907853269984665640564039457584007913129639935)` (literal = 2²⁵⁶−1; §四 DB upper bound) | uint256 integer; transport form `[1-9][0-9]*` (FR-06); never float |
 | status | TEXT | `NOT NULL DEFAULT 'accepted' CHECK (= 'accepted')` | 007 writes no other status; Accepted = received, not executed (FR-08) |
 | created_at | TIMESTAMPTZ | `NOT NULL DEFAULT now()` | |
 | CONSTRAINT `withdrawal_requests_caller_key_uniq` | `UNIQUE (caller_id, idempotency_key)` | replay-or-409 carrier (R6) | |
 | CONSTRAINT `withdrawal_requests_authorization_uniq` | `UNIQUE (authorization_id)` | one-auth→one-request carrier (R7) | |
 
 `NUMERIC(78,0)` holds the full uint256 range (78 decimal digits) as an integer; CHECK `> 0`
-rejects zero at the storage layer as well. Layered amount enforcement (all three, not capacity
-alone): (1) transport-shape reject in `validate.go` — must match `[1-9][0-9]*`, which already
-excludes zero, leading zeros, signs, decimals, exponents, blanks (FR-06); (2) semantic range
-check in Go — value ≤ 2²⁵⁶−1 via `math/big` before INSERT (FR-06; over-length digit strings die
-here, never reaching the DB); (3) storage CHECK `> 0` + `NUMERIC(78,0)` scale-0 as depth defense
-(this table). No nonce/signature/broadcast columns exist by design
+rejects zero at the storage layer as well. Layered amount enforcement (§四, all three — capacity alone is not validation):
+(1) transport-shape reject in `validate.go` — must match `[1-9][0-9]*`, which already
+excludes zero, leading zeros, signs, decimals, exponents, blanks (FR-06); decimals therefore
+die at parse, never as values: `NUMERIC(78,0)` is NOT relied on to reject fraction input,
+because driver conversion could round before the CHECK ever sees it — the shape regex is the
+decimal barrier; (2) semantic range check in Go — value ≤ 2²⁵⁶−1 via `math/big` before INSERT
+(FR-06; over-length digit strings die here, never reaching the DB); (3) storage CHECK
+`amount >= 1 AND amount <= 2²⁵⁶−1` (literal in the Table 3 row above) as depth defense against
+any future second writer that bypasses `validate.go`. Positive verification both directions
+(future tests): max-uint256 accepted end-to-end; max-uint256+1 rejected at layer (2) with zero
+rows; `1.5`/`1e3` rejected at layer (1) with zero rows. No nonce/signature/broadcast columns exist by design
 (FR-19); 008+ add their own tables keyed off `request_id` (Downstream Handoff, no FK from 007 side).
 
 ## Table 4 — `withdrawal_authorizations` (upstream grant supply; 007 reads, never approves)
@@ -78,7 +83,7 @@ here, never reaching the DB); (3) storage CHECK `> 0` + `NUMERIC(78,0)` scale-0 
 | chain_id | BIGINT | `NOT NULL CHECK (> 0)` | |
 | asset | TEXT | `NOT NULL CHECK ~ '^0x[0-9a-f]{40}$'` | |
 | recipient | TEXT | `NOT NULL CHECK ~ '^0x[0-9a-f]{40}$'` | |
-| amount | NUMERIC(78,0) | `NOT NULL CHECK (> 0)` | |
+| amount | NUMERIC(78,0) | `NOT NULL CHECK (amount >= 1 AND amount <= 115792089237316195423570985008687907853269984665640564039457584007913129639935)` (literal = 2²⁵⁶−1; same §四 bound) | |
 | state | TEXT | `NOT NULL CHECK IN ('active','revoked','expired')` | revocation/expiry live here |
 | expires_at | TIMESTAMPTZ | NULL = no expiry | |
 | supplied_at | TIMESTAMPTZ | `NOT NULL DEFAULT now()` | audit: when upstream supplied it |
@@ -87,10 +92,11 @@ here, never reaching the DB); (3) storage CHECK `> 0` + `NUMERIC(78,0)` scale-0 
 Supply path (locked 2026-09-15定向收尾 — R9, see research.md): the `txharbor withdrawal-authz`
 command (same controlled-script carrier as T024 `depositauth.go:1-32`: repository-owned,
 version-controlled parameterized SQL in one explicit BEGIN..COMMIT over the DB operator's
-connection; NOT a stored function; migrations stay pure DDL). Intake validates
-`state='active' AND (expires_at IS NULL OR expires_at > now())` plus full param equality
-in-tx (R7 FINAL read); mismatch/inactive → 403, zero persistence. No FOR SHARE, no coordinator
-lock on any 007 path.
+connection; NOT a stored function; migrations stay pure DDL). Intake locks the grant row
+`FOR SHARE` and validates `state='active' AND (expires_at IS NULL OR expires_at > now())`
+plus full param equality in-tx (R7 FINAL, sole lock on the intake path); mismatch/inactive
+→ 403, zero persistence. Revoke takes `FOR UPDATE`/UPDATE on the same row (three-case
+interleave proof in research R7).
 
 ## Table 5 — `withdrawal_request_audit` (append-only receipt log)
 
@@ -106,11 +112,36 @@ lock on any 007 path.
 Written in the same tx as the request insert (R8); replay/conflict/reject paths append their
 own rows. Never updated or deleted (FR-11).
 
+## Table 6 — `withdrawal_grant_audit` (append-only grant-supply log; R9 carrier)
+
+Shape mirrors `deposit_pause_audit` (`migrations/000004_deposit_detection.sql:109-122`):
+chain-agnostic here (single deployment), keyed by grant id + action.
+
+| Column | Type | Constraints | Notes |
+|--------|------|-------------|-------|
+| audit_id | BIGINT | PK (`GENERATED ALWAYS AS IDENTITY`) | |
+| authorization_id | TEXT | `NOT NULL` (no FK — audit must survive and must key unbound grants; a grant row may never exist for a refused supply) | §三: unbound-grant audit keys here, not Table 5 |
+| caller_id | BIGINT | `NOT NULL` | grant's caller (or attempted caller on refused supply) |
+| action | TEXT | `NOT NULL CHECK IN ('supplied','resupplied','supply_refused','revoked','revoke_nop')` | supply vocabulary |
+| operator | TEXT | `NOT NULL DEFAULT ''` | declared supply identity (audit claim; trust root is DSN possession, R9) |
+| reason | TEXT | `NOT NULL DEFAULT ''` | |
+| detail | TEXT | `NOT NULL DEFAULT ''` | redacted params snapshot (no secrets) |
+| recorded_at | TIMESTAMPTZ | `NOT NULL DEFAULT now()` | |
+| CONSTRAINT `withdrawal_grant_audit_uniq` | `UNIQUE (authorization_id, action, recorded_at)` | converges concurrent duplicate supply/revoke reports; never blocks distinct actions | |
+
+Verifiable outcomes: successful supply → row + `supplied`; idempotent re-supply (same full
+params) → row + `resupplied`, grant row untouched; same-id异参 → `supply_refused`, zero grant
+mutation; revoke → row + `revoked`; revoke of already-revoked/missing → `revoke_nop`
+(idempotent success, zero mutation); uncertain COMMIT → re-read grant row and report durable
+state (same discipline as R8). Every supply/revoke commits its audit row in the same tx
+(`RowsAffected()==1` on both writes).
+
 ## Transaction catalog (behavioral; SQL in contracts/)
 
 - **T-accept** (first receipt): pre-tx classify (fast path) → BEGIN → writeGuard →
-  validate auth in-tx → plain INSERT request → INSERT audit → COMMIT;
-  23505 → rollback → classify by `ConstraintName` → 200/409/403; commit-error → re-classify.
+  `FOR SHARE` grant row + validate (403 + ROLLBACK on fail) → plain INSERT request →
+  INSERT audit → COMMIT; 23505 → rollback → fixed-order classify → 200/409/403;
+  commit-error → re-classify.
 - **T-replay**: classify hit + FR-10 equality → return original + `replayed` audit (no new request).
 - **T-conflict**: classify hit + any business-param/auth-id inequality → 409 + `conflict` audit,
   original untouched.
@@ -130,7 +161,9 @@ Both uniqueness carriers are single index inserts — atomic and serializing by 
 Concurrent same-key writers: one INSERT commits, losers get 23505 on `caller_key_uniq` and
 classify to the winner (R6). Concurrent same-auth different-key writers: one commits, losers
 get 23505 on `authorization_uniq` → fixed-order classify → 403 (R7). Auth-validity itself is
-proven by the in-tx re-read sharing the INSERT's snapshot ("snapshot时刻有效"); per-request
-key/permission checks prove revocation immediacy; post-rollback classify proves loss/uncertain
-recovery. No app memory, no second lock object. Restart safety follows: all guarantees are
+proven by the `FOR SHARE` grant-row lock + validity SELECT in the receipt tx (three-case
+interleave proof in research R7 — the earlier "shared snapshot" wording is withdrawn);
+per-request key/permission checks prove startpoint freshness (no whole-request immediacy
+claim); post-rollback classify proves loss/uncertain recovery. One lock object total on the
+intake path. Restart safety follows: all guarantees are
 durable rows; a retry after crash/response-loss replays against the same constraints (FR-13).

@@ -24,8 +24,8 @@ Evidence base (read-only):
 Repo pins that bind every decision: **postgres:18.6-trixie** (so PG19 `ON CONFLICT DO SELECT`
 is unavailable — recorded as future simplification only); **pgx v5.11.0**
 (`pgconn.PgError.Code`/`ConstraintName`); **no new infra** (007 Non-Goals; constitution
-progression Go+PostgreSQL+Anvil); **single `indexer_lease` FOR UPDATE discipline**,
-no second lock object, no new lock order.
+progression Go+PostgreSQL+Anvil); 007 intake uses exactly one lock object (grant-row
+`FOR SHARE`, R7 FINAL) and never touches the `indexer_lease` discipline — no new lock order.
 
 ## R1 — Credential storage: deterministic SHA-256, UNIQUE-indexed (resolves auth storage)
 
@@ -78,8 +78,15 @@ no second lock object, no new lock order.
   `WHERE key_hash = $1 AND (revoked_at IS NULL OR revoked_at > now())`.
   Immediate revocation writes `now()`; rotation grace writes a future timestamp (dual-accept window).
   No cache, no Redis, no revocation service.
-- **Rationale**: A per-request read of the local durable store is not an external call; the predicate
-  makes revocation immediate with no invalidation problem. FR-11 and constitution forbid new infra.
+- **Rationale**: A per-request read of the local durable store is not an external call. The precise
+  boundary (二轮定向修正 — "immediate" withdrawn as a whole-request claim): the predicate is
+  evaluated at request start (auth step (1) of contracts/api.md §2); a revocation committing
+  *before* that evaluation is observed (401/403, zero effect); a revocation committing *after*
+  that evaluation does not abort the in-flight request — the request completes under the
+  startpoint verdict. Zero cache narrows the staleness window to the request's own lifetime; it
+  does not make revocation "instant for the whole request". Replay path re-evaluates steps (1)–(2)
+  per attempt, so a revoked key fails the *next* attempt's startpoint check. No whole-request lock
+  is added (Q1/Q5 approved no such mechanism); the boundary above is stated, not strengthened.
   Every cached-verification design trades revocation latency for throughput (Gitea re-reads the row
   on LRU hit precisely to catch deletion; Ory Talos documents TTL-window acceptance on other
   instances) — at operator-issued key cardinality a cache is a liability, not an optimization.
@@ -120,10 +127,17 @@ endpoint, or infrastructure; upstream is NOT required to hold a DB connection as
   `supplied_by` + audit rows; it is an audit claim, not a cryptographic proof — the trust root is
   DSN possession, identical to every existing privileged path.
 - **Who can create/revoke; why API callers cannot**: only this subcommand issues the supply
-  statements. Ordinary withdrawal API callers hold no DB credential at all (HTTP only); privilege
-  separation is by credential possession (DSN vs API key), not by an in-app role check that could
-  be bypassed. A bare `psql` INSERT is forbidden by the same rule as `confirm-auth`: every guard
-  lives inside the reviewed function, and this is the only binary path that executes it.
+  statements — by *operational rule backed by credential separation*, stated precisely:
+  (a) ordinary withdrawal API callers hold no DB credential at all (HTTP only), so they
+  *technically cannot* reach the database through any application path; (b) no PostgreSQL
+  role-level restriction is introduced in 007 (single DSN role, same as all existing paths —
+  recorded here so no later step miscites a role barrier that does not exist); (c) anyone who
+  *does* hold the DSN (DB operator, or an attacker who stole it) *can* technically issue raw SQL,
+  which is why the "bare `psql` INSERT is forbidden" rule is an operational/review discipline
+  (same as `confirm-auth`), not a technical impossibility — guards live inside the reviewed
+  function, and this subcommand is the only *reviewed* binary path that executes them.
+  `--operator` is a declared audit identity, not a verified identity; the trust root is DSN
+  possession, identical to every existing privileged path.
 - **Actions**: `supply --authorization-id G --caller-id C --chain-id N --asset 0x… --recipient 0x…
   --amount D [--expires-at T] --operator OP --reason R` (upserts the Table 4 row; same grant id +
   same full param set → idempotent re-supply returning the row; same id + any param differ →
@@ -164,32 +178,53 @@ endpoint, or infrastructure; upstream is NOT required to hold a DB connection as
 
 ## R7 — One authorization → one request via constraint, not lock (resolves FR-03b)
 
-**FINAL (locked 2026-09-15定向收尾): constraints-only. No coordinator lock, no FOR SHARE,
-no second lock object on the intake path.** The unselected variants are closed, not deferred:
-tasks/implement MUST NOT re-decide or silently add a global lock.
+**FINAL (locked 2026-09-15定向收尾; corrected 二轮定向): constraints + one shared row lock.
+No coordinator lock, no advisory lock, no `FOR UPDATE` anywhere on the intake path.** The single
+coordination primitive on this path is `FOR SHARE` on the one grant row being consumed (see
+invariant table). Tasks/implement MUST NOT re-decide, add a global lock, or drop the share lock.
 
 - **Carrier**: `UNIQUE (authorization_id)`, `NOT NULL` (FR-03b requires an authorization per create;
   named so pgx can map it). Concurrent different-key binds serialize at the index: one wins, the
   loser gets 23505 on this constraint → 403 (FR-14 "不满足逐笔授权要求"; locked here as 403,
   not 409 — a bound grant means the caller lacks a *usable* grant for a new request).
-- **Rationale**: A constraint needs no lock ordering. Advisory locks are a second, session-scoped
-  coordination primitive outside the repo's single-lock discipline (pgsql-general consensus: row
-  locks/constraints over advisory locks for per-record races). `FOR UPDATE` on the auth row would
-  add a second lock object and a lock-order-ring risk (explicitly forbidden). The coordinator
-  `indexer_lease` lock is rejected for intake: it would serialize every API create against the
-  indexer loops for zero additional guarantee (see invariant table — every invariant is already
-  carried by a constraint or a same-tx read).
+- **Rationale**: Uniqueness needs no lock ordering (both UNIQUEs), but grant *validity* does
+  need one row-level coordination — a plain in-tx re-read is insufficient: under READ COMMITTED
+  each statement takes its own snapshot, so a revoke committing after the validity SELECT but
+  before the INSERT is visible to the INSERT, and the "same snapshot" claim in the previous
+  revision was wrong (corrected here; it is NOT retained). The minimal provable carrier is
+  `SELECT … FOR SHARE` on the single grant row: shared locks do not block each other, so
+  concurrent receipts against *different* grants (and re-reads of the same grant) proceed in
+  parallel; only a grant-state writer (`revoke`, which takes `FOR UPDATE`/UPDATE on that row)
+  serializes against holders. There is exactly one lock object on this path, acquired at one
+  fixed point (step 3 of Ordering) — with no second lock anywhere, no lock-order ring can form.
+  Advisory locks remain rejected (session-scoped second primitive). `FOR UPDATE` on the grant row
+  remains rejected (would serialize concurrent receipts against the same grant for no reason).
+  The coordinator `indexer_lease` lock remains rejected for intake (serializes API creates against
+  indexer loops for zero additional guarantee).
 - **Invariant coverage (what proves what)**:
   | Invariant | Carrier | Why sufficient |
   |---|---|---|
   | 同 caller 同键至多一请求 | `UNIQUE (caller_id, idempotency_key)` index insert | atomic + serializing by construction |
   | 同一授权跨不同键至多一请求 | `UNIQUE (authorization_id)` index insert | same; loser maps to 403 |
-  | 授权在接收时有效 (state/params/expiry/caller-bind) | in-tx validity re-read + param equality, same snapshot as the INSERT | revocation committing after the tx snapshot is invisible to this receipt — defined semantics "snapshot时刻有效", identical to READ COMMITTED single-statement guarantees; a revoke racing *before* the snapshot blocks (403, zero rows) |
-  | 调用方权限/密钥吊销即时生效 | per-request auth lookup (`api_key` predicate, R4) | every request re-reads; no cache |
+  | 授权在接收时有效 (state/params/expiry/caller-bind) | `FOR SHARE` on the grant row + validity SELECT + param equality, all before the INSERT in one tx | share lock held to COMMIT ⇒ a concurrent revoke (`FOR UPDATE`/UPDATE on that row) either commits *before* the lock is granted (read sees revoked → 403, zero rows) or blocks *until* this tx commits (receipt stands, revoke applies to later receipts only). No third outcome. Linearization point: the grant-row lock acquisition ordered against the revoke's row write |
+  | 调用方权限/密钥吊销 | per-request auth lookup (`api_key` predicate, R4) evaluated at request start (startpoint semantics: pre-startpoint revokes observed; post-startpoint revokes affect next attempt, not the in-flight one) | every attempt re-reads; no cache |
   | 响应丢失/提交未知后不重建 | post-rollback classify against durable rows (R8) | winner visibility decides; miss → retryable |
 - **Ordering (locked)**: pre-tx classify (fast path only) → BEGIN → writeGuard →
-  auth-validity re-read → plain INSERT → audit INSERT → COMMIT. No `ensureLeaseSQL`/`lockCoordSQL`
-  on this path. 23505 handling per R8 (rollback-then-classify; dual-constraint race below).
+  `SELECT grant row … FOR SHARE` + validity check (403 + ROLLBACK on fail) → plain INSERT →
+  audit INSERT → COMMIT. No `ensureLeaseSQL`/`lockCoordSQL` on this path. 23505 handling per R8
+  (rollback-then-classify; dual-constraint race below).
+- **Full interleave proof (receive vs revoke, Q2 rule: "撤销对尚未接收请求生效、已 Accepted 不隐式取消")**:
+  Let R = receipt tx (lock grant → validate → INSERT request → COMMIT), V = revoke tx
+  (lock grant `FOR UPDATE` → set `revoked` → COMMIT). "接收" completes at R-COMMIT.
+  Case A (V-COMMIT before R-lock): R reads `revoked` → 403, zero rows. Revocation effective. ✓
+  Case B (R-COMMIT before V-lock): V blocks until R commits, then revokes; the Accepted row
+  stands, never implicitly cancelled; later replays return 200 (Q5). Revocation affects only
+  later receipts. ✓
+  Case C (interleaved: R holds share, V waits): V cannot commit mid-R; R's INSERT + COMMIT decide
+  first; then V commits. Identical outcome to Case B, deterministically — the "快照后撤销"
+  hole of the previous revision is closed by the lock, not by snapshot wishful thinking. ✓
+  No outcome creates a second request for one grant (`authorization_uniq`), and no outcome
+  cancels an Accepted row. QED against the Q2 rule with no rule relaxation.
 - **Alternatives closed**: advisory lock (rejected); auth-row `FOR UPDATE` (rejected);
   coordinator-lock intake (rejected — cost without coverage); conditional
   `INSERT … SELECT … WHERE NOT EXISTS` (rejected — still needs the constraint; zero-row
@@ -204,8 +239,8 @@ tasks/implement MUST NOT re-decide or silently add a global lock.
   classify-miss (winner not yet visible → retryable, never fabricated) and uncertain COMMIT
   (re-classify → replay/conflict/retryable), mirroring `reorgpolicy.go:353-366`.
 - **Tx shape (locked)**: pre-tx opportunistic classify (fast path only) → `BEGIN` → `SET LOCAL
-  statement_timeout` (shared `writeGuard`) → auth-validity re-read (same tx, plain SELECT;
-  R7 FINAL: no FOR SHARE, no coordinator lock) → plain `INSERT` request → `INSERT` audit
+  statement_timeout` (shared `writeGuard`) → `SELECT grant row … FOR SHARE` + validity check
+  (R7 FINAL, sole lock on this path) → plain `INSERT` request → `INSERT` audit
   (same tx; repo precedent: DELETE + audit in one tx, `depositauth.go:1142-1159`) → `COMMIT` with
   `RowsAffected()==1` checks, 23505/commit-error handling per above.
 - **Dual-constraint race (locked semantics)**: one INSERT can violate both UNIQUEs at once, but

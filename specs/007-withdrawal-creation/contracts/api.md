@@ -67,16 +67,26 @@ documents the closed check set; FR-11).
 - `recovery.execution` is **always** `not_started` in 007: "尚未执行" is a standing fact, never
   "执行结果未知" (Q8 correction — unknown-outcome vocabulary belongs to 006 in-flight *external*
   requests, FR-17, not to 007 rows).
-- `recovery.state`: live 006 state at read time (`none`/`recovering`/`paused_reconcile`/`released`,
-  006 FR-18 subset); request facts stay servable in every state. Read point and reader contract:
-  every GET performs one fresh `LoadRecoveryState` + `RecoveryReleased` read
-  (`internal/indexer/reorgquery.go:62-83` — nil-able point read, no side effects, derived from
-  durable state at read time, never a cache flag); annotation follows `AnnotateRecoveryHeight`
-  (`reorgquery.go:43-60`), with 007 rows treated as ancestor-side facts (always servable; the
-  validity axis does not gate request facts). Read-failure → `state: unknown`
-  with the same body (never forge `released`; a failed read MUST NOT map to none-or-released).
-  `state` and the request row are two independent reads, not an atomic global view — the contract
-  promises per-read freshness, not cross-read atomicity. No nonce/signature/broadcast fields exist.
+- `recovery.state`: 006 state at read time (`none`/`recovering`/`paused_reconcile`/`released`,
+  006 FR-18 subset); request facts stay servable in every state. Reader contract (§五修正):
+  every GET performs `LoadRecoveryState` + `RecoveryReleased` (`reorgquery.go:62-83` — nil-able
+  point reads, no side effects, derived from durable state at read time, never a cache flag).
+  The two reads are NOT one atomic snapshot: a release-then-re-establish landing between them
+  can combine a stale row with a newer terminal event (or vice versa). Combination rule
+  (locked here): if EITHER read fails → `state: unknown`; if the row is present → report its
+  phase-mapped state (`recovering`/`paused_reconcile`) regardless of the terminal-event read
+  (a live row is never contradicted by history — the row is the sole recovery authority per
+  006 R9); if no row AND a terminal release event exists → `released`; if no row AND no event
+  → `none`. A failed read MUST NOT map to none-or-released. `state` and the request row are two
+  independent reads, not an atomic global view — the contract promises per-read freshness plus
+  the precedence rule above, never cross-read atomicity.
+- 007 rows carry NO chain height: `AnnotateRecoveryHeight(row, released, height)` is NOT called
+  with a fabricated height (the previous "ancestor-side facts" wording is withdrawn — 007 must
+  not invent an observation height to reuse a height-indexed function). Height-indexed validity
+  (`valid_unaffected`/`provisional_replaying`/`unknown_paused`) does not apply to 007 rows at all;
+  the only recovery signal on a 007 response is `state` (+ constant `execution: not_started`).
+  Request facts (Table 3 row) and recovery signal (006 rows) are expressed side-by-side with no
+  claim that they were read atomically.
 - POST + recovery-read interplay: recovery state is never read on the POST path (creates do not
   depend on it — intake observes the 006 downstream preconditions subset per FR-16, which is a
   gate on follow-on action, of which 007 has none). A POST that committed but whose response was

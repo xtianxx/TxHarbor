@@ -25,8 +25,9 @@ grant reuse across a second key → 403-path (T-auth-bound), first row untouched
 Supply entry: `withdrawal-authz supply` (idempotent re-supply on same full params;
 same id + differ → refused, row untouched); `withdrawal-authz revoke` (active → revoked;
 already-revoked → idempotent success; bound requests keep rows).
-Revocation interleaved with first receipt: revoke-committed-before-snapshot → 403 zero rows;
-revoke-committed-after-snapshot → receipt stands ("snapshot时刻有效"), subsequent replays 200.
+Revocation interleaved with first receipt: revoke-committed-before-grant-lock → 403 zero rows;
+revoke-blocked-on-grant-lock (receipt first) → receipt stands, revoke applies after COMMIT,
+subsequent replays 200. Assert the three-case table from research R7.
 
 ## V4 — param matrix
 Wrong chain / non-whitelist asset / bad address shape / mixed-case failing EIP-55 /
@@ -55,7 +56,9 @@ existing Accepted rows unaffected, replays still 200.
 With an active 006 recovery row: compliant POST → persisted, zero nonce/sign/broadcast
 artefacts (assert via absence: no new tables/rows outside 007 scope, no RPC broadcast);
 GET → facts servable with live `recovery.state` (fresh LoadRecoveryState + RecoveryReleased
-read per request; kill the read path in test → `state: unknown`, same body, still 200);
+read per request; kill either read path in test → `state: unknown`, same body, still 200;
+release-then-re-establish between the two reads → row-present precedence rule applies, never a
+forged `released`/`none`);
 direct unit assertion that no recovery governance rows were written or deleted by 007 paths.
 POST-then-lost-response during recovery → same-key retry → 200 with identical `request_id`;
 recovery read failure never alters replay outcome.
