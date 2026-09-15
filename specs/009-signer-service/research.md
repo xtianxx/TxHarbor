@@ -179,9 +179,12 @@ grant carrier read-only; it owns its own credential, request, result, admission,
   authorization_id = $1 FOR SHARE` plus `state='active'` and (`expires_at IS NULL OR
   expires_at > now()`) evaluated on the DB clock; the bound grant fields
   (`caller_id, chain_id, asset, recipient, amount`) plus the observed `state`/`expires_at` MUST
-  match the corresponding request/declared fields. `FOR SHARE` is the *only* lock object on 009's
-  signing path and it matches the 007 receipt-path discipline (007 R7: revoke takes
-  `FOR UPDATE`/UPDATE on that row; share locks do not block each other).
+  match the corresponding request/declared fields. The transaction first acquires the shared gate
+  lock (`LOCK TABLE indexer_pause, log_pause, deposit_pause, reorg_recovery, reorg_recovery_events
+  IN SHARE MODE`, R6) so the 006 observation is ordered against pause/recovery writers; the 007
+  grant `FOR SHARE` is the grant-axis lock and matches the 007 receipt-path discipline (007 R7:
+  revoke takes `FOR UPDATE`/UPDATE on that row; share locks do not block each other). `can_sign`
+  is re-read at delivery under `FOR SHARE` (R6).
 - **Rationale**: FR-17/FR-18, 006 `contracts/downstream.md` preconditions (observe in one read
   sequence; observation failure → refuse, record cause, no queue-for-later), 007 R7 lock precedent.
   009 MUST NOT write, clear, or release any 006 pause/recovery row or any 007 grant — all reads
@@ -199,101 +202,141 @@ grant carrier read-only; it owns its own credential, request, result, admission,
   classes are recorded in the audit row with the observed basis (pause table(s) present,
   recovery phase/seq, grant state/fingerprint).
 
-## R6 — Delivery admission ordering + EXPOSED GAP (006 pause establishment has no shared lock)
+## R6 — Delivery admission ordering: shared table-level gate lock closes the pause/revoke window
 
-- **Decision — ordering**: signature material is delivered only through a recorded **delivery
-  admission**, on the first response and on every same-identity retry alike (OC-6). One attempt:
-  1. Open a short transaction; in one read sequence re-run the 006 gate (pause + recovery +
-     **current version equality vs the stored `recovery_version`**) and re-read the 007 grant
-     `FOR SHARE` (state/expiry/fingerprint equality);
-  2. Insert one `delivery_admissions` row recording the observation snapshot and verdict
-     (`admitted` before any bytes are written; `blocked` on any gate refusal) and `COMMIT`;
-  3. Only then write the response bytes; after the write, a bounded best-effort marker updates the
-     row to `delivered`. A crash between (2) and (3) leaves `admitted` — the material was cleared
-     for delivery and is treated as in-flight approved (`in_flight_approved`), never as "not
-     delivered"; a same-identity retry re-runs the full gate (it may re-deliver the *same bytes*
-     after passing, or return blocked status-only).
-  Gate failure at delivery → **no signature material** in any field of the response: desensitized
-  status only (`state`, `content_hash`, refusal class/reason, timestamps; no signature bytes, no
-  `tx_hash` unless a prior admission is recorded as `delivered`/`admitted`). This is the explicit
-  inversion of the 007 still-200 replay (OC-6: MUST NOT 类比 still-200).
-- **Decision — races that ARE closable**:
-  - 007 revocation: the delivery path holds `FOR SHARE` on the grant row (step 1) while the revoke
-    path takes `FOR UPDATE`/UPDATE on the same row; a revoke either commits before the lock is
-    granted (delivery sees `revoked` → blocked) or blocks until the admission commits (delivery
-    stands; revoke applies to later attempts). Linearization point: the grant-row lock.
-  - expiry: evaluated on the DB clock inside the same read sequence; a grant expiring after the
-    grant-row read is a time boundary, not a lock boundary — the admission records the observed
-    `expires_at`, and the next delivery attempt re-evaluates from scratch (no persistent permit).
-- **Decision — EXPOSED GAP (recorded, not silently patched)**: 006 **establishes** a pause by
-  `INSERT` into the pause table (and recovery rows by 006-owned transactions) and takes no lock
-  that 009 can share; 009's one-read-sequence check and its response write are not atomic with
-  that INSERT. A pause committing after 009's last read but before the response bytes leave the
-  process is therefore not observable by 009, and **no 009-side mechanism can close it**:
-  - `FOR SHARE` on the 007 grant row does not help — pause establishment never touches grant rows
-    (that lock closes the *revocation* race, not the pause race);
-  - adding a 009-side lock (advisory/table) only helps if 006's INSERT takes the same lock, which
-    is a 006 contract change (out of 009's scope; 009 MUST NOT modify 006 governance).
-  Consequence and ownership: 009 records the admitted snapshot and its verdict (the "明确且可验证
-  的先后顺序" required by FR-23 is the *admission-commit → response-write* order plus the recorded
-  observation), treats an admitted delivery as in-flight approved and not reclaimable (OC-7), and
-  refuses all *future* attempts once the pause is visible. The residual window is **closable only
-  by a 006-side contract change** (e.g. pause establishment taking a lock that downstream gate
-  readers also take); that extension is deferred to a future 006 amendment or covered downstream
-  by the 010 broadcast gate, which re-verifies recovery itself before broadcasting. This item is
-  reported as an EXPOSED GAP in plan.md (deferred item G-1), not as a solved problem.
-- **Rationale**: OC-6/OC-7 rulings; FR-17/FR-23. The admission row is the verifiable artifact
-  that makes "delivery admission decided before pause/revocation" auditable after the fact.
+- **Decision — common coordination basis (table-level `SHARE` lock)**: every signing admission
+  (T-submit) and every delivery assessment (T-deliver) acquires, as the first locked statement
+  after the timeout guard and before any gate read:
+  `LOCK TABLE indexer_pause, log_pause, deposit_pause, reorg_recovery, reorg_recovery_events
+  IN SHARE MODE`, held to `COMMIT`. PostgreSQL `SHARE` conflicts with the `ROW EXCLUSIVE` every
+  `INSERT`/`UPDATE`/`DELETE` takes, so a 006 writer **cannot commit a pause/recovery change
+  concurrently with 009's decision**:
+  - a pause/recovery write that committed before 009's lock is visible to 009's in-tx read;
+  - a pause/recovery write racing 009 waits on the table lock until 009 commits and is therefore
+    ordered *after* the admission;
+  - an **empty** table ("当前无暂停行") is covered because the lock is on the relation, not on a
+    row — this is the explicit handling of the future-`INSERT` ordering the row-lock design
+    could not provide (locking the 007 grant never covered a new pause in another table);
+  - the manual-DBA release path of `indexer_pause`/`log_pause` (no application writer exists) is
+    covered too, because a direct `DELETE` takes `ROW EXCLUSIVE` on the table.
+  This needs **no 006 code or migration change** and does not depend on 006's internal writer
+  lock being present. The read-only invariant is refined (gates.md §5): 009 issues `SELECT` and
+  `LOCK TABLE … IN SHARE MODE` — a lock acquisition with no data modification — against 006
+  tables, never `INSERT`/`UPDATE`/`DELETE`. `LOCK TABLE` wait and the gate reads are bounded by
+  the 5s `statement_timeout`; a wait/deadlock is `gate_read_failed`, fail-closed, retryable with
+  the same identity.
+- **Decision — 007 auto gate unchanged**: `SELECT … FOR SHARE` on the grant row; 007's revoke and
+  re-supply take `FOR UPDATE`/`UPDATE` on that row, so revoke/replacement orders against delivery
+  at the grant-row lock (R5; 007 R7/R8 precedent).
+- **Decision — wallet/permission gates**: delivery re-reads `signer_caller.can_sign` with
+  `SELECT … FOR SHARE`; 009's operator disable path (`signer-auth`) is required to take
+  `FOR UPDATE` on the same row. The 008-side pause/registry-disabled gate is consumed through
+  `BindingReader`; the 008 adapter contract MUST make `ReadBinding` serialized against 008's own
+  pause transitions (008-side obligation, gates.md §3), so a paused/reconciling/disabled binding
+  can never be read as `BindingMatches`.
+- **Fixed lock order (one ring-free order)**: (1) 006 gate tables `SHARE` (single statement) →
+  (2) 007 grant `FOR SHARE` → (3) `signer_caller` `FOR SHARE` → (4) own `signing_requests` row
+  (`FOR UPDATE` on submit / read on delivery) → (5) `delivery_admissions` `INSERT`. No 006/007
+  writer ever acquires a 009 table and no 009 path acquires two of its objects out of this order,
+  so no lock-order cycle can form.
+- **Decision — admission ordering (evidence order kept)**: T-deliver takes the locks above,
+  re-reads 006/007/008 + `can_sign` in one read sequence, `INSERT`s one `delivery_admissions` row
+  (`admitted`/`blocked`) recording the snapshot and `COMMIT`s; **only then** are response bytes
+  written; the post-write `admitted → delivered` marker is best-effort. Gate failure at delivery
+  → no signature material in any field: desensitized status only (`state`, `content_hash`,
+  refusal class/reason, timestamps; no signature bytes, no `tx_hash` unless a prior admission is
+  `delivered`/`admitted`). Explicit inversion of the 007 still-200 replay (OC-6 MUST NOT 类比).
+- **Decision — bounded admission validity (an admission is not an indefinite permit)**: an
+  `admitted` row authorizes only the **immediate** response write of the **same handling
+  attempt**; it is not a durable, reusable permit. Any send delayed beyond the current attempt
+  (retry, restart, scheduling gap) MUST NOT use the stored admission — it MUST run T-deliver
+  again, re-read all gates, and record a new admission (`attempt_seq`+1). If the re-admission
+  observes a pause/revoke/can_sign-off, delivery is `blocked` status-only. Effective boundary:
+  the **admission `COMMIT`, linearly ordered by the gate-table `SHARE` lock**; a gate change
+  committed after that boundary is not retroactive but governs every later send. Only bytes
+  actually written are in-flight approved and not recallable (OC-7); an admitted-but-unwritten
+  material remains withholdable and its row means "write outcome unknown", not "permission".
+- **Decision — two concurrency timelines**:
+  - (a) **Pause/revoke first → no delivery**: 006 pause tx `BEGIN → INSERT pause → COMMIT`; 009
+    T-deliver then takes the gate-table `SHARE` lock (waiting up to the 5s guard if that tx is
+    still open) and its in-tx read observes the pause → admission `blocked`, `COMMIT`, response
+    status-only, zero signature bytes. If the pause tx outlives the guard, `LOCK TABLE` times out
+    → `gate_read_failed`, fail-closed, retry same identity, still zero bytes. 007 revoke is the
+    same shape through the grant `FOR SHARE` (revoke commits first → `revoked` read → blocked).
+  - (b) **Admission first → pause/revoke after**: 009 T-deliver holds the gate-table `SHARE`
+    lock, admits, commits; a concurrent pause/revoke tx's write waits for that commit, so it is
+    ordered after the admission. The immediate write proceeds. An in-flight admitted send is
+    **withholdable** if any delay occurs before the write (it must re-admit, above); if the write
+    already happened the bytes are in-flight approved and MUST NOT be claimed recallable. A crash
+    after admission `COMMIT` but before the write leaves `admitted` (write outcome unknown) →
+    `unknown_reconcile`/`outcome_unknown`, never a permit for a later ungated send, and the result
+    is never re-signed.
+- **Decision — unknown/commit-unknown recovery**: commit-unknown on submit/admission → do not
+  claim signed/delivered; same-identity retry re-reads durable rows (bounded, no loop). A retry
+  never inherits a prior admission's authority — it re-gates and re-admits.
+- **Rationale**: OC-6/OC-7 rulings; FR-17/FR-23. The table lock is the common coordination basis
+  the prior revision lacked; the admission row remains the verifiable artifact that makes
+  "delivery admission ordered before/after pause/revocation" auditable.
 - **Alternatives considered**:
-  - "check then deliver in one long transaction" — rejected: the response write cannot be inside a
-    DB transaction, and the material would not be persisted before return (FR-13).
+  - `FOR SHARE` on 006's internal writer lease row — rejected: depends on that row existing and
+    does **not** cover the manual-DBA release of `indexer_pause`/`log_pause` (no application lock).
+  - "check then deliver in one long transaction" — rejected: the response write cannot be inside
+    a DB transaction and the material must be persisted before return (FR-13).
   - "deliver then check" — rejected: violates OC-6 outright.
-  - blocking on a 009-owned advisory lock that 006 does not take — rejected: it would look like a
-    fix while providing zero cross-writer guarantee (false confidence is worse than a recorded gap).
+  - a 009-owned advisory lock that 006 does not take — rejected: zero cross-writer guarantee
+    (false confidence is worse than an explicit protocol).
 
-## R7 — Fee replacement: fresh-authorization rule; 007 carrier gaps recorded, extension owned by 007/011
+## R7 — Fee replacement: OC-5 conditional rule; carrier closure in R11
 
-- **Decision**: a fee-replacement signing request is a **new attempt**: new `attempt_id` +
-  new `signing_request_id`, same `intent_id`/`binding_ref`, and it MUST carry a **different
-  `authorization_id`** than the attempt it replaces (fresh authorization + fresh identity per
-  FR-05). Structural carrier: `signing_requests` carries `UNIQUE (authorization_id)` — one grant
-  backs at most one signing-request identity, so a replacement cannot silently reuse the consumed
-  grant; retries reuse the *same* request identity and therefore the same row (no new insert, no
-  consumption, no extension of the authorization — FR-05 "重试 MUST NOT 消耗或延长授权").
-  Rejection of a replacement that names an already-bound grant: `403 authorization_invalid` with
-  the fresh-authorization instruction.
-- **Authorization fingerprint** (the version surrogate): the grant row read under `FOR SHARE`
-  stores, on the request row, `authorization_id` + a deterministic fingerprint of the observed
-  fields (`caller_id, chain_id, asset, recipient, amount, state, expires_at`), versioned
-  (`authz:v1`). The carrier has **no version column** and no `revoked_at` (revocation is a
-  `state` flip), so the fingerprint + observed state at read time is the strongest bind 009 can
-  honestly claim; delivery re-reads and MUST match the fingerprint to deliver.
-- **Carrier gaps (explicit, MUST NOT be silently rewritten)** — 007 `withdrawal_authorizations`
-  cannot express:
-  1. **intent linkage**: no `intent_id`/`request_id` column → 009 cannot verify
-     request→intent→binding→attempt→request association *from the carrier*; 009 persists the
-     caller-declared `intent_id` and verifies content/binding consistency plus grant field
-     equality. Full intent-linkage verification is owned by 011/007 extension.
-  2. **version**: no version/sequence column → no "authorization version" can be compared; the
-     fingerprint is the surrogate (must not be presented as a version).
-  3. **fee-replacement purpose/scope**: no purpose/action/fee-scope column → "该授权显式允许费用
-     替换用途" cannot be verified from the row. 009's rule therefore treats a *fresh
-     authorization* as the only acceptable basis for replacement; whether that fresh grant
-     "explicitly allows" replacement remains unverifiable until 007/011 extend the carrier.
-  4. **revocation timestamp**: no `revoked_at` → revocation ordering is observed only as
-     `state='revoked'`; the observed state is bound in the fingerprint.
-  These gaps are recorded here and in plan.md (deferred items D-1..D-4) with owner 007/011; 009
-  MUST NOT add columns to 007's table, MUST NOT invent a second authorization table, and MUST NOT
-  present the fingerprint as a version it is not.
-- **Rationale**: FR-05 (fresh authorization for fee replacement; reuse of 007's approved carrier;
-  gaps explicit), OC-4 (new attempt = new request identity).
+- **Decision — rule (OC-5 semantics, not reinterpreted)**: a fee-replacement signing request is a
+  **new attempt**: new `attempt_id` + new `signing_request_id` (OC-4), same `intent_id` +
+  `binding_ref`. Authorization use is **conditional**, exactly as OC-5 rules:
+  1. if the original authorization **explicitly permits the fee-replacement purpose** and the
+     replacement's fee is **within the authorized fee scope** → the same `authorization_id` MAY
+     be reused (still a new request identity; the original request row is never modified/rebound);
+  2. otherwise → the caller MUST first obtain a **new authorization** and use it with the new
+     identity (a new `authorization_id`).
+  The rule MUST NOT be flattened to "always fresh"; "always fresh" is only the operative path
+  while the carrier cannot express the permission (gap D-3 / R11).
+- **Decision — carrier (physical reuse must be possible)**: replace the over-tight
+  `UNIQUE (authorization_id)` on `signing_requests` (which makes same-grant reuse physically
+  impossible) with an anchor-plus-replacement shape:
+  - `replacement_of BIGINT` nullable self-FK → `signing_requests(id)`, marking a replacement row;
+  - partial unique index `UNIQUE (authorization_id) WHERE replacement_of IS NULL`, so a grant has
+    at most one **anchor** (non-replacement) request, while replacement rows may name the same
+    grant;
+  - a replacement reusing the anchor's grant MUST declare the anchor's `intent_id` (and the same
+    `binding_ref`); a fresh-grant replacement is its own anchor.
+  **"旧请求换绑禁止" is preserved**: a persisted request row's `authorization_id` is never
+  updated (retries reuse the same row); a replacement is always a new row/identity, never a
+  rebind of the old row. Concurrent first uses of one grant serialize at the anchor index (loser
+  → `23505` → `403 authorization_invalid`).
+- **Decision — honest operative default**: the real 007 carrier has no purpose/fee-scope column,
+  so "explicitly permits" is not verifiable from the row → branch (1) is currently **unreachable**
+  and branch (2) (fresh authorization + new identity) is the operative path. This is a **recorded
+  carrier gap** (R11/D-3), **not** acceptance of fresh-only as the OC-5 rule. Rejection of a reuse
+  that cannot be verified: `403 authorization_invalid` with the fresh-authorization instruction.
+- **Decision — version**: the carrier has no version column; the `authz:v1` fingerprint is a
+  read-time **surrogate** and MUST NOT be presented as a version. OC-5 requires the request to
+  persist authorization identity **and version**; the version carrier is part of the R11
+  extension. Until it exists, 009 records the fingerprint as a surrogate and reports the gap; a
+  request that cannot bind a version is not silently upgraded to "versioned".
+- **Carrier gaps (explicit, MUST NOT be silently rewritten)**: 007 `withdrawal_authorizations`
+  cannot express (a) intent linkage, (b) version, (c) fee-scope/purpose, (d) `revoked_at`; plus
+  (e) sender scope and (f) cryptographic issuance authenticity. The per-attribute closure,
+  concrete new carrier, owner, controlled write entry, consistency protocol, migration
+  compatibility, and the two genuine business questions are all in **R11**. 009 MUST NOT add
+  columns to 007's table, MUST NOT build a second authorization table, and MUST NOT present the
+  fingerprint as a version it is not.
+- **Rationale**: FR-05/OC-5 (conditional fee replacement; reuse of 007's approved carrier; gaps
+  explicit), OC-4 (new attempt = new request identity).
 - **Alternatives considered**:
-  - reuse the original grant for a replacement — rejected: violates the explicit-purpose rule and
-    makes one grant fund two distinct signable objects.
-  - add a purpose column to 007's table — rejected: forbidden (must not silently rewrite 007);
-    extension is 007/011-owned.
-  - treat every same-intent request as a replacement and refuse all — rejected: replacement is a
-    legitimate path; the fresh-grant rule makes it expressible without new columns.
+  - unconditional reuse of the original grant — rejected: violates OC-5's explicit-permission
+    requirement and lets one grant fund distinct signable objects without proof.
+  - flatten to always-fresh — rejected: that is not OC-5; it silently drops the reuse branch and
+    over-reads the carrier gap as a rule change.
+  - add a purpose column to 007's table from 009 — rejected (forbidden to 009); the extension is
+    007/011-owned (R11).
 
 ## R8 — 008 binding read: five-class consumption; only "exists and matches" signs
 
@@ -394,14 +437,83 @@ grant carrier read-only; it owns its own credential, request, result, admission,
   - a 009-only compose stack — rejected: new infra surface (constitution XIII); a dedicated
     database + non-default port + testcontainers achieves isolation with zero new infra.
 
+## R11 — Authorization carrier closure (OC-5 against the real 007 carrier)
+
+Ground truth (verified in code, not assumed): `withdrawal_authorizations`
+(`migrations/000007_withdrawal_creation.sql:118-139`) carries exactly
+`authorization_id PK, caller_id FK→caller, chain_id, asset, recipient, amount,
+state ∈ {active,revoked,expired}, expires_at, supplied_at, supplied_by` — **no fee column, no
+request/intent direct link, no version, no `revoked_at`, no purpose/scope**. Supply is the
+controlled operator entry `txharbor withdrawal-authz supply` (`internal/app/withdrawalauthz.go`;
+identity = DSN trust + a declared `--operator` string recorded in `supplied_by` and
+`withdrawal_grant_audit` — an *audit claim, not a cryptographic proof*). Revocation is
+`RevokeGrant` (`FOR UPDATE` + `state='revoked'`). Validity is a Go predicate
+(`state='active' AND (expires_at IS NULL OR expires_at > clock_timestamp())`) over a `FOR SHARE`
+read (`internal/withdrawal/intake.go`). Request linkage is `withdrawal_requests.authorization_id
+UNIQUE` (007 side). `caller.can_create` is the only interface permission, enforced on 007's POST
+only.
+
+Per-attribute closure (OC-5 attribute → carrier → 009 verification):
+
+| OC-5 attribute | Carrier providing it | 009 verification |
+|---|---|---|
+| stable identity | `authorization_id` PK (real, 007) | row exists by id |
+| issuing authority / authenticity | controlled `withdrawal-authz supply` entry + `supplied_by`/`withdrawal_grant_audit` (real, 007) | provenance = row + audit; **declared identity, not cryptographic** |
+| single caller | `caller_id` FK (real, 007) | `= authenticated caller` |
+| chain / asset / recipient / amount scope | columns (real, 007) | equality vs request bound fields |
+| expiry | `expires_at` (real, 007) | `active` + `expires_at > clock_timestamp()` under `FOR SHARE` |
+| revocation | `state` flip + grant-row lock (real, 007) | observed state; ordered by `FOR SHARE` (R6) |
+| 007 request linkage | `withdrawal_requests.authorization_id UNIQUE` (real, 007) | 007-side bind; 009 cannot read intent from it |
+| sender scope | **absent** in the grant; OC-2 registry/config + future 011 intent bind | registry policy + provider key match — not from the grant |
+| fee scope | **absent** | not verifiable from the grant (policy caps only) |
+| fee-replacement purpose | **absent** | not verifiable (R7 branch 1 unreachable) |
+| intent / attempt / binding linkage | **absent** in the grant | 009 persists declarations; no carrier equality |
+| authorization version | **absent** | fingerprint surrogate only; version binding unmet |
+
+- **Concrete closure — new carrier, upstream-owned (009 does not build it)**:
+  a 007/011-owned additive carrier `withdrawal_authorization_scopes` (1:1, PK
+  `authorization_id`, FK → `withdrawal_authorizations`), written by the **same
+  `withdrawal-authz supply` transaction** that supplies the grant (never by an ordinary caller,
+  never by 009), carrying: `intent_id`, `request_id` (007), `sender`, `fee_scope` (max fee/tip or
+  a range), `allows_fee_replacement` (explicit purpose token per OC-5), `authorization_version`
+  (monotonic per grant), `attested_by`, and — only if Q-A rules so — an authorizer signature over
+  `(authorization_id, authorization_version, fields)`. **Owner**: 007/011 (extension), never 009.
+  **Controlled write entry**: the existing operator supply transaction, extended op-input;
+  `RevokeGrant` extended to keep the scope row's state/version consistent. **Consistency
+  protocol**: 009 reads the scope row read-only inside the same `FOR SHARE` read sequence (R6
+  lock order), requires `authorization_id` equality and checks `sender`/`fee_scope`/
+  `allows_fee_replacement`/`intent_id`/`request_id` against the request, persists
+  `authorization_version` on the request, and re-checks version/fingerprint at delivery.
+  **Minimal change scope / migration compatibility**: one additive migration (007/011); zero
+  change to 007's existing columns, read shapes, or intake semantics; existing grants remain valid
+  at the storage level (scope row optional), while 009 **fails closed** on a grant with no scope
+  row/version (`authorization_unverifiable`) instead of silently accepting — a backfill is an
+  operational step, not a semantic rewrite.
+- **Genuine new business questions (listed, not self-decided)**:
+  - **Q-A**: is the approved controlled-supply provenance (`--operator` declared, no
+    cryptography) sufficient for OC-5 "可验证真实性", or must v1 require a cryptographic
+    authorizer attestation in the scope carrier?
+  - **Q-B**: for pre-extension grants without a scope row/version, does 009 fail closed
+    permanently (`authorization_unverifiable`) or must a one-time backfill complete before 009
+    accepts any grant?
+- **Explicitly NOT substitutes**: the `authz:v1` fingerprint, the `caller_id` FK, and ordinary
+  caller/API authentication are **not** authorization capabilities; none may be presented as
+  satisfying the missing attributes above.
+
 ## Open / deferred research items (carried into plan.md)
 
 - **T000-P** stays open: production provider (KMS/HSM) selection is out of scope; R2 only promises
   interface shape.
 - **D3 / R8**: 008's concrete binding read contract is not available in this worktree; the
   `BindingReader` interface is the 009-side consumption contract, and final integration
-  verification waits for 008 (constitution XI; R5 of the parallel workflow).
-- **G-1 / R6**: the 006 pause-establishment vs delivery window is an EXPOSED GAP; closing it is a
-  006-side contract change, not a 009 decision.
-- **D-1..D-4 / R7**: 007 authorization carrier gaps (intent linkage, version, fee purpose,
-  revoked_at) are recorded; extension is owned by 007/011.
+  verification waits for 008 (constitution XI; R5 of the parallel workflow). The R6 lock protocol
+  adds one 008-side obligation: `ReadBinding` MUST be serialized against 008's pause transitions.
+- **G-1 / R6 — CLOSED**: the 006 pause-establishment vs delivery window is closed in-plan by the
+  gate-table `SHARE` lock (no 006 change); it is no longer an exposed gap or a deferred item.
+- **D-1/D-2/D-4 / R7, R11**: intent linkage, authorization version, and `revoked_at` remain
+  carrier gaps; the concrete closure carrier (`withdrawal_authorization_scopes`), owner 007/011,
+  write entry, and consistency protocol are specified in R11.
+- **D-3 / R7, R11**: fee-scope/purpose gap recorded; OC-5's conditional fee-replacement rule is
+  restored, with the fresh-authorization branch operating until the R11 carrier lands.
+- **Q-A / Q-B (R11)**: genuine business questions on authenticity strength and pre-extension
+  fail-closed/backfill behavior — listed for a business ruling, not decided here.

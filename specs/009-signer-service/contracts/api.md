@@ -68,7 +68,8 @@ Responses (stable machine code + human message + trace id; no secrets):
 | same-identity retry, delivery withheld (expired/revoked auth, 006/008 pause, version change) | 409 | `signature_withheld` | status-only (§3); no signature; reason + observed basis |
 | same identity, different envelope | 409 | `request_conflict` | original untouched; new content needs a new identity |
 | authenticated, no signing permission | 403 | `signing_not_permitted` | — |
-| authorization missing/inactive/expired/revoked/mismatch/changed | 403 | `authorization_invalid` / `authorization_expired` / `authorization_revoked` | fresh authorization required for replacements |
+| authorization missing/inactive/expired/revoked/mismatch/changed | 403 | `authorization_invalid` / `authorization_expired` / `authorization_revoked` | OC-5 conditional: same-grant reuse only if explicitly permitted + fee in scope, else fresh authorization |
+| grant has no verifiable scope/version carrier | 403 | `authorization_unverifiable` | upstream carrier extension required (fail closed) |
 | malformed JSON / unknown field / wrong type | 400 | `malformed_request` | — |
 | arbitrary digest / missing required content / field validation | 422 | `arbitrary_digest_rejected` / `validation_failed` (+ field) | — |
 | policy refusal (chain/sender/asset/recipient/amount/fee) | 422 | `policy_refused` (`policy_*` detail class) | — |
@@ -110,8 +111,11 @@ service never broadcasts and has no RPC dependency (FR-16; SC-06).
 3. Identity lookup: same `(caller_id, signing_request_id)` → envelope equality → replay path
    (persisted result through delivery) or `409 request_conflict`. In-flight/unknown result →
    `503 outcome_not_yet_visible` (same-identity retry).
-4. First receipt: submit transaction (gates → binding → authorization → policy → sign → persist,
-   persistence.md §1). No gate is read before authentication and shape checks.
+4. First receipt: submit transaction (gate-table `LOCK … IN SHARE MODE` (R6) → gates → binding →
+   authorization → policy → sign → persist, persistence.md §1). No gate is read before
+   authentication and shape checks. Delivery (persistence.md §2) re-runs the same gate lock and
+   re-reads 006/007/008 + `can_sign`; the admission is valid only for that attempt's immediate
+   write (a delayed send must re-admit).
 5. Delivery assessment (persistence.md §2) → response.
 Replay does not re-run policy (deterministic), but delivery re-runs the revocable gates
 (006/007/008) on every attempt.

@@ -14,6 +14,8 @@ One transaction owns the decision. Fixed order (research R4):
 ```text
 BEGIN
   statement-timeout guard (SET LOCAL statement_timeout = '5s')
+  LOCK TABLE indexer_pause, log_pause, deposit_pause, reorg_recovery,
+       reorg_recovery_events IN SHARE MODE                    -- R6 gate coord, held to COMMIT
   plain INSERT signing_requests (state='received')            -- identity + envelope bound first
     └─ 23505 (caller_id, signing_request_id) → ROLLBACK → replay path (§3)
   SELECT … FOR UPDATE own row                                 -- serialize same-identity attempts
@@ -47,13 +49,21 @@ Invariants this ordering establishes:
 
 Delivery is never a pure read of Table 4; it is a recorded assessment (research R6, OC-6/OC-7):
 
-1. `BEGIN` → short read transaction: 006 gate re-read (one statement) + version equality; 008
-   binding re-read; 007 grant re-read `FOR SHARE` + fingerprint equality.
-2. Persist one `delivery_admissions` row: verdict `admitted` **before** any response byte, or
-   `blocked` with the observed basis (`pause_basis`, `recovery_basis`, `reason`). `COMMIT`.
+1. `BEGIN` → gate-table `LOCK … IN SHARE MODE` (R6, held to COMMIT) → 006 gate re-read (one
+   statement) + version equality; 008 binding re-read (the adapter read MUST be serialized
+   against 008's pause transitions, gates.md §3); 007 grant re-read `FOR SHARE` + fingerprint/
+   version equality; `signer_caller.can_sign` re-read `FOR SHARE`.
+2. Persist one `delivery_admissions` row recording the snapshot (`binding_class`, `can_sign`,
+   pause/recovery basis): verdict `admitted` **before** any response byte, or `blocked` with the
+   observed basis. `COMMIT`.
 3. Write the response. On `admitted`, a bounded best-effort `UPDATE … SET verdict='delivered',
-   delivered_at=now()` follows; its loss leaves `admitted`, which means "cleared for delivery,
-   write outcome unknown" (in-flight approved, not reclaimable).
+   delivered_at=now()` follows. An `admitted` row authorizes **only the immediate write of this
+   attempt** — it is not a durable permit: any delayed send (retry, restart, scheduling gap) MUST
+   re-run T-deliver, re-read all gates and `can_sign`, and record a new `attempt_seq`
+   (re-admission). If a pause/revoke/`can_sign`-off became visible after the old admission, the
+   re-admission is `blocked`; a lost marker leaves `admitted` = "write outcome unknown" (unknown
+   reconcile), never a standing permission. Only bytes already written are in-flight approved.
+   Linearization: the admission `COMMIT`, ordered by the gate-table `SHARE` lock (R6).
 
 Consequences:
 
@@ -105,7 +115,8 @@ Retryability is a property of the class, not of the caller's patience.
 | `binding_paused` | 008 paused/reconciling (hold annotation, recovery != none, or registry disabled) | after release (same identity) |
 | `binding_terminal` | 008 binding exists but terminal (nonce consumed/released, audit-only) | no by content; only via a new identity + binding after reconcile — terminal never becomes signable |
 | `binding_read_failed` | 008 read failed/indeterminate | yes (same identity) |
-| `authorization_invalid` / `authorization_expired` / `authorization_revoked` | 007 grant absent/inactive/expired/revoked/mismatch/changed | no (fresh authorization required) |
+| `authorization_invalid` / `authorization_expired` / `authorization_revoked` | 007 grant absent/inactive/expired/revoked/mismatch/changed | no (OC-5 conditional: fresh authorization needed unless explicit permit + in-scope fee allows same-grant reuse) |
+| `authorization_unverifiable` | grant has no verifiable scope/version carrier (R11 gap) | no (upstream carrier extension required; fail closed) |
 | `recovery_paused` / `recovery_active` | 006 pause row / active recovery | after release (same identity; never queued) |
 | `recovery_version_changed` | content built on a stale recovery version | no (reconstruct content on the new view, new identity) |
 | `gate_read_failed` | gate statement error/indeterminate | yes (same identity) |

@@ -9,7 +9,8 @@ numbered goose sequence; conventions follow 004–007: named constraints, lowerc
 009 owns six tables (Tables 1–6 below). It does **not** own, copy, or write 006/007 tables; it
 reads them read-only through the contracts in [contracts/gates.md](contracts/gates.md) (006
 `indexer_pause`/`log_pause`/`deposit_pause`, 006 `reorg_recovery` + `reorg_recovery_events`,
-007 `withdrawal_authorizations`). Reading is consumer-side; this model adds no column to any
+007 `withdrawal_authorizations`), acquiring the gate-table `LOCK … IN SHARE MODE` coordination
+lock described in research R6 (a lock acquisition, not a data write). Reading is consumer-side; this model adds no column to any
 upstream table and MUST NOT be interpreted as extending them.
 
 Cross-cutting rules: no floating-point anywhere (all monetary/fee/nonce quantities are
@@ -72,6 +73,7 @@ CREATE TABLE signing_requests (
     caller_id                   BIGINT        NOT NULL,
     signing_request_id          TEXT          NOT NULL,
     attempt_id                  TEXT          NOT NULL,
+    replacement_of              BIGINT,
     intent_id                   TEXT          NOT NULL,
     binding_ref                 TEXT          NOT NULL,
     recovery_version            BIGINT        NOT NULL DEFAULT 0,
@@ -105,7 +107,8 @@ CREATE TABLE signing_requests (
         REFERENCES signer_caller (caller_id),
     CONSTRAINT signing_requests_caller_request_uniq UNIQUE (caller_id, signing_request_id),
     CONSTRAINT signing_requests_attempt_uniq UNIQUE (attempt_id),
-    CONSTRAINT signing_requests_authorization_uniq UNIQUE (authorization_id),
+    CONSTRAINT signing_requests_replacement_fkey FOREIGN KEY (replacement_of)
+        REFERENCES signing_requests (id),
     CONSTRAINT signing_requests_state_check
         CHECK (state IN ('received', 'validated', 'signed', 'rejected', 'failed')),
     CONSTRAINT signing_requests_chain_id_check CHECK (chain_id > 0),
@@ -134,12 +137,20 @@ CREATE TABLE signing_requests (
     CONSTRAINT signing_requests_authorization_fingerprint_check
         CHECK (authorization_fingerprint ~ '^[0-9a-f]{64}$')
 );
-```
+
+-- OC-5 conditional grant reuse (research R7): one anchor (non-replacement) request per
+-- authorization; replacement rows may share the grant. A persisted row's authorization_id is
+-- never updated, so an old request can never be rebound to another grant.
+CREATE UNIQUE INDEX signing_requests_authorization_anchor_uniq
+    ON signing_requests (authorization_id) WHERE replacement_of IS NULL;
 
 Field notes:
 
 - **Identity columns**: `(caller_id, signing_request_id)` is the request identity (OC-4);
   `attempt_id` is the 010 attempt identity (UNIQUE — one attempt = one request identity).
+  `replacement_of` is NULL for a non-replacement anchor and points at the predecessor for a
+  fee-replacement request (OC-4/OC-5; new identity, same intent/binding). A persisted row's
+  `authorization_id` is never updated, so no old request is ever rebound (research R7).
   `intent_id` / `binding_ref` are upstream references (OC-1 / OC-3): the service verifies binding
   consistency through its read contract (research R8) and records what it verified.
 - **Fee shape**: one of two closed shapes enforced by CHECK (legacy `gas_price`, or EIP-1559
@@ -159,8 +170,12 @@ Field notes:
   artifact compared on retry/conflict (never re-derived from columns).
 - **Authorization binding**: `authorization_id` + `authorization_fingerprint`
   (`authz:v1` over observed grant fields) + `authorization_state` (observed `state` at read
-  time). The fingerprint is a read-time surrogate for the version the 007 carrier cannot express
-  (research R7 gaps D-1..D-4).
+  time). Reuse of one grant across requests is **conditional** (OC-5, research R7): a
+  replacement may share the anchor's grant only when the authorization explicitly permits the
+  fee-replacement purpose and the fee is in scope (branch currently unreachable because the 007
+  carrier cannot express it — research R11); otherwise a fresh `authorization_id` is required.
+  The fingerprint is a read-time **surrogate** for the authorization version the 007 carrier
+  cannot express and MUST NOT be presented as a version (research R7/R11, gap D-2).
 - **Policy version**: `policy_version` = versioned SHA-256 of the effective signing policy
   (allowed chains, sender registry, asset/function allowlist, recipient rules, amount cap, fee
   caps, mode) — every request/audit row carries the version that decided it (FR-12).
@@ -246,6 +261,8 @@ CREATE TABLE delivery_admissions (
     authorization_id          TEXT        NOT NULL,
     authorization_fingerprint TEXT        NOT NULL,
     authorization_state       TEXT        NOT NULL,
+    binding_class             TEXT        NOT NULL DEFAULT '',
+    can_sign                  BOOLEAN     NOT NULL DEFAULT TRUE,
     recovery_version          BIGINT      NOT NULL,
     pause_basis               TEXT        NOT NULL DEFAULT 'none',
     recovery_basis            TEXT        NOT NULL DEFAULT 'none',
@@ -257,16 +274,24 @@ CREATE TABLE delivery_admissions (
         REFERENCES signing_requests (id),
     CONSTRAINT delivery_admissions_request_attempt_uniq UNIQUE (signing_request_row, attempt_seq),
     CONSTRAINT delivery_admissions_attempt_seq_check CHECK (attempt_seq > 0),
+    CONSTRAINT delivery_admissions_binding_class_check CHECK (binding_class IN (
+        '', 'matches', 'absent', 'conflict', 'paused', 'terminal', 'read_failed')),
     CONSTRAINT delivery_admissions_verdict_check CHECK (verdict IN (
         'admitted', 'delivered', 'blocked', 'unknown_reconcile'))
 );
 ```
 
-- One row per delivery attempt (attempt_seq 1 = first response, >1 = same-identity retries).
-  Ordering invariant (research R6): the `admitted`/`blocked` verdict and its observation snapshot
-  commit **before** response bytes are written; the post-write marker flips `admitted → delivered`
-  (best-effort). A row left at `admitted` means "cleared for delivery, write outcome unknown" —
-  in-flight approved, not reclaimable (OC-7).
+- One row per delivery attempt (attempt_seq 1 = first response, >1 = same-identity retries). The
+  transaction first takes the gate-table `SHARE` lock (research R6), so the snapshot and verdict
+  are linearly ordered against 006/007 writers; the `admitted`/`blocked` verdict commits
+  **before** response bytes are written, and the post-write marker flips `admitted → delivered`
+  (best-effort). `binding_class` and `can_sign` record the observed 008 binding class and caller
+  permission at decision time.
+- **Bounded admission validity (research R6)**: an `admitted` row authorizes only the immediate
+  response write of the same attempt — it is not a durable permit. A delayed send (retry,
+  restart, scheduling gap) MUST re-run T-deliver and record a new `attempt_seq`; a row left at
+  `admitted` means "cleared at that snapshot, write outcome unknown", not a standing permission
+  (OC-7). Only bytes already written are in-flight approved and not reclaimable.
 - `blocked` records the refusal and its basis (`pause_basis` names the observed pause table(s),
   `recovery_basis` the recovery phase/seq, `reason` the class). No signature material is
   delivered and none appears in the response.
@@ -281,15 +306,17 @@ CREATE TABLE delivery_admissions (
 
 | ID | Transaction | Statements (fixed order) | Owner file (planned) |
 |----|-------------|--------------------------|----------------------|
-| T-submit-first | first receipt of an identity | BEGIN → statement-timeout guard → plain INSERT request row (`received`) → `SELECT … FOR UPDATE` own row → 006 gate read (one read sequence) → 008 binding read → 007 grant `FOR SHARE` + validity/equality → policy validation → `KeyProvider.SignTx` → INSERT `signature_results` → UPDATE state `signed` (or `rejected`; transient refusal keeps non-terminal state) → audit INSERT → COMMIT | `internal/signer/submit.go` |
+| T-submit-first | first receipt of an identity | BEGIN → statement-timeout guard → gate-table `LOCK … IN SHARE MODE` (R6) → plain INSERT request row (`received`) → `SELECT … FOR UPDATE` own row → 006 gate read (one read sequence) → 008 binding read → 007 grant `FOR SHARE` + validity/equality → policy validation → `KeyProvider.SignTx` → INSERT `signature_results` → UPDATE state `signed` (or `rejected`; transient refusal keeps non-terminal state) → audit INSERT → COMMIT | `internal/signer/submit.go` |
 | T-submit-replay | duplicate identity arrives | INSERT → catch 23505 exact `signing_requests_caller_request_uniq` → ROLLBACK → read row → envelope equal → delivery path (T-deliver) with persisted result; envelope differ → 409 `request_conflict` (+ audit best-effort); row exists, no result yet → `503`-shape "outcome not yet visible; retry same identity" | `internal/signer/submit.go` |
-| T-deliver | first response or same-identity retry | BEGIN → statement-timeout guard → 006 gate re-read (one statement) + version equality → 008 binding re-read → 007 grant `FOR SHARE` + fingerprint equality → INSERT `delivery_admissions` (`admitted`/`blocked`) → COMMIT → write response → best-effort UPDATE to `delivered` | `internal/signer/delivery.go` |
+| T-deliver | first response or same-identity retry | BEGIN → statement-timeout guard → gate-table `LOCK … IN SHARE MODE` (R6) → 006 gate re-read (one statement) + version equality → 008 binding re-read → 007 grant `FOR SHARE` + fingerprint/version equality → `signer_caller.can_sign` `FOR SHARE` → INSERT `delivery_admissions` (`admitted`/`blocked`; records `binding_class`/`can_sign`) → COMMIT → write response → best-effort UPDATE to `delivered` | `internal/signer/delivery.go` |
 | T-status | authenticated status read | single read: request row by `(caller_id, signing_request_id)` + latest admission row; other callers/nonexistent → identical 404 | `internal/signer/status.go` |
 | T-auth | per-request authentication | read `signer_credential` by `secret_hash` (+ caller row); constant-time compare; revoked/absent → generic 401 | `internal/signer/auth.go` |
 
-Discipline: T-submit-* and T-deliver are the only 009 transactions that touch upstream tables,
-and only with `SELECT`. No RPC, no external calls inside any transaction. `writeGuard`-style
-per-statement timeout (5s literal, same as the repo's existing guard) bounds every transaction.
+Discipline: T-submit-* and T-deliver are the only 009 transactions that touch upstream tables;
+against them 009 issues only `SELECT` and the gate-table `LOCK … IN SHARE MODE` (lock acquisition
+with no data mutation — research R6), never `INSERT`/`UPDATE`/`DELETE`. No RPC, no external calls
+inside any transaction. `writeGuard`-style per-statement timeout (5s literal, same as the repo's
+existing guard) bounds every transaction and the `LOCK TABLE` wait.
 
 ## Concurrency & crash argument (why no second observable signature)
 
@@ -297,8 +324,10 @@ per-statement timeout (5s literal, same as the repo's existing guard) bounds eve
   loser's INSERT blocks on the index entry until the winner commits or rolls back. Winner commits
   → loser gets 23505 → converges on the persisted row/result. Winner rolls back → loser's INSERT
   succeeds and proceeds. Exactly one row, at most one result.
-- **Concurrent different identities, same 007 grant**: `UNIQUE (authorization_id)` serializes
-  them; the loser maps to `403 authorization_invalid` (fresh-authorization rule, R7).
+- **Concurrent different anchors, same 007 grant**: the partial anchor index
+  `signing_requests_authorization_anchor_uniq` serializes them; the loser maps to
+  `403 authorization_invalid`. A replacement row may share the anchor's grant only under OC-5's
+  conditional rule and its matching `replacement_of`/`intent_id` (research R7).
 - **Crash before COMMIT**: no row state change, no result; retry with the same identity re-runs
   the path; deterministic RFC-6979 bytes mean the eventual single persisted result matches what a
   hypothetical pre-crash sign produced.
@@ -314,8 +343,8 @@ per-statement timeout (5s literal, same as the repo's existing guard) bounds eve
 
 | Upstream | Read | Contract |
 |----------|------|----------|
-| 006 | `indexer_pause` / `log_pause` / `deposit_pause` existence; `reorg_recovery` active row (any phase) + version (active `recovery_seq`, else events MAX, else 0) | [contracts/gates.md](contracts/gates.md) §1 — one read sequence, read-only, never cleared/released |
-| 007 | `withdrawal_authorizations` by `authorization_id` `FOR SHARE` + state/expiry/field equality + fingerprint | [contracts/gates.md](contracts/gates.md) §2 — the only lock on 009's signing path; consumption never writes |
+| 006 | `indexer_pause` / `log_pause` / `deposit_pause` existence; `reorg_recovery` active row (any phase) + version (active `recovery_seq`, else events MAX, else 0) | [contracts/gates.md](contracts/gates.md) §1 — gate-table `LOCK … IN SHARE MODE` (R6) + one read sequence, read-only, never cleared/released |
+| 007 | `withdrawal_authorizations` by `authorization_id` `FOR SHARE` + state/expiry/field equality + fingerprint/version | [contracts/gates.md](contracts/gates.md) §2 — grant-axis lock in the R6 lock order; consumption never writes |
 | 008 | nonce binding for `intent_id`/`attempt_id` with five-class result | [contracts/gates.md](contracts/gates.md) §3 — interface-level contract; adapter waits for 008 (D3) |
 
 ## Retention & secrecy notes

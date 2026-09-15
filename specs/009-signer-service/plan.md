@@ -11,12 +11,17 @@ component with key access: authenticated, structured-transaction-only signing re
 content validation (chain/sender/asset/calldata/recipient/amount/fees); identity↔content binding
 in PostgreSQL with same-identity replay and conflict refusal; sign+persist in one row-locked
 transaction before any response; read-only consumption of 006 pause/recovery and 007
-authorization gates with `FOR SHARE` as the sole lock; recorded delivery admission that re-verifies
-006/007/008 gates on every response (first and retry alike); persisted results never re-delivered
-after expiry/revocation/pause (status-only); no broadcast and no RPC code path. Technical approach
-from research R1–R10: go-ethereum `types`+`crypto` (no custom cryptography), narrow
-sender-bound `KeyProvider`, canonical envelope + `keccak256` content hash, insert-first/23505
-classification, single `000009` migration with six tables.
+authorization gates with a shared gate-table `SHARE` lock on the 006 gate tables plus `FOR SHARE`
+on the 007 grant (one ring-free lock order — research R6); recorded delivery admission that
+re-verifies 006/007/008 + `can_sign` gates on every response (first and retry alike) with a
+**bounded admission validity** (an admission permits only the immediate write; delayed sends must
+re-admit); persisted results never re-delivered after expiry/revocation/pause (status-only);
+conditional OC-5 fee replacement (reuse the grant only if it explicitly permits replacement and
+the fee is in scope, else fresh authorization + new identity — research R7); no broadcast and no
+RPC code path. Technical approach from research R1–R11: go-ethereum `types`+`crypto` (no custom
+cryptography), narrow sender-bound `KeyProvider`, canonical envelope + `keccak256` content hash,
+insert-first/23505 classification, single `000009` migration with six tables, and the R11
+authorization-carrier closure (upstream-owned extension; 009 fails closed on unverifiable grants).
 
 ## Technical Context
 
@@ -33,7 +38,8 @@ dependencies** (no new module, no new infrastructure — constitution XIII).
 `signer_caller`, `signer_credential`, `signing_requests`, `signature_results`,
 `signing_request_audit`, `delivery_admissions` (data-model Tables 1–6). Read-only consumers:
 006 `indexer_pause`/`log_pause`/`deposit_pause`, 006 `reorg_recovery` + events, 007
-`withdrawal_authorizations`. No Redis/Kafka/new infra.
+`withdrawal_authorizations` — read with a gate-table `LOCK … IN SHARE MODE` (lock only, no data
+mutation; R6) plus `FOR SHARE` on the 007 grant. No Redis/Kafka/new infra.
 
 **Testing**: `go test ./...` (unit: strict request schema, canonical envelope, validation matrix,
 conflict/replay classification, refusal taxonomy, independent signature verification) +
@@ -98,12 +104,61 @@ Pre-Phase-0 (2026-09-16, against Constitution 1.1.0):
 - **XIV (Spec-driven)**: PASS — this plan; scope fenced by Non-Goals; upstream rulings consumed,
   not reopened.
 
-Post-Phase-1 re-check (2026-09-16): no new violations introduced. `FOR SHARE` on the 007 grant row
-is the single lock object on 009's paths (matches 007 R7 discipline; no lock-order ring); the
-`signer_caller`/`signer_credential` tables are required FR-04/05 carriers (upstream tables cannot
-hold 009's caller namespace without breaking 007's contract); the canonical envelope column is
-required to make same-identity equality byte-exact (R3). Delivery-boundary gap G-1 is recorded as
-an upstream (006) contract item, not silently waived.
+Post-Phase-1 re-check (2026-09-16): no new violations introduced. Lock discipline is a single
+ring-free order: gate-table `SHARE` locks on the 006 gate tables → 007 grant `FOR SHARE` →
+`signer_caller` `FOR SHARE` → own request row (R6); no 006/007 writer takes a 009 table, so no
+cycle can form. The `signer_caller`/`signer_credential` tables are required FR-04/05 carriers
+(upstream tables cannot hold 009's caller namespace without breaking 007's contract); the canonical
+envelope column is required to make same-identity equality byte-exact (R3); `replacement_of` +
+the partial anchor index are required to make OC-5's conditional grant reuse physically possible
+without rebinding an old request (R7). Former delivery-boundary gap **G-1 is closed in-plan** by
+the gate-table `SHARE` lock (R6), not waived or deferred.
+
+## Authorization carrier closure (OC-5 ↔ real 007 carrier)
+
+Per-attribute closure matrix, the concrete upstream-owned extension carrier, its controlled write
+entry, consistency protocol, migration compatibility, and the two genuine business questions are
+in **research R11**. Summary of real vs extended capability:
+
+- **Reused (real 007 capability)**: `authorization_id` identity, `caller_id` bind, `chain_id`/
+  `asset`/`recipient`/`amount` equality, `state`/`expires_at` validity on the DB clock,
+  `state`-flip revocation ordered by the grant-row lock, and the controlled `withdrawal-authz
+  supply` entry (declared operator identity + append-only grant audit — an audit claim, not a
+  cryptographic proof).
+- **Extended (upstream-owned; 009 does not build it)**: a 007/011 additive carrier
+  `withdrawal_authorization_scopes`, written in the **same supply transaction**, carrying
+  `intent_id`, `request_id`, `sender`, `fee_scope`, `allows_fee_replacement`,
+  `authorization_version`, `attested_by` (+ authorizer signature only if Q-A rules so). 009 reads
+  it read-only in the same `FOR SHARE` sequence, checks equality, persists the version on the
+  request, and re-checks version/fingerprint at delivery; a grant with no scope row/version is
+  **refused fail-closed** (`authorization_unverifiable`), never silently accepted.
+- **Not substitutes**: the `authz:v1` fingerprint, the `caller_id` FK, and ordinary caller/API
+  authentication are not authorization capabilities.
+- **Open business questions (R11)**: Q-A (cryptographic authenticity required in v1?) and Q-B
+  (pre-extension grants: fail closed vs mandatory backfill).
+
+## Pause/revoke ↔ delivery ordering (closes G-1; resolved in-plan)
+
+Participants, write entries, and effective points (full protocol in research R6):
+
+| Participant | Write entry | Change | Effective point | 009 ordering lock |
+|---|---|---|---|---|
+| 006 pause | `INSERT`/`DELETE` on `indexer_pause`/`log_pause`/`deposit_pause` (stream writers or manual DBA) | pause on/off | writer `COMMIT` | gate-table `SHARE` (conflicts with `ROW EXCLUSIVE`) |
+| 006 recovery establish | `EstablishRecovery` (`internal/indexer/reorgcommit.go`) | `reorg_recovery`+events insert | `COMMIT` | gate-table `SHARE` |
+| 006 recovery verify/complete | `CompleteRecoveryVerify` | phase move / row `DELETE` + event | `COMMIT` | gate-table `SHARE` |
+| 006 recovery release | `AuthorizeRecoveryRelease` | row `DELETE` + `released` event | `COMMIT` | gate-table `SHARE` |
+| 008 own pause / registry disable | 008-owned writer | 008 pause / binding state | 008 `COMMIT` | `BindingReader` serialization obligation (008 contract, gates.md §3) |
+| 007 revoke / change | `RevokeGrant` / re-supply | grant `state`/fields | `COMMIT` | grant-row `FOR SHARE` |
+| wallet/permission disable | `signer_caller.can_sign` via `signer-auth` | permission off | `COMMIT` | `signer_caller` row `FOR SHARE` |
+| 009 first delivery / old-result replay | T-deliver admission `INSERT` | admission row | admission `COMMIT` (ordered by gate-table `SHARE`) | — |
+
+Two required concurrency timelines (R6): **(a) pause/revoke before admission** → 009 observes it
+under the `SHARE` lock and returns status-only with zero signature bytes; **(b) admission first,
+pause/revoke after** → ordered after the admission `COMMIT`; the immediate write proceeds, any
+delayed send must re-admit, and only bytes already written are in-flight approved (an
+admitted-but-unwritten row means "write outcome unknown", not "permission"). Crash, commit-unknown,
+and response-loss all resolve by same-identity retry re-reading durable rows and re-gating; the
+result is never re-signed.
 
 ## Project Structure
 
@@ -181,19 +236,19 @@ signer's own address, no new infrastructure.
 | FR-01 (independent boundary, no business keys) | `signer-serve` process; `internal/signer` key deps only via `provider.go`; import-boundary test | V8 |
 | FR-02/FR-03 (structured full content, no arbitrary digest) | strict schema (`DisallowUnknownFields`), no digest endpoint/field, content envelope | V1, V2 |
 | FR-04 (authentication) | auth.go + Tables 1–2 + `signer-auth` lifecycle; generic 401 | V3 |
-| FR-05 (permission + per-tx authorization, OC-5) | `can_sign` + 007 grant read/equality/expiry + fresh-grant replacement rule | V3, V4, V6 |
+| FR-05 (permission + per-tx authorization, OC-5) | `can_sign` + 007 grant read/equality/expiry + OC-5 conditional replacement rule + R11 carrier closure | V3, V4, V6 |
 | FR-06 (chain) | policy chain bind vs `config.ChainID` | V5 |
 | FR-07 (sender) | sender registry/config + provider sender-key binding (OC-2) | V5, V8 |
 | FR-08 (asset/calldata consistency) | `validate.go` calldata decode + allowlist + declared-triple equality | V5 |
 | FR-09 (recipient) | EIP-55 shape + recipient policy | V5 |
 | FR-10 (amount) | integer validators + uint256 CHECKs + policy cap | V5 |
-| FR-11 (fees) | fee-shape CHECK + policy caps + replacement gate (R7) | V5, V6 |
+| FR-11 (fees) | fee-shape CHECK + policy caps + OC-5 conditional replacement gate (R7) | V5, V6 |
 | FR-12 (no silent bypass, auditable) | single validation entry + `policy_version` + audit rows | V5, V7 |
 | FR-13 (identity↔content binding, OC-4) | Table 3 constraints + envelope equality + persist-before-return | V4 |
 | FR-14 (retry/response-loss/restart determinism) | insert-first + row lock + persisted result + delivery path | V4 |
 | FR-15 (explicit state machine) | state CHECK + fixed transaction order | V4 |
 | FR-16 (result only, never broadcast) | response contract; no RPC import; no chain tests | V1, V8 |
-| FR-17 (006 gate + delivery withholding, OC-6) | gates.md §1 + delivery admission + status-only | V6, V7 |
+| FR-17 (006 gate + delivery withholding + ordering, OC-6/OC-7) | gates.md §1 + gate-table `SHARE` lock ordering (R6) + delivery admission + bounded admission validity + status-only | V6, V7 |
 | FR-18 (nonce given, read-only binding, OC-3) | never allocates nonce; `BindingReader` five classes | V6 |
 | FR-19 (007 Accepted guard, OC-1) | no trigger from receive status; intent refs persisted, not inferred | V6 |
 | FR-20 (KeyProvider, established crypto) | provider.go + go-ethereum `types.SignTx` | V8 |
@@ -220,7 +275,8 @@ are justified explicitly:
 | Non-standard choice | Why needed | Simpler alternative rejected because |
 |---|---|---|
 | Six new tables in one migration (incl. `signer_caller`/`signer_credential`) | FR-04/05 callers are 009's own authenticated namespace; upstream tables cannot hold them without coupling two independently deployable boundaries (research R9) | Reusing 007's `caller`/`api_key` tables would give withdrawal clients signing semantics and break 007's contract; env-only static tokens cannot be revoked per caller |
-| `FOR SHARE` on the 007 grant row (single lock object) | Closes the revocation-vs-delivery race and enforces one-grant-one-identity with the same discipline 007's receipt path already uses (007 R7) | No lock: revoke/deliver could interleave inconsistently; `FOR UPDATE`: needlessly serializes concurrent deliveries/reads and adds a second lock order |
+| Gate-table `SHARE` lock on the 006 gate tables (+ `FOR SHARE` on the 007 grant) | Closes the pause/revoke-vs-delivery race in-plan with one ring-free lock order, using only primitives already present (no 006/008 change); the relation-level lock also orders against future `INSERT`s and the manual-DBA release path a row lock cannot cover (R6) | Read-only snapshot without a shared lock: a pause/recovery commit between the last read and the response write is unobservable (the old G-1 gap); a 009-owned advisory lock 006 does not take: zero cross-writer guarantee |
+| `replacement_of` + partial unique anchor index (`UNIQUE (authorization_id) WHERE replacement_of IS NULL`) | Makes OC-5's conditional same-grant reuse physically possible while keeping one anchor request per grant and forbidding any rebind of an old request row (R7) | Keeping `UNIQUE (authorization_id)`: reuse impossible, forcing a silent fresh-only reinterpretation; no constraint: two competing anchors for one grant |
 | Stored canonical envelope (+ keccak256 hash) alongside parsed columns | Same-identity equality must be byte-exact and re-derivable after restart; audit needs one comparable artifact (research R3) | Column re-comparison is ambiguous across encodings (case, leading zeros); hash-only loses operator-readable evidence |
 | Delivery admission rows before response bytes | OC-6/OC-7 require a verifiable ordering and recorded basis; also distinguishes in-flight-approved from never-delivered (persistence.md §2) | Delivering without a recorded admission cannot satisfy the ruling's evidence requirement; a log line is not durable state |
 
@@ -229,25 +285,30 @@ are justified explicitly:
 - **Migration** (`000009`, scratch/dedicated database only): `up`/`down` reproducibility; negative
   probes — UNIQUE/PK/CHECK conflicts expect 23505/23514 with the exact named constraint
   (`signing_requests_caller_request_uniq`, `signing_requests_attempt_uniq`,
-  `signing_requests_authorization_uniq`, `signature_results_tx_hash_uniq`, …); classification by
+  `signing_requests_authorization_anchor_uniq`, `signature_results_tx_hash_uniq`, …); classification by
   `ConstraintName` only.
 - **Unit**: strict schema rejection (unknown fields/arbitrary digest), canonical envelope
   determinism, validation matrix, taxonomy mapping, independent signature verification
   (recover sender + rebuild hash), no float types.
 - **Integration (real PostgreSQL, workdir-local DB)**: concurrency (N identical submits →
-  one result; different identities on one grant → one winner); crash points (pre-commit /
-  post-commit / delivery); gate races (revoke during submit/delivery; pause established between
-  attempts); read-only diff of 006/007 tables; status privacy (identical 404).
+  one result; different anchors on one grant → one winner; conditional replacement reuse vs fresh
+  grant); crash points (pre-commit / post-commit / admission / response); the two R6 timelines
+  (pause/revoke committed before delivery admission → status-only; admission committed before a
+  pause/revoke → immediate write, delayed send must re-admit); `can_sign` disabled between sign
+  and delivery; read-only diff of 006/007 tables with the gate-table `SHARE` lock asserted; status
+  privacy (identical 404).
 - **Race detector**: `make test-race` on signer paths (row lock/insert classification).
 - **Boundary/secrecy**: import test (business `serve` wires no `KeyProvider`; `internal/signer`
   imports no RPC/dial package); log/error/metric scan for keys, credentials, signature bytes on
   refusal paths, raw signed bytes.
 - **CI**: existing `ci.yml` four jobs (unit+race, integration-Docker, build, lint) cover 009 with
   no workflow change; no new CI infrastructure.
-- **Residual risks / ownership**: G-1 (006 pause establishment has no shared lock; deferred item
-  below), 008 adapter integration (D3), T000-P production provider (open). Test doubles for the
-  008 binding are contract-shape only and MUST NOT be cited as final integration acceptance
-  (constitution XI; workflow R5).
+- **Residual risks / ownership**: G-1 **closed in-plan** by the gate-table `SHARE` lock (R6) — no
+  longer a residual item; 008 adapter integration (D3) now includes the R6 serialization
+  obligation on `ReadBinding`; R11 authorization-carrier extension and its Q-A/Q-B business
+  questions belong to 007/011 (009 fails closed until available); T000-P production provider
+  (open). Test doubles for the 008 binding are contract-shape only and MUST NOT be cited as final
+  integration acceptance (constitution XI; workflow R5).
 
 ## Evidence separation (status, not proof)
 
@@ -266,12 +327,13 @@ are justified explicitly:
 | ID | Item | Owner |
 |---|---|---|
 | T000-P | Production KMS/HSM provider selection/integration (interface ready; no provider ships) | later production track |
-| D3 | 008 binding read adapter + five-class integration acceptance (interface defined in gates.md §3) | 008 contract availability |
-| G-1 | EXPOSED GAP: 006 pause establishment shares no lock with 009's gate read; residual window between last gate read and response write is closable only by a 006-side contract change (research R6) | 006 amendment / 010 broadcast gate |
-| D-1 | 007 carrier gap: no `intent_id`/`request_id` linkage (intent association verified only as persisted caller declarations + content/binding consistency) | 007/011 extension |
-| D-2 | 007 carrier gap: no authorization version (fingerprint is the surrogate, never presented as a version) | 007/011 extension |
-| D-3 | 007 carrier gap: no fee-scope/purpose (fee replacement accepted only via a fresh authorization) | 007/011 extension |
-| D-4 | 007 carrier gap: no `revoked_at` (revocation observed as `state='revoked'`) | 007/011 extension |
+| D3 | 008 binding read adapter + five-class integration acceptance (interface defined in gates.md §3), including the R6 obligation that `ReadBinding` be serialized against 008's pause transitions | 008 contract availability |
+| G-1 | **CLOSED in-plan** (2026-09-16): the pause/revoke-vs-delivery window is closed by the gate-table `SHARE` lock (research R6); no 006 change and no deferred residue | 009 plan (R6) |
+| D-1 | 007 carrier gap: no `intent_id`/`request_id` linkage — concrete closure carrier/owner/entry/protocol in research R11 (`withdrawal_authorization_scopes`); 009 fails closed until available | 007/011 extension (R11) |
+| D-2 | 007 carrier gap: no authorization version — closure via R11 `authorization_version`; the fingerprint remains a labelled surrogate, never a version | 007/011 extension (R11) |
+| D-3 | 007 carrier gap: no fee-scope/purpose — OC-5 conditional rule restored (R7); reuse branch unreachable until the R11 carrier lands; fresh authorization is the operative branch, not the rule | 007/011 extension (R11) |
+| D-4 | 007 carrier gap: no `revoked_at` (revocation observed as `state='revoked'`); closure column in R11 | 007/011 extension (R11) |
+| Q-A/Q-B | Genuine business questions from R11 (cryptographic authorization authenticity in v1; pre-extension grants fail-closed vs mandatory backfill) — listed, not self-decided | business ruling (007/011) |
 | F-1 | 010/011 consumption fixtures: a contract-conforming test caller (OC-4 input shape) keeps 009 developable; no 010/011 specs, tables, or fixtures beyond the test caller are created here | 010/011 (later specs) |
 
 

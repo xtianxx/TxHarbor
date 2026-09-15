@@ -66,9 +66,12 @@ Commands are illustrative sketches of the validation flow, not implementation ar
    `outcome_not_yet_visible` (same-identity retry converges).
 4. Restart the signer process between attempts → same result from persistence (no memory
    dependence).
-5. Fee replacement = new `attempt_id` + new `signing_request_id` + same intent + **fresh**
-   `authorization_id` → accepted path; reuse of the consumed `authorization_id` → `403
-   authorization_invalid`.
+5. Fee replacement = new `attempt_id` + new `signing_request_id` + same intent/binding, per OC-5
+   **conditional** rule: reuse the original grant only if it explicitly permits fee replacement
+   and the new fee is in scope (structurally possible via `replacement_of` + the partial anchor
+   index), else a **new** `authorization_id` with the new identity → accepted path; a reuse that
+   cannot be verified, or an anchor-index collision → `403 authorization_invalid`. Never rebind an
+   existing request row to another grant.
 
 ## V5 — Validation matrix (US4/FR-06–FR-12; SC-04)
 
@@ -107,7 +110,12 @@ any code path (static check + integer-typed validators).
    multiple independent pauses: releasing one does not bypass the other; 009 clears none.
 3. Gate passes and admission commits → response carries the signature; simulate a crash between
    admission COMMIT and response write → retry re-runs gates, re-delivers the same bytes after a
-   pass, or withholds after a failure; admission rows tell the story; never re-signed.
+   pass, or withholds after a failure; admission rows tell the story; never re-signed. Assert the
+   **bounded admission validity**: a delayed send cannot reuse the stored `admitted` row — it must
+   re-run T-deliver and record a new `attempt_seq`, and is `blocked` if a pause/revoke/`can_sign`
+   off became visible in between; the two R6 timelines (pause/revoke committed before admission →
+   status-only; admission committed before pause/revoke → immediate write, delayed send re-admits)
+   and the `can_sign` disable-between-sign-and-delivery case are both exercised.
 4. Force an indeterminate delivery outcome → response is `outcome_unknown` status-only; the
    reconcile path (persistence.md §6) uses audit + admission rows; no new identity, no new intent.
 5. Injection points: after gate check, during signing, after result commit, at admission, at
