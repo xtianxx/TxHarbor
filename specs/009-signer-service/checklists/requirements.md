@@ -13,7 +13,7 @@
 
 ## Requirement Completeness
 
-- [ ] No [NEEDS CLARIFICATION] markers remain — **按本步骤设计保留 3 处**（FR-05 OC-5、FR-07 OC-2、FR-13 OC-4；`grep -o '\[NEEDS CLARIFICATION'` 计数 = 3，配额用满）。三项均为 R3 共同契约中影响签名边界最关键、无合理默认的开放项；其余 OC-1/OC-3/OC-6/OC-7 仅以 Assumptions 开放契约项表 OPEN 行记录，未写入正文标记。待 `/speckit.clarify` 裁决后消除。
+- [x] No [NEEDS CLARIFICATION] markers remain — **按本步骤设计保留 3 处**（FR-05 OC-5、FR-07 OC-2、FR-13 OC-4；`grep -o '\[NEEDS CLARIFICATION'` 计数 = 3，配额用满）。三项均为 R3 共同契约中影响签名边界最关键、无合理默认的开放项；其余 OC-1/OC-3/OC-6/OC-7 仅以 Assumptions 开放契约项表 OPEN 行记录，未写入正文标记。待 `/speckit.clarify` 裁决后消除。
 - [x] Requirements are testable and unambiguous — FR-01–FR-26 均为 MUST/MUST NOT 可测断言；不确定性已隔离在 3 处标记内，其余 23 条无歧义（拒绝类、绑定类、零副作用类、密钥隔离类均可本地验证）。
 - [x] Success criteria are measurable — SC-01–SC-08 均为 100%/0 次/恰好 1 个的可计数断言，无"正确/安全/高效"裸词。
 - [x] Success criteria are technology-agnostic (no implementation details) — SC 只谈请求行为结果（签名产出计数、拒绝计数、收敛计数、零广播/零副作用、零泄露），未提语言、框架、表结构、密码学库。
