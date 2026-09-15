@@ -135,6 +135,28 @@ func intakeWantActions(t *testing.T, got, want []string) {
 	}
 }
 
+// intakeWantIntent asserts the response-first audit intent a result carries
+// (the transport persists it after the response); no row is written by the
+// core for it.
+func intakeWantIntent(t *testing.T, res *SubmitResult, action string, callerID int64, requestID string) {
+	t.Helper()
+	if res.Audit == nil {
+		t.Fatalf("result %+v has nil Audit, want action %q", res, action)
+	}
+	if res.Audit.Action != action || res.Audit.CallerID != callerID || res.Audit.RequestID != requestID {
+		t.Fatalf("Audit = %+v, want {caller %d request %q action %q}", res.Audit, callerID, requestID, action)
+	}
+}
+
+// intakeWantNoAudit asserts a result carries no audit intent (201 in-tx row or
+// a 401 with no verifiable caller identity).
+func intakeWantNoAudit(t *testing.T, res *SubmitResult) {
+	t.Helper()
+	if res.Audit != nil {
+		t.Fatalf("result %+v carries Audit %+v, want nil", res, res.Audit)
+	}
+}
+
 // TestWithdrawalIntakeFirstPersistAndReplay covers T-accept persistence, the
 // 200 same-key-equal replay, and Q5 replay immunity to a later grant revoke.
 func TestWithdrawalIntakeFirstPersistAndReplay(t *testing.T) {
@@ -158,6 +180,7 @@ func TestWithdrawalIntakeFirstPersistAndReplay(t *testing.T) {
 	if got := intakeAmountOf(t, ctx, pool, first.RequestID); got != intakeAmount {
 		t.Fatalf("persisted amount = %q, want %q (exact string round-trip)", got, intakeAmount)
 	}
+	intakeWantNoAudit(t, first)
 	intakeWantActions(t, intakeAuditActions(t, ctx, pool), []string{auditActionCreated})
 
 	replay, err := SubmitWithdrawal(ctx, pool, intakeReq(key, "idem-1", "auth-intake-1"))
@@ -170,7 +193,8 @@ func TestWithdrawalIntakeFirstPersistAndReplay(t *testing.T) {
 	if n := intakeRequestCount(t, ctx, pool); n != 1 {
 		t.Fatalf("request rows after replay = %d, want 1 (no new row)", n)
 	}
-	intakeWantActions(t, intakeAuditActions(t, ctx, pool), []string{auditActionCreated, auditActionReplayed})
+	intakeWantIntent(t, replay, auditActionReplayed, 7101, first.RequestID)
+	intakeWantActions(t, intakeAuditActions(t, ctx, pool), []string{auditActionCreated})
 
 	// Q5: a replay re-checks only current key-auth + interface permission; the
 	// original grant's later revocation MUST NOT turn it into a failure.
@@ -184,6 +208,8 @@ func TestWithdrawalIntakeFirstPersistAndReplay(t *testing.T) {
 	if afterRevoke.Status != 200 || afterRevoke.RequestID != first.RequestID {
 		t.Fatalf("replay after revoke = %+v, want 200 with the original request_id", afterRevoke)
 	}
+	intakeWantIntent(t, afterRevoke, auditActionReplayed, 7101, first.RequestID)
+	intakeWantActions(t, intakeAuditActions(t, ctx, pool), []string{auditActionCreated})
 }
 
 // TestWithdrawalIntakeConflict covers T-conflict: same key with a differing
@@ -217,7 +243,8 @@ func TestWithdrawalIntakeConflict(t *testing.T) {
 	if got := intakeAmountOf(t, ctx, pool, first.RequestID); got != intakeAmount {
 		t.Fatalf("original amount = %q, want %q (unchanged)", got, intakeAmount)
 	}
-	intakeWantActions(t, intakeAuditActions(t, ctx, pool), []string{auditActionCreated, auditActionConflict})
+	intakeWantIntent(t, conflict, auditActionConflict, 7102, first.RequestID)
+	intakeWantActions(t, intakeAuditActions(t, ctx, pool), []string{auditActionCreated})
 }
 
 // TestWithdrawalIntakeAuthorizationBound covers T-auth-bound: a different key
@@ -242,7 +269,8 @@ func TestWithdrawalIntakeAuthorizationBound(t *testing.T) {
 	if n := intakeRequestCount(t, ctx, pool); n != 1 {
 		t.Fatalf("request rows after auth-bound = %d, want 1 (zero new rows)", n)
 	}
-	intakeWantActions(t, intakeAuditActions(t, ctx, pool), []string{auditActionCreated, auditActionAuthFailed})
+	intakeWantIntent(t, second, auditActionAuthFailed, 7103, "")
+	intakeWantActions(t, intakeAuditActions(t, ctx, pool), []string{auditActionCreated})
 }
 
 // TestWithdrawalIntakeCrossCallerIndependent proves the (caller_id,
@@ -286,7 +314,10 @@ func TestWithdrawalIntakeUnknownGrant(t *testing.T) {
 	if n := intakeRequestCount(t, ctx, pool); n != 0 {
 		t.Fatalf("request rows after unknown grant = %d, want 0", n)
 	}
-	intakeWantActions(t, intakeAuditActions(t, ctx, pool), []string{auditActionRejected})
+	intakeWantIntent(t, res, auditActionRejected, 7106, "")
+	if n := intakeAuditCount(t, ctx, pool); n != 0 {
+		t.Fatalf("audit rows after unknown grant = %d, want 0 (intent only)", n)
+	}
 }
 
 // TestWithdrawalIntakeRevokedAndExpiredGrant covers both non-active grant
@@ -307,6 +338,7 @@ func TestWithdrawalIntakeRevokedAndExpiredGrant(t *testing.T) {
 		if n := intakeRequestCount(t, ctx, pool); n != 0 {
 			t.Fatalf("request rows after revoked grant = %d, want 0", n)
 		}
+		intakeWantIntent(t, res, auditActionRejected, 7107, "")
 	})
 
 	t.Run("expired", func(t *testing.T) {
@@ -325,6 +357,7 @@ VALUES ($1, $2, $3, $4, $5, $6::numeric, 'active', now() - interval '1 hour', 's
 		if n := intakeRequestCount(t, ctx, pool); n != 0 {
 			t.Fatalf("request rows after expired grant = %d, want 0", n)
 		}
+		intakeWantIntent(t, res, auditActionRejected, 7108, "")
 	})
 }
 
@@ -342,6 +375,7 @@ func TestWithdrawalIntakeMismatchedGrant(t *testing.T) {
 	if n := intakeRequestCount(t, ctx, pool); n != 0 {
 		t.Fatalf("request rows after mismatched grant = %d, want 0", n)
 	}
+	intakeWantIntent(t, res, auditActionRejected, 7109, "")
 }
 
 // TestWithdrawalIntakeBadParams covers the step-3 semantic rejects: every case
@@ -374,10 +408,14 @@ func TestWithdrawalIntakeBadParams(t *testing.T) {
 			if res.Status != 422 || res.Code != CodeValidationFailed {
 				t.Fatalf("bad-param result = %+v, want 422/%s", res, CodeValidationFailed)
 			}
+			intakeWantIntent(t, res, auditActionRejected, 7110, "")
 		})
 	}
 	if n := intakeRequestCount(t, ctx, pool); n != 0 {
 		t.Fatalf("request rows after bad params = %d, want 0", n)
+	}
+	if n := intakeAuditCount(t, ctx, pool); n != 0 {
+		t.Fatalf("audit rows after bad params = %d, want 0 (intent only)", n)
 	}
 }
 
@@ -395,6 +433,7 @@ func TestWithdrawalIntakeUnauthenticated(t *testing.T) {
 	if res.Status != 401 || res.Code != CodeUnauthenticated {
 		t.Fatalf("unauthenticated result = %+v, want 401/%s", res, CodeUnauthenticated)
 	}
+	intakeWantNoAudit(t, res)
 	if n := intakeRequestCount(t, ctx, pool); n != 0 {
 		t.Fatalf("request rows after 401 = %d, want 0", n)
 	}
@@ -428,6 +467,7 @@ func TestWithdrawalIntakeActiveRecoveryPersist(t *testing.T) {
 	if err != nil || res.Status != 201 {
 		t.Fatalf("submit during active recovery = (%+v, %v), want 201", res, err)
 	}
+	intakeWantNoAudit(t, res)
 	if n := intakeRequestCount(t, ctx, pool); n != 1 {
 		t.Fatalf("request rows during recovery = %d, want 1", n)
 	}
@@ -448,4 +488,148 @@ func TestWithdrawalIntakeActiveRecoveryPersist(t *testing.T) {
 // by T026's failure_integration_test.go, which this batch does not have.
 func TestWithdrawalIntakeStorageDown(t *testing.T) {
 	t.Skip("storage-failure and unknown-commit fault injection are owned by T026")
+}
+
+// TestWithdrawalIntakeV1AmountRoundTripMaxUint256 covers SC-08's exactness
+// requirement at the uint256 ceiling: a max-bound compliant create persists the
+// amount string verbatim and a self-query reads it back byte-identical — the
+// integer never passes through a float and is never re-formatted.
+func TestWithdrawalIntakeV1AmountRoundTripMaxUint256(t *testing.T) {
+	// Given a caller with an active grant bound to the uint256 maximum.
+	ctx, pool := grantSetup(t)
+	const callerID = int64(7150)
+	key := intakeKey(t, ctx, pool, callerID)
+	intakeSupplyGrant(t, ctx, pool, callerID, "auth-v1-max", withdrawalMaxUint256)
+
+	// When the compliant max-amount request is persisted.
+	req := intakeReq(key, "idem-v1-max", "auth-v1-max")
+	req.Amount = withdrawalMaxUint256
+	first, err := SubmitWithdrawal(ctx, pool, req)
+	if err != nil {
+		t.Fatalf("max-amount SubmitWithdrawal: %v", err)
+	}
+
+	// Then it is accepted with no pre-tx audit intent, and BOTH the stored row
+	// and the self-query carry the byte-identical max string.
+	if first.Status != 201 {
+		t.Fatalf("max-amount status = %d (%+v), want 201", first.Status, first)
+	}
+	intakeWantNoAudit(t, first)
+	if got := intakeAmountOf(t, ctx, pool, first.RequestID); got != withdrawalMaxUint256 {
+		t.Fatalf("persisted amount = %q, want byte-identical %q", got, withdrawalMaxUint256)
+	}
+	view, err := GetWithdrawal(ctx, pool, callerID, first.RequestID)
+	if err != nil {
+		t.Fatalf("GetWithdrawal(max-amount): %v", err)
+	}
+	if view.Amount != withdrawalMaxUint256 {
+		t.Fatalf("self-query amount = %q, want byte-identical %q", view.Amount, withdrawalMaxUint256)
+	}
+	intakeWantActions(t, intakeAuditActions(t, ctx, pool), []string{auditActionCreated})
+}
+
+// TestWithdrawalIntakeV1CreateSelfQueryIdentity covers SC-01 end to end on the
+// 007 path (not a seeded row): the create response and the owner's self-query
+// agree on every field, status is accepted, created_at is a real timestamp, and
+// the recovery signal is the standing none/not_started.
+func TestWithdrawalIntakeV1CreateSelfQueryIdentity(t *testing.T) {
+	// Given a caller with an active grant.
+	ctx, pool := grantSetup(t)
+	const callerID = int64(7151)
+	key := intakeKey(t, ctx, pool, callerID)
+	intakeSupplyGrant(t, ctx, pool, callerID, "auth-v1-identity", intakeAmount)
+
+	// When the compliant create is persisted and the owner queries it by the
+	// request_id it returned.
+	first, err := SubmitWithdrawal(ctx, pool, intakeReq(key, "idem-v1-identity", "auth-v1-identity"))
+	if err != nil {
+		t.Fatalf("SubmitWithdrawal: %v", err)
+	}
+	if first.Status != 201 {
+		t.Fatalf("create status = %d (%+v), want 201", first.Status, first)
+	}
+	intakeWantNoAudit(t, first)
+
+	view, err := GetWithdrawal(ctx, pool, callerID, first.RequestID)
+	if err != nil {
+		t.Fatalf("GetWithdrawal(self): %v", err)
+	}
+
+	// Then every field of the self-query matches the create, the in-tx
+	// `created` row exists (no pre-tx rows), and the standing signal holds.
+	if view.RequestID != first.RequestID || view.CallerID != callerID {
+		t.Fatalf("identity = %q/%d, want %q/%d", view.RequestID, view.CallerID, first.RequestID, callerID)
+	}
+	if view.ChainID != intakeChainID || view.Asset != intakeAsset || view.Recipient != intakeRecipient {
+		t.Fatalf("bound fields = chain %d asset %q recipient %q, want %d/%q/%q",
+			view.ChainID, view.Asset, view.Recipient, intakeChainID, intakeAsset, intakeRecipient)
+	}
+	if view.Amount != intakeAmount {
+		t.Fatalf("amount = %q, want %q", view.Amount, intakeAmount)
+	}
+	if view.Status != "accepted" {
+		t.Fatalf("status = %q, want accepted", view.Status)
+	}
+	if view.CreatedAt.IsZero() {
+		t.Fatal("created_at is zero, want a real timestamp")
+	}
+	if view.Recovery.State != "none" || view.Recovery.Execution != "not_started" {
+		t.Fatalf("recovery = %+v, want {none not_started}", view.Recovery)
+	}
+	intakeWantActions(t, intakeAuditActions(t, ctx, pool), []string{auditActionCreated})
+}
+
+// TestWithdrawalIntakeV1FieldCompleteness covers the SC-08/FR-07 persistence
+// spot checks the replay tests do not: a legal mixed-case request persists every
+// Table 3 column, with asset/recipient canonicalized to lowercase, and the
+// self-query returns that canonical content.
+func TestWithdrawalIntakeV1FieldCompleteness(t *testing.T) {
+	// Given a caller with an active grant and a legal mixed-case request.
+	ctx, pool := grantSetup(t)
+	const callerID = int64(7152)
+	key := intakeKey(t, ctx, pool, callerID)
+	intakeSupplyGrant(t, ctx, pool, callerID, "auth-v1-complete", intakeAmount)
+
+	req := intakeReq(key, "idem-v1-complete", "auth-v1-complete")
+	req.Asset = "0x" + strings.ToUpper(intakeAsset[2:])
+	req.Recipient = "0x" + strings.ToUpper(intakeRecipient[2:])
+
+	// When it is persisted.
+	first, err := SubmitWithdrawal(ctx, pool, req)
+	if err != nil {
+		t.Fatalf("mixed-case SubmitWithdrawal: %v", err)
+	}
+	if first.Status != 201 {
+		t.Fatalf("mixed-case status = %d (%+v), want 201", first.Status, first)
+	}
+
+	// Then every persisted column is present and canonical.
+	var (
+		asset, recipient, status, idemKey, authID string
+		chainID                                   int64
+	)
+	if err := pool.QueryRow(ctx, `
+SELECT asset, recipient, chain_id, status, idempotency_key, authorization_id
+FROM withdrawal_requests WHERE request_id = $1`, first.RequestID).
+		Scan(&asset, &recipient, &chainID, &status, &idemKey, &authID); err != nil {
+		t.Fatalf("read persisted columns: %v", err)
+	}
+	if asset != intakeAsset || recipient != intakeRecipient {
+		t.Fatalf("persisted asset/recipient = %q/%q, want canonical %q/%q",
+			asset, recipient, intakeAsset, intakeRecipient)
+	}
+	if chainID != intakeChainID || status != "accepted" {
+		t.Fatalf("persisted chain/status = %d/%q, want %d/accepted", chainID, status, intakeChainID)
+	}
+	if idemKey != "idem-v1-complete" || authID != "auth-v1-complete" {
+		t.Fatalf("persisted idem/auth = %q/%q, want verbatim key + bound authorization", idemKey, authID)
+	}
+	view, err := GetWithdrawal(ctx, pool, callerID, first.RequestID)
+	if err != nil {
+		t.Fatalf("GetWithdrawal(mixed-case): %v", err)
+	}
+	if view.Asset != intakeAsset || view.Recipient != intakeRecipient {
+		t.Fatalf("self-query asset/recipient = %q/%q, want canonical %q/%q",
+			view.Asset, view.Recipient, intakeAsset, intakeRecipient)
+	}
 }

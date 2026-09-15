@@ -1,6 +1,7 @@
 package metrics
 
 import (
+	"net/http"
 	"reflect"
 	"strings"
 	"testing"
@@ -487,4 +488,80 @@ func gatherCounters(t *testing.T, m *Metrics, name string) map[string]float64 {
 		}
 	}
 	return out
+}
+
+// TestWithdrawalMetricsCounters covers the 007 T015 intake counters: six
+// label-free outcome series, a second New never panics on duplicate
+// registration (each instance owns a private registry), 403 shares the rejected
+// outcome, and the transport-only 405 is never counted.
+func TestWithdrawalMetricsCounters(t *testing.T) {
+	m := New(func() bool { return true })
+	_ = New(func() bool { return true }) // independent registry: no collision panic
+
+	cases := []struct {
+		status int
+		name   string
+	}{
+		{http.StatusCreated, WithdrawalAcceptedMetricName},
+		{http.StatusOK, WithdrawalReplayedMetricName},
+		{http.StatusConflict, WithdrawalConflictMetricName},
+		{http.StatusUnprocessableEntity, WithdrawalRejectedMetricName},
+		{http.StatusServiceUnavailable, WithdrawalUnavailableMetricName},
+		{http.StatusUnauthorized, WithdrawalUnauthenticatedMetricName},
+	}
+	for _, tc := range cases {
+		m.ObserveWithdrawalStatus(tc.status)
+		if got := gatherCounters(t, m, tc.name)[""]; got != 1 {
+			t.Fatalf("%s = %v, want 1", tc.name, got)
+		}
+	}
+
+	m.ObserveWithdrawalStatus(http.StatusForbidden)
+	if got := gatherCounters(t, m, WithdrawalRejectedMetricName)[""]; got != 2 {
+		t.Fatalf("%s after 403 = %v, want 2", WithdrawalRejectedMetricName, got)
+	}
+	m.ObserveWithdrawalStatus(http.StatusMethodNotAllowed)
+	if got := gatherCounters(t, m, WithdrawalRejectedMetricName)[""]; got != 2 {
+		t.Fatalf("%s after 405 = %v, want 2 (transport-only, never counted)", WithdrawalRejectedMetricName, got)
+	}
+}
+
+// TestWithdrawalMetricsNoSecretLabels freezes the FR-20 zero-secrets rule for
+// T015: the withdrawal outcome counters carry no labels at all, so no caller
+// id, request id, key material, asset or amount can ever become a label value
+// and cardinality stays O(1).
+func TestWithdrawalMetricsNoSecretLabels(t *testing.T) {
+	m := New(func() bool { return true })
+	for _, status := range []int{
+		http.StatusCreated, http.StatusOK, http.StatusConflict,
+		http.StatusUnprocessableEntity, http.StatusServiceUnavailable, http.StatusUnauthorized,
+	} {
+		m.ObserveWithdrawalStatus(status)
+	}
+
+	// The allowlist is empty: any label name on a withdrawal counter is a
+	// boundary violation, not just a high-cardinality one.
+	allowed := map[string]bool{}
+	families, err := m.Gatherer().Gather()
+	if err != nil {
+		t.Fatalf("Gather() error = %v", err)
+	}
+	found := 0
+	for _, f := range families {
+		name := f.GetName()
+		if !strings.HasPrefix(name, "txharbor_withdrawal_") {
+			continue
+		}
+		found++
+		for _, metric := range f.GetMetric() {
+			for _, lp := range metric.GetLabel() {
+				if !allowed[lp.GetName()] {
+					t.Errorf("withdrawal metric %q carries forbidden label %q = %q", name, lp.GetName(), lp.GetValue())
+				}
+			}
+		}
+	}
+	if found != 6 {
+		t.Fatalf("gathered %d withdrawal metric families, want 6", found)
+	}
 }

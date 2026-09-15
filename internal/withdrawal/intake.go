@@ -1,7 +1,9 @@
 // intake.go owns the receipt transaction core (T010, research R6-R8): the
 // frozen SubmitWithdrawal surface the HTTP wiring (T014) consumes, the
 // fixed-order 23505 classify, the FOR SHARE grant-lock receipt transaction, and
-// the best-effort pre-tx reject-audit writer (data-model Table 5 C3/N1).
+// the response-first pre-tx reject-audit intents (data-model Table 5 C3/N1)
+// the transport persists AFTER the response is written. The in-tx `created`
+// audit row stays inside the receipt transaction (atomic persistence, FR-11).
 //
 // Contract boundary (contracts/api.md §1-2): every defined outcome
 // (201/200/409/422/401/403/503) is returned as (*SubmitResult, nil) carrying
@@ -110,11 +112,28 @@ type SubmitRequest struct {
 // empty/"accepted" language on success. RequestID is set on 201, on a 200
 // replay, and on a 409 conflict against an existing row (never on 401/403/422/
 // 503).
+//
+// Audit is the pre-tx reject audit the transport MUST persist AFTER the
+// response is written (response-first rule). It is nil on a 201 (its in-tx
+// `created` row is written atomically inside the receipt transaction) and on
+// the 401/503 auth-failure paths (no verifiable caller identity).
 type SubmitResult struct {
 	Status    int
 	Code      Code
 	Message   string
 	RequestID string
+	Audit     *AuditIntent
+}
+
+// AuditIntent is one pre-tx reject audit the transport persists after the
+// response. CallerID is the verified caller; RequestID is the existing "wr-…"
+// id or "" for a never-created rejection (the writer mints a "rej-…" marker);
+// Action is a Table 5 vocabulary member; Detail is the human explanation.
+type AuditIntent struct {
+	CallerID  int64
+	RequestID string
+	Action    string
+	Detail    string
 }
 
 // submitParams is the canonicalized FR-10 comparison set for one attempt
@@ -171,19 +190,23 @@ func SubmitWithdrawal(ctx context.Context, pool *pgxpool.Pool, req SubmitRequest
 	// (data-model Table 5: auth_failed is reserved for the post-commit
 	// grant-bound path).
 	if !auth.Caller.CanCreate {
-		writeRejectBestEffort(ctx, pool, callerID, "", auditActionRejected, "caller lacks interface permission")
 		return &SubmitResult{
 			Status:  403,
 			Code:    CodeUnauthorized,
 			Message: "caller lacks interface permission to create withdrawals",
+			Audit:   auditIntent(callerID, "", auditActionRejected, "caller lacks interface permission"),
 		}, nil
 	}
 
 	// (3) Input shape/semantics (validation order, contracts §2 step 3).
 	norm, verr := normalizeSubmit(req)
 	if verr != nil {
-		writeRejectBestEffort(ctx, pool, callerID, "", auditActionRejected, verr.Error())
-		return &SubmitResult{Status: 422, Code: CodeValidationFailed, Message: intakeErrorMessage(verr)}, nil
+		return &SubmitResult{
+			Status:  422,
+			Code:    CodeValidationFailed,
+			Message: intakeErrorMessage(verr),
+			Audit:   auditIntent(callerID, "", auditActionRejected, verr.Error()),
+		}, nil
 	}
 
 	// (4) Pre-tx fast path: read-only, optimization only. The UNIQUE index in
@@ -196,15 +219,19 @@ func SubmitWithdrawal(ctx context.Context, pool *pgxpool.Pool, req SubmitRequest
 	}
 	if found {
 		if row.matches(norm) {
-			writeRejectBestEffort(ctx, pool, callerID, row.requestID, auditActionReplayed, "same key and parameters")
-			return &SubmitResult{Status: 200, Message: "withdrawal request already accepted", RequestID: row.requestID}, nil
+			return &SubmitResult{
+				Status:    200,
+				Message:   "withdrawal request already accepted",
+				RequestID: row.requestID,
+				Audit:     auditIntent(callerID, row.requestID, auditActionReplayed, "same key and parameters"),
+			}, nil
 		}
-		writeRejectBestEffort(ctx, pool, callerID, row.requestID, auditActionConflict, "same idempotency key with different parameters")
 		return &SubmitResult{
 			Status:    409,
 			Code:      CodeIdempotencyConflict,
 			Message:   "idempotency key already used with different parameters",
 			RequestID: row.requestID,
+			Audit:     auditIntent(callerID, row.requestID, auditActionConflict, "same idempotency key with different parameters"),
 		}, nil
 	}
 
@@ -271,11 +298,11 @@ func submitInTx(ctx context.Context, pool *pgxpool.Pool, callerID int64, req Sub
 				// CHECK violations are pre-covered by validate.go; map to 422
 				// and never into the 23505 classify path.
 				_ = tx.Rollback(ctx)
-				writeRejectBestEffort(ctx, pool, callerID, "", auditActionRejected, "request failed a storage constraint")
 				return &SubmitResult{
 					Status:  422,
 					Code:    CodeValidationFailed,
 					Message: "withdrawal request failed storage validation",
+					Audit:   auditIntent(callerID, "", auditActionRejected, "request failed a storage constraint"),
 				}, nil
 			}
 		}
@@ -313,15 +340,19 @@ func classifyFixedOrder(ctx context.Context, pool *pgxpool.Pool, callerID int64,
 	}
 	if found {
 		if row.matches(p) {
-			writeRejectBestEffort(ctx, pool, callerID, row.requestID, auditActionReplayed, "same key and parameters")
-			return &SubmitResult{Status: 200, Message: "withdrawal request already accepted", RequestID: row.requestID}
+			return &SubmitResult{
+				Status:    200,
+				Message:   "withdrawal request already accepted",
+				RequestID: row.requestID,
+				Audit:     auditIntent(callerID, row.requestID, auditActionReplayed, "same key and parameters"),
+			}
 		}
-		writeRejectBestEffort(ctx, pool, callerID, row.requestID, auditActionConflict, "same idempotency key with different parameters")
 		return &SubmitResult{
 			Status:    409,
 			Code:      CodeIdempotencyConflict,
 			Message:   "idempotency key already used with different parameters",
 			RequestID: row.requestID,
+			Audit:     auditIntent(callerID, row.requestID, auditActionConflict, "same idempotency key with different parameters"),
 		}
 	}
 	bound, err := requestBoundToAuthorization(ctx, pool, p.authorizationID)
@@ -331,11 +362,11 @@ func classifyFixedOrder(ctx context.Context, pool *pgxpool.Pool, callerID int64,
 	if bound {
 		// T-auth-bound: the grant is already consumed by another request. Never
 		// attributing the audit to that other request's identity (rej- marker).
-		writeRejectBestEffort(ctx, pool, callerID, "", auditActionAuthFailed, "authorization already bound to another request")
 		return &SubmitResult{
 			Status:  403,
 			Code:    CodeAuthorizationInvalid,
 			Message: "authorization is already bound to another withdrawal request",
+			Audit:   auditIntent(callerID, "", auditActionAuthFailed, "authorization already bound to another request"),
 		}
 	}
 	// Dual miss: a request_id collision on a fresh key, a winner not yet
@@ -505,39 +536,39 @@ func intakeResultFromError(err error) *SubmitResult {
 }
 
 // intakeUnavailableResult rolls back the receipt tx (when one is open) and
-// returns the retryable 503 outcome. It also fires one best-effort
-// `unavailable` audit row.
-func intakeUnavailableResult(tx pgx.Tx, pool *pgxpool.Pool, callerID int64, ctx context.Context) *SubmitResult {
+// returns the retryable 503 outcome carrying the `unavailable` audit intent
+// the transport persists after the response.
+func intakeUnavailableResult(tx pgx.Tx, _ *pgxpool.Pool, callerID int64, ctx context.Context) *SubmitResult {
 	if tx != nil {
 		_ = tx.Rollback(ctx)
 	}
-	writeRejectBestEffort(ctx, pool, callerID, "", auditActionUnavailable, "storage failure while submitting withdrawal")
-	return &SubmitResult{Status: 503, Code: CodeTemporarilyUnavailable, Message: intakeUnavailableMessage}
+	return &SubmitResult{
+		Status:  503,
+		Code:    CodeTemporarilyUnavailable,
+		Message: intakeUnavailableMessage,
+		Audit:   auditIntent(callerID, "", auditActionUnavailable, "storage failure while submitting withdrawal"),
+	}
 }
 
 // intakeRejectResult rolls back the receipt tx (discarding any in-tx audit) and
-// writes exactly ONE best-effort post-rollback `rejected` audit.
-func intakeRejectResult(tx pgx.Tx, pool *pgxpool.Pool, callerID int64, ctx context.Context, detail string) *SubmitResult {
+// returns the 403 outcome carrying exactly ONE `rejected` audit intent.
+func intakeRejectResult(tx pgx.Tx, _ *pgxpool.Pool, callerID int64, ctx context.Context, detail string) *SubmitResult {
 	_ = tx.Rollback(ctx)
-	writeRejectBestEffort(ctx, pool, callerID, "", auditActionRejected, detail)
 	return &SubmitResult{
 		Status:  403,
 		Code:    CodeAuthorizationInvalid,
 		Message: "authorization is missing, inactive, or does not match the request",
+		Audit:   auditIntent(callerID, "", auditActionRejected, detail),
 	}
 }
 
-// writeRejectBestEffort fires one pre-tx reject audit and ignores its error:
-// the row is auxiliary observability, never a response input (data-model
-// Table 5 C3/N1). It is a no-op without a caller identity.
-func writeRejectBestEffort(ctx context.Context, pool *pgxpool.Pool, callerID int64, requestID, action, detail string) {
-	if pool == nil || callerID <= 0 {
-		return
+// auditIntent builds a pre-tx reject audit intent, or nil when there is no
+// verifiable caller identity (the writer's own no-op guard).
+func auditIntent(callerID int64, requestID, action, detail string) *AuditIntent {
+	if callerID <= 0 {
+		return nil
 	}
-	if requestID == "" {
-		requestID = mintRejectMarker()
-	}
-	_ = WriteRejectAudit(ctx, pool, callerID, requestID, action, detail)
+	return &AuditIntent{CallerID: callerID, RequestID: requestID, Action: action, Detail: detail}
 }
 
 // WriteRejectAudit appends exactly one best-effort row to

@@ -285,8 +285,22 @@ func Serve(ctx context.Context, d Deps) int {
 		return fail("startup failed (recovery): %s", logx.Redact(err.Error()))
 	}
 
+	// 007 withdrawal routes mount on the same probe listener: the parent mux
+	// takes precedence over the health handler's "/" subtree, and health/metrics
+	// stay unchanged on the child mux. No new listener or address.
+	withdrawH := &WithdrawalHandler{
+		Pool:      pool,
+		ChainID:   chainID,
+		Allowlist: withdrawalAllowlist(cfg.DepositContracts),
+		Metrics:   m,
+	}
+	mux := http.NewServeMux()
+	mux.Handle("/withdrawals", withdrawH)
+	mux.Handle("/withdrawals/", withdrawH)
+	mux.Handle("/", health.NewServer(agg, m.Handler()).Handler())
+
 	srv := &http.Server{
-		Handler:           health.NewServer(agg, m.Handler()).Handler(),
+		Handler:           mux,
 		ReadHeaderTimeout: cfg.ProbeTimeout,
 	}
 	listener, err := net.Listen("tcp", cfg.HTTPAddr)

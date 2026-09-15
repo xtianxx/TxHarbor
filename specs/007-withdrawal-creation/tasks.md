@@ -52,11 +52,11 @@
 
 **Independent Test**: V1 — valid body → 201 + `request_id` + `status:accepted`; same-key GET → identical body with `recovery:{state:none,execution:not_started}` (FR-01, FR-08, SC-01)
 
-- [ ] T012 [P] [US1] Integration test for create+self-query in `internal/withdrawal/intake_integration_test.go` (tags: integration; V1 happy path incl. amount-string round-trip, SC-01/SC-08)
-- [ ] T013 [P] [US1] Contract test for POST/GET shapes + error codes in `internal/withdrawal/contract_test.go` (201/200 bodies per contracts/api.md §§1/3)
-- [ ] T014 [US1] Wire POST /withdrawals + GET /withdrawals/{id} on existing `http.Server` (`health.NewServer(...).Handler()` mux in `internal/app/serve.go:288-293`; no new listener; caller_id from key row only; route registration + handler wiring only) (depends on T010, T011, T035)
-- [ ] T035 [US1] Config passthrough in `internal/config/config.go` (plan wiring: `ChainID` from `TXHARBOR_CHAIN_ID` as deployment chain bind for FR-04 + `HTTPAddr` reuse; NO new secret knobs in 007; validation via existing `config.Load` + `internal/app/serve_config_test.go`-style unit test; depends on T001; blocks T014)
-- [ ] T015 [US1] Structured logging + metrics in `internal/withdrawal/intake.go` (log fields) + `internal/metrics/` registry extension (plan wiring; caller/request/chain/asset/retry fields, zero secrets via `logx.Redact`; FR-20/FR-21; depends on T014)
+- [x] T012 [P] [US1] Integration test for create+self-query in `internal/withdrawal/intake_integration_test.go` (tags: integration; V1 happy path incl. amount-string round-trip, SC-01/SC-08)
+- [x] T013 [P] [US1] Contract test for POST/GET shapes + error codes in `internal/withdrawal/contract_test.go` (201/200 bodies per contracts/api.md §§1/3)
+- [x] T014 [US1] Wire POST /withdrawals + GET /withdrawals/{id} on existing `http.Server` (`health.NewServer(...).Handler()` mux in `internal/app/serve.go:288-293`; no new listener; caller_id from key row only; route registration + handler wiring only) (depends on T010, T011, T035)
+- [x] T035 [US1] Config passthrough in `internal/config/config.go` (plan wiring: `ChainID` from `TXHARBOR_CHAIN_ID` as deployment chain bind for FR-04 + `HTTPAddr` reuse; NO new secret knobs in 007; validation via existing `config.Load` + `internal/app/serve_config_test.go`-style unit test; depends on T001; blocks T014)
+- [x] T015 [US1] Structured logging + metrics in `internal/withdrawal/intake.go` (log fields) + `internal/metrics/` registry extension (plan wiring; caller/request/chain/asset/retry fields, zero secrets via `logx.Redact`; FR-20/FR-21; depends on T014)
 
 **Checkpoint**: US1 fully functional and testable independently (create → persist → self-query round-trip green)
 
