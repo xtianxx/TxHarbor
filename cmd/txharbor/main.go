@@ -6,6 +6,8 @@
 //	txharbor migrate up       apply pending database migrations
 //	txharbor migrate status   show current/pending migration versions
 //	txharbor confirm-auth     run one guarded confirmation-policy switch
+//	txharbor withdrawal-authz supply an upstream grant (or mint/revoke)
+//	txharbor apikey-auth      manage caller API keys (issue/rotate/revoke)
 package main
 
 import (
@@ -40,6 +42,10 @@ func run(args []string) int {
 		return app.Migrate(ctx, args[1:], d)
 	case "confirm-auth":
 		return app.ConfirmAuth(ctx, args[1:], d)
+	case "withdrawal-authz":
+		return app.WithdrawalAuthz(ctx, args[1:], d)
+	case "apikey-auth":
+		return app.APIKeyAuth(ctx, args[1:], d)
 	case "help", "-h", "--help":
 		usage(os.Stdout)
 		return 0
@@ -58,6 +64,8 @@ commands:
   migrate up        apply pending database migrations
   migrate status    show applied/pending migration versions
   confirm-auth      run one guarded confirmation-policy switch
+  withdrawal-authz  supply an upstream grant (or mint/revoke)
+  apikey-auth       manage caller API keys (issue/rotate/revoke)
   help              show this help
 `)
 }

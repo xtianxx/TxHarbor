@@ -55,6 +55,17 @@ const (
 	ReorgRevivedMetricName      = "txharbor_reorg_revived_total"
 	ReorgReconcileMetricName    = "txharbor_reorg_reconcile_required"
 	ReorgEvidenceWaitMetricName = "txharbor_reorg_evidence_wait_total"
+
+	// 007 withdrawal intake surface (specs/007-withdrawal-creation, T015). One
+	// label-free counter per create outcome; the outcome is the metric name so
+	// no caller/request/key/asset/amount can ever become a (high-cardinality or
+	// secret-bearing) label value (FR-20/FR-21).
+	WithdrawalAcceptedMetricName        = "txharbor_withdrawal_accepted_total"
+	WithdrawalReplayedMetricName        = "txharbor_withdrawal_replayed_total"
+	WithdrawalConflictMetricName        = "txharbor_withdrawal_conflict_total"
+	WithdrawalRejectedMetricName        = "txharbor_withdrawal_rejected_total"
+	WithdrawalUnavailableMetricName     = "txharbor_withdrawal_unavailable_total"
+	WithdrawalUnauthenticatedMetricName = "txharbor_withdrawal_unauthenticated_total"
 )
 
 // Metrics owns a private registry so multiple instances (tests, restarts of
@@ -107,6 +118,14 @@ type Metrics struct {
 	reorgRevived      *prometheus.CounterVec
 	reorgReconcile    *prometheus.GaugeVec
 	reorgEvidenceWait *prometheus.CounterVec
+
+	// 007 withdrawal create outcomes; label-free (see the metric-name consts).
+	withdrawalAccepted        *prometheus.CounterVec
+	withdrawalReplayed        *prometheus.CounterVec
+	withdrawalConflict        *prometheus.CounterVec
+	withdrawalRejected        *prometheus.CounterVec
+	withdrawalUnavailable     *prometheus.CounterVec
+	withdrawalUnauthenticated *prometheus.CounterVec
 
 	handler http.Handler
 }
@@ -307,6 +326,37 @@ func New(ready func() bool) *Metrics {
 		confirmationConfirmed, confirmationSkipped, confirmationTransition, confirmationPolicyTransition,
 		reorgActive, reorgDepth, reorgBound, reorgFrontierLag,
 		reorgOrphaned, reorgRevived, reorgReconcile, reorgEvidenceWait)
+
+	// 007 withdrawal create outcomes. Label-free counters: each create attempt
+	// lands in exactly one series by outcome, so cardinality stays O(1) and no
+	// request-derived value can leak into a label (FR-20/FR-21). No label
+	// dimensions means the series appears only once an outcome is observed.
+	withdrawalAccepted := prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: WithdrawalAcceptedMetricName,
+		Help: "Accepted 007 withdrawal creates (HTTP 201); one per newly persisted request row.",
+	}, nil)
+	withdrawalReplayed := prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: WithdrawalReplayedMetricName,
+		Help: "Replayed 007 withdrawal creates (HTTP 200): same key and parameters as the stored row.",
+	}, nil)
+	withdrawalConflict := prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: WithdrawalConflictMetricName,
+		Help: "Conflicting 007 withdrawal creates (HTTP 409): same key, different parameters.",
+	}, nil)
+	withdrawalRejected := prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: WithdrawalRejectedMetricName,
+		Help: "Rejected 007 withdrawal creates (HTTP 400/403/422): malformed, unauthorized or invalid.",
+	}, nil)
+	withdrawalUnavailable := prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: WithdrawalUnavailableMetricName,
+		Help: "007 withdrawal creates whose storage outcome was unavailable/unknown (HTTP 503).",
+	}, nil)
+	withdrawalUnauthenticated := prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: WithdrawalUnauthenticatedMetricName,
+		Help: "Unauthenticated 007 withdrawal create attempts (HTTP 401); no verifiable caller identity.",
+	}, nil)
+	registry.MustRegister(withdrawalAccepted, withdrawalReplayed, withdrawalConflict,
+		withdrawalRejected, withdrawalUnavailable, withdrawalUnauthenticated)
 	return &Metrics{
 		registry:                     registry,
 		probeTotal:                   probeTotal,
@@ -341,6 +391,12 @@ func New(ready func() bool) *Metrics {
 		reorgRevived:                 reorgRevived,
 		reorgReconcile:               reorgReconcile,
 		reorgEvidenceWait:            reorgEvidenceWait,
+		withdrawalAccepted:           withdrawalAccepted,
+		withdrawalReplayed:           withdrawalReplayed,
+		withdrawalConflict:           withdrawalConflict,
+		withdrawalRejected:           withdrawalRejected,
+		withdrawalUnavailable:        withdrawalUnavailable,
+		withdrawalUnauthenticated:    withdrawalUnauthenticated,
 		handler:                      promhttp.HandlerFor(registry, promhttp.HandlerOpts{}),
 	}
 }
@@ -636,3 +692,24 @@ var DepositLogFields = map[string][]string{
 func DepositLogRedact(s string) string { return logx.Redact(s) }
 
 func chainLabel(chain int64) string { return strconv.FormatInt(chain, 10) }
+
+// ObserveWithdrawalStatus counts one 007 withdrawal create attempt by the HTTP
+// status the transport returned (T015, FR-20/FR-21). The counters are
+// label-free, so no caller id, request id, key material, asset or amount ever
+// reaches a label. Statuses with no business outcome (e.g. 405) are ignored.
+func (m *Metrics) ObserveWithdrawalStatus(status int) {
+	switch status {
+	case http.StatusCreated:
+		m.withdrawalAccepted.WithLabelValues().Inc()
+	case http.StatusOK:
+		m.withdrawalReplayed.WithLabelValues().Inc()
+	case http.StatusConflict:
+		m.withdrawalConflict.WithLabelValues().Inc()
+	case http.StatusBadRequest, http.StatusForbidden, http.StatusUnprocessableEntity:
+		m.withdrawalRejected.WithLabelValues().Inc()
+	case http.StatusUnauthorized:
+		m.withdrawalUnauthenticated.WithLabelValues().Inc()
+	case http.StatusServiceUnavailable:
+		m.withdrawalUnavailable.WithLabelValues().Inc()
+	}
+}
