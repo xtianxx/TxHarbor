@@ -99,8 +99,10 @@
   uniqueness — **no contiguity requirement** (`migrate.go:65-93`); `Pending`
   is computed per version (`!applied[f.Version]`, `migrate.go:145-149`);
   goose `Provider.Up` "applies all pending migrations" (`provider.go:244`),
-  so a DB at {1..8,10} later runs plain `migrate up` and applies exactly 9 —
-  **no special option**. `CheckCompatibility` refuses serve while any version
+  so a DB at {1..8,10} later runs `migrate up` and applies exactly 9 — needs
+  the allow-missing provider (`goose.WithAllowOutofOrder(true)` in
+  `internal/db/migrate.go:newProvider`); no special CLI option at the call
+  site. `CheckCompatibility` refuses serve while any version
   is pending (`migrate.go:164-194`), so the gap can never serve unfilled.
   Rollback descends applied versions (`Down`, `provider.go:308`).
 - PB-05 grows sequence (d): DB at {1..8,10} + files {1..10} → `migrate up`

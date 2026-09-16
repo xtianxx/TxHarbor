@@ -28,6 +28,7 @@ package app
 import (
 	"context"
 	"fmt"
+	"sort"
 	"strconv"
 	"strings"
 	"testing"
@@ -50,20 +51,84 @@ var open3NonceTables = []string{
 	"nonce_ops_audit",
 }
 
-// open3NonceRowCounts counts the rows of every 008 nonce table. Zero before and
-// after the re-issue is the "zero new intent/nonce" proof: any intent-binding
-// write (nonce_bindings.intent_id) would make a count non-zero.
-func open3NonceRowCounts(t *testing.T, ctx context.Context, pool *pgxpool.Pool) map[string]int {
+// open3Snapshot reads the FULL content of every named table as ordered
+// row-JSON — the T030 technique (reissueSnapshot) — so the "untouched" compare
+// is a content compare: an in-place UPDATE or an equal-size replacement is
+// caught exactly like an insert or delete, not merely a count.
+func open3Snapshot(t *testing.T, ctx context.Context, pool *pgxpool.Pool, tables []string) map[string][]string {
 	t.Helper()
-	counts := make(map[string]int, len(open3NonceTables))
-	for _, table := range open3NonceTables {
-		var n int
-		if err := pool.QueryRow(ctx, `SELECT count(*) FROM `+table).Scan(&n); err != nil {
-			t.Fatalf("count %s: %v", table, err)
+	snap := make(map[string][]string, len(tables))
+	for _, table := range tables {
+		rows, err := pool.Query(ctx, `SELECT row_to_json(t)::text FROM `+table+` t ORDER BY 1`)
+		if err != nil {
+			t.Fatalf("snapshot %s: %v", table, err)
 		}
-		counts[table] = n
+		var out []string
+		for rows.Next() {
+			var line string
+			if err := rows.Scan(&line); err != nil {
+				rows.Close()
+				t.Fatalf("scan %s row: %v", table, err)
+			}
+			out = append(out, line)
+		}
+		if err := rows.Err(); err != nil {
+			rows.Close()
+			t.Fatalf("iterate %s: %v", table, err)
+		}
+		rows.Close()
+		snap[table] = out
 	}
-	return counts
+	return snap
+}
+
+// open3Diff returns the multiset difference after\before and before\after.
+func open3Diff(before, after []string) (added, removed []string) {
+	counts := make(map[string]int, len(before))
+	for _, r := range before {
+		counts[r]++
+	}
+	for _, r := range after {
+		if counts[r] > 0 {
+			counts[r]--
+			continue
+		}
+		added = append(added, r)
+	}
+	for r, n := range counts {
+		for i := 0; i < n; i++ {
+			removed = append(removed, r)
+		}
+	}
+	sort.Strings(added)
+	sort.Strings(removed)
+	return added, removed
+}
+
+// open3SeedNonceFixture writes one representative row into each 008 nonce_*
+// table (the T030 fixture, reissueSeedNonceFixture) so the "untouched" snapshot
+// is a real content compare, never a vacuous empty set.
+func open3SeedNonceFixture(t *testing.T, ctx context.Context, pool *pgxpool.Pool, sender string) {
+	t.Helper()
+	const chainID = int64(31337)
+	stmts := []struct {
+		name string
+		sql  string
+		args []any
+	}{
+		{"nonce_wallet_registry", `INSERT INTO nonce_wallet_registry (chain_id, sender, state, registry_seq) VALUES ($1, $2, 'active', 1)`, []any{chainID, sender}},
+		{"nonce_scope_state", `INSERT INTO nonce_scope_state (chain_id, sender, reconciled_floor, last_latest, last_pending, last_observation_id) VALUES ($1, $2, 0, 0, 0, 'obs-init')`, []any{chainID, sender}},
+		{"nonce_bindings", `INSERT INTO nonce_bindings (binding_id, intent_id, chain_id, sender, nonce, state, authorization_id, authorization_version, registry_seq, allocation_observation_id) VALUES ('bind-1', 'intent-nonce-1', $1, $2, 5, 'allocated', 'auth-nonce-1', repeat('a', 64), 1, 'obs-init')`, []any{chainID, sender}},
+		{"nonce_binding_events", `INSERT INTO nonce_binding_events (binding_id, from_state, to_state, observation_id, operation_id, detail) VALUES ('bind-1', NULL, 'allocated', 'obs-init', 'op-init', 'seed')`, nil},
+		{"nonce_observations", `INSERT INTO nonce_observations (observation_id, chain_id, sender, kind, classification, latest_count, pending_count, head_number, head_hash, error_class, rpc_ref) VALUES ('obs-init', $1, $2, 'allocation', 'consistent', 1, 0, 1, '0x' || repeat('b', 64), '', 'rpc-init')`, []any{chainID, sender}},
+		{"nonce_scope_holds", `INSERT INTO nonce_scope_holds (hold_id, chain_id, sender, cause, status, evidence_observation_id) VALUES ('hold-1', $1, $2, 'unexplained_gap', 'active', 'obs-init')`, []any{chainID, sender}},
+		{"nonce_ops_audit", `INSERT INTO nonce_ops_audit (operation_id, action, chain_id, sender, subject_id, outcome, operator, reason) VALUES ('op-nonce-seed', 'binding_release', $1, $2, 'bind-1', 'applied', 'op-seed', 'seed')`, []any{chainID, sender}},
+	}
+	for _, s := range stmts {
+		if _, err := pool.Exec(ctx, s.sql, s.args...); err != nil {
+			t.Fatalf("seed %s: %v", s.name, err)
+		}
+	}
 }
 
 // open3DistinctIntents reads the distinct intent_id set the scope table carries.
@@ -230,9 +295,17 @@ func TestWithdrawalAuthzOpen3DryRunReissue(t *testing.T) {
 		t.Fatalf("stock grant scope rows = %d, want 0 (queryable, never executable)", n)
 	}
 	open3SeedRequest(t, ctx, pool, stockReqID, callerID, stockAuthID, asset, recipient, "100")
+	// Seed one row per 008 table so the "untouched" snapshot is a real content
+	// compare, not a vacuous empty set (T030's non-emptiness guard).
+	open3SeedNonceFixture(t, ctx, pool, sender)
 
 	// Step 2 — snapshot before the re-issue.
-	beforeNonce := open3NonceRowCounts(t, ctx, pool)
+	beforeNonce := open3Snapshot(t, ctx, pool, open3NonceTables)
+	for _, table := range open3NonceTables {
+		if len(beforeNonce[table]) == 0 {
+			t.Fatalf("fixture %s is empty: the no-side-effect proof would be vacuous", table)
+		}
+	}
 	beforeIntents := open3DistinctIntents(t, ctx, pool)
 	if len(beforeIntents) != 1 || beforeIntents[0] != intentID {
 		t.Fatalf("distinct intent set before = %v, want [%s]", beforeIntents, intentID)
@@ -298,12 +371,17 @@ func TestWithdrawalAuthzOpen3DryRunReissue(t *testing.T) {
 		t.Fatalf("old stock grant gained a scope row (n=%d); stock stays queryable-but-refused", n)
 	}
 
-	// Step 7 — zero new nonce and zero new intent.
-	afterNonce := open3NonceRowCounts(t, ctx, pool)
+	// Step 7 — zero new nonce rows (full-content, not count-only) and zero new
+	// intent. Every 008 table must be byte-identical; an in-place UPDATE is
+	// caught as a removal exactly like an insert is caught as an addition.
+	afterNonce := open3Snapshot(t, ctx, pool, open3NonceTables)
+	nonceRows := make(map[string]int, len(open3NonceTables))
 	for _, table := range open3NonceTables {
-		if afterNonce[table] != beforeNonce[table] {
-			t.Fatalf("%s rows changed across re-issue: %d -> %d", table, beforeNonce[table], afterNonce[table])
+		added, removed := open3Diff(beforeNonce[table], afterNonce[table])
+		if len(added) != 0 || len(removed) != 0 {
+			t.Fatalf("%s drifted across re-issue: added=%v removed=%v", table, added, removed)
 		}
+		nonceRows[table] = len(afterNonce[table])
 	}
 	afterIntents := open3DistinctIntents(t, ctx, pool)
 	if len(afterIntents) != len(beforeIntents) || afterIntents[0] != intentID {
@@ -311,5 +389,5 @@ func TestWithdrawalAuthzOpen3DryRunReissue(t *testing.T) {
 	}
 
 	t.Logf("OPEN-3 dry-run: stock=%s reissued=%s trace=%q nonce_rows=%v intents=%v",
-		stockAuthID, newAuthID, detail, afterNonce, afterIntents)
+		stockAuthID, newAuthID, detail, nonceRows, afterIntents)
 }

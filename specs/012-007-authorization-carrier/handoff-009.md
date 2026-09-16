@@ -91,9 +91,11 @@ scope row.
   a scope/version change between submit and delivery MUST block, never be
   silently adopted (data-model.md L68-75). Keep the existing fingerprint
   equality check; the version check is additive.
-- Rationale binding: a revoke or revoke-then-re-supply bumps the version
-  (`grant.go:154-157,774-778`), so a version captured before the change can
-  never match after it.
+- Rationale binding: a revoke-then-resupply cycle bumps
+  `authorization_version` (bare revoke bumps it too — D1 contract; observed
+  via version AND grant state); 009 MUST re-check grant current
+  state/validity at delivery, never version-equality alone. (Assumes the
+  sibling D1 revoke-bump change has landed; `runRevokeTx` carries it.)
 
 ## H3 — `replacement_of` threading
 
@@ -171,4 +173,5 @@ research R-PB6 L85) and MUST be threaded.
   is made in this lane. This note is the only artifact.
 - 009 files MUST NOT be modified in this lane (tasks.md L12); migration numbers
   and apply rules follow R-PB5/R-PB8 (PB = `000010` first, 009 = `000009`
-  later; gap at 9 is filled by plain `migrate up`).
+  later; gap at 9 is filled by `migrate up` with the allow-missing provider
+  (see migrate.go:newProvider)).

@@ -364,6 +364,102 @@ func TestWithdrawalGrantRevokeThenRepeat(t *testing.T) {
 	}
 }
 
+// TestWithdrawalGrantScopedRevokeSyncsVersion is T021 (T-revoke-sync) for a
+// scoped grant: a revoke syncs the scope version in the same tx. It pins four
+// contract points — a bare revoke bumps v1→v2; a same-operation retry reports
+// the recorded outcome and bumps nothing; a fresh revoke is the idempotent
+// revoke_nop and bumps nothing; a revoke-then-re-supply cycle bumps again to
+// v3. Every assertion reads the scope row, never an inferred return code.
+func TestWithdrawalGrantScopedRevokeSyncsVersion(t *testing.T) {
+	ctx, pool := grantSetup(t)
+	grantSeedCaller(t, ctx, pool, 7305)
+
+	const authID = "auth-scoped-revoke-sync"
+	op := grantScopedTestOp("71000000000000000000000000000001", authID, 7305)
+	if out, err := SupplyGrant(ctx, pool, op, "op", "seed scoped grant"); err != nil || out.Action != grantOutcomeSupplied {
+		t.Fatalf("seed scoped supply = (%+v, %v), want %s", out, err, grantOutcomeSupplied)
+	}
+	if v := grantScopeVersion(t, ctx, pool, authID); v != 1 {
+		t.Fatalf("seed scope version = %d, want 1", v)
+	}
+
+	const revokeOpID = "71000000000000000000000000000002"
+	if out, err := RevokeGrant(ctx, pool, revokeOpID, authID, "op", "revoke"); err != nil || out.Action != grantOutcomeRevoked {
+		t.Fatalf("bare revoke = (%+v, %v), want %s", out, err, grantOutcomeRevoked)
+	}
+	if v := grantScopeVersion(t, ctx, pool, authID); v != 2 {
+		t.Fatalf("scope version after revoke = %d, want 2 (T-revoke-sync)", v)
+	}
+
+	if out, err := RevokeGrant(ctx, pool, revokeOpID, authID, "op", "same-op retry"); err != nil || out.Action != grantOutcomeRevoked {
+		t.Fatalf("same-op revoke retry = (%+v, %v), want recorded %s", out, err, grantOutcomeRevoked)
+	}
+	if v := grantScopeVersion(t, ctx, pool, authID); v != 2 {
+		t.Fatalf("scope version after same-op retry = %d, want 2 (no double bump)", v)
+	}
+
+	if out, err := RevokeGrant(ctx, pool, "71000000000000000000000000000003", authID, "op", "repeat revoke"); err != nil || out.Action != grantOutcomeRevokeNop {
+		t.Fatalf("repeat revoke = (%+v, %v), want %s", out, err, grantOutcomeRevokeNop)
+	}
+	if v := grantScopeVersion(t, ctx, pool, authID); v != 2 {
+		t.Fatalf("scope version after repeat revoke = %d, want 2 (revoke_nop bumps nothing)", v)
+	}
+
+	reOp := grantScopedTestOp("71000000000000000000000000000004", authID, 7305)
+	if out, err := SupplyGrant(ctx, pool, reOp, "op", "resupply after revoke"); err != nil || out.Action != grantOutcomeResupplied {
+		t.Fatalf("re-supply after revoke = (%+v, %v), want %s", out, err, grantOutcomeResupplied)
+	}
+	if v := grantScopeVersion(t, ctx, pool, authID); v != 3 {
+		t.Fatalf("scope version after revoke-then-re-supply = %d, want 3", v)
+	}
+
+	if acted := grantAuditActions(t, ctx, pool, authID); len(acted) != 4 ||
+		acted[0] != grantOutcomeSupplied || acted[1] != grantOutcomeRevoked ||
+		acted[2] != grantOutcomeRevokeNop || acted[3] != grantOutcomeResupplied {
+		t.Fatalf("audit actions = %v, want [supplied revoked revoke_nop resupplied]", acted)
+	}
+}
+
+// TestWithdrawalGrantScopedResolveRequiresScope is T2: resolveByOperationID
+// must not report a matched scoped attempt as success when the scope row is
+// absent or has drifted. Both cases are conservative retries (temporarily
+// unavailable), never a success built on the audit row alone.
+func TestWithdrawalGrantScopedResolveRequiresScope(t *testing.T) {
+	ctx, pool := grantSetup(t)
+	grantSeedCaller(t, ctx, pool, 7306)
+
+	const authID = "auth-resolve-scope"
+	op := grantScopedTestOp("72000000000000000000000000000001", authID, 7306)
+	if out, err := SupplyGrant(ctx, pool, op, "op", "seed scoped grant"); err != nil || out.Action != grantOutcomeSupplied {
+		t.Fatalf("seed scoped supply = (%+v, %v), want %s", out, err, grantOutcomeSupplied)
+	}
+
+	if out, err := resolveByOperationID(ctx, pool, op); err != nil || out.Action != grantOutcomeSupplied {
+		t.Fatalf("resolve with matching scope = (%+v, %v), want %s", out, err, grantOutcomeSupplied)
+	}
+
+	if _, err := pool.Exec(ctx,
+		`UPDATE withdrawal_authorization_scopes SET sender = $2 WHERE authorization_id = $1`,
+		authID, "0xcccccccccccccccccccccccccccccccccccccccc"); err != nil {
+		t.Fatalf("drift scope content: %v", err)
+	}
+	out, err := resolveByOperationID(ctx, pool, op)
+	if out != nil {
+		t.Fatalf("resolve with drifted scope = (%+v, %v), want nil outcome", out, err)
+	}
+	grantWantCode(t, err, CodeTemporarilyUnavailable)
+
+	if _, err := pool.Exec(ctx,
+		`DELETE FROM withdrawal_authorization_scopes WHERE authorization_id = $1`, authID); err != nil {
+		t.Fatalf("delete scope row: %v", err)
+	}
+	out, err = resolveByOperationID(ctx, pool, op)
+	if out != nil {
+		t.Fatalf("resolve with absent scope = (%+v, %v), want nil outcome", out, err)
+	}
+	grantWantCode(t, err, CodeTemporarilyUnavailable)
+}
+
 // TestWithdrawalGrantConcurrentFirstSupplyTwins covers the two first-supply
 // race shapes: same-O same-OPIN → one grant + one 'supplied'; different-O
 // different-OPIN → one grant (winner) + 'supplied' + 'supply_refused'.
@@ -1105,10 +1201,10 @@ func TestWithdrawalGrantScopedSupplyFeeTripleBoundaries(t *testing.T) {
 // order happened is the two audit rows' audit_id sequence plus the monotonic
 // scope version:
 //
-//   - revoke committed first  ⇒ the loser re-supply observes state=revoked and
-//     bumps authorization_version (revoke-then-re-supply cycle) → version 2;
-//   - re-supply committed first ⇒ it saw state=active and did not bump, so the
-//     later revoke leaves version 1.
+//   - revoke committed first  ⇒ the revoke bumps to 2, then the loser re-supply
+//     observes state=revoked and bumps again (revoke-then-re-supply cycle) → 3;
+//   - re-supply committed first ⇒ it saw state=active and did not bump, and the
+//     later revoke bumps (T-revoke-sync) → version 2.
 //
 // Either order is legal; what may never happen is a partial write, an order
 // that disagrees with the version, or drift of the immutable scope content.
@@ -1216,7 +1312,7 @@ func TestWithdrawalGrantRevokeSupplyRace(t *testing.T) {
 		return op
 	}
 
-	t.Run("revoke commits first: loser supply observes revoked and bumps the version", func(t *testing.T) {
+	t.Run("revoke commits first: revoke bumps, loser supply observes revoked and bumps again", func(t *testing.T) {
 		ctx, pool := grantSetup(t)
 		const authID = "auth-race-revoke-first"
 		op := seedScoped(t, ctx, pool, authID, "70000000000000000000000000000001")
@@ -1234,10 +1330,10 @@ func TestWithdrawalGrantRevokeSupplyRace(t *testing.T) {
 			acted[0] != grantOutcomeSupplied || acted[1] != grantOutcomeRevoked || acted[2] != grantOutcomeResupplied {
 			t.Fatalf("audit actions = %v, want [supplied revoked resupplied]", acted)
 		}
-		grantWantRevokedScopeConsistent(t, ctx, pool, authID, op, 2)
+		grantWantRevokedScopeConsistent(t, ctx, pool, authID, op, 3)
 	})
 
-	t.Run("supply commits first: revoke observes the live grant, version stays 1", func(t *testing.T) {
+	t.Run("supply commits first: revoke observes the live grant and bumps the version", func(t *testing.T) {
 		ctx, pool := grantSetup(t)
 		const authID = "auth-race-supply-first"
 		op := seedScoped(t, ctx, pool, authID, "70000000000000000000000000000004")
@@ -1254,7 +1350,7 @@ func TestWithdrawalGrantRevokeSupplyRace(t *testing.T) {
 			acted[0] != grantOutcomeSupplied || acted[1] != grantOutcomeResupplied || acted[2] != grantOutcomeRevoked {
 			t.Fatalf("audit actions = %v, want [supplied resupplied revoked]", acted)
 		}
-		grantWantRevokedScopeConsistent(t, ctx, pool, authID, op, 1)
+		grantWantRevokedScopeConsistent(t, ctx, pool, authID, op, 2)
 	})
 
 	t.Run("concurrent barrier: loser observes the winner and the version matches the audit order", func(t *testing.T) {
@@ -1288,11 +1384,11 @@ func TestWithdrawalGrantRevokeSupplyRace(t *testing.T) {
 			t.Fatalf("audit actions = %v, want both revoked and resupplied present exactly once", acted)
 		}
 		// audit_id order is the commit order (both ways serialize on the grant
-		// row FOR UPDATE): revoke-before-resupply completed the cycle and bumped
-		// the version; resupply-before-revoke did not.
-		wantVersion := int64(1)
+		// row FOR UPDATE): revoke-before-resupply bumps twice (the revoke, then
+		// the re-supply cycle); resupply-before-revoke bumps once (the revoke).
+		wantVersion := int64(2)
 		if revokedIdx < resuppliedIdx {
-			wantVersion = 2
+			wantVersion = 3
 		}
 		grantWantRevokedScopeConsistent(t, ctx, pool, authID, op, wantVersion)
 	})

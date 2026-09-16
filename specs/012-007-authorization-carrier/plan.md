@@ -80,7 +80,7 @@ internal/app/
 └── withdrawalauthz_integration_test.go  # extended cycles (existing file)
 
 internal/db/
-└── migrate.go               # untouched (runner picks up the new file automatically)
+└── migrate.go               # gains `WithAllowOutofOrder(true)` (R-PB8 gap-fill)
 ```
 
 **Structure Decision**: Single project (Go monorepo); additive migration + extended
@@ -104,8 +104,9 @@ existing files only — no new packages, no new binaries, no new infrastructure.
 6. OPEN-3 acceptance designed here (quickstart.md V-PB9 + matrix); tasks assign execution.
 7. No new business questions raised; PB-C1/PB-C2/Q-A/Q-B not reopened.
 8. Merge/deploy order determined (R-PB8): PB merges first as `000010`,
-   009 later as `000009` unchanged; gap-fill is native goose `Up`
-   (`provider.go:244`), serve gate enforces it — no merge-time decision left.
+   009 later as `000009` unchanged; gap-fill is native goose `Up` with the
+   allow-missing provider (`provider.go:244`), serve gate enforces it — no
+   merge-time decision left.
 9. Authority protocol closed (R-PB10): in-tx re-verification (api_key +
    caller `FOR SHARE` + `PermitIssue` re-eval, `supply_refused` on failure);
    allowlist env `TXHARBOR_AUTHZ_ISSUER_CALLERS` fixed; controlled switchover

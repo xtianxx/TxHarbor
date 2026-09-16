@@ -27,7 +27,7 @@ runs it). No test doubles substitute for the legal path.
 | V-PB6 | Revoke vs supply race: loser observes winner state; scope consistent | green |
 | V-PB7 | Grant+scope+audit atomicity (kill -9 at phase points) | converge by operation id, zero partial |
 | V-PB8 | Commit-unknown retry with same operation id | converges, never second grant |
-| V-PB9 | Explicit re-issuance dry-run (procedure above) | trace complete; 008 seven-table content snapshots identical; distinct intent set unchanged (re-issue reuses the business intent); first-supply new linkage NOT failed |
+| V-PB9 | Explicit re-issuance dry-run (procedure above) | trace complete; zero new rows (counts); zero mutation proven by T030 content snapshot; distinct intent set unchanged (re-issue reuses the business intent); first-supply new linkage NOT failed |
 | V-PB10 | Migration chain: empty→full, 007-era→carrier, down→re-up, **gap-fill ({1..8,10} + files {1..10} → up applies exactly 9, gate green)** | green; applied numbers untouched |
 | V-PB11 | Allowlist switchover rehearsal (R-PB10 §1–5: halt → drain-confirm → atomic swap + checksum → re-enable; T043) | old refused, new allowed; failure path keeps entry closed; unaccounted executor → switchover NOT declared |
 

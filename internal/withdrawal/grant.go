@@ -822,6 +822,14 @@ func runRevokeTx(ctx context.Context, pool *pgxpool.Pool, op OpInput, operator, 
 		if tag.RowsAffected() != 1 {
 			return nil, fmt.Errorf("revoke grant affected %d rows, want 1", tag.RowsAffected())
 		}
+		// T-revoke-sync: revoke syncs the scope version in the same tx, so a
+		// version persisted before the revoke (009 delivery re-check,
+		// data-model.md) never matches afterwards. Stock grants carry no scope:
+		// zero rows updated is expected. The repeated-revoke nop branch below
+		// never reaches here, so a second revoke does not bump again.
+		if err := bumpScopeVersionTx(ctx, tx, op.AuthorizationID); err != nil {
+			return nil, err
+		}
 		action = grantOutcomeRevoked
 		callerID = grant.callerID
 	default: // already revoked/expired → idempotent no-op, own row
@@ -932,6 +940,20 @@ func resolveByOperationID(ctx context.Context, pool *pgxpool.Pool, op OpInput) (
 		return nil, New(CodeOperationConflict,
 			"operation_id was already recorded with a different op-input").
 			WithField("operation_id")
+	}
+	// T2: a matched scoped attempt is success only when its scope row is also
+	// present and content-equal. The audit row can become visible before the
+	// scope row, so an absent or mismatched scope is a conservative retry, never
+	// a claimed success.
+	if op.scoped() {
+		scope, err := readScopeReadOnly(ctx, pool, op.AuthorizationID)
+		if err != nil {
+			return nil, grantRetryable(err)
+		}
+		if scope == nil || !scope.matchesOp(op) {
+			return nil, New(CodeTemporarilyUnavailable,
+				"operation outcome is not yet visible; retry with the same operation_id")
+		}
 	}
 	return &GrantOutcome{Action: row.action, AuthorizationID: row.authorizationID}, nil
 }
