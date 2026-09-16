@@ -474,8 +474,11 @@ func versionsOf(results []*goose.MigrationResult) []int64 {
 // status set — while 002/003/004 schema and rows stay intact, and re-applying
 // works. (T030 explicit review: this 006-owned test hardcoded the chain head
 // at 6; 007's ALLOWED-NEW migration legitimately extends the chain, so the
-// expectation is chain-relative. No 001–006 schema, prod code, or shared
-// constant is touched — test-only.)
+// expectation is chain-relative. The 008/009 lane migrations extend it
+// further, so the rollback set and the pending count below derive from the
+// embedded file list — the static migration input, never the runner's own
+// output. No 001–006 schema, prod code, or shared constant is touched —
+// test-only.)
 func TestConfirmationMigrationDowngradeTo4RemovesAbove4(t *testing.T) {
 	dsn := startPostgres(t)
 	ctx := context.Background()
@@ -503,8 +506,27 @@ func TestConfirmationMigrationDowngradeTo4RemovesAbove4(t *testing.T) {
 	if err != nil {
 		t.Fatalf("DownTo(4): %v", err)
 	}
-	if len(results) != 3 || results[0].Source.Version != 7 || results[1].Source.Version != 6 || results[2].Source.Version != 5 {
-		t.Fatalf("DownTo(4) rolled back %v, want exactly versions [7 6 5] in order", versionsOf(results))
+	// Chain-relative rollback set: every embedded version above 4 rolls back
+	// exactly once, highest first. Derived from the embedded file list, not
+	// from the runner's output.
+	chainFiles, err := MigrationFiles(Migrations)
+	if err != nil {
+		t.Fatalf("list embedded migrations: %v", err)
+	}
+	var wantDown []int64
+	for i := len(chainFiles) - 1; i >= 0; i-- {
+		if chainFiles[i].Version > 4 {
+			wantDown = append(wantDown, chainFiles[i].Version)
+		}
+	}
+	gotDown := versionsOf(results)
+	if len(gotDown) != len(wantDown) {
+		t.Fatalf("DownTo(4) rolled back %v, want every version above 4 %v in order", gotDown, wantDown)
+	}
+	for i := range wantDown {
+		if gotDown[i] != wantDown[i] {
+			t.Fatalf("DownTo(4) rolled back %v, want every version above 4 %v in order", gotDown, wantDown)
+		}
 	}
 
 	for _, rel := range []string{
@@ -565,8 +587,8 @@ func TestConfirmationMigrationDowngradeTo4RemovesAbove4(t *testing.T) {
 	if err := MigrateStatus(ctx, opts, &out); err != nil {
 		t.Fatalf("MigrateStatus() after down error = %v", err)
 	}
-	if !strings.Contains(out.String(), "current_version=4") || !strings.Contains(out.String(), "pending=3") {
-		t.Fatalf("status after down = %q, want current_version=4 and pending=3", out.String())
+	if wantPending := fmt.Sprintf("pending=%d", len(wantDown)); !strings.Contains(out.String(), "current_version=4") || !strings.Contains(out.String(), wantPending) {
+		t.Fatalf("status after down = %q, want current_version=4 and %q", out.String(), wantPending)
 	}
 
 	files, err := MigrationFiles(Migrations)

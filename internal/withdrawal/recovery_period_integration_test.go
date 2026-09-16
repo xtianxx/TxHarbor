@@ -34,14 +34,18 @@ package withdrawal
 
 import (
 	"context"
+	"io"
 	"os"
 	"regexp"
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+
+	"github.com/xtianxx/txharbor/internal/db"
 )
 
 // recoveryPeriodScope006Tables are the 002–006-owned tables 007 must never
@@ -404,14 +408,76 @@ func TestWithdrawalRecoveryPeriodZeroSideEffectsOutsideScope(t *testing.T) {
 	}
 }
 
+// recoveryPeriodPublicBaseTables lists public BASE TABLE names, the set a
+// schema-shape assertion compares.
+func recoveryPeriodPublicBaseTables(t *testing.T, ctx context.Context, pool *pgxpool.Pool) map[string]struct{} {
+	t.Helper()
+	rows, err := pool.Query(ctx, `SELECT table_name FROM information_schema.tables WHERE table_schema = 'public' AND table_type = 'BASE TABLE'`)
+	if err != nil {
+		t.Fatalf("list public base tables: %v", err)
+	}
+	defer rows.Close()
+	out := map[string]struct{}{}
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			t.Fatalf("scan table name: %v", err)
+		}
+		out[name] = struct{}{}
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("iterate public tables: %v", err)
+	}
+	return out
+}
+
+// recoveryPeriodTableCounts snapshots row counts for tables.
+func recoveryPeriodTableCounts(t *testing.T, ctx context.Context, pool *pgxpool.Pool, tables []string) map[string]int64 {
+	t.Helper()
+	out := make(map[string]int64, len(tables))
+	for _, tbl := range tables {
+		var n int64
+		if err := pool.QueryRow(ctx, `SELECT count(*) FROM "`+tbl+`"`).Scan(&n); err != nil {
+			t.Fatalf("count %s: %v", tbl, err)
+		}
+		out[tbl] = n
+	}
+	return out
+}
+
 // TestWithdrawalRecoveryPeriodNoExecutionArtefacts is the behavioural + code
-// half of V8's "no RPC broadcast": 007 has no execution surface at all. At the
-// storage layer no table can hold a nonce/signature/broadcast (so a create
-// creates none); at the code layer no production file of this package imports
-// an RPC client or references a send/sign call. 007's only recovery interaction
-// is the read-only 006 reader reuse in query.go.
+// half of V8's "no RPC broadcast": 007 has no execution surface at all. Phase
+// A keeps the original 007-range guarantee bit-for-bit — a database migrated
+// with only 000001–000007 carries no nonce/signature/broadcast table, so a
+// create creates none. Phase B extends it to the full embedded chain: every
+// table introduced above 007 must hold exactly the same row count before and
+// after a recovery-period create, i.e. the recovery path writes no execution
+// record or state anywhere outside 007 scope. At the code layer no production
+// file of this package imports an RPC client or references a send/sign call.
+// 007's only recovery interaction is the read-only 006 reader reuse in
+// query.go.
 func TestWithdrawalRecoveryPeriodNoExecutionArtefacts(t *testing.T) {
-	// Given an active recovery and a compliant create that actually lands.
+	// Phase A: 007 historical range — the original absence proof, unchanged.
+	dsnA := withdrawalStartPostgres(t)
+	subset := withdrawalSubsetFS(t, 7)
+	subsetOpts := withdrawalMigrateOptions(dsnA)
+	subsetOpts.FS = subset
+	if err := db.MigrateUp(context.Background(), subsetOpts, io.Discard); err != nil {
+		t.Fatalf("migrate subset through 7: %v", err)
+	}
+	poolA, err := db.OpenPool(context.Background(), dsnA, 5*time.Second)
+	if err != nil {
+		t.Fatalf("open subset pool: %v", err)
+	}
+	t.Cleanup(poolA.Close)
+	recoveryPeriodAssertNoExecutionArtifactTables(t, context.Background(), poolA)
+	range007 := recoveryPeriodPublicBaseTables(t, context.Background(), poolA)
+
+	// Phase B: full embedded chain — a compliant create during an active
+	// recovery leaves every above-007 table exactly as it was, and creates
+	// no new table. The lane schema is legitimately deployed (so an
+	// absence assertion on the full chain would be false); the guarantee
+	// under test is no execution side effect during recovery.
 	ctx, pool := grantSetup(t)
 	const (
 		callerID = int64(7404)
@@ -420,13 +486,36 @@ func TestWithdrawalRecoveryPeriodNoExecutionArtefacts(t *testing.T) {
 	key := intakeKey(t, ctx, pool, callerID)
 	intakeSupplyGrant(t, ctx, pool, callerID, authID, intakeAmount)
 	recoveryPeriodSeedActiveRecovery(t, ctx, pool, intakeChainID, "rec-recovery-period-artefacts", "detected")
+	beforeTables := recoveryPeriodPublicBaseTables(t, ctx, pool)
+	var above007 []string
+	for tbl := range beforeTables {
+		if _, ok := range007[tbl]; !ok {
+			above007 = append(above007, tbl)
+		}
+	}
+	before := recoveryPeriodTableCounts(t, ctx, pool, above007)
 	if res, err := SubmitWithdrawal(ctx, pool, intakeReq(key, "idem-recovery-artefacts", authID)); err != nil || res.Status != 201 {
 		t.Fatalf("submit = (%+v, %v), want 201", res, err)
 	}
+	after := recoveryPeriodTableCounts(t, ctx, pool, above007)
+	for _, tbl := range above007 {
+		if after[tbl] != before[tbl] {
+			t.Fatalf("above-007 table %s rows changed %d -> %d during recovery create; recovery path must write no execution state", tbl, before[tbl], after[tbl])
+		}
+	}
+	afterTables := recoveryPeriodPublicBaseTables(t, ctx, pool)
+	for tbl := range afterTables {
+		if _, ok := beforeTables[tbl]; !ok {
+			t.Fatalf("recovery create created table %q; recovery path must create no execution artefact", tbl)
+		}
+	}
+	for tbl := range beforeTables {
+		if _, ok := afterTables[tbl]; !ok {
+			t.Fatalf("recovery create dropped table %q; recovery path must not alter schema", tbl)
+		}
+	}
 
-	// Then the schema grew no execution-artefact table, and this package's own
-	// production files carry no RPC send path.
-	recoveryPeriodAssertNoExecutionArtifactTables(t, ctx, pool)
+	// Then this package's own production files carry no RPC send path.
 	recoveryPeriodAssertNoRPCSendPath(t)
 }
 
