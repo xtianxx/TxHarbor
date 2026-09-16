@@ -235,8 +235,8 @@ grant carrier read-only; it owns its own credential, request, result, admission,
   (below), so a paused/reconciling/disabled binding can never be admitted as `BindingMatches`.
 - **Fixed lock order (one ring-free order)**: (0) 008 scope row `FOR SHARE` (joint coordination,
   same DB) → (1) 006 gate tables `SHARE` (single statement) →
-  (2) 007 grant `FOR SHARE` → (3) `signer_caller` `FOR SHARE` → (4) own `signing_requests` row
-  (`FOR UPDATE` on submit / read on delivery) → (5) `delivery_admissions` `INSERT`. No 006/007
+  (2) 007 grant   `FOR SHARE` → (3) `signer_caller` `FOR SHARE` → (4) own `signing_requests` row
+  `FOR UPDATE` (submit and delivery alike: same-identity deliveries serialize the send region) → (5) `delivery_admissions` `INSERT`. No 006/007
   writer ever acquires a 009 table, 008 writers take the scope row `FOR UPDATE` first and only
   read afterwards, and no 009 path acquires two of its objects out of this order,
   so no lock-order cycle can form.
@@ -247,17 +247,37 @@ grant carrier read-only; it owns its own credential, request, result, admission,
   → no signature material in any field: desensitized status only (`state`, `content_hash`,
   refusal class/reason, timestamps; no signature bytes, no `tx_hash` unless a prior admission is
   `delivered`/`admitted`). Explicit inversion of the 007 still-200 replay (OC-6 MUST NOT 类比).
-- **Decision — bounded admission validity (executable TTL, `valid_until`)**: an `admitted` row
-  carries `valid_until = decided_at + admission_ttl` (deployment config, seconds-scale) and
-  authorizes a write iff `now() <= valid_until` — the clock, not a scheduling-gap judgment,
-  decides. Any send past `valid_until` MUST NOT use the stored admission — it MUST run T-deliver
-  again, re-read all gates, and record a new admission (`attempt_seq`+1). If the re-admission
-  observes a pause/revoke/can_sign-off, delivery is `blocked` status-only. Effective boundary:
-  the **admission `COMMIT`, linearly ordered by the scope-row `FOR SHARE` + gate-table `SHARE`
-  locks**; a gate change committed after that boundary is not retroactive but governs every
-  later send. Only bytes actually written are in-flight approved and not recallable (OC-7);
-  `admitted` alone is NEVER "in-flight" by label — an admitted-but-unwritten row means "write
-  outcome unknown", not "permission".
+- **Decision — admission and handoff share one protected region (no grace window)**:
+  T-deliver performs gate re-reads, the `admitted` INSERT, the response-bytes write, and the
+  `delivered` marker inside ONE transaction holding all locks (order §"Fixed lock order").
+  There is no "admit now, write later" split: bytes are written only while the locks are held,
+  so a pause/revoke/permission change either commits before the region (observed → `blocked`)
+  or waits for the region's `COMMIT` (ordered after → in-flight approved). No TTL, no
+  post-`COMMIT` grace.
+- **Superseded 2026-09-16 (retracted, history kept)**: the prior `valid_until` TTL revision
+  claimed the window closed. It did not: `t=0` admission commits (5s TTL) → `t=1` revocation
+  commits → `t=2` send still allowed = post-revocation delivery of unsent bytes, i.e. bounded
+  grace semantics, not "uncancellable in-flight". A clock check additionally cannot survive
+  preemption between the check and the write. The TTL column/mechanism is withdrawn (kept in
+  git history only);   `valid_until` MUST NOT reappear as an authorizing mechanism.
+- **Decision — bounded send region mechanics (locks span the write, bounded both sides)**:
+  the earlier "locks never span network I/O" constraint is lifted for exactly this region, with
+  both sides bounded. Transport = the existing `txharbor serve` HTTP response path (009 has no
+  broadcast; plan Summary): "handoff" = the response-write syscall returning success (bytes
+  accepted by the OS); "cancelled" = write error / client disconnect (plan-level requirement:
+  server write timeout, e.g. ≤2s, strictly inside the 5s `statement_timeout`, both deployment
+  config). Write failure or timeout → `ROLLBACK`: no admission row survives, no bytes counted
+  as delivered; retry re-gates fresh. DB connection loss mid-region → transaction aborts →
+  `unknown_reconcile` on retry (bytes may have gone out: honest unknown, identical-bytes
+  re-delivery only). Process suspend mid-region → locks stay held AND the server-side
+  `statement_timeout` still fires → region aborts on resume (or writers were merely delayed);
+  suspension can delay pause/revoke writers but can never let an ungated byte out, because no
+  byte is written outside the region. Writer-side impact (stated, bounded): 006 pause INSERTs,
+  007 revokes, and 008 writers wait on 009's `SHARE` locks for at most the region budget
+  (send timeout + `statement_timeout`); they are ordered after, never starved, never failed —
+  delay, not denial. Same-identity concurrent deliveries serialize on the request row
+  `FOR UPDATE` (catalog order below); a duplicated region would only ever emit byte-identical
+  content.
 - **Decision — two concurrency timelines**:
   - (a) **Pause/revoke first → no delivery**: 006 pause tx `BEGIN → INSERT pause → COMMIT`; 009
     T-deliver then takes the gate-table `SHARE` lock (waiting up to the 5s guard if that tx is
@@ -266,15 +286,13 @@ grant carrier read-only; it owns its own credential, request, result, admission,
     → `gate_read_failed`, fail-closed, retry same identity, still zero bytes. 007 revoke is the
     same shape through the grant `FOR SHARE` (revoke commits first → `revoked` read → blocked).
   - (b) **Admission first → pause/revoke after**: 009 T-deliver holds the scope-row + gate-table
-    `SHARE` locks, admits, commits; a concurrent pause/revoke tx's write waits for that commit, so it is
-    ordered after the admission. A write while `now() <= valid_until` proceeds (in-flight
-    approved); a write attempted past `valid_until` — including a process that was suspended
-    after `COMMIT` and resumed late — MUST re-admit first and is `blocked` if the pause/revoke
-    is now visible. If the write
-    already happened the bytes are in-flight approved and MUST NOT be claimed recallable. A crash
-    after admission `COMMIT` but before the write leaves `admitted` (write outcome unknown) →
-    `unknown_reconcile`/`outcome_unknown`, never a permit for a later ungated send, and the result
-    is never re-signed.
+    `SHARE` locks through the bytes write and `COMMIT`s after it; a concurrent pause/revoke tx's
+    write waits for that commit, so it is ordered after the handoff. If the bounded write
+    already returned, the bytes are in-flight approved and MUST NOT be claimed recallable;
+    the `delivered` marker commits in the same transaction, so "approved" always has a durable
+    record. A crash after the write but before `COMMIT` leaves no `delivered` marker → on retry
+    the outcome is `unknown_reconcile`/`outcome_unknown` (bytes may be out: honest unknown),
+    never a permit for a later ungated send, and the result is never re-signed.
 - **Decision — unknown/commit-unknown recovery**: commit-unknown on submit/admission → do not
   claim signed/delivered; same-identity retry re-reads durable rows (bounded, no loop). A retry
   never inherits a prior admission's authority — it re-gates and re-admits.

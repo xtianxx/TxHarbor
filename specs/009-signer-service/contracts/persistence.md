@@ -59,21 +59,17 @@ Delivery is never a pure read of Table 4; it is a recorded assessment (research 
    re-read `FOR SHARE` + fingerprint/version equality; `signer_caller.can_sign` re-read
    `FOR SHARE`.
 2. Persist one `delivery_admissions` row recording the snapshot (`binding_class`, `can_sign`,
-   pause/recovery basis): verdict `admitted` **before** any response byte, or `blocked` with the
-   observed basis. `COMMIT`.
-3. Write the response iff the admission is still valid (`now() <= valid_until`); otherwise
-   re-run T-deliver (new `attempt_seq`) instead of using the old admission — the clock, not a
-   scheduling-gap judgment, decides (data-model Table 6). A pause/revoke/`can_sign`-off that
-   commits after the admission `COMMIT` but before the handoff does not cancel a still-valid
-   write (ordered after the admission: in-flight approved); after `valid_until` lapses the same
-   event blocks via re-admission. A row left at `admitted` with a lost marker or after a
-   post-`COMMIT` crash means "write outcome unknown" (`unknown_reconcile`), never a standing
-   permission and never "in-flight" by label — only bytes already written are in-flight
-   approved. Re-admission of byte-identical content is allowed (idempotent); re-signing never.
-   Linearization: the admission `COMMIT`, ordered by the scope-row `FOR SHARE` + gate-table
-   `SHARE` locks (R6). Locks are never held across network I/O (held to `COMMIT` only,
-   `statement_timeout` guard); a network stall past `valid_until` triggers re-admission, and a
-   `LOCK TABLE` wait past the guard fails closed (`gate_read_failed`).
+   pause/recovery basis): verdict `admitted`, or `blocked` with the observed basis (then
+   `ROLLBACK`, status-only response, zero bytes).
+3. While still holding all locks, write the response bytes (bounded send region: server write
+   timeout strictly inside `statement_timeout`; research R6). On write success, `UPDATE …
+   SET verdict='delivered', delivered_at=now()`; `COMMIT`. On write failure/timeout,
+   `ROLLBACK` — no admission row survives, nothing counts as delivered; retry re-gates fresh.
+   A post-write pre-`COMMIT` crash leaves bytes possibly out with no `delivered` marker →
+   `unknown_reconcile` on retry (honest unknown; identical-bytes re-delivery only, never
+   re-sign). `admitted` alone is NEVER "in-flight" by label; only a committed `delivered`
+   marker, or bytes already written, counts. Linearization: the region `COMMIT`, ordered by
+   the scope-row `FOR SHARE` + gate-table `SHARE` locks (R6).
 
 Consequences:
 

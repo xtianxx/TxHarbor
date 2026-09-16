@@ -60,8 +60,9 @@ gate-table `LOCK … IN SHARE MODE` conflicts with `ROW EXCLUSIVE`, so:
   `indexer_pause`/`log_pause` (which takes no application lock) are both covered, because the
   lock is on the relation, not a row.
 A `LOCK TABLE` wait or deadlock is `gate_read_failed` (fail-closed, retryable, same identity).
-009 records the admitted snapshot; only bytes already written are in-flight approved and not
-recallable, while any delayed send MUST re-admit under current gates (research R6). No 006 change
+009 admits, writes, and marks inside one protected region; only a committed `delivered` marker
+or already-written bytes are in-flight approved and not
+recallable, while any send outside an active region MUST run T-deliver under current gates (research R6). No 006 change
 is required and no residual window is deferred.
 
 ## 2. 007 authorization read (`withdrawal_authorizations`, `FOR SHARE`)

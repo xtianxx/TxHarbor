@@ -113,9 +113,9 @@ service never broadcasts and has no RPC dependency (FR-16; SC-06).
    `503 outcome_not_yet_visible` (same-identity retry).
 4. First receipt: submit transaction (gate-table `LOCK … IN SHARE MODE` (R6) → gates → binding →
    authorization → policy → sign → persist, persistence.md §1). No gate is read before
-   authentication and shape checks. Delivery (persistence.md §2) re-runs the same gate lock and
-   re-reads 006/007/008 + `can_sign`; the admission is valid only for that attempt's immediate
-   write (a delayed send must re-admit).
+   authentication and shape checks. Delivery (persistence.md §2) re-runs the same locks and
+   re-reads 006/007/008 + `can_sign`; admission, bytes write, and marker commit atomically
+   inside the held locks (no admit-now-write-later split).
 5. Delivery assessment (persistence.md §2) → response.
 Replay does not re-run policy (deterministic), but delivery re-runs the revocable gates
 (006/007/008) on every attempt.

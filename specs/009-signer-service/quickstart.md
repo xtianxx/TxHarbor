@@ -108,15 +108,14 @@ any code path (static check + integer-typed validators).
    authorization id + observed state; result/binding/history retained.
 2. Enter an 006 pause (or 008 binding pause) after signing → retry withheld with the pause basis;
    multiple independent pauses: releasing one does not bypass the other; 009 clears none.
-3. Gate passes and admission commits → response carries the signature; simulate a crash between
-   admission COMMIT and response write → retry re-runs gates, re-delivers the same bytes after a
-   pass, or withholds after a failure; admission rows tell the story; never re-signed. Assert the
-   **bounded admission validity (`valid_until` TTL)**: a send with `now() > valid_until` cannot
-   reuse the stored `admitted` row — it must
-   re-run T-deliver and record a new `attempt_seq`, and is `blocked` if a pause/revoke/`can_sign`
-    off became visible in between; the two R6 timelines (pause/revoke committed before admission →
-    status-only; admission committed before pause/revoke → write iff `now() <= valid_until`, past-TTL
-    send re-admits, including a process suspended after `COMMIT` and resumed late)
+3. Gate passes → admission, bytes write, and `delivered` marker commit atomically inside the
+   held locks; simulate a crash between the write and `COMMIT` → retry reports
+   `unknown_reconcile`/`outcome_unknown`, re-delivers the same bytes after a pass
+   (identical-bytes only, never re-signed), or withholds after a failure; admission rows tell
+   the story. Assert **no split**: no admitted-then-write-later path exists — a write failure
+   rolls back the admission itself; the two R6 timelines (pause/revoke committed before the
+   region → status-only; region first → pause/revoke waits for its `COMMIT`, bytes in-flight
+   approved with a committed marker)
    and the `can_sign` disable-between-sign-and-delivery case are both exercised.
 4. Force an indeterminate delivery outcome → response is `outcome_unknown` status-only; the
    reconcile path (persistence.md §6) uses audit + admission rows; no new identity, no new intent.
