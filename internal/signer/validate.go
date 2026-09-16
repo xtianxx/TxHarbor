@@ -16,6 +16,11 @@ import (
 // transferSelector is ERC-20 transfer(address,uint256).
 var transferSelector = [4]byte{0xa9, 0x05, 0x9c, 0xbb}
 
+// maxUint256 is 2^256-1, the largest value the NUMERIC(78,0) money columns
+// accept (migration 000009 signing_requests_amount_check). Over-limit amounts
+// die here so they never reach the database (FR-10; V5 "over-uint256 amount").
+var maxUint256 = new(big.Int).Sub(new(big.Int).Lsh(big.NewInt(1), 256), big.NewInt(1))
+
 // checkAddress accepts lowercase hex or mixed-case that passes EIP-55 and
 // returns the canonical lowercase form.
 func checkAddress(field, s string) (string, error) {
@@ -74,6 +79,9 @@ func Validate(r *Request) error {
 	}
 	if amount.Sign() <= 0 {
 		return refuse(ClassValidationFailed, "amount", "amount must be positive")
+	}
+	if amount.Cmp(maxUint256) > 0 {
+		return refuse(ClassValidationFailed, "amount", "amount exceeds the uint256 maximum (2^256-1)")
 	}
 	gasLimit, err := decimalUint64("gas_limit", r.GasLimit)
 	if err != nil {

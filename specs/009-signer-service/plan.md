@@ -335,6 +335,22 @@ are justified explicitly:
   downstream statements there are one-directional consumption contracts.
 - T000-P remains open; local success (future) does not imply production readiness.
 
+### Deferred/evidence record (T033, appended 2026-09-16 at lane HEAD `56cb9ea`)
+
+- **010/011 fixtures stay a contract-shape test caller only (F-1).** The only 010/011 artifact
+  consumed by this lane is a contract-conforming test caller matching the OC-4 input shape; it keeps
+  009 developable and is not a 010/011 spec, table, migration, or fixture. No 010/011 deliverable is
+  created, verified, or cited here.
+- **No conformance is claimed with 010 or 011.** The downstream statements in those specs are
+  one-directional consumption contracts; 009 conforms to its own spec/contracts and to the stated
+  008 read/lock contract only. Nothing in this record certifies a 010/011 interface.
+- **T000-P remains open.** Production KMS/HSM provider selection and integration is still deferred;
+  the `KeyProvider` interface is ready but no production provider ships, so local success does not
+  imply production readiness.
+- **Probes remain throwaway context.** The feasibility probes run during planning (Go HTTP buffering,
+  PG 18 statement/idle/lock-timeout behaviour) lived in `/tmp` and are not repo artifacts; they are
+  context for the design, never completion evidence for V1–V8 or for any FR/SC.
+
 ## Deferred items (explicit, with owner)
 
 | ID | Item | Owner |

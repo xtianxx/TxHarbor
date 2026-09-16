@@ -2,9 +2,10 @@
 // contracts/api.md §1/§5): sha256-hashed bearer credentials with
 // constant-time compare, revoked_at enforcement, signer_caller load
 // including can_sign, and the operator credential lifecycle (issue/rotate/
-// revoke + can_sign flip) behind the signer-auth subcommand. Auth never
-// decides signing_not_permitted: it exposes CanSign and the serving layer
-// refuses (identity is not permission).
+// revoke + can_sign flip) behind the signer-auth subcommand. Authenticate
+// never decides signing_not_permitted; the permission half is the separate
+// PermitSigning gate the serving layer runs right after it (identity is not
+// permission).
 package signer
 
 import (
@@ -130,6 +131,17 @@ func Authenticate(ctx context.Context, db DB, presented string) (AuthResult, err
 		return zero, refuse(ClassStorageUnavailable, "", "credential store unavailable")
 	}
 	return AuthResult{Caller: caller, CredentialID: credentialID}, nil
+}
+
+// PermitSigning is the permission half of the request gate (api.md §4 step 1).
+// A proven identity with can_sign=false is refused as signing_not_permitted
+// (403), never as unauthenticated (401): identity is not permission. The
+// serving layer runs it immediately after Authenticate, before any body read.
+func PermitSigning(c Caller) error {
+	if !c.CanSign {
+		return refuse(ClassSigningNotPermitted, "", "caller may not sign")
+	}
+	return nil
 }
 
 // IssueCredential ensures the caller row exists (operator-assigned identity,

@@ -170,3 +170,97 @@ any code path (static check + integer-typed validators).
 
 SC-01→V1/V2, SC-02→V3, SC-03→V4, SC-04→V5, SC-05→V3/V8, SC-06→V6/V7, SC-07→V3/V8, SC-08→V7/V8.
 T000-P remains open; local Anvil-free green does not imply production readiness.
+
+---
+
+# Operator runbook & execution record (T032)
+
+Appended 2026-09-16 at lane HEAD `56cb9ea7b4a0994e5cfafacf9f33df8607c8c85b`
+(branch `009-signer-service`, baseline `4ebfe86`). This is an operator-facing record of what the
+lane actually wires, not a legal-path or delivery-completeness claim.
+
+## Commands
+
+`signer-serve` (the standalone signer process; the only path that constructs a `KeyProvider`):
+
+```
+TXHARBOR_PG_DSN=postgres://txharbor:txharbor@127.0.0.1:5433/txharbor_009 \
+TXHARBOR_SIGNER_MODE=development \
+TXHARBOR_SIGNER_KEY_FILE=/run/secrets/signer-test.key \
+txharbor signer-serve
+```
+
+Takes no arguments. Startup order: full config validation + signer required-ness → pool → metrics →
+policy → provider → listener. Exit 0 on clean shutdown after SIGINT/SIGTERM; 1 on startup/config
+failure (redacted reason); 2 on unexpected arguments. Startup refuses `production` mode without a
+production provider and never silently falls back to a test key.
+
+`signer-auth` (credential lifecycle carrier; DSN possession is the trust root):
+
+```
+txharbor signer-auth issue        --caller-id C --label L --operator OP --reason R
+txharbor signer-auth rotate       --caller-id C --credential-id K --operator OP --reason R
+txharbor signer-auth revoke       --credential-id K --operator OP --reason R
+txharbor signer-auth set-can-sign --caller-id C --can-sign true|false --operator OP --reason R
+```
+
+Secrets are generated from `crypto/rand`, stored as SHA-256 only, and printed exactly once on the
+stdout success line. Rotation is immediate (successor insert + predecessor revoke in one
+transaction); there is no grace window. Operator and reason are echoed on stdout as the paper trail
+and never reach the database. All four flags are required; exit codes are 0 committed, 1 failed, 2
+usage. Errors are redacted through `logx.Redact`.
+
+## Environment knobs (`TXHARBOR_SIGNER_*`)
+
+| Knob | Default | Notes |
+|---|---|---|
+| `TXHARBOR_SIGNER_HTTP_ADDR` | `127.0.0.1:8091` | loopback-only listener; never 8080 |
+| `TXHARBOR_SIGNER_MODE` | `production` | `development` is required to load a local test key |
+| `TXHARBOR_SIGNER_KEY_FILE` | (none) | required in `development`; no fallback |
+| `TXHARBOR_SIGNER_KEY_TIMEOUT` | `5s` | signing deadline bound |
+| `TXHARBOR_SIGNER_CHAINS` | (none) | policy allowlist |
+| `TXHARBOR_SIGNER_SENDERS` | (none) | policy allowlist |
+| `TXHARBOR_SIGNER_ASSETS` | (none) | policy allowlist |
+| `TXHARBOR_SIGNER_RECIPIENTS` | (none) | policy allowlist |
+| `TXHARBOR_SIGNER_MAX_AMOUNT` | (none) | integer-only cap |
+| `TXHARBOR_SIGNER_MAX_GAS_LIMIT` | (none) | integer-only cap |
+| `TXHARBOR_SIGNER_MAX_FEE_PER_GAS` | (none) | integer-only cap |
+| `TXHARBOR_SIGNER_MAX_PRIORITY_FEE_PER_GAS` | (none) | integer-only cap |
+| `TXHARBOR_SIGNER_MAX_GAS_PRICE` | (none) | integer-only cap |
+
+Knobs are parsed when present; signer-path required-ness is enforced by `SignerPolicyConfig`, so the
+shared `Load` stays green for `serve`/`migrate`. `TXHARBOR_PG_DSN` is the usual upstream DSN knob.
+
+## Isolated resources (pinned by `internal/signer/isolation_test.go`)
+
+| Resource | 009 value | Never collide with |
+|---|---|---|
+| PostgreSQL database | `txharbor_009` | shared `txharbor`, 008 `txharbor_008` |
+| PG host port (explicit compose override only) | `5433` | default `5432`, 008 `55432` |
+| Signer HTTP listener | `127.0.0.1:8091` | `8080`, 008 listener `58545`, RPC `8545` |
+| PG data volume (explicit override only) | `txharbor_009_pgdata` | shared `pgdata`, 008 volume |
+
+Automated integration tests use per-test testcontainers (container-local DB, random published
+port) and share nothing; the explicit compose override
+(`docker compose -f compose.yaml -f compose.009.yaml up -d postgres`) is for manual walkthroughs
+only and never auto-merges.
+
+## V1–V8 execution record (as of HEAD `56cb9ea`)
+
+Recorded for tasks that are `[X]` on disk at this HEAD. "Retained" means the scenario is
+PB-gated or its driving task is still `[ ]`, so no result is claimed here.
+
+| Scenario | Driving task(s) | State at `56cb9ea` | Notes |
+|---|---|---|---|
+| V1 happy path | T014 | `[X]` fail-closed branch only | PB-gated: without the scopes carrier (PB-01) no grant is verifiable, so only `authorization_unverifiable` runs; **no legal-path sign-off claimed** |
+| V2 digest/incomplete refusal | T015 | `[X]` | refusal vectors green, zero signatures |
+| V3 auth/permission/ownership | T017, T018 | `[X]` | matrix + credential lifecycle round-trip |
+| V4 binding/conflict/determinism | T019, T020, T021 | `[X]` | binding/restart green with `-race`; T021 covers the fresh-authorization + fail-closed branches. The grant-reuse branch is **retained** until the PB carrier lands |
+| V5 validation matrix | T022 | `[X]` | pre-sign refusals, zero signatures |
+| V6 gate consumption (read-only) | T026 | `[X]` | 006/008/007 classes incl. scopeless-grant behaviour assertion |
+| V7 delivery/unknown | T027 | `[ ]` | **retained**: needs T034 (`delivery.go`, `[ ]`); no V7 result claimed |
+| V8 failure/secrecy/isolation | T023, T024, T025 (+ T003 isolation) | `[X]` | import boundary, key separation, secrecy scan, isolation pin |
+
+Not exercised in this record: PB-01…PB-05 (`[ ]`, owned by the 007-extension batch), T027/T028/T034,
+T030/T031, T035. `T000-P` remains open. This lane's green is a fail-closed subset; merge still waits
+for the PB batch plus full legal-path acceptance (plan Merge order).

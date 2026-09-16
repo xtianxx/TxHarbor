@@ -26,16 +26,18 @@ const GateLockSQL = `LOCK TABLE indexer_pause, log_pause, deposit_pause, reorg_r
 
 // GateReadSQL is the one-statement 006 snapshot: three pause flags plus the
 // active recovery identity/phase/seq and the events max for the deployment
-// chain. One statement so no two reads can straddle a committing write; pure
-// SELECT (gates.md §1).
+// chain ($1 = chain_id). One statement so no two reads can straddle a
+// committing write; pure SELECT (gates.md §1). Column names mirror 006's
+// captureRecoveryVersion: reorg_recovery.recovery_seq is the active version,
+// reorg_recovery_events.recovery_seq its high-water when no active row exists.
 const GateReadSQL = `SELECT
   EXISTS (SELECT 1 FROM indexer_pause) AS indexer_paused,
   EXISTS (SELECT 1 FROM log_pause) AS log_paused,
   EXISTS (SELECT 1 FROM deposit_pause) AS deposit_paused,
-  (SELECT id FROM reorg_recovery LIMIT 1) AS recovery_id,
-  (SELECT phase FROM reorg_recovery LIMIT 1) AS recovery_phase,
-  (SELECT seq FROM reorg_recovery LIMIT 1) AS recovery_seq,
-  (SELECT MAX(seq) FROM reorg_recovery_events) AS events_max`
+  (SELECT recovery_id FROM reorg_recovery WHERE chain_id = $1) AS recovery_id,
+  (SELECT phase FROM reorg_recovery WHERE chain_id = $1) AS recovery_phase,
+  (SELECT recovery_seq FROM reorg_recovery WHERE chain_id = $1) AS recovery_seq,
+  (SELECT MAX(recovery_seq) FROM reorg_recovery_events WHERE chain_id = $1) AS events_max`
 
 // ScopeShareSQL takes the 008 scope row FOR SHARE before any gate read, so a
 // racing 008 pause/registry/release write blocks until 009 commits
@@ -217,6 +219,26 @@ func EvaluateGrant(found bool, grant *AuthzGrant, callerID int64, req *Request, 
 	want, err := decimalBig("amount", req.Amount)
 	if err != nil || grant.Amount == nil || grant.Amount.Cmp(want) != 0 {
 		return ClassAuthorizationInvalid
+	}
+	return ""
+}
+
+// GrantScope is the observed 007-extension scope carrier
+// (withdrawal_authorization_scopes, research R11). The real 007 carrier has
+// no scope row or version column, so every grant readable today is scopeless.
+type GrantScope struct {
+	// Present reports whether a scope row was found for the grant.
+	Present bool
+}
+
+// EvaluateGrantScope applies the R11 fail-closed rule once the 007 row checks
+// pass (gates.md §2 carrier gaps; Q-B ruling): a grant without a verifiable
+// scope/version carrier is refused per request as authorization_unverifiable.
+// Scope is never inferred from history, config, or caller claims. "" means
+// the carrier is present and verifiable.
+func EvaluateGrantScope(scope GrantScope) RefusalClass {
+	if !scope.Present {
+		return ClassAuthorizationUnverifiable
 	}
 	return ""
 }
