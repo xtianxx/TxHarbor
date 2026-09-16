@@ -239,7 +239,9 @@ func clsAllocator(t *testing.T, client *gethrpc.Client, pool *pgxpool.Pool) *non
 		RetryInitial: time.Millisecond,
 		RetryMax:     5 * time.Millisecond,
 	})
-	return nonce.NewAllocator(pool, observer)
+	admitGate := nonce.NewRebuildGate()
+	admitGate.Open()
+	return nonce.NewAllocator(pool, observer, admitGate)
 }
 
 func clsRequest(intentID, sender, authID string) nonce.AllocationRequest {

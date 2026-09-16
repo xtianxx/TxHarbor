@@ -130,6 +130,9 @@ func TestNumeric(t *testing.T) {
 		if _, err := BigFromNumeric(pgtype.Numeric{Int: big.NewInt(1), Exp: -1, Valid: true}); err == nil {
 			t.Fatal("fractional numeric accepted")
 		}
+		if _, err := BigFromNumeric(pgtype.Numeric{Int: mustBig(t, "18446744073709551616"), Valid: true}); err == nil {
+			t.Fatal("above-range numeric accepted")
+		}
 	})
 
 	t.Run("format", func(t *testing.T) {

@@ -294,9 +294,9 @@ func Serve(ctx context.Context, d Deps) int {
 	// verification runs once at startup, before the listener opens. Success is
 	// the only condition that opens the allocation admission gate; a failure
 	// keeps it closed with the structured reason — no silent repair, no
-	// memory-based allocation. Reads stay available either way; allocations
-	// stay refused rebuild_incomplete until an operator resolves the failure
-	// and the process restarts.
+	// memory-based allocation. The read path consults the same gate: while it
+	// is closed every read answers retryable `unavailable` (read-api.md §2)
+	// instead of serving facts the verification could not vouch for.
 	rebuildGate := nonce.NewRebuildGate()
 	runRebuildGate(startupCtx, chainID, rebuildGate, func(ctx context.Context, chainID int64) (nonce.RebuildReport, error) {
 		return nonce.VerifyRebuild(ctx, pool, chainID)
@@ -320,27 +320,23 @@ func Serve(ctx context.Context, d Deps) int {
 	// new listener or address. The bearer credential comes from config and is
 	// never logged; an unconfigured token admits nothing (fail closed).
 	// readapi.go is transport-free, so this handler owns the auth check and
-	// the two contract routes.
-	mux.Handle("/nonce/bindings/", &nonceReadHandler{provider: nonce.NewReadProvider(pool, cfg.NonceReadToken)})
+	// the two contract routes. The startup rebuild gate rides the provider so
+	// a gate that is not open fails every read closed as `unavailable`.
+	mux.Handle("/nonce/bindings/", &nonceReadHandler{provider: nonce.NewReadProvider(pool, cfg.NonceReadToken, rebuildGate)})
 	mux.Handle("/", health.NewServer(agg, m.Handler()).Handler())
 
 	srv := &http.Server{
 		Handler:           mux,
 		ReadHeaderTimeout: cfg.ProbeTimeout,
 	}
-	listener, err := net.Listen("tcp", cfg.HTTPAddr)
-	if err != nil {
-		ethClient.Close()
-		pool.Close()
-		return fail("startup failed (http listen): %s", logx.Redact(err.Error()))
-	}
 	// 008 reconcile observer (T029): a raw JSON-RPC client drives the
 	// per-known-scope T-observe tick on the existing IndexPollInterval cadence.
 	// Its failures are logged inside the loop and never flip service readiness,
-	// mirroring 006's observer.
+	// mirroring 006's observer. The RPC client is dialed before the listener
+	// opens, like every other startup dependency: a dial failure aborts startup
+	// before the port ever accepts a connection.
 	reconcileRPC, err := gethrpc.DialContext(runCtx, cfg.RPCURL)
 	if err != nil {
-		listener.Close()
 		ethClient.Close()
 		pool.Close()
 		return fail("startup failed (nonce reconcile rpc): %s", logx.Redact(err.Error()))
@@ -349,7 +345,14 @@ func Serve(ctx context.Context, d Deps) int {
 		RPCTimeout:   cfg.IndexRPCTimeout,
 		RetryInitial: cfg.IndexRetryInitial,
 		RetryMax:     cfg.IndexRetryMax,
-	}), chainID, cfg.IndexPollInterval, slog.Default())
+	}), chainID, cfg.IndexPollInterval, slog.Default(), m)
+	listener, err := net.Listen("tcp", cfg.HTTPAddr)
+	if err != nil {
+		reconcileRPC.Close()
+		ethClient.Close()
+		pool.Close()
+		return fail("startup failed (http listen): %s", logx.Redact(err.Error()))
+	}
 	startupCancel()
 
 	observer := &indexerObserver{scanner: scanner, m: m, chainID: chainID}
@@ -499,9 +502,10 @@ serveLoop:
 // runRebuildGate executes the R5 startup rebuild verification and applies its
 // verdict to the admission gate: success opens it, any failure keeps it closed
 // with the structured reason. It never repairs anything, never guesses from
-// memory, and never fails startup itself — reads stay available while every
-// allocation is refused rebuild_incomplete. verify is a seam for the lifecycle
-// glue test (production: nonce.VerifyRebuild over the serve pool).
+// memory, and never fails startup itself — while it is closed every allocation
+// is refused rebuild_incomplete and every read answers `unavailable`. verify is
+// a seam for the lifecycle glue test (production: nonce.VerifyRebuild over the
+// serve pool).
 func runRebuildGate(ctx context.Context, chainID int64, gate *nonce.RebuildGate,
 	verify func(context.Context, int64) (nonce.RebuildReport, error)) {
 	report, err := verify(ctx, chainID)
@@ -534,14 +538,14 @@ type nonceReadHandler struct {
 }
 
 func (h *nonceReadHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet {
-		w.Header().Set("Allow", http.MethodGet)
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
 	bearer, ok := strings.CutPrefix(r.Header.Get("Authorization"), "Bearer ")
 	if !ok || !h.provider.Authenticate(bearer) {
 		writeReadResponse(w, nonce.UnauthenticatedResponse())
+		return
+	}
+	if r.Method != http.MethodGet {
+		w.Header().Set("Allow", http.MethodGet)
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
 	rest := strings.TrimPrefix(r.URL.Path, "/nonce/bindings/")

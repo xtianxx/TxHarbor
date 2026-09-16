@@ -13,7 +13,12 @@
 // reads, and commits without a single data modification. An 008-owned read
 // failure collapses the whole answer to `unavailable` (all-or-nothing, never a
 // partial fact set); a 006 read failure only degrades
-// annotations.recovery.state to `unknown` — never to none/released.
+// annotations.recovery.state to `unknown` — never to none/released. While the
+// startup rebuild gate is not open the whole read path answers `unavailable`
+// before opening a transaction (read-api.md §2: "rebuild gate not open"), and
+// the read transaction is bounded by the same 5s guard every 008 write uses
+// (coord.go localWriteGuard) so a blocked scope-row share never pins a
+// connection.
 //
 // This file is transport-free: internal/app/serve.go (T017) owns the HTTP
 // wiring and maps ReadResponse.HTTPStatus / UnauthenticatedResponse onto its
@@ -71,9 +76,21 @@ SELECT 1 FROM reorg_recovery_events
 WHERE chain_id = $1 AND event IN ('auto_completed', 'released') LIMIT 1`
 )
 
+// readLockGuard bounds a read's scope-row share wait. The statement guard is
+// the repo's shared write bound (coord.go localWriteGuard, pinned to
+// internal/indexer's writeGuard): reads take no lock beyond one snapshot, so
+// no config knob or contract statement gives them their own magnitude. Both
+// guards are the first statements of the read transaction, so a scope-row FOR
+// SHARE blocked by a writer's FOR UPDATE fails as the retryable `unavailable`
+// instead of pinning a pooled connection.
+const readLockGuard = "SET LOCAL lock_timeout = '5s'"
+
 // ReadRequest is one read lookup. Exactly one of BindingID / IntentID is set;
-// ExpectedChainID/ExpectedSender are the optional by-intent scope cross-checks
-// (a supplied value that contradicts the durable binding is a mismatch).
+// ExpectedChainID/ExpectedSender are the optional by-intent expected-scope
+// cross-checks. Each supplied field is checked only against itself: an absent
+// field is no cross-check at all (never a default, never inferred from the
+// other field), so a request that supplies only one axis narrows the check to
+// that axis.
 type ReadRequest struct {
 	BindingID       string
 	IntentID        string
@@ -197,16 +214,22 @@ type readTx interface {
 
 // ReadProvider is the read-only entry point T017 mounts. token is the
 // deployment's TXHARBOR_NONCE_READ_TOKEN (T016 wires it); the provider never
-// logs or echoes it.
+// logs or echoes it. gate, when supplied, is the startup rebuild gate: while
+// it is not open the provider answers `unavailable` without touching the
+// database (read-api.md §2).
 type ReadProvider struct {
 	token string
+	gate  *RebuildGate
 	begin func(ctx context.Context) (readTx, error)
 }
 
 // NewReadProvider wires the pool with the deployment read token. The
 // transaction is REPEATABLE READ + read-write, per contracts/read-api.md §4.
-func NewReadProvider(pool *pgxpool.Pool, token string) *ReadProvider {
-	return &ReadProvider{
+// An optional startup rebuild gate (R5/FR-13) may be supplied; while it is
+// closed every read answers the retryable `unavailable` before opening a
+// transaction. No gate leaves the provider ungated (the unit-test seam).
+func NewReadProvider(pool *pgxpool.Pool, token string, gate ...*RebuildGate) *ReadProvider {
+	p := &ReadProvider{
 		token: token,
 		begin: func(ctx context.Context) (readTx, error) {
 			return pool.BeginTx(ctx, pgx.TxOptions{
@@ -215,6 +238,10 @@ func NewReadProvider(pool *pgxpool.Pool, token string) *ReadProvider {
 			})
 		},
 	}
+	if len(gate) > 0 {
+		p.gate = gate[0]
+	}
+	return p
 }
 
 // Authenticate compares the presented bearer credential against the
@@ -241,17 +268,32 @@ func (p *ReadProvider) ReadByIntent(ctx context.Context, intentID string, chainI
 	return p.Read(ctx, ReadRequest{IntentID: intentID, ExpectedChainID: chainID, ExpectedSender: sender})
 }
 
-// Read runs one lookup in one REPEATABLE READ transaction. Any 008 read
-// failure (or a failed commit of the read-only transaction) is all-or-nothing
-// `unavailable`; the transaction performs lock acquisition + SELECT only and
-// commits without writing.
+// Read runs one lookup in one REPEATABLE READ transaction. A closed rebuild
+// gate, any 008 read failure, or a failed commit of the read-only transaction
+// is all-or-nothing `unavailable`; the transaction performs lock acquisition +
+// SELECT only, carries the shared 5s statement/lock guards, and commits without
+// writing.
 func (p *ReadProvider) Read(ctx context.Context, req ReadRequest) (ReadResponse, error) {
 	if err := req.Validate(); err != nil {
 		return ReadResponse{}, err
 	}
+	// R5/FR-13: a gate that is not open cannot produce a trustworthy answer, so
+	// the whole read path fails closed as retryable `unavailable` before any DB
+	// access (read-api.md §2 "rebuild gate not open"; §4 008-owned failure).
+	if p.gate != nil && !p.gate.IsOpen() {
+		_, reason := p.gate.State()
+		if reason == "" {
+			reason = "startup rebuild verification has not completed"
+		}
+		return unavailableResponse(), Refuse(ReadUnavailable, "rebuild gate not open: "+reason)
+	}
 	tx, err := p.begin(ctx)
 	if err != nil {
 		return unavailableResponse(), readUnavailable("open read transaction", err)
+	}
+	if err := applyReadGuards(ctx, tx); err != nil {
+		_ = tx.Rollback(ctx)
+		return unavailableResponse(), readUnavailable("set read transaction guards", err)
 	}
 	resp, err := readBindingOutcomeTx(ctx, tx, req)
 	if err != nil {
@@ -275,6 +317,19 @@ func (p *ReadProvider) Read(ctx context.Context, req ReadRequest) (ReadResponse,
 	return resp, nil
 }
 
+// applyReadGuards bounds one read transaction with the shared statement and
+// lock guards as its first statements. A failure here (including a lock or
+// statement timeout) aborts the read transaction, which Read maps to
+// `unavailable`.
+func applyReadGuards(ctx context.Context, q txQuerier) error {
+	for _, guard := range []string{localWriteGuard, readLockGuard} {
+		if _, err := q.Exec(ctx, guard); err != nil {
+			return fmt.Errorf("read transaction guard: %w", err)
+		}
+	}
+	return nil
+}
+
 // degradedBy006Failure reports whether resp is a fully assembled fact response
 // whose only in-tx problem was the best-effort 006 probe: a bound/terminal body
 // carrying the `unknown` recovery degradation. That is exactly the case where
@@ -286,7 +341,12 @@ func degradedBy006Failure(resp ReadResponse) bool {
 
 // readBindingOutcomeTx is the in-tx read: identity lookup, expected-scope
 // cross-check, then — for a hit — the scope-row FOR SHARE followed by the
-// annotation reads of one snapshot.
+// annotation reads of one snapshot. not_bound (no binding) and mismatch (the
+// durable binding's scope contradicts the supplied expected scope) return
+// before the durable-scope share: there is no durable scope to lock on the
+// first, and the second echoes the immutable binding row read under this same
+// snapshot with no annotation reads, so neither can straddle versions
+// (read-api.md §4).
 func readBindingOutcomeTx(ctx context.Context, q txQuerier, req ReadRequest) (ReadResponse, error) {
 	// When the expected scope is complete, the scope-row lock is the first
 	// statement (contract order); otherwise the identity lookup must run first

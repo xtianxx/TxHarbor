@@ -172,5 +172,8 @@ func BigFromNumeric(n pgtype.Numeric) (*big.Int, error) {
 		}
 		v = q
 	}
+	if err := ValidateNonceRange(v); err != nil {
+		return nil, err
+	}
 	return v, nil
 }

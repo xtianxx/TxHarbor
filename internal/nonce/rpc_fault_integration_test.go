@@ -37,6 +37,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -50,6 +51,15 @@ import (
 // fltChainBase offsets each subtest onto its own chain so a reconcile loop
 // observes exactly the scope under test.
 const fltChainBase = int64(9500)
+
+// fltMethodTxCount / fltMethodBlock are the two observation methods (observe.go's
+// unexported consts are not visible from this package). fltMaxAttempts mirrors
+// observe.go's obsMaxAttempts bound.
+const (
+	fltMethodTxCount = "eth_getTransactionCount"
+	fltMethodBlock   = "eth_getBlockByNumber"
+	fltMaxAttempts   = 3
+)
 
 // fltFaultKind selects the injected failure.
 type fltFaultKind string
@@ -72,6 +82,40 @@ var fltFaultClasses = map[fltFaultKind]string{
 	fltTimeout:         "timeout",
 	fltRateLimit:       "rate_limited",
 	fltConflictingView: "invalid_response",
+}
+
+// fltFaultCalls is the exact per-method request count each fault induces for
+// one observation: a retryable fault (transport/timeout/rate-limited) is
+// retried up to the bound, a semantic refusal (invalid response) is not, and a
+// failed earlier read never reaches the later methods.
+var fltFaultCalls = map[fltFaultKind]int{
+	fltTransport:       fltMaxAttempts,
+	fltTimeout:         fltMaxAttempts,
+	fltRateLimit:       fltMaxAttempts,
+	fltConflictingView: 1,
+}
+
+// fltCallCounts records JSON-RPC requests by method so a test can assert the
+// observation's bounded retry discipline.
+type fltCallCounts struct {
+	mu       sync.Mutex
+	byMethod map[string]int
+}
+
+func newFltCallCounts() *fltCallCounts {
+	return &fltCallCounts{byMethod: make(map[string]int)}
+}
+
+func (c *fltCallCounts) record(method string) {
+	c.mu.Lock()
+	c.byMethod[method]++
+	c.mu.Unlock()
+}
+
+func (c *fltCallCounts) get(method string) int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.byMethod[method]
 }
 
 // fltSender mints a distinct lowercase 0x + 40 hex address per index.
@@ -143,8 +187,10 @@ func fltSeedHold(t *testing.T, sqlDB *sql.DB, chainID int64, sender, holdID stri
 
 // fltFaultClient serves the three R4 observation methods as a transport-level
 // JSON-RPC double that injects the configured fault instead of a usable view.
-func fltFaultClient(t *testing.T, fault fltFaultKind) *gethrpc.Client {
+// It returns the client and the per-method request counter.
+func fltFaultClient(t *testing.T, fault fltFaultKind) (*gethrpc.Client, *fltCallCounts) {
 	t.Helper()
+	counts := newFltCallCounts()
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		body, err := io.ReadAll(r.Body)
 		if err != nil {
@@ -159,6 +205,7 @@ func fltFaultClient(t *testing.T, fault fltFaultKind) *gethrpc.Client {
 			http.Error(w, "malformed JSON-RPC request", http.StatusBadRequest)
 			return
 		}
+		counts.record(req.Method)
 		switch fault {
 		case fltTimeout:
 			// Stall past the observer's RPCTimeout; the client cancellation
@@ -191,7 +238,7 @@ func fltFaultClient(t *testing.T, fault fltFaultKind) *gethrpc.Client {
 		t.Fatalf("dial fault JSON-RPC: %v", err)
 	}
 	t.Cleanup(client.Close)
-	return client
+	return client, counts
 }
 
 // fltObserver wires the exported Observer with a short RPCTimeout so the
@@ -302,7 +349,10 @@ func TestRPCFaultAdmissionPersistsUnavailableWithoutDomainChange(t *testing.T) {
 			fltSeedBinding(t, sqlDB, chainID, sender, seededBinding, fmt.Sprintf("flt-seed-intent-%d", i))
 			fltSeedFrontier(t, sqlDB, chainID, sender)
 
-			allocator := nonce.NewAllocator(pool, fltObserver(fltFaultClient(t, fault)))
+			client, counts := fltFaultClient(t, fault)
+			admitGate := nonce.NewRebuildGate()
+			admitGate.Open()
+			allocator := nonce.NewAllocator(pool, fltObserver(client), admitGate)
 
 			_, outcome, err := allocator.Allocate(ctx, nonce.AllocationRequest{
 				IntentID:        fmt.Sprintf("flt-intent-%d", i),
@@ -320,6 +370,19 @@ func TestRPCFaultAdmissionPersistsUnavailableWithoutDomainChange(t *testing.T) {
 			}
 			if obs[0].classification != nonce.ClassificationUnavailable || obs[0].errorClass != fltFaultClasses[fault] {
 				t.Fatalf("observation = %+v, want unavailable/%s", obs[0], fltFaultClasses[fault])
+			}
+
+			// Bounded retry discipline, per method: one observation attempts the
+			// first read at most fltMaxAttempts times, and a failed first read
+			// never reaches the pending read or the head read.
+			if got := counts.get(fltMethodTxCount); got != fltFaultCalls[fault] {
+				t.Fatalf("%s calls = %d, want %d", fltMethodTxCount, got, fltFaultCalls[fault])
+			}
+			if got := counts.get(fltMethodTxCount); got > fltMaxAttempts {
+				t.Fatalf("%s calls = %d, want <= %d (unbounded retry)", fltMethodTxCount, got, fltMaxAttempts)
+			}
+			if got := counts.get(fltMethodBlock); got != 0 {
+				t.Fatalf("%s calls = %d, want 0 (a failed earlier read must stop the observation)", fltMethodBlock, got)
 			}
 			fltAssertUnchanged(t, sqlDB, chainID, sender, seededBinding, "allocated", 0)
 		})
@@ -346,7 +409,8 @@ func TestRPCFaultReconcilePersistsUnavailableWithoutDomainChange(t *testing.T) {
 			fltSeedFrontier(t, sqlDB, chainID, sender)
 			fltSeedHold(t, sqlDB, chainID, sender, fmt.Sprintf("flt-rec-hold-%d", i))
 
-			loop := nonce.NewReconcileLoop(pool, fltObserver(fltFaultClient(t, fault)), chainID, 25*time.Millisecond, nil)
+			client, _ := fltFaultClient(t, fault)
+			loop := nonce.NewReconcileLoop(pool, fltObserver(client), chainID, 25*time.Millisecond, nil)
 
 			runCtx, cancel := context.WithCancel(ctx)
 			done := make(chan struct{})

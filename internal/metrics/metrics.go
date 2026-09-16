@@ -76,6 +76,14 @@ const (
 	NonceAllocationsMetricName  = "txharbor_nonce_allocations_total"
 	NonceReplaysMetricName      = "txharbor_nonce_replays_total"
 	NonceObservationsMetricName = "txharbor_nonce_observations_total"
+	// NonceHolds counts holds established by admission classification
+	// refusals. Label-free: the hold cause rides the redacted log line and
+	// the hold row, never a label (FR-21/SC-09).
+	NonceHoldsMetricName = "txharbor_nonce_holds_total"
+	// NonceReconcileFailures counts per-scope reconcile-tick failures that
+	// entered the bounded backoff. Label-free for the same reason; the
+	// failing scope and error ride the redacted log line only.
+	NonceReconcileFailuresMetricName = "txharbor_nonce_reconcile_failures_total"
 )
 
 // Metrics owns a private registry so multiple instances (tests, restarts of
@@ -139,9 +147,11 @@ type Metrics struct {
 
 	// 008 nonce-manager allocation surface (T020): result and classification
 	// are fixed vocabularies, nothing request-derived is ever a label.
-	nonceAllocations  *prometheus.CounterVec
-	nonceReplays      *prometheus.CounterVec
-	nonceObservations *prometheus.CounterVec
+	nonceAllocations       *prometheus.CounterVec
+	nonceReplays           *prometheus.CounterVec
+	nonceObservations      *prometheus.CounterVec
+	nonceHolds             *prometheus.CounterVec
+	nonceReconcileFailures *prometheus.CounterVec
 
 	handler http.Handler
 }
@@ -388,7 +398,15 @@ func New(ready func() bool) *Metrics {
 		Name: NonceObservationsMetricName,
 		Help: "008 persisted observation rows by classification (consistent, bootstrap_external_consumed, unattributed_consumption, unexplained_gap, divergence, unavailable).",
 	}, []string{"classification"})
-	registry.MustRegister(nonceAllocations, nonceReplays, nonceObservations)
+	nonceHolds := prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: NonceHoldsMetricName,
+		Help: "008 holds established by admission classification refusals.",
+	}, nil)
+	nonceReconcileFailures := prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: NonceReconcileFailuresMetricName,
+		Help: "008 per-scope reconcile-tick failures that entered the bounded backoff.",
+	}, nil)
+	registry.MustRegister(nonceAllocations, nonceReplays, nonceObservations, nonceHolds, nonceReconcileFailures)
 	return &Metrics{
 		registry:                     registry,
 		probeTotal:                   probeTotal,
@@ -432,6 +450,8 @@ func New(ready func() bool) *Metrics {
 		nonceAllocations:             nonceAllocations,
 		nonceReplays:                 nonceReplays,
 		nonceObservations:            nonceObservations,
+		nonceHolds:                   nonceHolds,
+		nonceReconcileFailures:       nonceReconcileFailures,
 		handler:                      promhttp.HandlerFor(registry, promhttp.HandlerOpts{}),
 	}
 }
@@ -767,4 +787,16 @@ func (m *Metrics) ObserveNonceReplay() {
 // classification (classify.go's fixed vocabulary).
 func (m *Metrics) ObserveNonceObservation(classification string) {
 	m.nonceObservations.WithLabelValues(classification).Inc()
+}
+
+// ObserveNonceHoldEstablished counts one hold row established by an admission
+// classification refusal in this attempt.
+func (m *Metrics) ObserveNonceHoldEstablished() {
+	m.nonceHolds.WithLabelValues().Inc()
+}
+
+// ObserveNonceReconcileFailure counts one per-scope reconcile-tick failure
+// that entered the bounded backoff.
+func (m *Metrics) ObserveNonceReconcileFailure() {
+	m.nonceReconcileFailures.WithLabelValues().Inc()
 }

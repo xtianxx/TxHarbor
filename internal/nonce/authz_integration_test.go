@@ -100,7 +100,9 @@ func azAllocator(t *testing.T, pool *pgxpool.Pool) (*nonce.Allocator, *azRPC) {
 		RetryInitial: time.Millisecond,
 		RetryMax:     5 * time.Millisecond,
 	})
-	return nonce.NewAllocator(pool, observer), rpc
+	admitGate := nonce.NewRebuildGate()
+	admitGate.Open()
+	return nonce.NewAllocator(pool, observer, admitGate), rpc
 }
 
 func azOpenPool(t *testing.T, dsn string) *pgxpool.Pool {

@@ -90,7 +90,9 @@ func loAllocator(pool *pgxpool.Pool) *nonce.Allocator {
 		RetryInitial: time.Millisecond,
 		RetryMax:     5 * time.Millisecond,
 	})
-	return nonce.NewAllocator(pool, observer)
+	admitGate := nonce.NewRebuildGate()
+	admitGate.Open()
+	return nonce.NewAllocator(pool, observer, admitGate)
 }
 
 // loSeed inserts the 007 caller/authorization rows plus one registry + scope
@@ -307,6 +309,46 @@ func TestNonceReadAPILockOrderIntegration(t *testing.T) {
 			}
 		case <-time.After(10 * time.Second):
 			t.Fatal("008 writer did not complete after the consumer committed")
+		}
+	})
+
+	// --- a read blocked past the lock bound is unavailable, then releases ----
+	// read-api.md §4: a read that cannot take the scope FOR SHARE because a
+	// writer holds FOR UPDATE fails closed as the retryable `unavailable`
+	// (never a partial/hung answer), and the pooled transaction is released so
+	// the next read succeeds.
+	t.Run("read_lock_timeout_is_unavailable_then_releases", func(t *testing.T) {
+		holder := loLockScopeRowRaw(t, sqlDB, "UPDATE", loSenderRead)
+
+		rctx, cancel := context.WithTimeout(ctx, 25*time.Second)
+		defer cancel()
+		start := time.Now()
+		done := make(chan loReadResult, 1)
+		go func() {
+			resp, rerr := reader.ReadByBindingID(rctx, readBinding.BindingID)
+			done <- loReadResult{resp, rerr}
+		}()
+
+		select {
+		case res := <-done:
+			if res.err == nil || !nonce.IsOutcome(res.err, nonce.ReadUnavailable) ||
+				res.resp.Outcome != nonce.ReadUnavailable {
+				t.Fatalf("blocked read = (%q, %v), want unavailable", res.resp.Outcome, res.err)
+			}
+			if elapsed := time.Since(start); elapsed < 4*time.Second {
+				t.Fatalf("blocked read returned after %s; want the DB lock bound to wait, not the caller ctx", elapsed)
+			}
+		case <-time.After(20 * time.Second):
+			t.Fatal("blocked read never returned; the lock bound did not fire")
+		}
+
+		loCommit(t, holder)
+
+		fctx, fcancel := context.WithTimeout(ctx, 10*time.Second)
+		defer fcancel()
+		resp, rerr := reader.ReadByBindingID(fctx, readBinding.BindingID)
+		if rerr != nil || resp.Outcome != nonce.ReadBound {
+			t.Fatalf("post-timeout read = (%q, %v), want bound (tx released)", resp.Outcome, rerr)
 		}
 	})
 

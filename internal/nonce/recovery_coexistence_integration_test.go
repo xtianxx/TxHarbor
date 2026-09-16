@@ -100,7 +100,9 @@ func coObserver(caller coRPCCaller) *nonce.Observer {
 }
 
 func coAllocator(pool *pgxpool.Pool, caller coRPCCaller) *nonce.Allocator {
-	return nonce.NewAllocator(pool, coObserver(caller))
+	admitGate := nonce.NewRebuildGate()
+	admitGate.Open()
+	return nonce.NewAllocator(pool, coObserver(caller), admitGate)
 }
 
 func coRunner(pool *pgxpool.Pool, caller coRPCCaller) *nonce.AdminRunner {

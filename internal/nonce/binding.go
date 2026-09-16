@@ -266,26 +266,61 @@ func advanceBindingStateTx(ctx context.Context, q txQuerier, bindingID, to, oper
 	return tag.RowsAffected() == 1, nil
 }
 
-// requiredConstraintNames are the named carriers the classification consumes
-// plus the table keys the rebuild verification trusts; the migration declares
-// every one explicitly (never PG auto-naming).
+// requiredConstraintNames are the named carriers of all seven 008 tables:
+// every UNIQUE/pkey the classification converges on, every FK the joins
+// trust, and every CHECK whose domain the integrity probes below re-assert
+// row by row. The migration declares every one explicitly (never PG
+// auto-naming), so a missing name means DDL drift, never a rename.
 var requiredConstraintNames = []string{
 	"nonce_wallet_registry_pkey",
+	"nonce_wallet_registry_chain_id_check",
+	"nonce_wallet_registry_sender_check",
+	"nonce_wallet_registry_state_check",
+	"nonce_wallet_registry_registry_seq_check",
 	"nonce_scope_state_pkey",
 	"nonce_scope_state_registry_fkey",
+	"nonce_scope_state_chain_id_check",
+	"nonce_scope_state_sender_check",
+	"nonce_scope_state_reconciled_floor_check",
+	"nonce_scope_state_last_latest_check",
+	"nonce_scope_state_last_pending_check",
 	"nonce_bindings_pkey",
 	"nonce_bindings_intent_uniq",
 	"nonce_bindings_scope_nonce_uniq",
 	"nonce_bindings_registry_fkey",
+	"nonce_bindings_chain_id_check",
+	"nonce_bindings_sender_check",
 	"nonce_bindings_state_check",
 	"nonce_bindings_terminal_consistency",
 	"nonce_bindings_nonce_range",
 	"nonce_bindings_intent_shape",
+	"nonce_bindings_authorization_version_check",
+	"nonce_bindings_registry_seq_check",
+	"nonce_binding_events_pkey",
 	"nonce_binding_events_binding_to_uniq",
+	"nonce_binding_events_from_state_check",
+	"nonce_binding_events_to_state_check",
+	"nonce_observations_pkey",
+	"nonce_observations_chain_id_check",
+	"nonce_observations_sender_check",
+	"nonce_observations_kind_check",
+	"nonce_observations_classification_check",
+	"nonce_observations_latest_count_check",
+	"nonce_observations_pending_count_check",
+	"nonce_observations_head_hash_check",
+	"nonce_scope_holds_pkey",
 	"nonce_scope_holds_status_consistency",
 	"nonce_scope_holds_registry_fkey",
+	"nonce_scope_holds_chain_id_check",
+	"nonce_scope_holds_sender_check",
+	"nonce_scope_holds_cause_check",
+	"nonce_scope_holds_status_check",
 	"nonce_ops_audit_pkey",
 	"nonce_ops_audit_operation_id_uniq",
+	"nonce_ops_audit_chain_id_check",
+	"nonce_ops_audit_sender_check",
+	"nonce_ops_audit_action_check",
+	"nonce_ops_audit_outcome_check",
 }
 
 // RebuildReport is the read-only rebuild verification result (R5).
@@ -311,11 +346,39 @@ WHERE chain_id = $1 AND (
     OR (state = 'released') <> (released_at IS NOT NULL AND release_operation_id IS NOT NULL)
     OR nonce < 0 OR nonce > 18446744073709551615
     OR length(intent_id) NOT BETWEEN 1 AND 128
+    OR chain_id <= 0
+    OR sender !~ '^0x[0-9a-f]{40}$'
+    OR authorization_version !~ '^[0-9a-f]{64}$'
+    OR registry_seq <= 0
+)`
+	countInvalidRegistrySQL = `
+SELECT count(*) FROM nonce_wallet_registry
+WHERE chain_id = $1 AND (
+    chain_id <= 0
+    OR sender !~ '^0x[0-9a-f]{40}$'
+    OR state NOT IN ('active', 'disabled')
+    OR registry_seq <= 0
+)`
+	countInvalidEventsSQL = `
+SELECT count(*) FROM nonce_binding_events e
+JOIN nonce_bindings b ON b.binding_id = e.binding_id
+WHERE b.chain_id = $1 AND (
+    e.to_state NOT IN ('allocated', 'in_flight', 'consumed', 'released')
+    OR (e.from_state IS NOT NULL AND e.from_state NOT IN ('allocated', 'in_flight', 'consumed', 'released'))
+)`
+	countInvalidObservationsSQL = `
+SELECT count(*) FROM nonce_observations
+WHERE chain_id = $1 AND (
+    kind NOT IN ('allocation', 'reconcile')
+    OR classification NOT IN ('consistent', 'bootstrap_external_consumed', 'unattributed_consumption',
+        'unexplained_gap', 'divergence', 'unavailable')
 )`
 	countInvalidScopesSQL = `
 SELECT count(*) FROM nonce_scope_state
 WHERE chain_id = $1 AND (
-    (reconciled_floor IS NOT NULL AND (reconciled_floor < 0 OR reconciled_floor > 18446744073709551615))
+    chain_id <= 0
+    OR sender !~ '^0x[0-9a-f]{40}$'
+    OR (reconciled_floor IS NOT NULL AND (reconciled_floor < 0 OR reconciled_floor > 18446744073709551615))
     OR (last_latest IS NOT NULL AND (last_latest < 0 OR last_latest > 18446744073709551615))
     OR (last_pending IS NOT NULL AND (last_pending < 0 OR last_pending > 18446744073709551615))
 )`
@@ -325,6 +388,17 @@ WHERE chain_id = $1 AND (
     status NOT IN ('active', 'released')
     OR (status = 'active') <> (released_at IS NULL)
     OR length(evidence_observation_id) = 0
+    OR chain_id <= 0
+    OR sender !~ '^0x[0-9a-f]{40}$'
+    OR cause NOT IN ('unattributed_consumption', 'unexplained_gap', 'chain_view_divergence')
+)`
+	countInvalidOpsSQL = `
+SELECT count(*) FROM nonce_ops_audit
+WHERE chain_id = $1 AND (
+    chain_id <= 0
+    OR sender !~ '^0x[0-9a-f]{40}$'
+    OR action NOT IN ('registry_register', 'registry_disable', 'hold_release', 'binding_release')
+    OR outcome NOT IN ('applied', 'nop', 'refused')
 )`
 )
 
@@ -363,6 +437,24 @@ func VerifyRebuild(ctx context.Context, q txQuerier, chainID int64) (RebuildRepo
 	if bad != 0 {
 		return rep, fmt.Errorf("rebuild verify: %d bindings are constraint-inconsistent", bad)
 	}
+	if err := q.QueryRow(ctx, countInvalidRegistrySQL, chainID).Scan(&bad); err != nil {
+		return rep, fmt.Errorf("rebuild verify: registry integrity: %w", err)
+	}
+	if bad != 0 {
+		return rep, fmt.Errorf("rebuild verify: %d registry rows are constraint-inconsistent", bad)
+	}
+	if err := q.QueryRow(ctx, countInvalidEventsSQL, chainID).Scan(&bad); err != nil {
+		return rep, fmt.Errorf("rebuild verify: event integrity: %w", err)
+	}
+	if bad != 0 {
+		return rep, fmt.Errorf("rebuild verify: %d binding events are constraint-inconsistent", bad)
+	}
+	if err := q.QueryRow(ctx, countInvalidObservationsSQL, chainID).Scan(&bad); err != nil {
+		return rep, fmt.Errorf("rebuild verify: observation integrity: %w", err)
+	}
+	if bad != 0 {
+		return rep, fmt.Errorf("rebuild verify: %d observations are constraint-inconsistent", bad)
+	}
 	if err := q.QueryRow(ctx, countInvalidScopesSQL, chainID).Scan(&bad); err != nil {
 		return rep, fmt.Errorf("rebuild verify: scope integrity: %w", err)
 	}
@@ -374,6 +466,12 @@ func VerifyRebuild(ctx context.Context, q txQuerier, chainID int64) (RebuildRepo
 	}
 	if bad != 0 {
 		return rep, fmt.Errorf("rebuild verify: %d hold rows are constraint-inconsistent", bad)
+	}
+	if err := q.QueryRow(ctx, countInvalidOpsSQL, chainID).Scan(&bad); err != nil {
+		return rep, fmt.Errorf("rebuild verify: ops-audit integrity: %w", err)
+	}
+	if bad != 0 {
+		return rep, fmt.Errorf("rebuild verify: %d ops-audit rows are constraint-inconsistent", bad)
 	}
 	return rep, nil
 }

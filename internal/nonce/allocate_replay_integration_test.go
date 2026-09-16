@@ -91,7 +91,9 @@ func replayAllocator(t *testing.T, pool *pgxpool.Pool) *nonce.Allocator {
 		RetryInitial: time.Millisecond,
 		RetryMax:     5 * time.Millisecond,
 	})
-	return nonce.NewAllocator(pool, observer)
+	admitGate := nonce.NewRebuildGate()
+	admitGate.Open()
+	return nonce.NewAllocator(pool, observer, admitGate)
 }
 
 // replayOpenPool opens one fresh pooled handle for the given DSN; Close is

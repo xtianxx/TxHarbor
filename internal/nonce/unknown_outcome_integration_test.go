@@ -338,7 +338,9 @@ func TestNonceUnknownOutcomeRetentionE2E(t *testing.T) {
 		RetryInitial: time.Millisecond,
 		RetryMax:     5 * time.Millisecond,
 	})
-	alloc := NewAllocator(pool, observer)
+	admitGate := NewRebuildGate()
+	admitGate.Open()
+	alloc := NewAllocator(pool, observer, admitGate)
 
 	// --- 1) admit the original intent while the account nonce is clean -----
 	original := AllocationRequest{

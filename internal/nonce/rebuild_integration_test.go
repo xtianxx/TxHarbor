@@ -31,9 +31,9 @@ import (
 const (
 	rebuildChainID = int64(1)
 	// rebuildDeclaredCarriers is len(nonce.requiredConstraintNames): the
-	// migration declares all 16 explicitly and VerifyRebuild probes exactly
+	// migration declares all 49 explicitly and VerifyRebuild probes exactly
 	// that set.
-	rebuildDeclaredCarriers = 16
+	rebuildDeclaredCarriers = 49
 )
 
 // rebuildMigratedPool boots an isolated scratch PostgreSQL, applies

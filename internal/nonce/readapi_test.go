@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 )
 
 const (
@@ -70,6 +71,7 @@ func readHoldValues(id, cause string) []any {
 type readFakeTx struct {
 	*fakeQuerier
 	rowsFn                func(sql string, args []any) (pgx.Rows, error)
+	commitErr             error
 	committed, rolledBack bool
 }
 
@@ -83,7 +85,10 @@ func (t *readFakeTx) Query(ctx context.Context, sql string, args ...any) (pgx.Ro
 	return t.rowsFn(sql, args)
 }
 
-func (t *readFakeTx) Commit(context.Context) error   { t.committed = true; return nil }
+func (t *readFakeTx) Commit(context.Context) error {
+	t.committed = true
+	return t.commitErr
+}
 func (t *readFakeTx) Rollback(context.Context) error { t.rolledBack = true; return nil }
 
 // readProvider wires a provider over one scripted transaction.
@@ -135,8 +140,13 @@ func TestReadAPIBoundBodyAndAnnotations(t *testing.T) {
 	if !tx.committed || tx.rolledBack {
 		t.Fatalf("read tx = (committed=%v, rolledBack=%v), want commit only", tx.committed, tx.rolledBack)
 	}
-	if n := len(tx.recordedExecs()); n != 0 {
-		t.Fatalf("read path executed %d statements, want zero modification", n)
+	if n := len(tx.recordedExecs()); n != 2 {
+		t.Fatalf("read path executed %d statements, want exactly the two SET LOCAL guards", n)
+	}
+	for _, stmt := range tx.recordedExecs() {
+		if !strings.HasPrefix(stmt, "SET LOCAL ") {
+			t.Fatalf("read path executed a non-guard statement %q, want SET LOCAL guards only", stmt)
+		}
 	}
 	if q := strings.Join(tx.recordedQueries(), "\n"); !strings.Contains(q, "FOR SHARE") {
 		t.Fatalf("scope share lock missing from read queries:\n%s", q)
@@ -378,6 +388,181 @@ func TestReadAPIAuthAndStatusMapping(t *testing.T) {
 	} {
 		if got := (ReadResponse{Outcome: tc.outcome}).HTTPStatus(); got != tc.want {
 			t.Fatalf("HTTPStatus(%q) = %d, want %d", tc.outcome, got, tc.want)
+		}
+	}
+}
+
+// TestReadAPIGateClosedIsUnavailable pins read-api.md §2 "rebuild gate not
+// open" → `unavailable` for both closed-gate states (startup zero value and a
+// failed verification) and confirms an open gate proceeds to the read. A
+// gate-closed read must never open a transaction (begin is nil on purpose).
+func TestReadAPIGateClosedIsUnavailable(t *testing.T) {
+	failed := NewRebuildGate()
+	failed.KeepClosed("rebuild_incomplete: 3 of 49 named carriers present")
+	for _, tc := range []struct {
+		name string
+		gate *RebuildGate
+	}{
+		{"startup_zero_value", NewRebuildGate()},
+		{"verification_failed", failed},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			p := &ReadProvider{token: "t", gate: tc.gate}
+			resp, err := p.ReadByBindingID(context.Background(), readTestBinding)
+			if !IsOutcome(err, ReadUnavailable) {
+				t.Fatalf("error = %v, want unavailable", err)
+			}
+			if resp.Outcome != ReadUnavailable || resp.HTTPStatus() != 503 {
+				t.Fatalf("outcome = %q/%d, want unavailable/503", resp.Outcome, resp.HTTPStatus())
+			}
+			if resp.Binding != nil || resp.Annotations != nil {
+				t.Fatalf("gate-closed read leaked a partial fact set: %+v", resp)
+			}
+			body, _ := json.Marshal(resp)
+			if !strings.Contains(string(body), `"error":{"code":"unavailable"`) ||
+				!strings.Contains(string(body), `"notice":"`+ReadNoticeUnavailable+`"`) {
+				t.Fatalf("gate-closed body = %s", body)
+			}
+		})
+	}
+
+	open := NewRebuildGate()
+	open.Open()
+	_, tx := readBaseHandler()
+	p := readProvider(tx, "secret-token")
+	p.gate = open
+	resp, err := p.ReadByBindingID(context.Background(), readTestBinding)
+	if err != nil || resp.Outcome != ReadBound {
+		t.Fatalf("open-gate read = (%q, %v), want bound", resp.Outcome, err)
+	}
+	if !tx.committed {
+		t.Fatal("open-gate read did not commit")
+	}
+}
+
+// TestReadAPIReadGuardsAndTimeoutUnavailable pins the read transaction guards
+// (read-api.md §4): they are the transaction's first two statements, reuse the
+// shared 5s write bound, and any guard/lock failure maps to `unavailable` with
+// the transaction released.
+func TestReadAPIReadGuardsAndTimeoutUnavailable(t *testing.T) {
+	_, tx := readBaseHandler()
+	resp, err := readProvider(tx, "secret-token").ReadByBindingID(context.Background(), readTestBinding)
+	if err != nil || resp.Outcome != ReadBound {
+		t.Fatalf("read = (%q, %v), want bound", resp.Outcome, err)
+	}
+	execs := tx.recordedExecs()
+	if len(execs) != 2 || execs[0] != localWriteGuard || execs[1] != readLockGuard {
+		t.Fatalf("read guards = %#v, want [%q %q] as the first statements", execs, localWriteGuard, readLockGuard)
+	}
+
+	// A guard failure aborts the read as unavailable and rolls the tx back.
+	guardFail := &readFakeTx{fakeQuerier: &fakeQuerier{execErr: func(sql string, _ []any) error {
+		if sql == readLockGuard {
+			return errors.New("fake: lock guard failed")
+		}
+		return nil
+	}}}
+	respGuard, errGuard := readProvider(guardFail, "secret-token").ReadByBindingID(context.Background(), readTestBinding)
+	if !IsOutcome(errGuard, ReadUnavailable) || respGuard.Outcome != ReadUnavailable {
+		t.Fatalf("guard failure = (%q, %v), want unavailable", respGuard.Outcome, errGuard)
+	}
+	if !guardFail.rolledBack || guardFail.committed {
+		t.Fatalf("guard failure tx = (committed=%v, rolledBack=%v), want rollback only",
+			guardFail.committed, guardFail.rolledBack)
+	}
+
+	// A real lock timeout (55P03) on the scope FOR SHARE is the same outcome.
+	lockTimeout := &pgconn.PgError{Code: "55P03", Message: "canceling statement due to lock timeout"}
+	timeoutTx := &readFakeTx{fakeQuerier: &fakeQuerier{handler: func(sql string, _ []any) pgx.Row {
+		switch {
+		case strings.Contains(sql, "WHERE binding_id = $1"):
+			return rows(readBindingValues(StateAllocated)...)
+		case strings.Contains(sql, "FOR SHARE"):
+			return fakeRow{err: lockTimeout}
+		default:
+			return noRows()
+		}
+	}}}
+	respTimeout, errTimeout := readProvider(timeoutTx, "secret-token").ReadByBindingID(context.Background(), readTestBinding)
+	if !IsOutcome(errTimeout, ReadUnavailable) || respTimeout.Outcome != ReadUnavailable {
+		t.Fatalf("lock timeout = (%q, %v), want unavailable", respTimeout.Outcome, errTimeout)
+	}
+	if !timeoutTx.rolledBack || timeoutTx.committed {
+		t.Fatalf("timeout tx = (committed=%v, rolledBack=%v), want rollback only",
+			timeoutTx.committed, timeoutTx.rolledBack)
+	}
+}
+
+// TestReadAPICommitFailureBoundary pins the read-api.md §4 abort-then-serve
+// boundary: a failed commit is served only for a fully assembled fact response
+// already degraded to recovery `unknown`; every other commit failure collapses
+// to `unavailable`. This is the boundary that keeps a masked commit failure from
+// serving a rolled-back snapshot.
+func TestReadAPICommitFailureBoundary(t *testing.T) {
+	degraded := &readFakeTx{
+		fakeQuerier: &fakeQuerier{handler: func(sql string, _ []any) pgx.Row {
+			switch {
+			case strings.Contains(sql, "WHERE binding_id = $1"):
+				return rows(readBindingValues(StateAllocated)...)
+			case strings.Contains(sql, "FOR SHARE"):
+				return rows(readTestChain)
+			case strings.Contains(sql, "nonce_wallet_registry"):
+				return rows(allocRegistryValues(RegistryActive, 3)...)
+			case strings.Contains(sql, "reorg_recovery"):
+				return fakeRow{err: errors.New("fake: 006 probe aborted the tx")}
+			default:
+				return noRows()
+			}
+		}},
+		commitErr: errors.New("fake: current transaction is aborted, commands ignored"),
+	}
+	resp, err := readProvider(degraded, "secret-token").ReadByBindingID(context.Background(), readTestBinding)
+	if err != nil || resp.Outcome != ReadBound {
+		t.Fatalf("degraded commit failure = (%q, %v), want the degraded bound response served", resp.Outcome, err)
+	}
+	if resp.Annotations == nil || resp.Annotations.Recovery.State != RecoveryUnknown {
+		t.Fatalf("degraded response recovery = %+v, want unknown", resp.Annotations)
+	}
+	if !degraded.rolledBack {
+		t.Fatal("degraded commit failure must still release the tx")
+	}
+
+	_, clean := readBaseHandler()
+	clean.commitErr = errors.New("fake: commit failed")
+	respClean, errClean := readProvider(clean, "secret-token").ReadByBindingID(context.Background(), readTestBinding)
+	if !IsOutcome(errClean, ReadUnavailable) || respClean.Outcome != ReadUnavailable {
+		t.Fatalf("non-degraded commit failure = (%q, %v), want unavailable", respClean.Outcome, errClean)
+	}
+	if !clean.rolledBack || clean.committed == false {
+		t.Fatalf("clean commit failure tx = (committed=%v, rolledBack=%v), want an attempted commit then rollback",
+			clean.committed, clean.rolledBack)
+	}
+}
+
+// TestDegradedBy006FailurePredicate pins the narrow predicate that gates the
+// abort-then-serve path: only a bound/terminal body whose recovery was already
+// degraded to `unknown` qualifies; a 006 success (none/released) or any error
+// outcome never does.
+func TestDegradedBy006FailurePredicate(t *testing.T) {
+	bound := func(recovery string) ReadResponse {
+		return ReadResponse{Outcome: ReadBound, Annotations: &ReadAnnotations{Recovery: ReadRecovery{State: recovery}}}
+	}
+	for _, tc := range []struct {
+		name string
+		resp ReadResponse
+		want bool
+	}{
+		{"bound_unknown", bound(RecoveryUnknown), true},
+		{"bound_none", bound(RecoveryNone), false},
+		{"bound_released", bound(RecoveryReleased), false},
+		{"terminal_unknown", ReadResponse{Outcome: ReadTerminal, Annotations: &ReadAnnotations{Recovery: ReadRecovery{State: RecoveryUnknown}}}, true},
+		{"not_bound", ReadResponse{Outcome: ReadNotBound}, false},
+		{"mismatch", ReadResponse{Outcome: ReadMismatch}, false},
+		{"unavailable", unavailableResponse(), false},
+		{"nil_annotations", ReadResponse{Outcome: ReadBound}, false},
+	} {
+		if got := degradedBy006Failure(tc.resp); got != tc.want {
+			t.Fatalf("%s: degradedBy006Failure = %v, want %v", tc.name, got, tc.want)
 		}
 	}
 }

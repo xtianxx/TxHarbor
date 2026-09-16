@@ -212,7 +212,9 @@ func TestAllocateConcurrent(t *testing.T) {
 		RetryInitial: time.Millisecond,
 		RetryMax:     5 * time.Millisecond,
 	})
-	allocator := nonce.NewAllocator(pool, observer)
+	admitGate := nonce.NewRebuildGate()
+	admitGate.Open()
+	allocator := nonce.NewAllocator(pool, observer, admitGate)
 
 	results := make([]nonceT018Result, len(targets))
 	start := make(chan struct{})

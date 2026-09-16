@@ -10,6 +10,9 @@
 // The loop never affects service readiness: a scope-list, RPC or transaction
 // failure is logged and skipped, never fatal, and nothing here touches the
 // health aggregate — mirroring 006's recovery observer (contracts/observation.md §5).
+// A persistently failing scope is retried under a bounded per-sender backoff
+// and counted through the optional low-cardinality ReconcileSink, so one bad
+// scope neither tight-loops nor starves the healthy ones.
 package nonce
 
 import (
@@ -35,6 +38,8 @@ import (
 // A terminal binding (consumed/released) has no path out, and a nil count
 // (an unavailable read) is never treated as a value. released is structurally
 // unreachable here: reconcile never emits it (operator-only, admin.go).
+// The caller additionally refuses to call this for a divergent observation,
+// whose contradictory counts are likewise not a value.
 func observeTransitionTarget(b Binding, latest, pending *big.Int) string {
 	if b.Nonce == nil || latest == nil || pending == nil || IsTerminal(b.State) {
 		return ""
@@ -60,8 +65,16 @@ func observeTransitionTarget(b Binding, latest, pending *big.Int) string {
 // event write and the state advance) appends zero further history. An
 // unavailable observation and a terminal binding are left untouched. The
 // return reports whether any row was written.
+//
+// Divergence is excluded exactly like unavailability: a contradictory (L > P)
+// or regressing view is NOT a value (classify.go checks it before every
+// candidate branch and holds + refuses), so it must never drive any automatic
+// edge — in particular it must never consume a binding from a contradictory
+// view (observation.md §2.1: a stale/contradictory observation MUST NEVER
+// reassign a binding). The classification still records its anomaly observation
+// and establishes its chain_view_divergence hold in the caller.
 func applyObservationTransitionTx(ctx context.Context, tx txQuerier, b Binding, obs Observation) (bool, error) {
-	if obs.Classification == ClassificationUnavailable {
+	if obs.Classification == ClassificationUnavailable || obs.Classification == ClassificationDivergence {
 		return false, nil
 	}
 	to := observeTransitionTarget(b, obs.LatestCount, obs.PendingCount)
@@ -99,6 +112,10 @@ WHERE chain_id = $1 ORDER BY sender`
 // known scopes and submits one T-observe transaction per scope; the chain view
 // is sampled outside the transaction (R4) and the write path reuses the
 // T024/T026 applier under the shared coordination lock.
+//
+// A scope that keeps failing is retried under a bounded exponential backoff
+// (never a tight per-tick retry), and healthy scopes are never delayed by it:
+// a backed-off scope is skipped in the pass, not awaited.
 type ReconcileLoop struct {
 	chainID  int64
 	interval time.Duration
@@ -107,13 +124,53 @@ type ReconcileLoop struct {
 	listScopes func(ctx context.Context) ([]string, error)
 	reconcile  func(ctx context.Context, sender string) error
 	logger     *slog.Logger
+	// sink is the optional low-cardinality failure counter (see ReconcileSink);
+	// nil skips counting.
+	sink ReconcileSink
+	// failures holds each failing scope's consecutive-failure streak and the
+	// earliest time it may be retried. Only Run/tick touch it and they run on
+	// one goroutine, so no lock is needed. The map is pruned to the live scope
+	// set every pass, so it is bounded by the registry, never by sender churn.
+	failures map[string]*reconcileFailure
+}
+
+// reconcileFailure is one scope's bounded-backoff state.
+type reconcileFailure struct {
+	streak      int
+	nextAttempt time.Time
+}
+
+// reconcileBackoffMaxMultiplier bounds the per-sender retry backoff: the
+// streak-th consecutive failure defers the scope by interval<<(streak-1),
+// capped at interval*reconcileBackoffMaxMultiplier. The cap makes retries
+// bounded (never an unbounded doubling) and keeps a permanently failing scope
+// from monopolizing passes.
+const reconcileBackoffMaxMultiplier = 8
+
+// ReconcileSink is the optional reconcile-loop failure seam: one label-free
+// count per failed scope tick. Counting failures through the observations
+// counter would mislabel them as persisted rows, so the seam is its own
+// method; the *metrics.Metrics registry satisfies it structurally, so this
+// package never imports the registry and the app layer stays the only wiring
+// point.
+type ReconcileSink interface {
+	ObserveNonceReconcileFailure()
 }
 
 // NewReconcileLoop wires the serve pool, the raw-RPC observer and the existing
 // IndexPollInterval cadence (no new timing knob). It opens one pooled
 // transaction per scope list and one per scope tick, never a long-lived session.
-func NewReconcileLoop(pool *pgxpool.Pool, observer *Observer, chainID int64, interval time.Duration, logger *slog.Logger) *ReconcileLoop {
-	l := &ReconcileLoop{chainID: chainID, interval: interval, logger: logger}
+// An optional ReconcileSink counts failed scope ticks.
+func NewReconcileLoop(pool *pgxpool.Pool, observer *Observer, chainID int64, interval time.Duration, logger *slog.Logger, sinks ...ReconcileSink) *ReconcileLoop {
+	l := &ReconcileLoop{
+		chainID:  chainID,
+		interval: interval,
+		logger:   logger,
+		failures: make(map[string]*reconcileFailure),
+	}
+	if len(sinks) > 0 {
+		l.sink = sinks[0]
+	}
 	begin := func(ctx context.Context) (allocTx, error) { return pool.Begin(ctx) }
 	l.listScopes = func(ctx context.Context) ([]string, error) { return listKnownScopes(ctx, begin, chainID) }
 	l.reconcile = func(ctx context.Context, sender string) error {
@@ -131,6 +188,7 @@ func (l *ReconcileLoop) Run(ctx context.Context) {
 		l.log().Warn("nonce reconcile loop disabled: non-positive interval", "interval", l.interval)
 		return
 	}
+	l.failures = make(map[string]*reconcileFailure)
 	ticker := time.NewTicker(l.interval)
 	defer ticker.Stop()
 	l.tick(ctx)
@@ -153,7 +211,9 @@ func (l *ReconcileLoop) log() *slog.Logger {
 
 // tick runs one pass: list the known scopes, then reconcile each in turn. A
 // list failure skips the pass and a per-scope failure skips that scope; neither
-// is fatal, and neither touches service readiness.
+// is fatal, and neither touches service readiness. A scope inside its failure
+// backoff window is skipped without blocking the pass, so healthy scopes keep
+// converging at the configured cadence.
 func (l *ReconcileLoop) tick(ctx context.Context) {
 	scopes, err := l.listScopes(ctx)
 	if err != nil {
@@ -162,16 +222,84 @@ func (l *ReconcileLoop) tick(ctx context.Context) {
 		}
 		return
 	}
+	now := time.Now()
 	for _, sender := range scopes {
 		if ctx.Err() != nil {
 			return
+		}
+		if f := l.failures[sender]; f != nil && now.Before(f.nextAttempt) {
+			continue
 		}
 		if err := l.reconcile(ctx, sender); err != nil {
 			if ctx.Err() != nil {
 				return
 			}
+			streak := l.recordFailure(sender, now)
 			l.log().Warn("nonce reconcile scope failed",
-				"sender", logx.Redact(sender), "error", logx.Redact(err.Error()))
+				"sender", logx.Redact(sender), "error", logx.Redact(err.Error()), "streak", streak)
+			continue
+		}
+		delete(l.failures, sender)
+	}
+	l.pruneFailures(scopes)
+}
+
+// recordFailure advances one scope's consecutive-failure streak, defers its
+// next attempt by the bounded backoff, and counts the failure through the
+// fixed-vocabulary sink (never the sender). It returns the new streak.
+func (l *ReconcileLoop) recordFailure(sender string, now time.Time) int {
+	if l.failures == nil {
+		l.failures = make(map[string]*reconcileFailure)
+	}
+	f := l.failures[sender]
+	if f == nil {
+		f = &reconcileFailure{}
+		l.failures[sender] = f
+	}
+	f.streak++
+	f.nextAttempt = now.Add(reconcileBackoff(l.interval, f.streak))
+	if l.sink != nil {
+		l.sink.ObserveNonceReconcileFailure()
+	}
+	return f.streak
+}
+
+// reconcileBackoff returns the deferral for the streak-th consecutive failure:
+// interval<<(streak-1), capped at interval*reconcileBackoffMaxMultiplier. It is
+// finite and monotone, so a persistently failing scope retries at most every
+// cap and never on every tick.
+func reconcileBackoff(interval time.Duration, streak int) time.Duration {
+	if interval <= 0 {
+		return 0
+	}
+	max := interval * reconcileBackoffMaxMultiplier
+	if max <= 0 { // overflow guard: fall back to the un-amplified interval
+		max = interval
+	}
+	delay := interval
+	for i := 1; i < streak && delay < max; i++ {
+		delay *= 2
+	}
+	if delay > max || delay <= 0 {
+		delay = max
+	}
+	return delay
+}
+
+// pruneFailures drops backoff state for senders no longer in the known scope
+// set: the map stays bounded by the live registry instead of growing with
+// sender churn. A re-appearing sender starts a fresh streak.
+func (l *ReconcileLoop) pruneFailures(scopes []string) {
+	if len(l.failures) == 0 {
+		return
+	}
+	live := make(map[string]struct{}, len(scopes))
+	for _, s := range scopes {
+		live[s] = struct{}{}
+	}
+	for sender := range l.failures {
+		if _, ok := live[sender]; !ok {
+			delete(l.failures, sender)
 		}
 	}
 }
@@ -281,6 +409,14 @@ func reconcileScopeInTx(ctx context.Context, tx txQuerier, chainID int64, sender
 			return err
 		}
 	}
+	// Record the fresh last_* facts. updateScopeFrontierSQL overwrites
+	// last_latest/last_pending unconditionally, which is correct here because
+	// the reconcile loop is their ONLY writer (allocation persists
+	// nonce_bindings, never the scope frontier; floor movement goes through
+	// advanceScopeFloorTx) and it runs one sequential goroutine per chain, so
+	// no later commit can carry an older sample. last_* are "last observed"
+	// facts, deliberately NOT monotonic — a chain reorg may legitimately lower
+	// them; monotonicity is a property of reconciled_floor alone (hold.go).
 	if obs.LatestCount != nil && obs.PendingCount != nil {
 		if err := updateScopeFrontierTx(ctx, tx, chainID, sender, obs.LatestCount, obs.PendingCount, observationID); err != nil {
 			return err

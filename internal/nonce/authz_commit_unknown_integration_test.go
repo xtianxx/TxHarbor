@@ -169,7 +169,9 @@ func cuAllocator(pool *pgxpool.Pool) *nonce.Allocator {
 		RetryInitial: time.Millisecond,
 		RetryMax:     5 * time.Millisecond,
 	})
-	return nonce.NewAllocator(pool, observer)
+	admitGate := nonce.NewRebuildGate()
+	admitGate.Open()
+	return nonce.NewAllocator(pool, observer, admitGate)
 }
 
 // cuSeed writes the FK prerequisites: one caller, one registered sender, and

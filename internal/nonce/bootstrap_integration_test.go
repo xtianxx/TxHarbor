@@ -139,6 +139,26 @@ func (n *bootAnvilNode) sendMinedTx(t *testing.T, to common.Address) common.Hash
 	return txHash
 }
 
+// sendPendingTx broadcasts one zero-value transfer and returns immediately,
+// without waiting for a head: used with automine disabled to stage a real
+// pending-only spike (pending > latest).
+func (n *bootAnvilNode) sendPendingTx(t *testing.T, from, to common.Address) common.Hash {
+	t.Helper()
+	var txHash common.Hash
+	n.mustCall(t, &txHash, "eth_sendTransaction", map[string]any{
+		"from": from, "to": to, "gas": "0x5208",
+	})
+	return txHash
+}
+
+// bootDisableAutomine turns off automine so a broadcast transaction stays
+// pending; the chain then reports latest < pending for the sender.
+func (n *bootAnvilNode) bootDisableAutomine(t *testing.T) {
+	t.Helper()
+	var ignored any
+	n.mustCall(t, &ignored, "evm_setAutomine", false)
+}
+
 // bootAssertCounts waits for the chain to report exactly latest/pending for the
 // sender, so the observation's pre-existing history is real and stable.
 func bootAssertCounts(t *testing.T, n *bootAnvilNode, sender string, latest, pending uint64) {
@@ -252,7 +272,9 @@ func TestNonceBootstrapExternalConsumedE2E(t *testing.T) {
 		RetryInitial: time.Millisecond,
 		RetryMax:     5 * time.Millisecond,
 	})
-	alloc := nonce.NewAllocator(pool, observer)
+	admitGate := nonce.NewRebuildGate()
+	admitGate.Open()
+	alloc := nonce.NewAllocator(pool, observer, admitGate)
 	req := nonce.AllocationRequest{
 		IntentID:        "boot-intent-first-scope",
 		ChainID:         bootChainID,
@@ -314,5 +336,74 @@ WHERE b.chain_id = $1 AND b.sender = $2
 		`SELECT count(*) FROM nonce_bindings WHERE chain_id = $1 AND sender = $2`,
 		bootChainID, sender); n != 1 {
 		t.Fatalf("scope bindings = %d, want exactly 1", n)
+	}
+}
+
+// TestNonceBootstrapPendingOnlySpikeAdmitsAtP pins the approved fresh-scope
+// bootstrap policy for the pending-only spike the matrix can produce: a
+// first-ever scope whose sender has queued but unmined transactions reports
+// 0 = latest < pending = P, and the approved behavior is to record
+// bootstrap_external_consumed for [0, P) and admit at P with no hold
+// (contracts/observation.md §2: a first-time scope with pre-existing chain
+// history admits at P). The pending nonce is never reused, and the pending
+// evidence is never merged into the sequence. This pins existing policy; it
+// introduces no new admission rule.
+func TestNonceBootstrapPendingOnlySpikeAdmitsAtP(t *testing.T) {
+	ctx := context.Background()
+	pool := bootMigratedPool(t)
+
+	anvil := bootStartAnvilNode(t)
+	// accounts[1] is a fresh sender: its nonce starts at 0 on a clean node.
+	sender := strings.ToLower(anvil.accounts[1].Hex())
+	anvil.bootDisableAutomine(t)
+	bootSeedScope(t, ctx, pool, sender)
+
+	burn := common.HexToAddress("0x000000000000000000000000000000000000dead")
+	anvil.sendPendingTx(t, anvil.accounts[1], burn)
+	bootAssertCounts(t, anvil, sender, 0, 1)
+
+	observer := nonce.NewObserver(anvil.rpc, nonce.ObserverConfig{
+		RPCTimeout:   5 * time.Second,
+		RetryInitial: time.Millisecond,
+		RetryMax:     5 * time.Millisecond,
+	})
+	admitGate := nonce.NewRebuildGate()
+	admitGate.Open()
+	alloc := nonce.NewAllocator(pool, observer, admitGate)
+	req := nonce.AllocationRequest{
+		IntentID:        "boot-intent-pending-spike",
+		ChainID:         bootChainID,
+		Sender:          sender,
+		AuthorizationID: bootAuthorization,
+	}
+
+	binding, outcome, err := alloc.Allocate(ctx, req)
+	if err != nil || outcome != nonce.OutcomeAllocated || binding == nil {
+		t.Fatalf("pending-only bootstrap allocate = (%+v, %q, %v), want allocated", binding, outcome, err)
+	}
+
+	// Admit at P: the queued nonce is never handed out again.
+	p := big.NewInt(1)
+	if binding.Nonce.Cmp(p) != 0 {
+		t.Fatalf("admitted nonce = %s, want P = %s", binding.Nonce, p)
+	}
+
+	obs := bootReadObservation(t, ctx, pool, binding.AllocationObservationID)
+	if obs.classification != "bootstrap_external_consumed" {
+		t.Fatalf("observation classification = %q, want bootstrap_external_consumed", obs.classification)
+	}
+	if obs.latest != "0" || obs.pending != p.String() {
+		t.Fatalf("observation view = latest %q pending %q, want 0/%s", obs.latest, obs.pending, p)
+	}
+
+	if n := bootCount(t, ctx, pool,
+		`SELECT count(*) FROM nonce_scope_holds WHERE chain_id = $1 AND sender = $2`,
+		bootChainID, sender); n != 0 {
+		t.Fatalf("pending-only bootstrap created %d hold(s), want 0", n)
+	}
+	if n := bootCount(t, ctx, pool,
+		`SELECT count(*) FROM nonce_bindings WHERE chain_id = $1 AND sender = $2 AND nonce < $3`,
+		bootChainID, sender, p.String()); n != 0 {
+		t.Fatalf("%d binding(s) below P — the pending spike was silently merged", n)
 	}
 }

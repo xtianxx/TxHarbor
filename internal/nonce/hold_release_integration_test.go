@@ -504,3 +504,73 @@ func TestNonceHoldReleaseIntegration(t *testing.T) {
 		t.Fatalf("status (after) still lists the released hold: %q", afterStatus)
 	}
 }
+
+// TestNonceHoldReleaseUnderActive006Recovery pins the V7 coexistence semantic:
+// releasing one named 008 hold while a 006 recovery is active clears ONLY that
+// hold — the 006 recovery row, every other active hold, and the 006 pause
+// itself are untouched. Clearing an 008 hold is never a 006 release.
+func TestNonceHoldReleaseUnderActive006Recovery(t *testing.T) {
+	ctx := context.Background()
+	dsn := nonceStartPostgres(t)
+
+	var out bytes.Buffer
+	if err := db.MigrateUp(ctx, nonceMigrateOptions(dsn), &out); err != nil {
+		t.Fatalf("MigrateUp() error = %v (output %q)", err, out.String())
+	}
+	sqlDB := nonceOpenSQL(t, dsn)
+	hrSeed(t, sqlDB)
+
+	sender := nonceAddr("b4")
+	const (
+		holdGap  = "hr-006-hold-gap"
+		holdKeep = "hr-006-hold-keep"
+		obsGap   = "no-hr-006-gap"
+		obsKeep  = "no-hr-006-keep"
+		opID     = "op-hr-006-1"
+		recID    = "rec-hr-006-1"
+	)
+	nonceMustExec(t, sqlDB, `INSERT INTO nonce_wallet_registry
+		(chain_id, sender, state, registry_seq) VALUES ($1, $2, 'active', 1)`, hrChain, sender)
+	hrInsertScope(t, sqlDB, sender, "0", "")
+	hrInsertObservation(t, sqlDB, obsGap, sender, "consistent", "0", "1")
+	hrInsertObservation(t, sqlDB, obsKeep, sender, "divergence", "0", "0")
+	hrInsertHold(t, sqlDB, holdGap, sender, nonce.CauseUnexplainedGap, obsGap)
+	hrInsertHold(t, sqlDB, holdKeep, sender, nonce.CauseChainViewDivergence, obsKeep)
+	hrInsertBinding(t, sqlDB, sender, "hr-006-binding", "hr-006-intent", "0")
+
+	nonceMustExec(t, sqlDB, `INSERT INTO reorg_policy_history
+		(chain_id, policy_seq, max_depth, operator) VALUES ($1, 1, 64, 'hr-006')`, hrChain)
+	nonceMustExec(t, sqlDB, `INSERT INTO reorg_recovery
+		(chain_id, recovery_id, phase, policy_seq, max_depth, bound_old_number, bound_old_hash, recovery_seq)
+		VALUES ($1, $2, 'detected', 1, 64, 10, $3, 1)`, hrChain, recID, hrHeadHash)
+
+	pool := replayOpenPool(t, dsn)
+	runner := hrRunner(pool, hrRPC{count: `"0x1"`, head: "0x0", headHash: hrHeadHash})
+	res, err := runner.Run(ctx, hrRequest(opID, sender, holdGap, obsGap,
+		"hr: gap reconciled under active 006; the pauses are independent"))
+	if err != nil {
+		t.Fatalf("run %s: unexpected error %v", opID, err)
+	}
+	if res.Outcome != nonce.AdminApplied {
+		t.Fatalf("run %s outcome = %q, want applied (detail %q)", opID, res.Outcome, res.Detail)
+	}
+
+	if got := hrReadHold(t, sqlDB, holdGap); got.status != nonce.HoldStatusReleased {
+		t.Fatalf("released hold = %+v, want terminal released", got)
+	}
+	if got := hrReadHold(t, sqlDB, holdKeep); got.status != nonce.HoldStatusActive || got.releaseOp.Valid {
+		t.Fatalf("coexisting hold = %+v, want it still active and untouched", got)
+	}
+	var phase string
+	var seq int64
+	if err := sqlDB.QueryRow(`SELECT phase, recovery_seq FROM reorg_recovery
+		WHERE chain_id = $1 AND recovery_id = $2`, hrChain, recID).Scan(&phase, &seq); err != nil {
+		t.Fatalf("read 006 recovery row: %v", err)
+	}
+	if phase != "detected" || seq != 1 {
+		t.Fatalf("006 recovery = (%s, %d), want it untouched at (detected, 1)", phase, seq)
+	}
+	if floor := hrFloor(t, sqlDB, sender); !floor.Valid || floor.String != "1" {
+		t.Fatalf("reconciled floor after release = %v, want 1", floor)
+	}
+}

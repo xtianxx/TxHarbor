@@ -44,7 +44,7 @@ release in `contracts/observation.md`, schema in `data-model.md`.
 | V10 | Registry lifecycle: register → disable → re-register; change-effect | I | FR-01/OC-2, SC-05 | disabled sender: new admission refused, existing binding facts unchanged, `registry_seq` history + audit rows complete; existing intent's sender/nonce never changes; operation-id replay/conflict semantics hold |
 | V11 | Authorization binding and fail-closed | I | FR-17/OC-5, SC-05 | missing/inactive/expired/mismatched/unreadable authorization → no binding (zero rows); valid → binding stores id + version digest; 008 writes zero 007 rows (snapshot); retry does not consume/extend the authorization |
 | V12 | Operator attempt semantics | I | FR-08, R7 | same operation id + same op-input → one audit row, recorded outcome; differ → `operation_conflict`, zero writes; refusals recorded as committed `refused` outcomes; uncertain COMMIT → same-id retry only |
-| V13 | Numeric/evidence/log hygiene | U+I | FR-21, SC-09, R13 | nonce `0` and `2⁶⁴−1` handled without uniqueness break; counts/nonces are decimal strings (no floats anywhere); logs contain redacted fields, zero token/key material; metrics series for allocations/holds/observations/reads/admin exist; every refusal carries a machine reason |
+| V13 | Numeric/evidence/log hygiene | U+I | FR-21, SC-09, R13 | nonce `0` and `2⁶⁴−1` handled without uniqueness break; counts/nonces are decimal strings (no floats anywhere); logs contain redacted fields, zero token/key material; metrics series for allocations/replays/observations/holds/reconcile-failures exist (all fixed-vocabulary or label-free); every refusal carries a machine reason |
 
 ## Failure-path checklist (first-class, not optional)
 
@@ -125,26 +125,48 @@ MUST 先持久化捕获该 id，再用它执行任何变更动作。每个变更
    `applied`/`refused`/`nop`（永不升级），异参 → `operation_conflict`、零写入。id 不为同一尝试
    重铸（mint-first）。
 
-7. V1–V13 检查清单与执行记录（T041 时点，HEAD `6a3ce1d9e28fa89b49aa956895ffaf7a20695a10`）。
-   本表是 T041 时点的**场景到测试映射**；V1–V13 的完整矩阵执行与 FR/SC 签署由 T042 负责，本
-   工作区 T039/T040/T042 均未勾选，故本记录**不宣称** V 矩阵 green，只登记 test 文件与任务归属
-   （`tasks.md` 中 T018–T038、T044/T045 记为 green）。T000-P 独立 open。
+7. V1–V13 检查清单与执行记录（T042 载体；本表替代 T041 时点快照）。
+   本表是**真实映射**：每个 `[x]` 单元格由一条在真实 PostgreSQL（需链时为真实 Anvil）上运行、
+   当前包内可复核的集成测试支撑；每个 `[ ]` 单元格**未满足**，保持未勾选。
 
-   | V | 场景 | 测试文件（任务） |
-   |---|---|---|
-   | V1 | 并发分配、一作用域 | `allocate_concurrency_integration_test.go`（T018） |
-   | V2 | 同意图重放/冲突/收敛 | `allocate_replay_integration_test.go`（T019）、`converge_integration_test.go`（T022）、`authz_commit_unknown_integration_test.go`（T045） |
-   | V3 | 崩溃/重启/重建闸门 | `restart_integration_test.go`（T021）、`rebuild_integration_test.go`（T023） |
-   | V4 | 未知结果保留/替换 | `unknown_outcome_integration_test.go`（T024）、`binding_release_integration_test.go`（T025）、`reconcile_integration_test.go`（T026） |
-   | V5 | 分类/hold/故障注入 | `classify_e2e_integration_test.go`（T027）、`rpc_fault_integration_test.go`（T030） |
-   | V6 | bootstrap 外部消耗证据 | `bootstrap_integration_test.go`（T028） |
-   | V7 | 解除证据/版本漂移 | `hold_release_integration_test.go`（T031）、`release_version_integration_test.go`（T032）、`recovery_coexistence_integration_test.go`（T033） |
-   | V8 | 006 pause 优先/独立共存 | `recovery_coexistence_integration_test.go`（T033） |
-   | V9 | 读契约五结果/单快照 | `readapi_contract_integration_test.go`（T034）、`readapi_lockorder_integration_test.go`（T035） |
-   | V10 | 注册表生命周期 | `registry_lifecycle_integration_test.go`（T036） |
-   | V11 | 授权绑定/fail-closed/撤销竞态 | `authz_integration_test.go`（T037）、`authz_revoke_race_integration_test.go`（T044）、`authz_commit_unknown_integration_test.go`（T045） |
-   | V12 | 运维尝试语义 | `admin_attempts_integration_test.go`（T038）、`authz_commit_unknown_integration_test.go`（T045） |
-   | V13 | 数值/证据/日志卫生 | `migration_integration_test.go`（T005）、`observe_redact_test.go`（T020）、`rpc_fault_integration_test.go`（T030）、`readapi_contract_integration_test.go`（T034） |
+   **矛盾消解（tasks.md vs quickstart，显式）**：原 T041 时点记录（HEAD `6a3ce1d`）写"本工作区
+   T039/T040/T042 均未勾选"。该句是**时点快照**，已被其后 T039 RECHECK 取代：`tasks.md` 现记
+   T039 `[X]`（HEAD `8dd084c` recheck）、T040 `[X]`，证据见 `tasks.md` §Evidence Index。T042 在
+   本表给出真实矩阵后仍为 `[ ]`，因为 SC-09 单元格未满足（下方 STOP）。历史快照不删除，只标明被取代。
+
+   **验证码版本与日志**：所有 `[x]` 行的集成测试来自 `/tmp/txharbor-008-int-nonce.log`
+   （2026-09-16 14:33，`go test -tags integration ./internal/nonce`，225 PASS / 0 FAIL）；该工作树
+   的 `internal/nonce/**` 与 HEAD `8dd084c` 字节一致（`8dd084c` 只改 `internal/db`、
+   `internal/withdrawal` 的测试与 `tasks.md`）。日志不内嵌 SHA，code version 由提交时间线关联，
+   非回填。T001–T038/T044/T045 的逐任务原始日志未持久化 → MISSING（见 `tasks.md` §Evidence Index）。
+
+   | V | SC | 测试（文件，任务） | verified code version | 状态 |
+   |---|---|---|---|---|
+   | V1 | SC-01 | `TestAllocateConcurrent`（allocate_concurrency_integration_test.go，T018） | `db6e764`＝`8dd084c`（nonce 包） | `[x]` |
+   | V2 | SC-02 | `TestNonceAllocateReplayConflictIntegration`（T019）；`TestNonceConvergeSameIntentRaceReplays`、`TestNonceConvergeScopeNonceRaceRetryable`、`TestNonceConvergeCommitUnknownRetryConverges`（converge_integration_test.go，T022）；`TestNonceAuthzCommitUnknownConvergenceIntegration`（T045） | 同上 | `[x]` |
+   | V3 | SC-03 | `TestNonceRestartCrashKill9Integration`（restart_integration_test.go，T021）；`TestNonceRebuildGateClosedRefusesAllocation`、`TestNonceRebuildVerificationSuccessOpensGate`、`TestNonceRebuildVerificationFailureKeepsGateClosed`、`TestNonceRebuildGateDBUnavailableFailsClosed`（rebuild_integration_test.go，T023） | 同上 | `[x]` |
+   | V4 | SC-04 | `TestNonceUnknownOutcomeRetentionE2E`（T024）；`TestNonceReconcileTransitionsAppendOneEvent`、`TestNonceReconcileRepeatObservationConverges`、`TestNonceReconcileNeverProducesReleased`（reconcile_integration_test.go，T026） | 同上 | `[x]` |
+   | V4 | SC-05 | `TestNonceBindingReleaseIntegration`（binding_release_integration_test.go，T025）；同 V4/SC-04 行测试 | 同上 | `[x]` |
+   | V5 | SC-06 | `TestNonceClassificationHoldsE2E`（classify_e2e_integration_test.go，T027）；`TestRPCFaultAdmissionPersistsUnavailableWithoutDomainChange`、`TestRPCFaultReconcilePersistsUnavailableWithoutDomainChange`（rpc_fault_integration_test.go，T030） | 同上 | `[x]` |
+   | V6 | SC-06 | `TestNonceBootstrapExternalConsumedE2E`（bootstrap_integration_test.go，T028） | 同上 | `[x]` |
+   | V7 | SC-06、SC-07 | `TestNonceHoldReleaseIntegration`（T031）、`TestNonceReleaseVersionDriftIntegration`（T032）、`TestNonceRecoveryCoexistenceIntegration`（recovery_coexistence_integration_test.go，T033） | 同上 | `[x]` |
+   | V8 | SC-07 | `TestNonceRecoveryCoexistenceIntegration`（T033） | 同上 | `[x]` |
+   | V9 | SC-06 | `TestNonceReadAPIContractIntegration`（readapi_contract_integration_test.go，T034）、`TestNonceReadAPILockOrderIntegration`（readapi_lockorder_integration_test.go，T035） | 同上 | `[x]` |
+   | V10 | SC-05 | `TestNonceRegistryLifecycleIntegration`（registry_lifecycle_integration_test.go，T036） | 同上 | `[x]` |
+   | V11 | SC-05、SC-08 | `TestNonceAuthzFailClosedAndBindingIntegration`（authz_integration_test.go，T037，含 FR-16 守卫）；`TestNonceAuthzRevokeRaceIntegration`（authz_revoke_race_integration_test.go，T044） | 同上 | `[x]` |
+   | V12 | SC-02、SC-05 | `TestNonceAdminAttemptsIntegration`（admin_attempts_integration_test.go，T038）；`TestNonceAuthzCommitUnknownConvergenceIntegration`（T045） | 同上 | `[x]` |
+   | V13 | SC-09 | 响应侧：`TestNonceReadAPIContractIntegration`（T034，集成）；日志侧：`TestAllocationEmissionRedactsSecrets`、`TestAllocationEmissionCountsEveryMachineReason`（observe_redact_test.go，T020，**UNIT**） | 集成部分 `db6e764`；unit 部分不计验收证据 | `[ ]`（日志侧未满足） |
+
+   **STOP — 需业务裁决（SC-09；其余单元格不受阻）**：
+   - 冲突：SC-09 要求"验收运行中"日志与响应出现密钥材料次数为 0，但唯一直接断言 redaction 的
+     `observe_redact_test.go`（T020）是**无集成标签的单元测试**（fake/日志捕获），而 `tasks.md`
+     T042 明文规定"test-double-only unit work 记为 NOT acceptance evidence"。
+     `TestNonceReadAPIContractIntegration`（T034）断言响应 body 字段集精确（无多余键）与 401，
+     可作**结构性**论据，但不等于一次真实验收运行的日志/响应密钥扫描。
+   - 选项 A：按 T042 规则接受该单元 redaction 断言为 SC-09 证据（将改写 T042 自身的排除规则，放宽标准）。
+   - 选项 B：补一条真实运行（serve + 一次验收调用）的日志/响应密钥扫描作为 SC-09 证据（新增测试/证据，
+     超出本次 doc-only 范围）。
+   - 选项 C（本次默认，不自作裁决）：维持 `[ ]`，SC-09 记为未满足，T042 保持 `[ ]`。
 
 ## §资源隔离记录（T041）
 

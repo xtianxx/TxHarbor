@@ -140,11 +140,191 @@
 
 **Purpose**: Regression, CI, runbook, acceptance sign-off — no new behavior
 
-- [X] T039 [P] 002–007 regression gate (unit + integration): `go test ./...` + `go test -tags integration ./...` green. Diff allowlist (reviewed with test evidence; being listed does NOT bless arbitrary changes inside a file): ALLOWED-NEW `internal/nonce/**`, `internal/app/nonceadmin.go` + `nonceadmin_test.go`, `internal/config/config_008_test.go`, `internal/nonce/*_integration_test.go`, `migrations/000008_nonce_manager.sql`, `specs/008-nonce-manager/**`; ALLOWED-MODIFY `cmd/txharbor/main.go` (dispatch case only), `internal/app/serve.go` (read mount + rebuild gate + reconcile loop start only), `internal/config/config.go` (read-token + knob passthrough only), `internal/metrics/metrics.go` + `metrics_test.go` (new series only). Any diff to `internal/indexer/**`, `internal/withdrawal/**`, `internal/db/**`, `migrations/000001–000007`, or the shared `writeGuard`/lease/coordinator constants → STOP, explicit review + full regression re-run. Historical CI runs are baseline context, never 008 evidence. done: gate green. NOTE (2026-09-16 directed verification): unchecked — full-gate red on 3 migration-discovery failures (internal/db TestConfirmationMigrationDowngradeTo4RemovesAbove4 / internal/withdrawal TestWithdrawalMigrationUpgradeDowngradeFrom006 / internal/withdrawal TestWithdrawalRecoveryPeriodNoExecutionArtefacts), each proven byte-identical at base 6a3ce1d; cause = lane migration 000008 in the embedded FS vs hardcoded 000001–000007 expectations; gate condition NOT narrowed; fix in progress. STOP triggered (test-only diff to internal/db + internal/withdrawal): reviewed — no 000001–000007 SQL, prod code, or shared-constant change; expectations derived from embedded file list, 007 upgrade assertions + 007-range absence proof retained. RECHECK (2026-09-16): gate green after fix — gofmt empty, vet + vet-integration 0, build 0, unit 10pkgs ok, integration per-package ok (app/config/db/eth/health/logx/metrics/nonce/withdrawal/indexer), directed 3/3 pass.
-- [X] T040 [P] Lint/vet/build gate: `gofmt -l .` empty + `go vet ./...` + `go vet -tags integration ./...` + `go build ./...` per Makefile (existing `ci.yml` four jobs; no workflow change). done: green
+- [X] T039 [P] 002–007 regression gate (unit + integration): `go test ./...` + `go test -tags integration ./...` green. Diff allowlist (reviewed with test evidence; being listed does NOT bless arbitrary changes inside a file): ALLOWED-NEW `internal/nonce/**`, `internal/app/nonceadmin.go` + `nonceadmin_test.go`, `internal/config/config_008_test.go`, `internal/nonce/*_integration_test.go`, `migrations/000008_nonce_manager.sql`, `specs/008-nonce-manager/**`; ALLOWED-MODIFY `cmd/txharbor/main.go` (dispatch case only), `internal/app/serve.go` (read mount + rebuild gate + reconcile loop start only), `internal/config/config.go` (read-token + knob passthrough only), `internal/metrics/metrics.go` + `metrics_test.go` (new series only). Any diff to `internal/indexer/**`, `internal/withdrawal/**`, `internal/db/**`, `migrations/000001–000007`, or the shared `writeGuard`/lease/coordinator constants → STOP, explicit review + full regression re-run. Historical CI runs are baseline context, never 008 evidence. done: gate green. NOTE (2026-09-16 directed verification): unchecked — full-gate red on 3 migration-discovery failures (internal/db TestConfirmationMigrationDowngradeTo4RemovesAbove4 / internal/withdrawal TestWithdrawalMigrationUpgradeDowngradeFrom006 / internal/withdrawal TestWithdrawalRecoveryPeriodNoExecutionArtefacts), each proven byte-identical at base 6a3ce1d; cause = lane migration 000008 in the embedded FS vs hardcoded 000001–000007 expectations; gate condition NOT narrowed; fix in progress. STOP triggered (test-only diff to internal/db + internal/withdrawal): reviewed — no 000001–000007 SQL, prod code, or shared-constant change; expectations derived from embedded file list, 007 upgrade assertions + 007-range absence proof retained. RECHECK (2026-09-16): gate green after fix — gofmt empty, vet + vet-integration 0, build 0, unit 10pkgs ok, integration per-package ok (app/config/db/eth/health/logx/metrics/nonce/withdrawal/indexer), directed 3/3 pass. Evidence index: see §Evidence Index & Appendix (T039).
+- [X] T040 [P] Lint/vet/build gate: `gofmt -l .` empty + `go vet ./...` + `go vet -tags integration ./...` + `go build ./...` per Makefile (existing `ci.yml` four jobs; no workflow change). done: green. Evidence index: see §Evidence Index & Appendix (T040).
 - [X] T041 Operator runbook + environment-isolation record in `specs/008-nonce-manager/quickstart.md` (append §操作 runbook + §资源隔离记录, 007 T032 / 005 T029 precedent; no new contracts file): `nonce-admin mint → hold-release / binding-release / register / disable / status` flows, operation-id capture rule, exit codes 0/1/2, DSN trust root, uncertain-COMMIT same-op-id retry rule, and the V1–V13 checklist execution record; isolation is workdir-local only — database/schema `txharbor_008`, PostgreSQL `127.0.0.1:55432`, Anvil `127.0.0.1:58545`, distinct compose project/volume (`txharbor008`); NEVER the shared `compose.yaml` `pgdata` / 5432 / 8545, so the sibling 009 workdir cannot collide. deps: T015 | FR-08; quickstart.md §Environment | done: runbook present; no behavior change
-- [X] T042 Full V-matrix validation run + FR/SC mapping sign-off: execute V1–V13 with each SC-01–SC-09 tied to a green test; record T000-P still open; mark test-double-only unit work as NOT acceptance evidence. deps: T018–T038 | FR-22; SC-01–SC-09; V1–V13 | done: matrix record green
+- [ ] T042 Full V-matrix validation run + FR/SC mapping sign-off: execute V1–V13 with each SC-01–SC-09 tied to a green test; record T000-P still open; mark test-double-only unit work as NOT acceptance evidence. deps: T018–T038 | FR-22; SC-01–SC-09; V1–V13 | done: matrix record green. NOTE (2026-09-16, doc-only): the real V1–V13 × SC-01–SC-09 × test-name × verified-code-version table now lives in `quickstart.md` §7; SC-01–SC-08 are satisfied by integration tests (log `/tmp/txharbor-008-int-nonce.log`, code `db6e764` = `8dd084c` for `internal/nonce/**`). SC-09 is NOT satisfied: its log-side redaction evidence is unit-only, and this task's own rule marks test-double-only unit work NOT acceptance evidence. That cell is STOPped pending a business ruling (options in `quickstart.md` §7). This task therefore stays OPEN — the earlier `[X]` is reverted because the matrix is not green (do not mark complete what is not). T000-P and plan.md gate A-13 both remain OPEN.
 - [X] T043 Deferred-acceptance record (no code): state that real 009 client integration, 010 attempt linkage and 011 intent-existence/linkage cross-checks are deferred (contracts/downstream.md §4), that the FR-18 deferred half (attempt traceability, contracts/downstream.md §2) is a recorded gap and not a simulated behavior, that 008's own acceptance is scoped to admission/reconcile/read-provider behavior (quickstart.md), and that T000-P remains open. deps: T042 | FR-18 (deferred half) /FR-23; downstream.md §2/§4 | done: record present
+
+---
+
+## Evidence Index & Appendix (added 2026-09-16; doc-only)
+
+**Discipline (unchanged)**: design artifacts are not evidence; test doubles (`EARLY-VALIDATION`) are not
+acceptance evidence; acceptance routes through real PostgreSQL (+ real Anvil where a chain is needed).
+Logs below live **outside the repo** under `/tmp` (ephemeral) and **do not embed a SHA**, so the code
+version is associated from the commit timeline, never back-filled. Runs whose raw logs were not persisted
+are stated **MISSING**, never reconstructed and never given an invented hash.
+
+### T039 evidence — 002–007 regression gate
+
+| # | command | result | code version | log availability |
+|---|---|---|---|---|
+| 1 | `go test -tags integration ./...` (pre-fix) | FAIL: exactly the 3 migration-discovery tests named in T039's NOTE (`internal/db/TestConfirmationMigrationDowngradeTo4RemovesAbove4`; `internal/withdrawal/TestWithdrawalMigrationUpgradeDowngradeFrom006`, `TestWithdrawalRecoveryPeriodNoExecutionArtefacts`); all other pkgs ok, incl. `internal/nonce` 226.4s | working tree ≈ `db6e764` (log has no SHA) | `/tmp/txharbor_008_integration.log` — present (13:15) |
+| 2 | `go test -tags integration ./internal/db -run TestConfirmationMigrationDowngradeTo4RemovesAbove4` | PASS 4.46s | post-fix tree; committed as `8dd084c` (test-only) | `/tmp/txharbor-008-db-directed.log` — present (14:08) |
+| 3 | `go test -tags integration ./internal/withdrawal -run TestWithdrawalMigrationUpgradeDowngradeFrom006` | PASS 4.20s | as #2 | `/tmp/txharbor-008-wd-directed.log` — present (14:08); that first attempt's `…NoExecutionArtefacts` was still red |
+| 4 | same, `-run TestWithdrawalRecoveryPeriodNoExecutionArtefacts` | PASS 6.09s | as #2 | `/tmp/txharbor-008-wd-directed2.log` — present (14:09) |
+| 5 | `go test ./...` (unit) | ok, 10 pkgs / 0 FAIL | as #2 | `/tmp/txharbor-008-unit.log` — present (14:11) |
+| 6 | `go test -tags integration ./internal/app ./internal/config ./internal/db ./internal/eth ./internal/health` | ok, 5/5 | as #2 | `/tmp/txharbor-008-int.log` — present (14:13) |
+| 7 | `go test -tags integration ./internal/logx ./internal/metrics` | ok, 2/2 | as #2 | `/tmp/txharbor-008-int2.log` — present (14:21) |
+| 8 | `go test -tags integration ./internal/nonce` | ok, 225 PASS / 0 FAIL, 226.4s | `db6e764` (`internal/nonce/**` byte-identical at `8dd084c`) | `/tmp/txharbor-008-int-nonce.log` — present (14:33) |
+| 9 | `go test -tags integration ./internal/withdrawal` | ok, 319 PASS / 0 FAIL, 485.2s | as #2 | `/tmp/txharbor-008-int-withdrawal.log` — present (14:39) |
+| 10 | `go test -tags integration ./internal/indexer` (first re-run) | FAIL 2 (006-owned `TestReorgRecoveryUS1CrashResume`, `TestT028CrashDrillAndRefork`, triage-phase asserts); package killed at 600.050s | as #2 | `/tmp/txharbor-008-int-indexer2.log` — present (14:44) |
+| 11 | `go test -tags integration ./internal/indexer` (full re-run) | ok 643.492s | as #2 | `/tmp/txharbor-008-int-indexer-full.log` — present (15:31) |
+
+- Fix scope asserted by `git show --stat 8dd084c`: `internal/db/confirmation_migration_integration_test.go`, `internal/withdrawal/migration_integration_test.go`, `internal/withdrawal/recovery_period_integration_test.go`, this `tasks.md` — **test/doc only**; no `migrations/000001–000007` or production change. Gate condition was not narrowed.
+- Honest discrepancy: #10 red (2 tests) and #11 green are the same package; both observations are recorded as-is. This index does **not** declare the pair flaky nor stably-failing (does not re-verify 006's own tests).
+- T039-time per-story raw logs (T001–T038/T044/T045) were not persisted → **MISSING**.
+
+### T040 evidence — lint/vet/build gate
+
+| command | result | code version | log availability |
+|---|---|---|---|
+| `go vet ./...`; `go vet -tags integration ./...`; `go build ./...` | clean, 0 output | post-fix tree (committed as `8dd084c`) | `/tmp/txharbor-008-vet.log`, `-vet-int.log`, `-build.log` — present, 0 bytes (a clean run emits nothing; 0 bytes is consistent with, not proof of, a clean run) |
+| `gofmt -l .` | empty (per the T040 line record) | same | **MISSING** — no dedicated log persisted |
+
+### PENDING-GATE — orchestrator final regression gate (do not invent)
+
+This change is doc/comment-only (`tasks.md`, `quickstart.md`, one comment block in
+`internal/withdrawal/recovery_period_integration_test.go`); production code is unchanged. The final gate
+must run on the HEAD containing this change and fill these placeholders:
+
+| command | result | code version | log |
+|---|---|---|---|
+| `go test ./...` | PENDING-GATE | `<final HEAD; production code == 8dd084c>` | PENDING-GATE |
+| `go test -tags integration ./...` | PENDING-GATE | same | PENDING-GATE |
+| `gofmt -l .`; `go vet ./...`; `go vet -tags integration ./...`; `go build ./...` | PENDING-GATE | same | PENDING-GATE |
+
+### Evidence appendix — T001–T038, T044/T045 (one appendix, not 40 edits)
+
+- Acceptance-critical story tasks (T018–T038, T044/T045) each resolve to a named passing integration test
+  in `quickstart.md` §7 (V×SC×test×code-version table). Every such test is PASS in
+  `/tmp/txharbor-008-int-nonce.log` (`go test -tags integration ./internal/nonce`, 225 PASS / 0 FAIL, 14:33).
+- Foundation/unit tasks (T001–T017) are covered by `go test ./...` (10 pkgs ok,
+  `/tmp/txharbor-008-unit.log`) plus that nonce run; fake-RPC/scripted unit files remain
+  `EARLY-VALIDATION` and are **not** acceptance evidence.
+- No per-task raw logs survive → **MISSING**; the aggregate runs above are the only retained evidence.
+
+### Open items (unchanged)
+
+- **T000-P** (production provider selection) remains **OPEN**.
+- **plan.md gate A-13** (constitution XI chain-level `API → queue → nonce → signing → broadcast → confirmation` E2E) remains **OPEN**; 008 does not claim complete acceptance.
+- **T042** stays **OPEN**: its V-matrix table is now real (quickstart §7), but SC-09's log-side evidence is unit-only and is excluded by T042's own rule (see the quickstart §7 STOP cell).
+
+### Batch-2 review disposition (2026-09-16; static review 007→8dd084c → fixes in this tree)
+
+Rule: no finding is closed by narrowing a safety contract or by written risk
+acceptance. Each row ends in one of: fixed / not-a-defect (with basis) / open.
+Code version for all green rows below: this batch's tree (unit 909 pass / 12 pkgs,
+`/tmp/txharbor-008-batch2-unit.log`; nonce integration 236 pass,
+`/tmp/txharbor-008-batch2-nonce.log`; withdrawal directed 2 pass,
+`/tmp/txharbor-008-batch2-wd.log`; vet + vet-integration + build clean, gofmt empty).
+
+P1:
+1. Divergent view could drive irreversible consume — FIXED: `applyObservationTransitionTx`
+   now excludes `divergence` exactly like `unavailable` (reconcile.go); the anomaly
+   observation + `chain_view_divergence` hold are still recorded by the caller.
+   Proof: NEW `TestNonceReconcileDivergenceNeverTransitions` (contradictory L>P never
+   consumes; regressing P<P_prev never flips to in_flight; hold still established).
+2. Read path ignored the rebuild gate — FIXED per existing contract (read-api.md §2
+   already promised it): `ReadProvider` takes the gate and answers `unavailable`
+   before any DB access; serve wires the startup gate into the provider (serve.go).
+   Proof: NEW `TestReadAPIGateClosedIsUnavailable` (unit) + `TestNonceReadHandlerGateClosedIsUnavailable` (app).
+3. Read tx without lock/statement bound — FIXED: `applyReadGuards` runs the shared
+   statement guard + `SET LOCAL lock_timeout = '5s'` first in every read tx; guard or
+   lock failure maps to retryable `unavailable` with tx rollback. No new knob: reads
+   take no lock beyond one snapshot, so they reuse the repo's shared write bound.
+   Proof: NEW `read_lock_timeout_is_unavailable_then_releases` subtest (real PG: blocked
+   read fails closed ≈5s, pooled tx released, next read bound).
+4. Admission sampled the waterline but never advanced it — FIXED: `allocateInTx`
+   persists last_latest/last_pending via `updateScopeFrontierTx` on a successful read
+   (unavailable/divergence views leave the waterline intact for the PendingPrev
+   regression check). Reconcile ticks already persisted it (reconcile.go:421), so both
+   writers now agree. Proof: release_version test re-verifies against the persisted
+   waterline (explicit tick-simulation reset documented in-test); classify unit +
+   full nonce integration green.
+5. Rebuild probes missed domains/constraints — FIXED: `requiredConstraintNames` now
+   covers all seven 008 tables' named carriers (pkey/UNIQUE/FK/CHECK) and
+   `VerifyRebuild` adds row-level probes for registry/events/observations/ops-audit
+   plus sender/chain/registry_seq/version domains on bindings/scopes/holds. Scope:
+   008 tables only — not a whole-DB audit (unchanged contract). Proof: rebuild
+   integration tests green on real PG.
+6. Reconcile loop had no backoff/failure metric — FIXED: per-sender bounded backoff
+   (`interval<<(streak-1)`, cap `interval*8`, map pruned to live scopes, single
+   goroutine so no lock; cancellable between scopes) + label-free
+   `txharbor_nonce_reconcile_failures_total` (no sender/cause/error labels, FR-21).
+   Holds gained the label-free `txharbor_nonce_holds_total` with the same discipline.
+   Proof: NEW backoff integration test (failing scope retried at bounded cadence,
+   healthy scope unaffected) + extended `TestNonceMetricsContract`.
+7. T042 claimed green while quickstart contradicted it — FIXED by honesty, not code:
+   T042 reverted to `[ ]`; the real V×SC×test×code-version table lives in
+   quickstart §7 with the SC-09 cell STOPped pending a business ruling (options A/B/C
+   recorded there; default C: stays open). No contract language was rewritten to pass.
+8. T039/completion records lacked traceable evidence — FIXED: §Evidence Index &
+   Appendix above (per-command result, code version, log pointer; MISSING stated
+   where logs were not persisted; 0-byte clean-run logs annotated as consistent-with,
+   not proof-of). This batch's runs are logged at `/tmp/txharbor-008-batch2-*.log`.
+
+P2 (decided on real call paths, not blind adoption):
+- `BigFromNumeric` range — FIXED: now rejects >2⁶⁴−1 via `ValidateNonceRange`
+   (+ unit case). It is on the real read path (scope/bind parsing), so the check is load-bearing.
+- `NewAllocator` optional gate — FIXED by strengthening: gate is now a required
+   parameter (no caller can silently lose R5/FR-13); all call sites updated (build green).
+- Unauthenticated non-GET returned 405 — FIXED: auth precedes the method check
+   (401, no `Allow` leak); authenticated non-GET still 405. Proof: extended
+   `TestNonceReadHandlerAuthAndMethod`.
+- RPC dial after `net.Listen` — FIXED: dial moved before listen; a dial failure
+   aborts startup before the port accepts anything (all closes preserved).
+- mismatch/by-intent lock order — NOT A DEFECT, documented: not_bound returns before
+   any durable scope is known; mismatch echoes the immutable binding row under the same
+   snapshot with no annotation reads — neither takes the durable-scope lock, so there
+   is nothing to order (readapi.go + contracts/read-api.md §4 bilateral note).
+- quickstart metrics wording ("reads/admin series") — FIXED by correction to the real
+   series (allocations/replays/observations/holds/reconcile-failures); FR-21 requires
+   structured fields, not those series names, so this is prose accuracy, not a contract change.
+- RPC retry upper bound — FIXED + proven: fault double now counts per-method calls;
+   admission asserts exact `fltFaultCalls` per fault, `<= fltMaxAttempts` on the first
+   method, and zero head-read after a failed earlier read (observation stops at first failure).
+- Converge/replay vs gate/auth/registry re-verify — NOT A DEFECT: the gate is checked
+   at `Allocate` entry before any replay/converge path, and the gate is monotonic
+   (closed→open once at startup, never closes), so no mid-call re-verify can change the
+   verdict. Replay returns the binding created under its original authorization (input
+   equality required); post-commit revoke races resolve to "admission first → binding
+   stands" per the approved T033 coexistence semantic, with 009/011 re-validation as
+   defense-in-depth per T044 — re-verifying inside replay would rewrite that approved semantic.
+- Pending-only spike for new scopes — pinned, no new rule: NEW
+   `TestNonceBootstrapPendingOnlySpikeAdmitsAtP` (real Anvil, automine off) proves
+   0=latest<pending=P admits at P with zero holds and zero merge (existing policy).
+- 006-active hold release — pinned: NEW `TestNonceHoldReleaseUnderActive006Recovery`
+   proves release clears ONLY the named hold; the 006 row, coexisting holds, and the
+   006 pause are byte-untouched (006 pause still blocks allocation per T033).
+- Admin×allocation interleave — NOT A DEFECT (no new test): admin (admin.go:214) and
+   allocation (allocate.go:380) take the scope row `FOR UPDATE` first in the same
+   documented order (coordination → scope → 006 gates → 007 share → own rows), so no
+   reverse order exists to cycle; concurrency is covered by T018 + attempt semantics (T038).
+
+VERIFY (unconfirmed suspicions — checked, none became defects):
+- caller_id absent from `authorizationVersionDigest` — NOT A DEFECT: 008 takes no caller
+   identity input (`AllocationRequest` has intent/chain/sender/authorization only); the
+   authorization is referenced purely by (id, chain) and 007's row is authoritative.
+   The digest covers every 008-read field of that row; a 007-side reassignment is a
+   007 state transition caught by the admission-time `FOR SHARE` + active predicate, not
+   by the historical digest (evidence, not a live guard).
+- Authorization expiry equality boundary — NOT A DEFECT: `expires_at > clock_timestamp()`
+   fails closed at exact equality (treated expired). Safe side, no change.
+- 006-probe degradation masking other errors — NOT A DEFECT: any non-006 in-tx statement
+   error returns `unavailable` before commit; `degradedBy006Failure` can only be true when
+   every fact read succeeded and the sole swallowed error is the best-effort 006 probe —
+   and that serve-instead-of-collapse behavior is the approved T034 contract (real-PG test).
+- Recovery-period row-count stability as proof — ADDRESSED as documentation scope, not
+   test expansion: the withdrawal comment now states Phase B is path-scoped (no-new-rows/
+   no-new-tables in the above-007 set), with the 002–006 snapshot + phase/seq + event-count
+   assertions living in `TestWithdrawalRecoveryPeriodZeroSideEffectsOutsideScope`
+   (comment-only change to a 007-owned file; no SQL/prod change; withdrawal directed 2/2 green).
+
+Remaining gaps (not defects, recorded open): T042 (SC-09 business ruling), T000-P, A-13 —
+see Open items above, unchanged.
+
 
 ---
 

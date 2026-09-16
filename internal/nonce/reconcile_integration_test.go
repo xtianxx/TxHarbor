@@ -28,6 +28,8 @@ import (
 	"errors"
 	"math/big"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -318,6 +320,172 @@ func TestNonceReconcileNeverProducesReleased(t *testing.T) {
 	}
 	if n := recCount(t, ctx, pool, `SELECT count(*) FROM nonce_binding_events WHERE to_state = 'released'`); n != 0 {
 		t.Fatalf("reconcile produced %d released events, want 0", n)
+	}
+}
+
+// TestNonceReconcileDivergenceNeverTransitions proves a divergent observation
+// (contradictory L > P, and regressing P < P_prev) is treated exactly like an
+// unavailable read by the transition applier: a binding whose nonce is below
+// the contradictory latest is NEVER consumed, and the regressing pending view
+// never moves an allocated binding to in_flight. The classification still
+// records its anomaly observation, and the full reconcile path still
+// establishes the chain_view_divergence hold (the ambiguity is held, not
+// silently resolved) — observation.md §2/§2.1, classify.go.
+func TestNonceReconcileDivergenceNeverTransitions(t *testing.T) {
+	ctx, pool := convergeSetup(t)
+	recSeedScope(t, ctx, pool)
+	// nonce 4 is below the contradictory L=10, so without the guard the
+	// applier consumes it; under the regressing view (L=3,P=5) it would flip
+	// to in_flight.
+	recSeedBinding(t, ctx, pool, "rec-div-consumed", 4, StateAllocated)
+	// nonce 3 exercises the regressing [L,P) window (L=3,P=5) that would flip
+	// an allocated binding to in_flight without the guard.
+	recSeedBinding(t, ctx, pool, "rec-div-regress", 3, StateAllocated)
+	// A durable last_pending of 9 makes a fresh pending of 5 a regression.
+	recMustExec(t, ctx, pool, `INSERT INTO nonce_scope_state
+		(chain_id, sender, reconciled_floor, last_latest, last_pending)
+		VALUES ($1, $2, NULL, 5::numeric, 9::numeric)`, recChainID, recSender)
+
+	// (a) Contradictory view L > P: observe 10/4 (P < durable 9 too).
+	contradictory := recPersistObservation(t, ctx, pool, 10, 4, ClassificationDivergence)
+	recApplyAll(t, ctx, pool, contradictory)
+	// (b) Regressing view L <= P: observe 3/5 with durable last_pending 9.
+	regressing := recPersistObservation(t, ctx, pool, 3, 5, ClassificationDivergence)
+	recApplyAll(t, ctx, pool, regressing)
+
+	for _, id := range []string{"rec-div-consumed", "rec-div-regress"} {
+		if got := recBindingState(t, ctx, pool, id); got != StateAllocated {
+			t.Errorf("divergent observation moved %s to %q, want untouched %q", id, got, StateAllocated)
+		}
+		if got := recEventTargets(t, ctx, pool, id); len(got) != 0 {
+			t.Errorf("divergent observation wrote events for %s: %v", id, got)
+		}
+	}
+
+	// The anomaly evidence is still persisted (never dropped), and the full
+	// reconcile path still establishes the divergence hold while admitting
+	// nothing.
+	if n := recCount(t, ctx, pool, `SELECT count(*) FROM nonce_observations
+		WHERE chain_id = $1 AND sender = $2 AND classification = 'divergence'`,
+		recChainID, recSender); n != 2 {
+		t.Fatalf("divergence observations = %d, want the 2 persisted anomalies", n)
+	}
+	fullReconcile(t, ctx, pool, 10, 4)
+	if got := recBindingState(t, ctx, pool, "rec-div-consumed"); got != StateAllocated {
+		t.Fatalf("full reconcile consumed from a divergent view: state = %q", got)
+	}
+	if n := recCount(t, ctx, pool, `SELECT count(*) FROM nonce_scope_holds
+		WHERE chain_id = $1 AND sender = $2 AND cause = 'chain_view_divergence' AND status = 'active'`,
+		recChainID, recSender); n != 1 {
+		t.Fatalf("divergence holds = %d, want exactly 1 established by the full path", n)
+	}
+	if n := recCount(t, ctx, pool, `SELECT count(*) FROM nonce_bindings WHERE state = 'consumed'`); n != 0 {
+		t.Fatalf("divergent observations produced %d consumed bindings, want 0", n)
+	}
+}
+
+// fullReconcile drives reconcileScopeInTx end to end for the seeded scope with
+// the given chain view, so the hold/anomaly behavior of the real T-observe path
+// is exercised (not just the applier).
+func fullReconcile(t *testing.T, ctx context.Context, pool *pgxpool.Pool, latest, pending int64) {
+	t.Helper()
+	tx, err := pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin full reconcile tx: %v", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	obs := Observation{
+		ChainID:      recChainID,
+		Sender:       recSender,
+		Kind:         ObservationKindReconcile,
+		LatestCount:  big.NewInt(latest),
+		PendingCount: big.NewInt(pending),
+		HeadNumber:   big.NewInt(1),
+		HeadHash:     "0x" + strings.Repeat("cd", 32),
+	}
+	if err := reconcileScopeInTx(ctx, tx, recChainID, recSender, obs); err != nil {
+		t.Fatalf("reconcileScopeInTx: %v", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		t.Fatalf("commit full reconcile tx: %v", err)
+	}
+}
+
+// recSink is a fake ReconcileSink: it counts failure ticks with no labels at
+// all, so the test proves a failing scope can never become a metric label.
+type recSink struct {
+	mu sync.Mutex
+	n  int
+}
+
+func (s *recSink) ObserveNonceReconcileFailure() {
+	s.mu.Lock()
+	s.n++
+	s.mu.Unlock()
+}
+
+func (s *recSink) count() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.n
+}
+
+// TestNonceReconcileLoopBacksOffFailingScope proves P1-6's bound: a scope that
+// keeps failing is retried under a bounded per-sender backoff instead of every
+// tick, a healthy scope in the same pass keeps converging at the cadence (no
+// starvation), each failure is counted through the low-cardinality sink with a
+// fixed classification (never a sender label), and cancellation joins cleanly.
+func TestNonceReconcileLoopBacksOffFailingScope(t *testing.T) {
+	ctx, pool := convergeSetup(t)
+	recSeedScope(t, ctx, pool) // the healthy sender, recSender
+	const failSender = "0x9999999999999999999999999999999999999999"
+	recMustExec(t, ctx, pool, `INSERT INTO nonce_wallet_registry (chain_id, sender, state, registry_seq)
+		VALUES ($1, $2, 'active', 1)`, recChainID, failSender)
+
+	var healthy, failing atomic.Int64
+	sink := &recSink{}
+	loop := NewReconcileLoop(pool, nil, recChainID, 20*time.Millisecond, discardLog(), sink)
+	// The scope list and the sink are real; only the per-scope work is scripted
+	// so exactly one sender fails every time it is actually attempted.
+	loop.reconcile = func(_ context.Context, sender string) error {
+		if sender == failSender {
+			failing.Add(1)
+			return errors.New("persistent scope failure")
+		}
+		healthy.Add(1)
+		return nil
+	}
+
+	runCtx, cancel := context.WithCancel(ctx)
+	done := make(chan struct{})
+	go func() { defer close(done); loop.Run(runCtx) }()
+
+	reconcileWaitFor(t, 3*time.Second, func() bool { return healthy.Load() >= 8 })
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("Run did not return after cancellation (ctx.Done not respected)")
+	}
+	stoppedHealthy, stoppedFailing := healthy.Load(), failing.Load()
+
+	// Backoff, not a per-tick tight retry: the failing scope was attempted
+	// strictly fewer times than the healthy one over the same passes. Without
+	// the bound both counters advance once per pass.
+	if stoppedFailing >= stoppedHealthy {
+		t.Fatalf("failing scope attempted %d times vs healthy %d: no backoff, tight per-tick retry",
+			stoppedFailing, stoppedHealthy)
+	}
+
+	if n := sink.count(); n != int(stoppedFailing) {
+		t.Fatalf("failure counter = %d, want exactly the %d failed attempts", n, stoppedFailing)
+	}
+
+	// No further work after cancel.
+	time.Sleep(4 * 20 * time.Millisecond)
+	if healthy.Load() != stoppedHealthy || failing.Load() != stoppedFailing {
+		t.Fatalf("loop kept working after cancel: healthy %d->%d failing %d->%d",
+			stoppedHealthy, healthy.Load(), stoppedFailing, failing.Load())
 	}
 }
 

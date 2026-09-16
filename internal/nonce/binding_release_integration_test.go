@@ -133,14 +133,16 @@ func relRunner(pool *pgxpool.Pool, caller relCaller) *nonce.AdminRunner {
 	}))
 }
 
-// relAllocator wires the ungated Allocator (the unit-test seam) over the same
-// healthy view, used for the never-reused/replacement assertions.
+// relAllocator wires the Allocator with an explicitly opened gate over the
+// same healthy view, used for the never-reused/replacement assertions.
 func relAllocator(pool *pgxpool.Pool) *nonce.Allocator {
+	admitGate := nonce.NewRebuildGate()
+	admitGate.Open()
 	return nonce.NewAllocator(pool, nonce.NewObserver(relHealthyRPC(), nonce.ObserverConfig{
 		RPCTimeout:   2 * time.Second,
 		RetryInitial: time.Millisecond,
 		RetryMax:     5 * time.Millisecond,
-	}))
+	}), admitGate)
 }
 
 // relJSONRPCServer is a real HTTP JSON-RPC endpoint for the CLI dispatch test:

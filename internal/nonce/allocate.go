@@ -122,6 +122,15 @@ type AllocationSink interface {
 	ObserveNonceObservation(classification string)
 }
 
+// holdEventSink is the optional extension the concrete metrics registry
+// implements for hold establishments. It is a separate interface so existing
+// AllocationSink doubles stay valid (an optional capability, not a widened
+// requirement). The count is label-free: the cause rides the redacted log
+// line and the hold row, never a metric label.
+type holdEventSink interface {
+	ObserveNonceHoldEstablished()
+}
+
 // allocationObservation is the structured, pre-redaction payload of one
 // admission for the T020 observability funnel. It carries no key material:
 // emitAllocation runs every string field through logx.Redact before slog.
@@ -193,6 +202,16 @@ func (a *Allocator) emitAllocation(obs allocationObservation) {
 		if obs.classification != "" {
 			a.sink.ObserveNonceObservation(obs.classification)
 		}
+		// A hold established by this attempt's classification refusal is
+		// exactly the case holdID != "" with a classification set: the
+		// pre-existing-hold refusal path sets holdID but never classifies,
+		// so it is excluded here (its free-form "active holds: ..." cause
+		// must never become a label). Rolled-back paths never set holdID.
+		if obs.holdID != "" && obs.classification != "" {
+			if hs, ok := a.sink.(holdEventSink); ok {
+				hs.ObserveNonceHoldEstablished()
+			}
+		}
 	}
 	logger := a.logger
 	if logger == nil {
@@ -210,20 +229,17 @@ func (a *Allocator) emitAllocation(obs allocationObservation) {
 		"registry_seq", obs.registrySeq)
 }
 
-// NewAllocator wires the pooled transaction opener and the pre-tx observer
-// (T017 constructs it with the serve pool and a real RPC observer). An
-// optional startup rebuild gate (R5/FR-13) may be supplied; while it is closed
-// every admission refuses rebuild_incomplete before any RPC or DB access. No
-// gate leaves the allocator ungated (the unit-test seam).
-func NewAllocator(pool *pgxpool.Pool, observer *Observer, gate ...*RebuildGate) *Allocator {
-	a := &Allocator{
+// NewAllocator wires the pooled transaction opener, the pre-tx observer and
+// the required startup rebuild gate (R5/FR-13): while it is closed every
+// admission refuses rebuild_incomplete before any RPC or DB access. The gate
+// is required (never variadic-optional) so no caller can silently lose the
+// R5/FR-13 protection; tests pass an explicitly opened gate.
+func NewAllocator(pool *pgxpool.Pool, observer *Observer, gate *RebuildGate) *Allocator {
+	return &Allocator{
 		observer: observer,
+		gate:     gate,
 		begin:    func(ctx context.Context) (allocTx, error) { return pool.Begin(ctx) },
 	}
-	if len(gate) > 0 {
-		a.gate = gate[0]
-	}
-	return a
 }
 
 // Allocate is the T-allocate entry point: it returns the volatile binding
@@ -452,6 +468,20 @@ func allocateInTx(ctx context.Context, tx txQuerier, req AllocationRequest, obs 
 	observationID, err := insertObservationTx(ctx, tx, obs)
 	if err != nil {
 		return allocationTxResult{}, err
+	}
+
+	// Persist the verified waterline in the same transaction. last_* are
+	// "last observed" facts, not chain truth and never the allocated nonce:
+	// only a successful read's counts advance them, so a failed/expired read
+	// (nil counts) and a contradictory view (divergence) leave the previous
+	// waterline intact for the next admission's PendingPrev comparison.
+	if obs.LatestCount != nil && obs.PendingCount != nil &&
+		obs.Classification != ClassificationUnavailable &&
+		obs.Classification != ClassificationDivergence {
+		if err := updateScopeFrontierTx(ctx, tx, req.ChainID, req.Sender,
+			obs.LatestCount, obs.PendingCount, observationID); err != nil {
+			return allocationTxResult{}, err
+		}
 	}
 
 	if decision.Candidate == nil {

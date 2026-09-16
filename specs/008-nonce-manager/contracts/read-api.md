@@ -128,6 +128,10 @@ never claims absence.
   after). Absent scope row ⇒ `not_bound` under the retry rule above. 006 state in this snapshot
   stays best-effort (007 single-snapshot protocol); cross-process 006 ordering is the consumer's
   own gate re-read (009 R6 gate-table lock), not this read.
+- The scope-row `FOR SHARE` ordering above applies to `bound`/`terminal` only: `not_bound` returns
+  before any durable scope is known, and `mismatch` returns after reading the immutable binding
+  row under the same snapshot and performs no annotation reads — neither takes the durable-scope
+  lock (there is nothing to order), so no cross-version composite is possible for either.
 - Consumer lock participation (bilateral): a consumer (009) MAY take `SELECT … FOR SHARE` on the
   same scope row directly in its own admission transaction (same database) BEFORE its gate reads
   and hold it to its own `COMMIT`, with the fixed cross-transaction order — 008 scope row, then

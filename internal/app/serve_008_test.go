@@ -55,12 +55,47 @@ func TestNonceReadHandlerAuthAndMethod(t *testing.T) {
 		}
 	}
 
+	// Auth precedes the method check: an unauthenticated non-GET is 401, not
+	// 405, so the endpoint's method surface is never disclosed pre-auth.
+	reqPost := httptest.NewRequest(http.MethodPost, "/nonce/bindings/b-1", nil)
+	recPost := httptest.NewRecorder()
+	h.ServeHTTP(recPost, reqPost)
+	if recPost.Code != http.StatusUnauthorized {
+		t.Fatalf("unauthenticated POST status = %d, want 401 (auth precedes method)", recPost.Code)
+	}
+	if recPost.Header().Get("Allow") != "" {
+		t.Fatalf("unauthenticated POST leaked Allow: %q", recPost.Header().Get("Allow"))
+	}
+
 	req := httptest.NewRequest(http.MethodPost, "/nonce/bindings/b-1", nil)
 	req.Header.Set("Authorization", "Bearer "+testNonceReadToken)
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
 	if rec.Code != http.StatusMethodNotAllowed || rec.Header().Get("Allow") != http.MethodGet {
 		t.Fatalf("POST status/allow = %d/%q, want 405/GET", rec.Code, rec.Header().Get("Allow"))
+	}
+}
+
+// TestNonceReadHandlerGateClosedIsUnavailable wires the real provider over a
+// closed rebuild gate: an authenticated read is the retryable 503, never a
+// served fact (read-api.md §2). A nil pool is deliberate — a closed gate must
+// answer before any transaction opens.
+func TestNonceReadHandlerGateClosedIsUnavailable(t *testing.T) {
+	gate := nonce.NewRebuildGate()
+	gate.KeepClosed("rebuild_incomplete: named carrier missing")
+	provider := nonce.NewReadProvider(nil, testNonceReadToken, gate)
+	h := &nonceReadHandler{provider: provider}
+
+	req := httptest.NewRequest(http.MethodGet, "/nonce/bindings/b-1", nil)
+	req.Header.Set("Authorization", "Bearer "+testNonceReadToken)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("gate-closed read status = %d, want 503", rec.Code)
+	}
+	if body := rec.Body.String(); !strings.Contains(body, `"outcome":"unavailable"`) ||
+		!strings.Contains(body, `"code":"unavailable"`) {
+		t.Fatalf("gate-closed body = %s, want unavailable", body)
 	}
 }
 

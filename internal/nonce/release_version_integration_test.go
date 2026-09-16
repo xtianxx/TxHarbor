@@ -150,7 +150,9 @@ func vdRunner(pool *pgxpool.Pool, caller vdCaller) *nonce.AdminRunner {
 }
 
 func vdAllocator(pool *pgxpool.Pool, caller vdCaller) *nonce.Allocator {
-	return nonce.NewAllocator(pool, vdObserver(caller))
+	admitGate := nonce.NewRebuildGate()
+	admitGate.Open()
+	return nonce.NewAllocator(pool, vdObserver(caller), admitGate)
 }
 
 // vdRequest is one hold-release attempt.
@@ -516,6 +518,15 @@ func TestNonceReleaseVersionDriftIntegration(t *testing.T) {
 	if h1.cause != nonce.CauseUnexplainedGap {
 		t.Fatalf("first hold cause = %q, want %q", h1.cause, nonce.CauseUnexplainedGap)
 	}
+
+	// The held admission above persisted its P=2 sample into the waterline
+	// (admissions record last-observed facts like ticks do). No reconcile
+	// loop runs in this test, so simulate the stabilizing tick production
+	// would run before the release: without it no fresh view could ever
+	// re-verify consistent against the spiked waterline.
+	nonceMustExec(t, sqlDB, `UPDATE nonce_scope_state
+		SET last_latest = 0, last_pending = 0 WHERE chain_id = $1 AND sender = $2`,
+		vdChain, vdSenderNew)
 
 	h1Released := vdWantApplied(t, sqlDB, healthy,
 		vdRequest("op-vd-new-1", vdSenderNew, h1.holdID, vdObsNewRef, vdEvidence))

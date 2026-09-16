@@ -567,6 +567,21 @@ func TestNonceMetricsContract(t *testing.T) {
 			t.Fatalf("%s{classification=%s} = %v, want 1", NonceObservationsMetricName, classification, got)
 		}
 	}
+
+	// The two label-free 008 series: one hold establishment and three
+	// backoff-entering reconcile failures. Both counters carry no labels, so
+	// no sender, cause, or error text can ever become a label value
+	// (FR-21/SC-09 fixed vocabulary).
+	m.ObserveNonceHoldEstablished()
+	if got := gatherCounters(t, m, NonceHoldsMetricName)[""]; got != 1 {
+		t.Fatalf("%s = %v, want 1", NonceHoldsMetricName, got)
+	}
+	m.ObserveNonceReconcileFailure()
+	m.ObserveNonceReconcileFailure()
+	m.ObserveNonceReconcileFailure()
+	if got := gatherCounters(t, m, NonceReconcileFailuresMetricName)[""]; got != 3 {
+		t.Fatalf("%s = %v, want 3", NonceReconcileFailuresMetricName, got)
+	}
 }
 
 // TestWithdrawalMetricsNoSecretLabels freezes the FR-20 zero-secrets rule for
