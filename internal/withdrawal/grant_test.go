@@ -7,6 +7,7 @@ package withdrawal
 import (
 	"context"
 	"errors"
+	"math"
 	"strings"
 	"testing"
 	"time"
@@ -260,6 +261,69 @@ func TestGrantSupplyScopeInvalidBeforePoolUse(t *testing.T) {
 			}
 			if e.Field != tc.field {
 				t.Fatalf("SupplyGrant() field = %q, want %q", e.Field, tc.field)
+			}
+		})
+	}
+}
+
+// TestGrantSupplyFeeTripleValidation is T016: the PB-C2 fee triple on a scoped
+// supply. Amounts are native-coin smallest-unit integers, so a negative cap is
+// illegal; a scope that carries any fee dimension must carry the applicable
+// caps (fee_max_total and fee_max_per_gas present, never "unlimited"); the
+// EIP-1559 priority cap MUST NOT exceed the per-gas max_fee cap, while
+// fee_max_priority == 0 selects the legacy gas_price path; and an all-zero
+// triple is a scope with no fee constraint (pre-T016 shape kept so a scoped
+// supply that predates fee scoping stays valid). Each boundary is asserted on
+// both sides: at-cap accepted, cap+1 refused.
+func TestGrantSupplyFeeTripleValidation(t *testing.T) {
+	const maxInt64 = int64(math.MaxInt64)
+	now := time.Now()
+	cases := []struct {
+		name                    string
+		total, perGas, priority int64
+		wantField               string // "" means valid
+	}{
+		{"full triple", 21000, 2, 1, ""},
+		{"priority at per-gas cap", 10, 10, 10, ""},
+		{"priority below per-gas cap", 10, 10, 9, ""},
+		{"legacy gas_price path (priority zero)", 10, 10, 0, ""},
+		{"native integer upper bound", maxInt64, maxInt64, maxInt64, ""},
+		{"all zero is not fee-bearing", 0, 0, 0, ""},
+		{"priority one above per-gas cap refused", 10, 10, 11, "fee_max_priority"},
+		{"priority above cap with larger total refused", 1000, 10, 11, "fee_max_priority"},
+		{"missing total cap refused", 0, 10, 0, "fee_max_total"},
+		{"missing per-gas cap refused", 100, 0, 0, "fee_max_per_gas"},
+		{"priority present without per-gas cap refused", 100, 0, 1, "fee_max_per_gas"},
+		{"negative total refused", -1, 10, 1, "fee_max_total"},
+		{"negative per-gas refused", 10, -1, 0, "fee_max_per_gas"},
+		{"negative priority refused", 10, 10, -1, "fee_max_priority"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			op := grantScopedOp()
+			op.FeeMaxTotal, op.FeeMaxPerGas, op.FeeMaxPriority = tc.total, tc.perGas, tc.priority
+
+			norm, err := validateSupplyOpInput(op, now)
+			if tc.wantField == "" {
+				if err != nil {
+					t.Fatalf("validateSupplyOpInput() error = %v, want nil", err)
+				}
+				if norm.FeeMaxTotal != tc.total || norm.FeeMaxPerGas != tc.perGas || norm.FeeMaxPriority != tc.priority {
+					t.Fatalf("normalized fee triple = (%d, %d, %d), want (%d, %d, %d)",
+						norm.FeeMaxTotal, norm.FeeMaxPerGas, norm.FeeMaxPriority,
+						tc.total, tc.perGas, tc.priority)
+				}
+				return
+			}
+			var e *Error
+			if !errors.As(err, &e) {
+				t.Fatalf("validateSupplyOpInput() error = %v (%T), want *Error", err, err)
+			}
+			if e.Code != CodeValidationFailed {
+				t.Fatalf("error code = %q, want %q", e.Code, CodeValidationFailed)
+			}
+			if e.Field != tc.wantField {
+				t.Fatalf("error field = %q, want %q", e.Field, tc.wantField)
 			}
 		})
 	}

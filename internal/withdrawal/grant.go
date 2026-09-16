@@ -119,6 +119,51 @@ SELECT action, authorization_id, detail FROM withdrawal_grant_audit WHERE operat
 	grantSelectReadOnlySQL = `
 SELECT caller_id, chain_id, asset, recipient, amount::text, state, expires_at
 FROM withdrawal_authorizations WHERE authorization_id = $1`
+
+	// scopeSelectSQL reads the 1:1 scope row for a grant (T012). The supply/revoke
+	// tx holds the grant row FOR UPDATE, so all scope writers are serialized on
+	// the grant and no separate lock is taken here (data-model.md lock matrix:
+	// "fresh scope insert (no lock)"). A missing row is pre-extension stock.
+	scopeSelectSQL = `
+SELECT authorization_id, intent_id, request_id, sender, fee_max_total,
+       fee_max_per_gas, fee_max_priority, allows_fee_replacement,
+       authorization_version, attested_by
+FROM withdrawal_authorization_scopes WHERE authorization_id = $1`
+
+	// scopeInsertSQL writes the scope row in the same tx as the first supply
+	// (T012). authorization_version starts at 1 (data-model.md).
+	scopeInsertSQL = `
+INSERT INTO withdrawal_authorization_scopes
+    (authorization_id, intent_id, request_id, sender, fee_max_total,
+     fee_max_per_gas, fee_max_priority, allows_fee_replacement,
+     authorization_version, attested_by)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`
+
+	// scopeBumpVersionSQL advances the monotonic version and nothing else:
+	// applied scope CONTENT is immutable once written (data-model.md,
+	// T-revoke-sync / T-reissue "never rewrite applied rows"). A revoke bumps
+	// the version (scope follows grant state) and a revoke-then-re-supply cycle
+	// bumps it again, so a version persisted before the change never matches
+	// afterwards (009 delivery re-check).
+	scopeBumpVersionSQL = `
+UPDATE withdrawal_authorization_scopes
+SET authorization_version = authorization_version + 1
+WHERE authorization_id = $1`
+
+	// keyAuthoritySelectSQL re-reads the presented key row FOR SHARE inside the
+	// supply tx (T015, R-PB10). Matching the intake lookup predicate exactly
+	// means a revocation committed before our SHARE is observed and one later
+	// blocks until our COMMIT.
+	keyAuthoritySelectSQL = `
+SELECT caller_id FROM api_key
+WHERE key_hash = $1 AND (revoked_at IS NULL OR revoked_at > now())
+FOR SHARE`
+
+	// callerAuthoritySelectSQL re-reads the caller row FOR SHARE (T015,
+	// defense in depth: no UPDATE path exists in-tree, but a direct operator
+	// write must still be observed).
+	callerAuthoritySelectSQL = `
+SELECT can_create FROM caller WHERE caller_id = $1 FOR SHARE`
 )
 
 // OpInput is one supply op-input — the eight fields bound by data-model
@@ -175,6 +220,24 @@ func (op OpInput) scoped() bool {
 type GrantOutcome struct {
 	Action          string // Table 6 audit action ('supplied', 'resupplied', ...)
 	AuthorizationID string // grant id the attempt operated on
+}
+
+// In-tx authority check names (T015, R-PB10): a refusal records the failed
+// check in the audit reason so the cause is durable, not just returned.
+const (
+	authorityCheckAPIKey  = "api_key"
+	authorityCheckCaller  = "caller"
+	authorityCheckIssuers = "issuer_allowlist"
+)
+
+// SupplyAuthority is the in-tx authority re-verification input of
+// SupplyGrantAuthorized (T015, R-PB10). The presented key is hashed for the
+// `FOR SHARE` re-read and is never persisted or logged; the allowlist is
+// deployment config. It is not op-input: it never joins convergence comparison
+// and never enters the audit snapshot.
+type SupplyAuthority struct {
+	PresentedKey string
+	Issuers      *IssuerAllowlist
 }
 
 // MintOperationID returns a fresh opaque attempt id: 16 bytes from crypto/rand
@@ -236,6 +299,31 @@ func (g grantRow) matchesOp(op OpInput) bool {
 	return g.callerID == op.CallerID && g.chainID == op.ChainID &&
 		g.asset == op.Asset && g.recipient == op.Recipient &&
 		g.amount == op.Amount && equalOptionalTime(g.expiresAt, op.ExpiresAt)
+}
+
+// scopeRow is one scope row (data-model.md) as read/written by the supply and
+// revoke transactions.
+type scopeRow struct {
+	authorizationID      string
+	intentID             string
+	requestID            string
+	sender               string
+	feeMaxTotal          int64
+	feeMaxPerGas         int64
+	feeMaxPriority       int64
+	allowsFeeReplacement bool
+	authorizationVersion int64
+	attestedBy           string
+}
+
+// matchesOp reports whether the stored scope content binds exactly the
+// presented scope payload. authorization_version is a monotonic counter, not
+// content, so it is excluded (T012 guarded resupply comparison).
+func (s scopeRow) matchesOp(op OpInput) bool {
+	return s.intentID == op.IntentID && s.requestID == op.RequestID &&
+		s.sender == op.Sender && s.feeMaxTotal == op.FeeMaxTotal &&
+		s.feeMaxPerGas == op.FeeMaxPerGas && s.feeMaxPriority == op.FeeMaxPriority &&
+		s.allowsFeeReplacement == op.AllowsFeeReplacement && s.attestedBy == op.AttestedBy
 }
 
 // attemptRow is one recorded audit attempt read by operation id.
@@ -337,6 +425,21 @@ func validateSupplyOpInput(op OpInput, now time.Time) (OpInput, error) {
 		}
 		op.Sender = sender
 	}
+	if err := validateFeeScope(op); err != nil {
+		return OpInput{}, err
+	}
+	return op, nil
+}
+
+// validateFeeScope enforces the PB-C2 fee triple (data-model.md fee domains +
+// the frozen priority <= max_fee cross-check). Amounts are native-coin
+// smallest-unit integers, so a negative cap is illegal. A scope that carries
+// any fee dimension must carry the applicable caps: a missing fee_max_total or
+// fee_max_per_gas is refused, never read as "unlimited". fee_max_priority == 0
+// selects the legacy gas_price path (only the per-gas cap applies); a positive
+// priority MUST stay within fee_max_per_gas. An all-zero triple is a scope with
+// no fee constraint and keeps the pre-extension shape.
+func validateFeeScope(op OpInput) error {
 	for _, fee := range []struct {
 		value int64
 		field string
@@ -346,11 +449,29 @@ func validateSupplyOpInput(op OpInput, now time.Time) (OpInput, error) {
 		{op.FeeMaxPriority, "fee_max_priority"},
 	} {
 		if fee.value < 0 {
-			return OpInput{}, New(CodeValidationFailed, fee.field+" must not be negative").
+			return New(CodeValidationFailed, fee.field+" must not be negative").
 				WithField(fee.field)
 		}
 	}
-	return op, nil
+	if op.FeeMaxTotal == 0 && op.FeeMaxPerGas == 0 && op.FeeMaxPriority == 0 {
+		return nil
+	}
+	if op.FeeMaxTotal == 0 {
+		return New(CodeValidationFailed,
+			"fee_max_total is required once a scope carries a fee dimension; a missing applicable cap is refused").
+			WithField("fee_max_total")
+	}
+	if op.FeeMaxPerGas == 0 {
+		return New(CodeValidationFailed,
+			"fee_max_per_gas is required once a scope carries a fee dimension; a missing applicable cap is refused").
+			WithField("fee_max_per_gas")
+	}
+	if op.FeeMaxPriority > op.FeeMaxPerGas {
+		return New(CodeValidationFailed,
+			"fee_max_priority must not exceed fee_max_per_gas (the EIP-1559 priority cap stays within the max_fee cap); use 0 for the legacy gas_price path").
+			WithField("fee_max_priority")
+	}
+	return nil
 }
 
 // validateRevokeInput validates a revoke attempt before any pool use.
@@ -422,6 +543,65 @@ func readGrantReadOnly(ctx context.Context, pool *pgxpool.Pool, authorizationID 
 	return &g, nil
 }
 
+// readScopeTx reads the scope row for a grant inside tx (nil when absent =
+// pre-extension stock).
+func readScopeTx(ctx context.Context, tx pgx.Tx, authorizationID string) (*scopeRow, error) {
+	var s scopeRow
+	err := tx.QueryRow(ctx, scopeSelectSQL, authorizationID).
+		Scan(&s.authorizationID, &s.intentID, &s.requestID, &s.sender,
+			&s.feeMaxTotal, &s.feeMaxPerGas, &s.feeMaxPriority,
+			&s.allowsFeeReplacement, &s.authorizationVersion, &s.attestedBy)
+	switch {
+	case errors.Is(err, pgx.ErrNoRows):
+		return nil, nil
+	case err != nil:
+		return nil, fmt.Errorf("read scope: %w", err)
+	}
+	return &s, nil
+}
+
+// readScopeReadOnly reads the scope row via the pool (PK-race recovery, where
+// the winner tx has already committed).
+func readScopeReadOnly(ctx context.Context, pool *pgxpool.Pool, authorizationID string) (*scopeRow, error) {
+	var s scopeRow
+	err := pool.QueryRow(ctx, scopeSelectSQL, authorizationID).
+		Scan(&s.authorizationID, &s.intentID, &s.requestID, &s.sender,
+			&s.feeMaxTotal, &s.feeMaxPerGas, &s.feeMaxPriority,
+			&s.allowsFeeReplacement, &s.authorizationVersion, &s.attestedBy)
+	switch {
+	case errors.Is(err, pgx.ErrNoRows):
+		return nil, nil
+	case err != nil:
+		return nil, fmt.Errorf("read scope: %w", err)
+	}
+	return &s, nil
+}
+
+// insertScopeTx writes the scope row in the same tx as the grant (T012) and
+// asserts exactly one row.
+func insertScopeTx(ctx context.Context, tx pgx.Tx, op OpInput, version int64) error {
+	tag, err := tx.Exec(ctx, scopeInsertSQL, op.AuthorizationID, op.IntentID,
+		op.RequestID, op.Sender, op.FeeMaxTotal, op.FeeMaxPerGas, op.FeeMaxPriority,
+		op.AllowsFeeReplacement, version, op.AttestedBy)
+	if err != nil {
+		return fmt.Errorf("insert scope: %w", err)
+	}
+	if tag.RowsAffected() != 1 {
+		return fmt.Errorf("insert scope affected %d rows, want 1", tag.RowsAffected())
+	}
+	return nil
+}
+
+// bumpScopeVersionTx advances the scope version in the revoke/re-supply tx
+// (T021). Stock grants carry no scope, so zero rows updated is expected and not
+// an error.
+func bumpScopeVersionTx(ctx context.Context, tx pgx.Tx, authorizationID string) error {
+	if _, err := tx.Exec(ctx, scopeBumpVersionSQL, authorizationID); err != nil {
+		return fmt.Errorf("bump scope version: %w", err)
+	}
+	return nil
+}
+
 // insertAuditTx appends one audit row inside tx and asserts exactly one row.
 func insertAuditTx(ctx context.Context, tx pgx.Tx, op OpInput, callerID int64, operator, reason, action string) error {
 	tag, err := tx.Exec(ctx, grantAuditInsertSQL, op.OperationID, op.AuthorizationID,
@@ -435,8 +615,9 @@ func insertAuditTx(ctx context.Context, tx pgx.Tx, op OpInput, callerID int64, o
 	return nil
 }
 
-// runSupplyTx owns BEGIN..COMMIT for one supply attempt.
-func runSupplyTx(ctx context.Context, pool *pgxpool.Pool, op OpInput, operator, reason string) (*GrantOutcome, error) {
+// runSupplyTx owns BEGIN..COMMIT for one supply attempt. auth is the optional
+// in-tx authority re-check (T015); nil keeps the transport-free library path.
+func runSupplyTx(ctx context.Context, pool *pgxpool.Pool, op OpInput, auth *SupplyAuthority, operator, reason string) (*GrantOutcome, error) {
 	tx, err := pool.BeginTx(ctx, pgx.TxOptions{})
 	if err != nil {
 		return nil, fmt.Errorf("begin supply transaction: %w", err)
@@ -445,6 +626,24 @@ func runSupplyTx(ctx context.Context, pool *pgxpool.Pool, op OpInput, operator, 
 
 	if _, err := tx.Exec(ctx, grantWriteGuard); err != nil {
 		return nil, fmt.Errorf("supply transaction statement guard: %w", err)
+	}
+	// T015 / R-PB10 lock order: authority shares before the grant FOR UPDATE.
+	// A failure records the refusal and writes no grant/scope row.
+	if auth != nil {
+		check, err := verifySupplyAuthority(ctx, tx, *auth)
+		if err != nil {
+			return nil, err
+		}
+		if check != "" {
+			if err := insertAuditTx(ctx, tx, op, op.CallerID, operator,
+				"supply authority: "+check, grantOutcomeSupplyRefused); err != nil {
+				return nil, err
+			}
+			if err := tx.Commit(ctx); err != nil {
+				return nil, &grantCommitUnknownError{err: err}
+			}
+			return nil, authorityRefused(check)
+		}
 	}
 	grant, err := readGrant(ctx, tx, op.AuthorizationID)
 	if err != nil {
@@ -462,6 +661,13 @@ func runSupplyTx(ctx context.Context, pool *pgxpool.Pool, op OpInput, operator, 
 		if tag.RowsAffected() != 1 {
 			return nil, fmt.Errorf("insert grant affected %d rows, want 1", tag.RowsAffected())
 		}
+		// T012: a scoped first supply writes grant + scope + audit atomically
+		// (data-model.md T-supply+scope); scopeless stock stays unchanged.
+		if op.scoped() {
+			if err := insertScopeTx(ctx, tx, op, 1); err != nil {
+				return nil, err
+			}
+		}
 		action = grantOutcomeSupplied
 	case grant.matchesOp(op): // present + equal + supply → resupply
 		tag, err := tx.Exec(ctx, grantUnchangedSQL, op.AuthorizationID, op.CallerID, op.ChainID,
@@ -473,6 +679,26 @@ func runSupplyTx(ctx context.Context, pool *pgxpool.Pool, op OpInput, operator, 
 			return nil, New(CodeOperationConflict,
 				"grant parameters changed under the equality check").
 				WithField("authorization_id")
+		}
+		// T012: the guarded resupply comparison extends to the scope content;
+		// a differing or absent scope is a conflict with zero writes. T021: a
+		// re-supply of a non-active grant is the revoke-then-re-supply cycle
+		// and bumps the monotonic version.
+		if op.scoped() {
+			scope, err := readScopeTx(ctx, tx, op.AuthorizationID)
+			if err != nil {
+				return nil, err
+			}
+			if scope == nil || !scope.matchesOp(op) {
+				return nil, New(CodeOperationConflict,
+					"grant scope parameters changed under the equality check").
+					WithField("authorization_id")
+			}
+			if grant.state != "active" {
+				if err := bumpScopeVersionTx(ctx, tx, op.AuthorizationID); err != nil {
+					return nil, err
+				}
+			}
 		}
 		action = grantOutcomeResupplied
 	default: // present + differ (or no match) → refused, zero grant mutation
@@ -610,22 +836,65 @@ func resolveGrantPKRace(ctx context.Context, pool *pgxpool.Pool, op OpInput, ope
 	if err != nil {
 		return nil, grantRetryable(err)
 	}
-	if grant != nil && grant.matchesOp(op) {
+	matched := grant != nil && grant.matchesOp(op)
+	// T012: the recovery re-read includes the scope row, so a scopeless winner
+	// never reports a scoped attempt as resupplied (and vice versa).
+	if matched && op.scoped() {
+		scope, err := readScopeReadOnly(ctx, pool, op.AuthorizationID)
+		if err != nil {
+			return nil, grantRetryable(err)
+		}
+		matched = scope != nil && scope.matchesOp(op)
+	}
+	if matched {
 		return boundedAudit(ctx, pool, op, op.CallerID, operator, reason, grantOutcomeResupplied)
 	}
 	return boundedAudit(ctx, pool, op, op.CallerID, operator, reason, grantOutcomeSupplyRefused)
 }
 
-// SupplyGrant runs one supply attempt. It owns BEGIN..COMMIT (do not nest it in
-// another transaction). The operation id is op.OperationID and MUST be non-empty
-// and durably captured first; invalid op-input fails with CodeValidationFailed
-// before any database access. 23505/commit recovery per data-model Table 6.
-func SupplyGrant(ctx context.Context, pool *pgxpool.Pool, op OpInput, operator, reason string) (*GrantOutcome, error) {
+// verifySupplyAuthority performs the T015 in-tx authority re-verification
+// (R-PB10): the api_key row FOR SHARE, then the caller row FOR SHARE, then
+// PermitIssue against the loaded mapping. It returns the name of the failed
+// check, or "" when authorized. An empty presented key can never match a row,
+// so it refuses rather than skipping the check.
+func verifySupplyAuthority(ctx context.Context, tx pgx.Tx, auth SupplyAuthority) (string, error) {
+	var callerID int64
+	err := tx.QueryRow(ctx, keyAuthoritySelectSQL, HashKey(auth.PresentedKey)).Scan(&callerID)
+	switch {
+	case errors.Is(err, pgx.ErrNoRows):
+		return authorityCheckAPIKey, nil
+	case err != nil:
+		return "", fmt.Errorf("re-read authority api key: %w", err)
+	}
+	var canCreate bool
+	err = tx.QueryRow(ctx, callerAuthoritySelectSQL, callerID).Scan(&canCreate)
+	switch {
+	case errors.Is(err, pgx.ErrNoRows):
+		return authorityCheckCaller, nil
+	case err != nil:
+		return "", fmt.Errorf("re-read authority caller: %w", err)
+	}
+	if !auth.Issuers.PermitIssue(callerID) {
+		return authorityCheckIssuers, nil
+	}
+	return "", nil
+}
+
+// authorityRefused is the classified refusal returned after the in-tx authority
+// check commits its `supply_refused` audit row; the check name is both durable
+// (audit reason) and reported to the carrier.
+func authorityRefused(check string) *Error {
+	return New(CodeUnauthorized, "supply refused: authority check failed: "+check)
+}
+
+// supply runs the shared validation + transaction + recovery path; auth is nil
+// for SupplyGrant and non-nil for SupplyGrantAuthorized.
+func supply(ctx context.Context, pool *pgxpool.Pool, op OpInput, auth *SupplyAuthority, operator, reason string) (*GrantOutcome, error) {
 	norm, err := validateSupplyOpInput(op, time.Now())
 	if err != nil {
 		return nil, err
 	}
-	out, err := runSupplyTx(ctx, pool, norm, operator, reason)
+	out, err := runSupplyTx(ctx, pool, norm, auth, operator, reason)
 	if err == nil {
 		return out, nil
 	}
@@ -649,6 +918,25 @@ func SupplyGrant(ctx context.Context, pool *pgxpool.Pool, op OpInput, operator, 
 		}
 	}
 	return nil, grantRetryable(err)
+}
+
+// SupplyGrant runs one supply attempt. It owns BEGIN..COMMIT (do not nest it in
+// another transaction). The operation id is op.OperationID and MUST be non-empty
+// and durably captured first; invalid op-input fails with CodeValidationFailed
+// before any database access. 23505/commit recovery per data-model Table 6.
+// It performs no authority check: the caller asserts it is authorized
+// (R-PB9 transport-free library surface); use SupplyGrantAuthorized for the
+// in-tx re-verification.
+func SupplyGrant(ctx context.Context, pool *pgxpool.Pool, op OpInput, operator, reason string) (*GrantOutcome, error) {
+	return supply(ctx, pool, op, nil, operator, reason)
+}
+
+// SupplyGrantAuthorized is SupplyGrant plus the T015 in-tx authority
+// re-verification: before any grant/scope write it re-reads the presented key
+// and caller rows FOR SHARE and re-evaluates PermitIssue. A failed check
+// records `supply_refused` naming the check and writes zero grant/scope rows.
+func SupplyGrantAuthorized(ctx context.Context, pool *pgxpool.Pool, op OpInput, auth SupplyAuthority, operator, reason string) (*GrantOutcome, error) {
+	return supply(ctx, pool, op, &auth, operator, reason)
 }
 
 // RevokeGrant runs one revoke attempt. It owns BEGIN..COMMIT (do not nest it).

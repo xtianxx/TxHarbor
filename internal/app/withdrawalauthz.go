@@ -31,6 +31,13 @@ import (
 // verbatim as the declared supply identity — an audit claim, not a
 // cryptographic proof.
 //
+// Supply additionally takes an optional --api-key: when presented it must
+// resolve through Authenticate to a caller permitted by the deployment's
+// TXHARBOR_AUTHZ_ISSUER_CALLERS mapping before any supply transaction, and the
+// resolved principal is what attestation records (never --operator). A scoped
+// supply requires the key; a scopeless supply without one stays the legacy
+// DSN-trust path, so pre-extension callers are unchanged.
+//
 // Actions: `mint` prints one opaque operation id and is pure entropy — it
 // validates no configuration and opens no connection, so nothing is persisted
 // until supply/revoke and no DSN is needed to mint (R9: the caller MUST
@@ -70,10 +77,12 @@ func WithdrawalAuthz(ctx context.Context, args []string, d Deps) int {
 func withdrawalAuthzUsage(w io.Writer) {
 	fmt.Fprint(w, `usage: txharbor withdrawal-authz mint
        txharbor withdrawal-authz supply --operation-id O --authorization-id G --caller-id C --chain-id N --asset 0x… --recipient 0x… --amount D [--expires-at RFC3339] --operator OP --reason R
+                                     [--api-key KEY] [--intent-id I --request-id Q --sender 0x… --fee-max-total T --fee-max-per-gas P --fee-max-priority F --allows-fee-replacement]
        txharbor withdrawal-authz revoke --operation-id O --authorization-id G --operator OP --reason R
 
 mint prints one opaque operation id; capture it durably before supply/revoke.
 --operation-id is required on supply and revoke (no auto-mint, no echo-fallback).
+--api-key resolves the issuing principal and is required for a scoped supply.
 `)
 }
 
@@ -109,6 +118,14 @@ func withdrawalAuthzSupply(ctx context.Context, args []string, d Deps) int {
 	expiresAtRaw := fs.String("expires-at", "", "optional RFC3339 expiry (must be in the future)")
 	operator := fs.String("operator", "", "declared operator identity for the audit row")
 	reason := fs.String("reason", "", "audit reason")
+	apiKey := fs.String("api-key", "", "issuing operator's API key; resolved server-side, never recorded")
+	intentID := fs.String("intent-id", "", "scope: operator-declared intent identity")
+	requestID := fs.String("request-id", "", "scope: originating withdrawal request id")
+	sender := fs.String("sender", "", "scope: 0x-prefixed sender address")
+	feeMaxTotalRaw := fs.String("fee-max-total", "", "scope: single-tx total network fee cap, native最小单位")
+	feeMaxPerGasRaw := fs.String("fee-max-per-gas", "", "scope: per-gas-unit fee cap, native最小单位")
+	feeMaxPriorityRaw := fs.String("fee-max-priority", "", "scope: EIP-1559 priority fee cap (0 = legacy gas_price)")
+	allowsFeeReplacement := fs.Bool("allows-fee-replacement", false, "scope: authorization permits fee replacement")
 	if err := fs.Parse(args); err != nil {
 		withdrawalAuthzUsage(stderr)
 		return 2
@@ -134,6 +151,37 @@ func withdrawalAuthzSupply(ctx context.Context, args []string, d Deps) int {
 		withdrawalAuthzUsage(stderr)
 		return code
 	}
+	for _, fee := range []struct {
+		name string
+		raw  *string
+	}{
+		{"--fee-max-total", feeMaxTotalRaw},
+		{"--fee-max-per-gas", feeMaxPerGasRaw},
+		{"--fee-max-priority", feeMaxPriorityRaw},
+	} {
+		if _, code := withdrawalAuthzFee(stderr, fee.name, *fee.raw); code != 0 {
+			withdrawalAuthzUsage(stderr)
+			return code
+		}
+	}
+	feeMaxTotal, _ := withdrawalAuthzFee(stderr, "--fee-max-total", *feeMaxTotalRaw)
+	feeMaxPerGas, _ := withdrawalAuthzFee(stderr, "--fee-max-per-gas", *feeMaxPerGasRaw)
+	feeMaxPriority, _ := withdrawalAuthzFee(stderr, "--fee-max-priority", *feeMaxPriorityRaw)
+
+	scoped := *intentID != "" || *requestID != "" || *sender != "" ||
+		feeMaxTotal != 0 || feeMaxPerGas != 0 || feeMaxPriority != 0 || *allowsFeeReplacement
+	if scoped && *apiKey == "" {
+		fmt.Fprintln(stderr, "txharbor withdrawal-authz supply: --api-key is required for a scoped supply")
+		withdrawalAuthzUsage(stderr)
+		return 2
+	}
+
+	// The issuance allowlist is deployment config: an illegal value is a
+	// startup error (exit 2) and a missing/empty value is deny-all.
+	allow, code := withdrawalAuthzAllowlist(stderr, d)
+	if code != 0 {
+		return code
+	}
 
 	pool, code := withdrawalAuthzConnect(ctx, d, &chainID)
 	if code != 0 {
@@ -141,23 +189,94 @@ func withdrawalAuthzSupply(ctx context.Context, args []string, d Deps) int {
 	}
 	defer pool.Close()
 
-	out, err := withdrawal.SupplyGrant(ctx, pool, withdrawal.OpInput{
-		OperationID:     *operationID,
-		Action:          "supply",
-		AuthorizationID: *authorizationID,
-		CallerID:        callerID,
-		ChainID:         chainID,
-		Asset:           *asset,
-		Recipient:       *recipient,
-		Amount:          *amount,
-		ExpiresAt:       expiresAt,
-	}, *operator, *reason)
+	op := withdrawal.OpInput{
+		OperationID:          *operationID,
+		Action:               "supply",
+		AuthorizationID:      *authorizationID,
+		CallerID:             callerID,
+		ChainID:              chainID,
+		Asset:                *asset,
+		Recipient:            *recipient,
+		Amount:               *amount,
+		ExpiresAt:            expiresAt,
+		IntentID:             *intentID,
+		RequestID:            *requestID,
+		Sender:               *sender,
+		FeeMaxTotal:          feeMaxTotal,
+		FeeMaxPerGas:         feeMaxPerGas,
+		FeeMaxPriority:       feeMaxPriority,
+		AllowsFeeReplacement: *allowsFeeReplacement,
+	}
+
+	// Authenticate needs the pool for a well-formed key; only flag-shape
+	// failures are pool-free. PermitIssue then gates issuance on the deployment
+	// mapping before the supply transaction, and SupplyGrantAuthorized repeats
+	// the api_key/caller `FOR SHARE` re-read inside that transaction (T015) so a
+	// revocation committed in between is still observed.
+	var authority *withdrawal.SupplyAuthority
+	if *apiKey != "" {
+		res, err := withdrawal.Authenticate(ctx, pool, *apiKey)
+		if err != nil {
+			return withdrawalAuthzRefuse(d, *operationID, err)
+		}
+		if !allow.PermitIssue(res.Caller.ID) {
+			return withdrawalAuthzRefuse(d, *operationID,
+				withdrawal.New(withdrawal.CodeUnauthorized, "authenticated principal is not an authorized issuer"))
+		}
+		authority = &withdrawal.SupplyAuthority{PresentedKey: *apiKey, Issuers: allow}
+		if scoped {
+			op.AttestedBy = withdrawalAuthzPrincipal(res)
+		}
+	}
+
+	var out *withdrawal.GrantOutcome
+	if authority != nil {
+		out, err = withdrawal.SupplyGrantAuthorized(ctx, pool, op, *authority, *operator, *reason)
+	} else {
+		out, err = withdrawal.SupplyGrant(ctx, pool, op, *operator, *reason)
+	}
 	if err != nil {
 		return withdrawalAuthzRefuse(d, *operationID, err)
 	}
 	fmt.Fprintf(stdout, "txharbor withdrawal-authz: ok authorization_id=%s action=%s\n",
 		out.AuthorizationID, out.Action)
 	return 0
+}
+
+// withdrawalAuthzAllowlist loads the issuance mapping from the deployment
+// environment: an illegal value is a startup configuration error the carrier
+// reports with exit 2, while a missing or empty value yields a deny-all
+// mapping.
+func withdrawalAuthzAllowlist(stderr io.Writer, d Deps) (*withdrawal.IssuerAllowlist, int) {
+	allow, err := withdrawal.LoadIssuerAllowlist(d.getenv())
+	if err != nil {
+		fmt.Fprintf(stderr, "txharbor withdrawal-authz supply: configuration error: %s\n", logx.Redact(err.Error()))
+		return nil, 2
+	}
+	return allow, 0
+}
+
+// withdrawalAuthzFee parses one optional scope fee cap as a decimal integer.
+// Empty means "unset" (0); a non-integer or out-of-int64-range value is a flag
+// usage error.
+func withdrawalAuthzFee(stderr io.Writer, name, raw string) (int64, int) {
+	if raw == "" {
+		return 0, 0
+	}
+	v, err := strconv.ParseInt(raw, 10, 64)
+	if err != nil {
+		fmt.Fprintf(stderr, "txharbor withdrawal-authz supply: invalid %s %q: not a decimal integer\n", name, raw)
+		return 0, 2
+	}
+	return v, 0
+}
+
+// withdrawalAuthzPrincipal renders the server-resolved issuing principal
+// recorded in attested_by: the credential id plus the caller identity the
+// credential resolved to, never a caller-supplied string and never the
+// audit-only --operator value.
+func withdrawalAuthzPrincipal(res *withdrawal.AuthResult) string {
+	return fmt.Sprintf("key:%d/caller:%d", res.Key.KeyID, res.Caller.ID)
 }
 
 func withdrawalAuthzRevoke(ctx context.Context, args []string, d Deps) int {

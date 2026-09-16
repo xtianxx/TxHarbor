@@ -14,6 +14,8 @@ import (
 	"context"
 	"errors"
 	"io"
+	"strconv"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -862,5 +864,233 @@ func TestWithdrawalGrantPKRaceDifferentOperationDifferentInput(t *testing.T) {
 	}
 	if loserDetail != opInputDetail(loser) {
 		t.Fatalf("loser refusal detail = %q, want %q (loser's attempted params)", loserDetail, opInputDetail(loser))
+	}
+}
+
+// ---------------------------------------------------------------------------
+// T010 [US1] legal scoped-supply round-trip (fail-first).
+//
+// A legal supply writes grant + scope + audit in the SAME transaction: the
+// scope row is 1:1 with the grant with authorization_version 1, every scope
+// column equals the op-input payload (row equality, sender lowercased), and
+// the recorded audit attempt agrees with grant↔scope↔principal (same
+// authorization_id, same principal in the snapshot). This test is RED until
+// T012 writes the scope row inside runSupplyTx; T010 does not implement it.
+// Deterministic single round-trip, no sleeps-as-proof.
+// ---------------------------------------------------------------------------
+
+// grantScopedTestOp is a fully-populated legal scoped supply op-input: the
+// eight Table 6 fields plus every PB scope field and the server-resolved
+// attested_by, matching the contract's extended supply entry.
+func grantScopedTestOp(operationID, authorizationID string, callerID int64) OpInput {
+	op := grantTestOp(operationID, authorizationID, callerID, "100")
+	op.IntentID = "intent-" + authorizationID
+	op.RequestID = "request-" + authorizationID
+	op.Sender = "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+	op.FeeMaxTotal = 21000
+	op.FeeMaxPerGas = 2
+	op.FeeMaxPriority = 1
+	op.AllowsFeeReplacement = true
+	op.AttestedBy = "principal-issuer"
+	return op
+}
+
+// grantScopeRow is one withdrawal_authorization_scopes row read back verbatim.
+type grantScopeRow struct {
+	authorizationID      string
+	intentID             string
+	requestID            string
+	sender               string
+	feeMaxTotal          int64
+	feeMaxPerGas         int64
+	feeMaxPriority       int64
+	allowsFeeReplacement bool
+	authorizationVersion int64
+	attestedBy           string
+}
+
+// grantReadScopeRow reads the single scope row for a grant, failing when it is
+// absent — which is exactly the T012 gap this fail-first test pins down. It
+// reads persistent state, never an inferred return code.
+func grantReadScopeRow(t *testing.T, ctx context.Context, pool *pgxpool.Pool, authorizationID string) grantScopeRow {
+	t.Helper()
+	var r grantScopeRow
+	err := pool.QueryRow(ctx, `
+SELECT authorization_id, intent_id, request_id, sender, fee_max_total,
+       fee_max_per_gas, fee_max_priority, allows_fee_replacement,
+       authorization_version, attested_by
+FROM withdrawal_authorization_scopes
+WHERE authorization_id = $1`, authorizationID).
+		Scan(&r.authorizationID, &r.intentID, &r.requestID, &r.sender, &r.feeMaxTotal,
+			&r.feeMaxPerGas, &r.feeMaxPriority, &r.allowsFeeReplacement,
+			&r.authorizationVersion, &r.attestedBy)
+	if err != nil {
+		t.Fatalf("scope row for grant %q missing/unreadable (T012 must write it in the supply tx): %v",
+			authorizationID, err)
+	}
+	return r
+}
+
+// grantCallerIDByID reads the stored caller_id of a grant row.
+func grantCallerIDByID(t *testing.T, ctx context.Context, pool *pgxpool.Pool, authorizationID string) int64 {
+	t.Helper()
+	var callerID int64
+	if err := pool.QueryRow(ctx,
+		`SELECT caller_id FROM withdrawal_authorizations WHERE authorization_id = $1`, authorizationID).
+		Scan(&callerID); err != nil {
+		t.Fatalf("read grant caller for %q: %v", authorizationID, err)
+	}
+	return callerID
+}
+
+// TestWithdrawalGrantScopedSupplyWritesScopeRow is T010: a legal supply must
+// write grant + scope + audit atomically with matching payloads.
+func TestWithdrawalGrantScopedSupplyWritesScopeRow(t *testing.T) {
+	ctx, pool := grantSetup(t)
+	grantSeedCaller(t, ctx, pool, 7301)
+
+	const (
+		authID = "auth-scoped"
+		opID   = "50000000000000000000000000000001"
+	)
+	op := grantScopedTestOp(opID, authID, 7301)
+
+	out, err := SupplyGrant(ctx, pool, op, "operator-scoped", "legal scoped supply")
+	if err != nil {
+		t.Fatalf("scoped SupplyGrant: %v", err)
+	}
+	if out.Action != grantOutcomeSupplied || out.AuthorizationID != authID {
+		t.Fatalf("outcome = %+v, want {%s %s}", out, grantOutcomeSupplied, authID)
+	}
+	if n := grantCount(t, ctx, pool, authID); n != 1 {
+		t.Fatalf("grant rows = %d, want 1", n)
+	}
+
+	// Scope row: 1:1 with the grant, every column equal to the op-input scope
+	// payload (sender normalized to lowercase), version 1 on first supply.
+	scope := grantReadScopeRow(t, ctx, pool, authID)
+	if scope.authorizationID != authID || scope.authorizationID != op.AuthorizationID {
+		t.Fatalf("scope authorization_id = %q, want the grant/op id %q", scope.authorizationID, authID)
+	}
+	if scope.intentID != op.IntentID || scope.requestID != op.RequestID {
+		t.Fatalf("scope identity = (%q, %q), want (%q, %q)",
+			scope.intentID, scope.requestID, op.IntentID, op.RequestID)
+	}
+	if wantSender := strings.ToLower(op.Sender); scope.sender != wantSender {
+		t.Fatalf("scope sender = %q, want lowercased %q", scope.sender, wantSender)
+	}
+	if scope.feeMaxTotal != op.FeeMaxTotal || scope.feeMaxPerGas != op.FeeMaxPerGas ||
+		scope.feeMaxPriority != op.FeeMaxPriority || scope.allowsFeeReplacement != op.AllowsFeeReplacement {
+		t.Fatalf("scope fee/purpose = (%d, %d, %d, %t), want (%d, %d, %d, %t)",
+			scope.feeMaxTotal, scope.feeMaxPerGas, scope.feeMaxPriority, scope.allowsFeeReplacement,
+			op.FeeMaxTotal, op.FeeMaxPerGas, op.FeeMaxPriority, op.AllowsFeeReplacement)
+	}
+	if scope.attestedBy != op.AttestedBy {
+		t.Fatalf("scope attested_by = %q, want %q (server-resolved principal)", scope.attestedBy, op.AttestedBy)
+	}
+	if scope.authorizationVersion != 1 {
+		t.Fatalf("authorization_version = %d, want 1 on first scoped supply", scope.authorizationVersion)
+	}
+
+	// Audit agreement grant↔scope↔principal: the recorded attempt names the
+	// same grant/scope row, binds the same scope snapshot (so the stored scope
+	// payload is what the attempt recorded), attributes the same caller, and
+	// carries the scope's principal in attested_by.
+	action, detail := grantAuditRowByOp(t, ctx, pool, opID)
+	if action != grantOutcomeSupplied {
+		t.Fatalf("audit action = %q, want %s", action, grantOutcomeSupplied)
+	}
+	if detail != opInputDetail(op) {
+		t.Fatalf("audit detail = %q, want the scoped op-input snapshot %q", detail, opInputDetail(op))
+	}
+	if callerID := grantAuditCallerByOp(t, ctx, pool, opID); callerID != op.CallerID {
+		t.Fatalf("audit caller_id = %d, want %d", callerID, op.CallerID)
+	}
+	if callerID := grantCallerIDByID(t, ctx, pool, authID); callerID != op.CallerID {
+		t.Fatalf("grant caller_id = %d, want %d", callerID, op.CallerID)
+	}
+	if wantPrincipal := "attested_by=" + strconv.Quote(scope.attestedBy); !strings.Contains(detail, wantPrincipal) {
+		t.Fatalf("audit detail %q must agree with scope principal %q", detail, scope.attestedBy)
+	}
+}
+
+// TestWithdrawalGrantScopedSupplyFeeTripleBoundaries is T016 against a real
+// PostgreSQL: every PB-C2 fee boundary is exercised on both sides. A fee triple
+// exactly at the priority<=per-gas cap, and the legacy gas_price path
+// (priority 0), write the scope row with the supplied values; a triple one unit
+// over the cap or missing an applicable cap is refused with zero grant, scope
+// and audit rows. Deterministic, one row census per case.
+func TestWithdrawalGrantScopedSupplyFeeTripleBoundaries(t *testing.T) {
+	ctx, pool := grantSetup(t)
+	grantSeedCaller(t, ctx, pool, 7302)
+
+	type greenCase struct {
+		name                    string
+		total, perGas, priority int64
+	}
+	greens := []greenCase{
+		{"priority at per-gas cap", 10, 10, 10},
+		{"legacy gas_price path (priority zero)", 21000, 2, 0},
+	}
+	for i, tc := range greens {
+		t.Run(tc.name, func(t *testing.T) {
+			authID := "auth-fee-green-" + strconv.Itoa(i)
+			opID := "6000000000000000000000000000000" + strconv.Itoa(i)
+			op := grantScopedTestOp(opID, authID, 7302)
+			op.FeeMaxTotal, op.FeeMaxPerGas, op.FeeMaxPriority = tc.total, tc.perGas, tc.priority
+
+			out, err := SupplyGrant(ctx, pool, op, "op-fee", "fee boundary green")
+			if err != nil {
+				t.Fatalf("SupplyGrant() error = %v, want supplied", err)
+			}
+			if out.Action != grantOutcomeSupplied {
+				t.Fatalf("outcome = %+v, want %s", out, grantOutcomeSupplied)
+			}
+			if n := grantCount(t, ctx, pool, authID); n != 1 {
+				t.Fatalf("grant rows = %d, want 1", n)
+			}
+			scope := grantReadScopeRow(t, ctx, pool, authID)
+			if scope.feeMaxTotal != tc.total || scope.feeMaxPerGas != tc.perGas || scope.feeMaxPriority != tc.priority {
+				t.Fatalf("scope fee triple = (%d, %d, %d), want (%d, %d, %d)",
+					scope.feeMaxTotal, scope.feeMaxPerGas, scope.feeMaxPriority,
+					tc.total, tc.perGas, tc.priority)
+			}
+		})
+	}
+
+	reds := []struct {
+		name                    string
+		total, perGas, priority int64
+		wantField               string
+	}{
+		{"priority one above per-gas cap", 10, 10, 11, "fee_max_priority"},
+		{"missing total cap", 0, 10, 0, "fee_max_total"},
+		{"missing per-gas cap", 100, 0, 0, "fee_max_per_gas"},
+	}
+	for i, tc := range reds {
+		t.Run(tc.name+" refused with zero rows", func(t *testing.T) {
+			authID := "auth-fee-red-" + strconv.Itoa(i)
+			opID := "6100000000000000000000000000000" + strconv.Itoa(i)
+			op := grantScopedTestOp(opID, authID, 7302)
+			op.FeeMaxTotal, op.FeeMaxPerGas, op.FeeMaxPriority = tc.total, tc.perGas, tc.priority
+
+			out, err := SupplyGrant(ctx, pool, op, "op-fee", "fee boundary refused")
+			if out != nil {
+				t.Fatalf("outcome = %+v, want nil", out)
+			}
+			e := grantWantCode(t, err, CodeValidationFailed)
+			if e.Field != tc.wantField {
+				t.Fatalf("error field = %q, want %q", e.Field, tc.wantField)
+			}
+			if n := grantCount(t, ctx, pool, authID); n != 0 {
+				t.Fatalf("grant rows after refusal = %d, want 0", n)
+			}
+			if n := grantAuthorityScopeCount(t, ctx, pool, authID); n != 0 {
+				t.Fatalf("scope rows after refusal = %d, want 0", n)
+			}
+			if n := grantAuditCountByOp(t, ctx, pool, opID); n != 0 {
+				t.Fatalf("audit rows after refusal = %d, want 0", n)
+			}
+		})
 	}
 }
