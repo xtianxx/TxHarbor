@@ -61,15 +61,19 @@ Delivery is never a pure read of Table 4; it is a recorded assessment (research 
 2. Persist one `delivery_admissions` row recording the snapshot (`binding_class`, `can_sign`,
    pause/recovery basis): verdict `admitted`, or `blocked` with the observed basis (then
    `ROLLBACK`, status-only response, zero bytes).
-3. While still holding all locks, write the response bytes (bounded send region: server write
-   timeout strictly inside `statement_timeout`; research R6). On write success, `UPDATE …
-   SET verdict='delivered', delivered_at=now()`; `COMMIT`. On write failure/timeout,
-   `ROLLBACK` — no admission row survives, nothing counts as delivered; retry re-gates fresh.
-   A post-write pre-`COMMIT` crash leaves bytes possibly out with no `delivered` marker →
-   `unknown_reconcile` on retry (honest unknown; identical-bytes re-delivery only, never
-   re-sign). `admitted` alone is NEVER "in-flight" by label; only a committed `delivered`
-   marker, or bytes already written, counts. Linearization: the region `COMMIT`, ordered by
-   the scope-row `FOR SHARE` + gate-table `SHARE` locks (R6).
+3. While still holding all locks, write the response bytes (bounded send region; research
+   R6). Write success means "accepted by the OS transport", NOT "received by the client" —
+   receipt is unobservable server-side (verified by probe: small Write+Flush returns success
+   with zero bytes read). On write success, `UPDATE … SET verdict='delivered',
+   delivered_at=now()`; `COMMIT`. On write failure/timeout, `ROLLBACK` — but the bytes MAY
+   already be out (a failed write never proves zero delivery): the outcome is `unknown`
+   (`unknown_reconcile`, §6), never "nothing delivered". A post-write pre-`COMMIT` crash is
+   likewise `unknown`, never a standing permission and never "in-flight" by label. After a
+   committed handoff, a best-effort fresh gate re-read (new transaction, no locks) classifies
+   the delivery as clean or overlapped (a pause/revoke/`can_sign`-off that committed during
+   the region is recorded in audit — accounting, not recall). Re-delivery is byte-identical
+   content only; re-signing never. Linearization: the region `COMMIT`, ordered by the
+   scope-row `FOR SHARE` + gate-table `SHARE` locks (R6).
 
 Consequences:
 
@@ -138,17 +142,27 @@ result/binding/audit history; a withheld retry MUST NOT silently rebind the auth
 
 ## 5. Bounded failure handling
 
-- **Statement bound**: every transaction sets the repo's 5s `statement_timeout` guard; no
-  unbounded query on any path.
+- **Statement bound (per-statement only)**: every transaction sets the repo's 5s
+  `statement_timeout` guard — it bounds each SQL statement's server-side execution, NOT the
+  transaction total and NOT network waits between statements (verified: a 6s idle gap inside a
+  tx with 2s `statement_timeout` runs untouched; a killed statement leaves the session alive).
+  The send region's network bound comes from the transport, not the database: the serve path
+  MUST set an `http.Server` `WriteTimeout` (currently unset — only `ReadHeaderTimeout` exists)
+  strictly inside the `statement_timeout` budget, so a stalled socket fails the write instead
+  of holding locks open; a suspended process that resumes past the deadline fails its write
+  and re-gates. No unbounded query and no unbounded socket wait on any path.
 - **Key provider bound**: a context deadline from `TXHARBOR_SIGNER_KEY_TIMEOUT` (default 5s)
   wraps `KeyProvider.SignTx`; timeout is `key_provider_timeout` (retryable), never a partial
   success and never recorded as signed.
 - **No internal retry loops**: one 23505 classification per request; commit-unknown resolution is
   a bounded re-read (row by identity, admission by attempt_seq) with no loop; the retry budget
   belongs to the caller, which MUST use the same identity. Infinite retries: 0 (SC-08).
-- **Crash safety**: crash before COMMIT → nothing observable (retry converges); crash after COMMIT
-  → result/admission durable (retry reads it); crash during response write after `admitted` →
-  in-flight approved (never re-signed, never claimed undelivered).
+- **Crash safety**: crash before COMMIT → Durable evidence decides: the `signature_results`
+  row (committed by the earlier submit transaction) proves "signed"; absence of a `delivered`
+  marker proves nothing about the wire — the outcome is `unknown`, and retry converges via
+  re-gating (same bytes or withhold, never re-sign); crash after COMMIT
+  → result/admission durable (retry reads it); crash with bytes possibly out but no `delivered`
+  marker → `unknown_reconcile` (never claimed delivered, never claimed undelivered).
 - **Storage unavailability**: no success response is ever synthesized without a durable result;
   when storage returns, the persisted result remains retrievable via the delivery path.
 - **Idempotent retry instruction**: every unavailable/unknown response tells the caller to retry
@@ -159,6 +173,13 @@ result/binding/audit history; a withheld retry MUST NOT silently rebind the auth
 Unknown outcomes are first-class: the response says the outcome is unknown (status-only), the
 durable rows say what was decided, and reconciliation uses the audit + admission history —
 `signing_request_audit` (per-decision) and `delivery_admissions` (per-delivery snapshot/verdict).
+**Durable unknown evidence (no reliance on rolled-back rows)**: a restart identifies
+"signed, delivery unknown" as a `signature_results` row (submit-`COMMIT` durable) with NO
+`delivered` marker for the identity. Absence of the marker is treated as unknown — never as
+proof of non-delivery (bytes may be out) and never as permission (re-gate required). Recovery
+is same-identity retry → re-gate all revocable gates → redeliver byte-identical content or
+withhold status-only; never re-sign (`signature_results_pkey`), never different bytes (content
+hash bound), never a new identity or intent.
 An unknown outcome MUST NOT be resolved by creating a new identity or a new payment intent
 (011 owns intent rework; 006 forbids "compensate by re-paying"). Reconciliation verification is
 listed in quickstart V7; a `signature_withheld` state is the standing-safe answer until the gate

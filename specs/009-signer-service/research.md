@@ -278,6 +278,46 @@ grant carrier read-only; it owns its own credential, request, result, admission,
   delay, not denial. Same-identity concurrent deliveries serialize on the request row
   `FOR UPDATE` (catalog order below); a duplicated region would only ever emit byte-identical
   content.
+  - Shared-serve impact (stated): `WriteTimeout` is connection-wide on the existing `serve`
+    listener shared with 007 endpoints — setting it bounds stalled writes for all handlers
+    (safety-positive; no 007 semantic change, only long-stalled writes now fail instead of
+    hanging). Recorded here so the tasks/implement diff on shared `serve.go` is expected, not
+    incidental.
+- **Feasibility verification 2026-09-16 (probes + code + official docs; PG 18.6, Go 1.26.5)**:
+  - `statement_timeout` bounds ONE statement's server execution, not the transaction and not
+    network waits. Probed on stock PG 18: `pg_sleep(5)` under 2s `SET LOCAL` aborts the
+    statement while the session continues; a 6s statement-free idle gap inside the tx runs
+    untouched; a `FOR UPDATE` lock wait aborts at ~2s (`while locking tuple`). Hence the
+    "5s guard" never bounded the send region — the network bound MUST come from the transport
+    (`http.Server.WriteTimeout`, currently unset in `serve.go`; only `ReadHeaderTimeout`
+    exists), strictly inside the statement budget, plus the serve path actually setting it
+    (tasks/implement acceptance).
+  - A small `Write`+`Flush` returns success with the peer provably receiving nothing (probed:
+    23 bytes, nil error, RST-without-read); `Flusher.Flush` returns no error at all. Write
+    success = handed to the OS; write failure = MAY already be partially out. The contract
+    therefore claims neither receipt-on-success nor zero-delivery-on-error — both map to
+    `unknown` with same-bytes-only recovery.
+  - DB-session death releases the region's locks server-side (locks live to transaction end;
+    the backend aborts the open tx). The sender learns of the death only on its next
+    interaction (`pgx`: `ErrConnClosed`/op error; pool reuse detects via `ResetSession`);
+    a `SELECT 1` health check before the write narrows but cannot close the race (TOCTOU).
+    Prevention of bytes under a dissolved protection is impossible across independent
+    channels — containment (`unknown` + overlap accounting + same-bytes-only + never re-sign)
+    is the mechanism, and it is stated as such, not as prevention.
+  - Suspended process: server-side `statement_timeout` fires only for an executing statement;
+    nothing runs Go timers while suspended. On resume past the write deadline the write fails
+    and the path re-gates (a revoke committed meanwhile → `blocked`); locks held during the
+    suspension delay writers but release on abort. Suspension can delay, never smuggle.
+- **Guaranteed vs residual (exact boundary)**: guaranteed — no byte is written unless gates
+  passed at the last re-check under held locks; any pause/revoke/permission change committed
+  before region entry blocks; any writer racing the region is ordered after its `COMMIT`;
+  ambiguity always resolves to `unknown` with byte-identical-or-withhold recovery and no
+  re-sign. Residual (not licensed, not silent): bytes emitted while a gate change commits
+  concurrently with the handoff under a dissolved protection (dead session) — recorded by the
+  post-handoff overlap re-read, never recallable, never repeatable with different bytes. This
+  residual is a property of the fault model (independent DB/network failure, no DB↔net
+  atomicity), not a permission window: unlike the withdrawn TTL, no committed revocation is
+  ever knowingly overridden.
 - **Decision — two concurrency timelines**:
   - (a) **Pause/revoke first → no delivery**: 006 pause tx `BEGIN → INSERT pause → COMMIT`; 009
     T-deliver then takes the gate-table `SHARE` lock (waiting up to the 5s guard if that tx is
