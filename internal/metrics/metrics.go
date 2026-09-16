@@ -66,6 +66,24 @@ const (
 	WithdrawalRejectedMetricName        = "txharbor_withdrawal_rejected_total"
 	WithdrawalUnavailableMetricName     = "txharbor_withdrawal_unavailable_total"
 	WithdrawalUnauthenticatedMetricName = "txharbor_withdrawal_unauthenticated_total"
+
+	// 008 nonce-manager surface (specs/008-nonce-manager/contracts/
+	// observation.md §5; T020). The allocation result label carries the
+	// admission's machine reason (allocated, replayed, or the refusal
+	// Outcome); classification carries the nonce_observations vocabulary.
+	// Both are fixed vocabularies, so no sender/nonce/intent/hold value can
+	// ever become a label (FR-21/SC-09).
+	NonceAllocationsMetricName  = "txharbor_nonce_allocations_total"
+	NonceReplaysMetricName      = "txharbor_nonce_replays_total"
+	NonceObservationsMetricName = "txharbor_nonce_observations_total"
+	// NonceHolds counts holds established by admission classification
+	// refusals. Label-free: the hold cause rides the redacted log line and
+	// the hold row, never a label (FR-21/SC-09).
+	NonceHoldsMetricName = "txharbor_nonce_holds_total"
+	// NonceReconcileFailures counts per-scope reconcile-tick failures that
+	// entered the bounded backoff. Label-free for the same reason; the
+	// failing scope and error ride the redacted log line only.
+	NonceReconcileFailuresMetricName = "txharbor_nonce_reconcile_failures_total"
 )
 
 // Metrics owns a private registry so multiple instances (tests, restarts of
@@ -126,6 +144,14 @@ type Metrics struct {
 	withdrawalRejected        *prometheus.CounterVec
 	withdrawalUnavailable     *prometheus.CounterVec
 	withdrawalUnauthenticated *prometheus.CounterVec
+
+	// 008 nonce-manager allocation surface (T020): result and classification
+	// are fixed vocabularies, nothing request-derived is ever a label.
+	nonceAllocations       *prometheus.CounterVec
+	nonceReplays           *prometheus.CounterVec
+	nonceObservations      *prometheus.CounterVec
+	nonceHolds             *prometheus.CounterVec
+	nonceReconcileFailures *prometheus.CounterVec
 
 	handler http.Handler
 }
@@ -357,6 +383,30 @@ func New(ready func() bool) *Metrics {
 	}, nil)
 	registry.MustRegister(withdrawalAccepted, withdrawalReplayed, withdrawalConflict,
 		withdrawalRejected, withdrawalUnavailable, withdrawalUnauthenticated)
+
+	// 008 nonce-manager allocation surface (T020). result/classification are
+	// fixed vocabularies; see the metric-name consts.
+	nonceAllocations := prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: NonceAllocationsMetricName,
+		Help: "008 admission terminals by machine reason: allocated, replayed, or the refusal Outcome.",
+	}, []string{"result"})
+	nonceReplays := prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: NonceReplaysMetricName,
+		Help: "008 admissions that returned the original binding on full allocation-input equality.",
+	}, nil)
+	nonceObservations := prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: NonceObservationsMetricName,
+		Help: "008 persisted observation rows by classification (consistent, bootstrap_external_consumed, unattributed_consumption, unexplained_gap, divergence, unavailable).",
+	}, []string{"classification"})
+	nonceHolds := prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: NonceHoldsMetricName,
+		Help: "008 holds established by admission classification refusals.",
+	}, nil)
+	nonceReconcileFailures := prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: NonceReconcileFailuresMetricName,
+		Help: "008 per-scope reconcile-tick failures that entered the bounded backoff.",
+	}, nil)
+	registry.MustRegister(nonceAllocations, nonceReplays, nonceObservations, nonceHolds, nonceReconcileFailures)
 	return &Metrics{
 		registry:                     registry,
 		probeTotal:                   probeTotal,
@@ -397,6 +447,11 @@ func New(ready func() bool) *Metrics {
 		withdrawalRejected:           withdrawalRejected,
 		withdrawalUnavailable:        withdrawalUnavailable,
 		withdrawalUnauthenticated:    withdrawalUnauthenticated,
+		nonceAllocations:             nonceAllocations,
+		nonceReplays:                 nonceReplays,
+		nonceObservations:            nonceObservations,
+		nonceHolds:                   nonceHolds,
+		nonceReconcileFailures:       nonceReconcileFailures,
 		handler:                      promhttp.HandlerFor(registry, promhttp.HandlerOpts{}),
 	}
 }
@@ -712,4 +767,36 @@ func (m *Metrics) ObserveWithdrawalStatus(status int) {
 	case http.StatusServiceUnavailable:
 		m.withdrawalUnavailable.WithLabelValues().Inc()
 	}
+}
+
+// ObserveNonceAllocation counts one 008 admission by its machine result: the
+// allocated outcome, the replayed outcome, or the refusal Outcome (the
+// refusal's machine reason). result is a fixed vocabulary value (R11/FR-21);
+// no sender, nonce, intent or hold value is ever passed here.
+func (m *Metrics) ObserveNonceAllocation(result string) {
+	m.nonceAllocations.WithLabelValues(result).Inc()
+}
+
+// ObserveNonceReplay counts one 008 admission that returned the original
+// binding on full allocation-input equality.
+func (m *Metrics) ObserveNonceReplay() {
+	m.nonceReplays.WithLabelValues().Inc()
+}
+
+// ObserveNonceObservation counts one persisted 008 observation by its
+// classification (classify.go's fixed vocabulary).
+func (m *Metrics) ObserveNonceObservation(classification string) {
+	m.nonceObservations.WithLabelValues(classification).Inc()
+}
+
+// ObserveNonceHoldEstablished counts one hold row established by an admission
+// classification refusal in this attempt.
+func (m *Metrics) ObserveNonceHoldEstablished() {
+	m.nonceHolds.WithLabelValues().Inc()
+}
+
+// ObserveNonceReconcileFailure counts one per-scope reconcile-tick failure
+// that entered the bounded backoff.
+func (m *Metrics) ObserveNonceReconcileFailure() {
+	m.nonceReconcileFailures.WithLabelValues().Inc()
 }

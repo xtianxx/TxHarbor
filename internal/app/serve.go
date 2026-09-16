@@ -5,6 +5,7 @@ package app
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -15,11 +16,14 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strconv"
+	"strings"
 	"syscall"
 	"time"
 
 	"github.com/ethereum/go-ethereum"
 	"github.com/ethereum/go-ethereum/core/types"
+	gethrpc "github.com/ethereum/go-ethereum/rpc"
 
 	"github.com/xtianxx/txharbor/internal/config"
 	"github.com/xtianxx/txharbor/internal/db"
@@ -28,6 +32,7 @@ import (
 	"github.com/xtianxx/txharbor/internal/indexer"
 	"github.com/xtianxx/txharbor/internal/logx"
 	"github.com/xtianxx/txharbor/internal/metrics"
+	"github.com/xtianxx/txharbor/internal/nonce"
 )
 
 // Deps carries process dependencies so commands are testable in-process.
@@ -285,6 +290,18 @@ func Serve(ctx context.Context, d Deps) int {
 		return fail("startup failed (recovery): %s", logx.Redact(err.Error()))
 	}
 
+	// 008 rebuild gate (R5/FR-13): the read-only per-known-scope integrity
+	// verification runs once at startup, before the listener opens. Success is
+	// the only condition that opens the allocation admission gate; a failure
+	// keeps it closed with the structured reason — no silent repair, no
+	// memory-based allocation. The read path consults the same gate: while it
+	// is closed every read answers retryable `unavailable` (read-api.md §2)
+	// instead of serving facts the verification could not vouch for.
+	rebuildGate := nonce.NewRebuildGate()
+	runRebuildGate(startupCtx, chainID, rebuildGate, func(ctx context.Context, chainID int64) (nonce.RebuildReport, error) {
+		return nonce.VerifyRebuild(ctx, pool, chainID)
+	})
+
 	// 007 withdrawal routes mount on the same probe listener: the parent mux
 	// takes precedence over the health handler's "/" subtree, and health/metrics
 	// stay unchanged on the child mux. No new listener or address. The FR-05
@@ -299,14 +316,39 @@ func Serve(ctx context.Context, d Deps) int {
 	mux := http.NewServeMux()
 	mux.Handle("/withdrawals", withdrawH)
 	mux.Handle("/withdrawals/", withdrawH)
+	// 008 read endpoints mount on the same listener next to /withdrawals: no
+	// new listener or address. The bearer credential comes from config and is
+	// never logged; an unconfigured token admits nothing (fail closed).
+	// readapi.go is transport-free, so this handler owns the auth check and
+	// the two contract routes. The startup rebuild gate rides the provider so
+	// a gate that is not open fails every read closed as `unavailable`.
+	mux.Handle("/nonce/bindings/", &nonceReadHandler{provider: nonce.NewReadProvider(pool, cfg.NonceReadToken, rebuildGate)})
 	mux.Handle("/", health.NewServer(agg, m.Handler()).Handler())
 
 	srv := &http.Server{
 		Handler:           mux,
 		ReadHeaderTimeout: cfg.ProbeTimeout,
 	}
+	// 008 reconcile observer (T029): a raw JSON-RPC client drives the
+	// per-known-scope T-observe tick on the existing IndexPollInterval cadence.
+	// Its failures are logged inside the loop and never flip service readiness,
+	// mirroring 006's observer. The RPC client is dialed before the listener
+	// opens, like every other startup dependency: a dial failure aborts startup
+	// before the port ever accepts a connection.
+	reconcileRPC, err := gethrpc.DialContext(runCtx, cfg.RPCURL)
+	if err != nil {
+		ethClient.Close()
+		pool.Close()
+		return fail("startup failed (nonce reconcile rpc): %s", logx.Redact(err.Error()))
+	}
+	reconcileLoop := nonce.NewReconcileLoop(pool, nonce.NewObserver(reconcileRPC, nonce.ObserverConfig{
+		RPCTimeout:   cfg.IndexRPCTimeout,
+		RetryInitial: cfg.IndexRetryInitial,
+		RetryMax:     cfg.IndexRetryMax,
+	}), chainID, cfg.IndexPollInterval, slog.Default(), m)
 	listener, err := net.Listen("tcp", cfg.HTTPAddr)
 	if err != nil {
+		reconcileRPC.Close()
 		ethClient.Close()
 		pool.Close()
 		return fail("startup failed (http listen): %s", logx.Redact(err.Error()))
@@ -358,6 +400,15 @@ func Serve(ctx context.Context, d Deps) int {
 	go runner.Run(runCtx)
 	serveErr := make(chan error, 1)
 	go func() { serveErr <- srv.Serve(listener) }()
+	// The reconcile observer runs beside the coordinator, not inside it: it
+	// takes no lease (008 never acquires one) and is serialized only by the
+	// shared coordination row, so it must keep reconciling even while another
+	// instance owns the lease. cancel() stops it and shutdown joins it.
+	reconcileDone := make(chan struct{})
+	go func() {
+		defer close(reconcileDone)
+		reconcileLoop.Run(runCtx)
+	}()
 	indexerErr := make(chan error, 1)
 	indexerDone := make(chan struct{})
 	go func() {
@@ -418,9 +469,9 @@ serveLoop:
 	}
 	cancel() // stop probe loop and indexer before releasing resources
 
-	// 6. Shutdown: stop accepting work, let the indexer exit, then release
-	// resources, all sharing one 15s budget. Budget exhaustion is recorded and
-	// exits non-zero.
+	// 6. Shutdown: stop accepting work, let the indexer and the reconcile
+	// observer exit, then release resources, all sharing one 15s budget.
+	// Budget exhaustion is recorded and exits non-zero.
 	if err := runShutdown(context.Background(), cfg.ShutdownTimeout,
 		func(shCtx context.Context) error { return srv.Shutdown(shCtx) },
 		func(shCtx context.Context) error {
@@ -431,13 +482,144 @@ serveLoop:
 				return shCtx.Err()
 			}
 		},
-		func(context.Context) error { ethClient.Close(); return nil },
+		func(shCtx context.Context) error {
+			select {
+			case <-reconcileDone:
+				return nil
+			case <-shCtx.Done():
+				return shCtx.Err()
+			}
+		},
+		func(context.Context) error { reconcileRPC.Close(); ethClient.Close(); return nil },
 		func(context.Context) error { pool.Close(); return nil },
 	); err != nil {
 		fmt.Fprintf(stderr, "txharbor serve: shutdown error: %s\n", logx.Redact(err.Error()))
 		exitCode = 1
 	}
 	return exitCode
+}
+
+// runRebuildGate executes the R5 startup rebuild verification and applies its
+// verdict to the admission gate: success opens it, any failure keeps it closed
+// with the structured reason. It never repairs anything, never guesses from
+// memory, and never fails startup itself — while it is closed every allocation
+// is refused rebuild_incomplete and every read answers `unavailable`. verify is
+// a seam for the lifecycle glue test (production: nonce.VerifyRebuild over the
+// serve pool).
+func runRebuildGate(ctx context.Context, chainID int64, gate *nonce.RebuildGate,
+	verify func(context.Context, int64) (nonce.RebuildReport, error)) {
+	report, err := verify(ctx, chainID)
+	if err != nil {
+		reason := "rebuild_incomplete: " + err.Error()
+		gate.KeepClosed(reason)
+		slog.Error("nonce rebuild verification failed; allocation gate stays closed",
+			"chain_id", chainID, "reason", logx.Redact(reason))
+		return
+	}
+	gate.Open()
+	slog.Info("nonce rebuild verification complete; allocation gate open",
+		"chain_id", chainID, "scopes", report.Scopes,
+		"bindings", report.Bindings, "holds", report.Holds)
+}
+
+// nonceReadProvider is the readapi surface the transport drives;
+// *nonce.ReadProvider satisfies it (the glue test substitutes a fake).
+type nonceReadProvider interface {
+	Authenticate(presented string) bool
+	Read(ctx context.Context, req nonce.ReadRequest) (nonce.ReadResponse, error)
+}
+
+// nonceReadHandler is the HTTP transport for the 008 read endpoints
+// (contracts/read-api.md §1–§3). The credential is checked before any routing
+// or read: a missing or wrong bearer is the 401 unauthenticated outcome, and
+// the credential never appears in a log line or in the 401 body.
+type nonceReadHandler struct {
+	provider nonceReadProvider
+}
+
+func (h *nonceReadHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	bearer, ok := strings.CutPrefix(r.Header.Get("Authorization"), "Bearer ")
+	if !ok || !h.provider.Authenticate(bearer) {
+		writeReadResponse(w, nonce.UnauthenticatedResponse())
+		return
+	}
+	if r.Method != http.MethodGet {
+		w.Header().Set("Allow", http.MethodGet)
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	rest := strings.TrimPrefix(r.URL.Path, "/nonce/bindings/")
+	if intentID, isByIntent := strings.CutPrefix(rest, "by-intent/"); isByIntent {
+		h.read(w, r, nonce.ReadRequest{
+			IntentID:        intentID,
+			ExpectedChainID: expectedChainID(r.URL.Query().Get("chain_id")),
+			ExpectedSender:  r.URL.Query().Get("sender"),
+		})
+		return
+	}
+	h.read(w, r, nonce.ReadRequest{BindingID: rest})
+}
+
+// read performs one lookup and writes its outcome. A path that names no
+// identity is the fail-closed 404, exactly like an unknown key; a malformed
+// expected scope rides the provider's own mismatch answer, never a
+// transport-invented status.
+func (h *nonceReadHandler) read(w http.ResponseWriter, r *http.Request, req nonce.ReadRequest) {
+	if (req.BindingID == "") == (req.IntentID == "") {
+		writeReadResponse(w, readNotBoundResponse())
+		return
+	}
+	resp, err := h.provider.Read(r.Context(), req)
+	if err != nil {
+		slog.Warn("nonce read request failed", "error", logx.Redact(err.Error()))
+		if resp.Outcome == "" {
+			resp = readUnavailableResponse()
+		}
+	}
+	writeReadResponse(w, resp)
+}
+
+// expectedChainID parses the optional by-intent chain_id cross-check. A
+// malformed value becomes 0, which no durable chain id can equal, so the
+// provider reports mismatch without inventing a status; an absent value is no
+// cross-check at all.
+func expectedChainID(raw string) *int64 {
+	if raw == "" {
+		return nil
+	}
+	id, err := strconv.ParseInt(raw, 10, 64)
+	if err != nil {
+		id = 0
+	}
+	return &id
+}
+
+// readNotBoundResponse mirrors nonce's fail-closed 404 body for a path that
+// names no identity, emitted before any provider call.
+func readNotBoundResponse() nonce.ReadResponse {
+	return nonce.ReadResponse{
+		Outcome: nonce.ReadNotBound,
+		Error:   &nonce.ReadErrorBody{Code: string(nonce.ReadNotBound)},
+		Notice:  nonce.ReadNoticeNotBound,
+	}
+}
+
+// readUnavailableResponse mirrors nonce's retryable 503 body for a request
+// the provider refused before producing an outcome.
+func readUnavailableResponse() nonce.ReadResponse {
+	return nonce.ReadResponse{
+		Outcome: nonce.ReadUnavailable,
+		Error:   &nonce.ReadErrorBody{Code: string(nonce.ReadUnavailable)},
+		Notice:  nonce.ReadNoticeUnavailable,
+	}
+}
+
+// writeReadResponse maps ReadResponse.HTTPStatus onto the wire; it encodes
+// only the outcome's defined fields and never credential material.
+func writeReadResponse(w http.ResponseWriter, resp nonce.ReadResponse) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(resp.HTTPStatus())
+	_ = json.NewEncoder(w).Encode(resp)
 }
 
 // indexerMetricInterval is how often scanner state and checkpoint snapshots
