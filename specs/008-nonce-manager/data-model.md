@@ -291,7 +291,10 @@ immediately before the tx and are passed in as data.
    `nonce_scope_state` row `FOR SHARE` before snapshotting; all four writer transactions above
    take it `FOR UPDATE`, so 008-owned pause/registry/floor/binding writes are linearized against
    reads. 006 ordering inside the read snapshot stays best-effort; consumers re-read 006 gates
-   in their own transactions.
+   in their own transactions. Consumers MAY additionally hold the same scope row `FOR SHARE`
+   inside their own admission transaction (ordering-only, never writes) under the fixed order
+   scope row → 006 gate tables → 007 grant row → own rows; 008 writers take no locks in reverse
+   order, so no cycle is introduced.
 
 ## Numeric and evidence conventions
 

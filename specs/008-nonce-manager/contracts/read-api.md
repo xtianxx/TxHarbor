@@ -107,11 +107,13 @@ never claims absence.
 
 ## 4. Consistency
 
-- Every request opens **one `REPEATABLE READ, READ ONLY` transaction** and reads inside it:
-  the binding row, its scope's active holds + scope state, the registry row, and the 006 recovery
-  signal (active `reorg_recovery` row + latest terminal event, 007 single-snapshot protocol).
-  Same snapshot ⇒ no cross-version composite (e.g., a release-then-re-establish cannot be
-  straddled).
+- Every request opens one `REPEATABLE READ` transaction in read-write mode (NOT `READ ONLY`:
+  the read acquires a row lock below, which `READ ONLY` rejects) and performs lock acquisition +
+  `SELECT` only — zero data modification; the transaction commits without writing. Order inside:
+  `SELECT … FOR SHARE` on the scope's `nonce_scope_state` row (when the scope row exists) first,
+  then the snapshot reads below (binding row, scope active holds + scope state, registry row, 006
+  recovery signal). Same snapshot ⇒ no cross-version composite (e.g., a release-then-re-establish
+  cannot be straddled).
 - 008-owned read failure → `unavailable` (all-or-nothing; no partial fact set). 006 read failure
   → `recovery.state = "unknown"` on an otherwise successful `bound`/`terminal` response — never
   mapped to `none`/`released` (007 rule).
@@ -126,6 +128,16 @@ never claims absence.
   after). Absent scope row ⇒ `not_bound` under the retry rule above. 006 state in this snapshot
   stays best-effort (007 single-snapshot protocol); cross-process 006 ordering is the consumer's
   own gate re-read (009 R6 gate-table lock), not this read.
+- Consumer lock participation (bilateral): a consumer (009) MAY take `SELECT … FOR SHARE` on the
+  same scope row directly in its own admission transaction (same database) BEFORE its gate reads
+  and hold it to its own `COMMIT`, with the fixed cross-transaction order — 008 scope row, then
+  006 gate tables, then 007 grant row, then own rows. 008 writers never take locks in reverse
+  order (scope row `FOR UPDATE` first, reads only after), so no lock cycle is introduced; a
+  racing 008 writer blocks until the consumer commits (ordered after the admission). The
+  consumer MUST NOT write 008 rows; the `SHARE` lock is ordering-only. This is how 009's
+  admission stays isolated from 008 pause/registry/release writes that commit after 009's own
+  `ReadBinding` call returned — the returned read alone is a point fact, never the admission's
+  isolation basis.
 - No mutation, no delivery: 008's delivery point is the allocation-commit admission
   (OC-7 mapping); a read never advances state.
 
