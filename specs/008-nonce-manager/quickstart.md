@@ -66,3 +66,121 @@ release in `contracts/observation.md`, schema in `data-model.md`.
   deferred to post-dependency.
 - Production provider selection (T000-P) remains open; Anvil-only validation does not claim
   production readiness.
+
+## §操作 runbook（T041；合成数据演示，非真实凭据）
+
+本节每一步均有实现/测试证据，不引入新语义。退出码全命令统一：0 成功（本次尝试已提交
+`applied`/`nop`，或同参重试收敛到已记录结果）、1 拒绝/失败（含 `operation_conflict` 与
+`temporarily_unavailable`，stderr 已脱敏）、2 用法错误（含缺 `--operation-id`，在任何配置或
+数据库访问之前判定）。用 serve 同一份 env 文件运行（`config.Load` 全量校验；命令实际只用
+`TXHARBOR_PG_DSN` + `TXHARBOR_RPC_URL` + `TXHARBOR_CHAIN_ID`）。
+
+信任边界（沿用 005 F-R2 / 007 T032，如实声明，非新增机制）：当前模型以写 DSN 的访问权作为
+数据库操作信任边界；serve 与 `nonce-admin` 未通过独立数据库角色隔离。持写 DSN 的主体技术上
+能直写数据库、绕过应用事务守卫；受控 CLI 与"禁裸 SQL"约定是操作纪律，不是数据库强制限制。
+`--operator` 为调用方声明的审计标签，不是已认证身份；`operation_id` 用于关联与幂等定性，
+不能单独证明实际操作者身份。审计追溯靠 `nonce_ops_audit` 的 operator/reason/operation id 列。
+
+operation-id 捕获规则（mint-first）：`txharbor nonce-admin mint` 打印一行 32 位小写十六进制
+不透明 id，是纯熵（无 `config.Load`、无连接、不落库；mint 在任何数据库访问之前）。调用方
+MUST 先持久化捕获该 id，再用它执行任何变更动作。每个变更动作 REQUIRED `--operation-id`
+（无自动 mint、无回退 echo）；id 绝不为同一尝试重铸。
+
+0. 启动与闸门：`migrate up` 到 `000008`；serve 绑定部署链（FR-04，链不符在打开任何连接前
+   拒绝）。启动重建闸门（R5）完成前所有分配拒 `rebuild_incomplete`；闸门失败保持关闭并结构化
+   报错，无静默修复、无内存猜测（证据 T017/T023）。
+
+1. `mint`（纯熵，证据 T015）：`txharbor nonce-admin mint` → stdout 一行 id，exit 0。
+   不碰配置、不碰库。
+
+2. 注册/禁用（注册表，证据 T008/T014/T015/T036）：
+   `txharbor nonce-admin register --operation-id O --chain-id 31337 --sender 0x… --operator op --reason r`
+   → `ok action=register subject_id=… outcome=applied`（插入或重启用并 `registry_seq + 1`）。
+   `txharbor nonce-admin disable --operation-id P --chain-id 31337 --sender 0x… --operator op --reason r`
+   → 状态翻转并 `registry_seq + 1`。注册表状态只门禁新准入；既有 intent 的 sender/nonce 是不可变
+   事实，后续配置变更永不改写。等参同 id 重放返已记录结果；同 id 异参 → `operation_conflict`、
+   零写入、exit 1。
+
+3. 解除 hold（`hold-release`，证据 T014/T015/T031/T032）：
+   `txharbor nonce-admin hold-release --operation-id O --hold-id H --chain-id 31337 --sender 0x… --observation-id OB --evidence "finding" --operator op --reason r`
+   证据标准（observation.md §3.1，全部满足才 applied）：在锁内以新鲜预观察重核作用域分类为
+   `consistent`、无未决冲突、`--observation-id` 属于该作用域；成功只清被点名的那一行 hold
+   （`active → released`）并把 `reconciled_floor` 推进到观察到的 pending；同事务写
+   `outcome=applied` 审计行。证据缺失/观察不存在/重核失败/仍分类为该原因/归属不足 →
+   `outcome=refused`、零 hold/floor 变更、exit 1。修复完成不自动等于解除：无自动路径、无定时器。
+
+4. 处置 binding（`binding-release`，证据 T014/T015/T025）：同 carrier，`--binding-id B`；
+   仅非终态 binding 可处置；无外部副作用的判定 MUST 有显式证据（链上重观察显示 nonce 从未被挖、
+   无 pending 交易，外加运维结论），单凭超时/连接错误从不是证据（US3-3）。结果：终态 `released`
+   加事件加审计；该 nonce 永不复用。在途项也可保持 in-flight（解除非强制）。
+
+5. `status`（只读查询面，observation.md §5，证据 T015）：
+   `txharbor nonce-admin status --chain-id 31337 [--sender 0x…]`
+   → 打印作用域状态（`reconciled_floor`/`last_latest`/`last_pending`/`last_observation_id`，缺省
+   `scope=none`）与逐 active hold（`hold_id`/`sender`/`cause`/`established_at`/`evidence_observation_id`），
+   末行 `status ok active_holds=N`。SELECT-only，永不写入，exit 0。
+
+6. 未知 COMMIT 同-op-id 重试规则（observation.md §3.4，证据 T038/T045）：COMMIT 结果不确定时
+   MUST 用同一个 `--operation-id` 与同一组参数重试；等参 → 收敛到已记录的
+   `applied`/`refused`/`nop`（永不升级），异参 → `operation_conflict`、零写入。id 不为同一尝试
+   重铸（mint-first）。
+
+7. V1–V13 检查清单与执行记录（T041 时点，HEAD `6a3ce1d9e28fa89b49aa956895ffaf7a20695a10`）。
+   本表是 T041 时点的**场景到测试映射**；V1–V13 的完整矩阵执行与 FR/SC 签署由 T042 负责，本
+   工作区 T039/T040/T042 均未勾选，故本记录**不宣称** V 矩阵 green，只登记 test 文件与任务归属
+   （`tasks.md` 中 T018–T038、T044/T045 记为 green）。T000-P 独立 open。
+
+   | V | 场景 | 测试文件（任务） |
+   |---|---|---|
+   | V1 | 并发分配、一作用域 | `allocate_concurrency_integration_test.go`（T018） |
+   | V2 | 同意图重放/冲突/收敛 | `allocate_replay_integration_test.go`（T019）、`converge_integration_test.go`（T022）、`authz_commit_unknown_integration_test.go`（T045） |
+   | V3 | 崩溃/重启/重建闸门 | `restart_integration_test.go`（T021）、`rebuild_integration_test.go`（T023） |
+   | V4 | 未知结果保留/替换 | `unknown_outcome_integration_test.go`（T024）、`binding_release_integration_test.go`（T025）、`reconcile_integration_test.go`（T026） |
+   | V5 | 分类/hold/故障注入 | `classify_e2e_integration_test.go`（T027）、`rpc_fault_integration_test.go`（T030） |
+   | V6 | bootstrap 外部消耗证据 | `bootstrap_integration_test.go`（T028） |
+   | V7 | 解除证据/版本漂移 | `hold_release_integration_test.go`（T031）、`release_version_integration_test.go`（T032）、`recovery_coexistence_integration_test.go`（T033） |
+   | V8 | 006 pause 优先/独立共存 | `recovery_coexistence_integration_test.go`（T033） |
+   | V9 | 读契约五结果/单快照 | `readapi_contract_integration_test.go`（T034）、`readapi_lockorder_integration_test.go`（T035） |
+   | V10 | 注册表生命周期 | `registry_lifecycle_integration_test.go`（T036） |
+   | V11 | 授权绑定/fail-closed/撤销竞态 | `authz_integration_test.go`（T037）、`authz_revoke_race_integration_test.go`（T044）、`authz_commit_unknown_integration_test.go`（T045） |
+   | V12 | 运维尝试语义 | `admin_attempts_integration_test.go`（T038）、`authz_commit_unknown_integration_test.go`（T045） |
+   | V13 | 数值/证据/日志卫生 | `migration_integration_test.go`（T005）、`observe_redact_test.go`（T020）、`rpc_fault_integration_test.go`（T030）、`readapi_contract_integration_test.go`（T034） |
+
+## §资源隔离记录（T041）
+
+仅 workdir-local 资源（workflow R4）。若本 workdir 使用任何手动调试栈，MUST 命名空间隔离于
+共享 compose 栈：
+
+- database/schema `txharbor_008`；
+- PostgreSQL `127.0.0.1:55432`；
+- Anvil `127.0.0.1:58545`；
+- 独立 compose project 与 volume 名 `txharbor008`。
+
+**NEVER** 共享 `compose.yaml` 的 `pgdata` 卷 / 5432 / 8545。008 测试永不消费共享栈，故 sibling
+009 workdir 不会与本 workdir 碰撞。集成/E2E 由 testcontainers 自供给 PostgreSQL 加 Anvil
+（foundry `v1.8.1`，chain 31337），Anvil 为链上真相；故障注入（RPC transport/timeout/rate-limit/
+divergent、kill -9、并发执行器）走同一入口（`make test-integration`）。测试双（fake RPC/脚本
+计数）仅限早期开发；最终并发/重启/恢复验收 MUST 跑真 PostgreSQL 加真 Anvil（原则 XI；workflow
+R5）。通过定义：每个场景断言全绿，SC-01–SC-09 为 pass/fail 而非备注，任何偏离即失败。
+
+## §延后验收记录（T043）
+
+明确延后，不做双边宣称（contracts/downstream.md §4）：
+
+1. **011 intent 存在性/linkage**：011 的 intent 表不存在；008 只把 `intent_id` 当作不透明稳定
+   身份，任何 FK/存在性交叉检查以及意图与请求与授权之间的 linkage 校验都延后到真实 011 集成。
+2. **010 attempt-level 精化**：010 的 attempt 生命周期不存在；008 的 binding 状态只由链证据推导
+   （`allocated`/`in_flight`/`consumed`），不读不写 010 表。
+3. **009 客户端与 gate 组合**：读客户端、重试策略，以及与 009 自身 signing/recovery gate 的组合。
+4. **端到端验收**："API 请求 → queue → nonce 分配 → signing → broadcast → confirmation" 在全链
+   存在前无法验收。
+
+FR-18 延后半（attempt 可追溯性，contracts/downstream.md §2）是**记录在案的缺口**（known gap），
+**不是被模拟的行为**：测试 fixture 使用 test-authored 的不透明 `intent_id`，upstream 无 011 表，
+延后的存在性检查作为已知缺口登记，绝不模拟为现实（contracts/downstream.md §5）。
+
+008 自身验收范围限于 **admission/reconcile/read-provider** 行为（本文件 §Scenario matrix 与
+§Environment）：V1–V13 覆盖的就是这三类 008 provider-side 行为，含 006 恢复暂停承接与 007 授权
+只读校验边界。T000-P（生产 provider 选择）保持 open；Anvil-only 验证不宣称生产就绪。
+
+本记录不新增代码、表或状态机，也不创建 009/010/011 规范。

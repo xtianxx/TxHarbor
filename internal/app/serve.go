@@ -23,6 +23,7 @@ import (
 
 	"github.com/ethereum/go-ethereum"
 	"github.com/ethereum/go-ethereum/core/types"
+	gethrpc "github.com/ethereum/go-ethereum/rpc"
 
 	"github.com/xtianxx/txharbor/internal/config"
 	"github.com/xtianxx/txharbor/internal/db"
@@ -333,6 +334,22 @@ func Serve(ctx context.Context, d Deps) int {
 		pool.Close()
 		return fail("startup failed (http listen): %s", logx.Redact(err.Error()))
 	}
+	// 008 reconcile observer (T029): a raw JSON-RPC client drives the
+	// per-known-scope T-observe tick on the existing IndexPollInterval cadence.
+	// Its failures are logged inside the loop and never flip service readiness,
+	// mirroring 006's observer.
+	reconcileRPC, err := gethrpc.DialContext(runCtx, cfg.RPCURL)
+	if err != nil {
+		listener.Close()
+		ethClient.Close()
+		pool.Close()
+		return fail("startup failed (nonce reconcile rpc): %s", logx.Redact(err.Error()))
+	}
+	reconcileLoop := nonce.NewReconcileLoop(pool, nonce.NewObserver(reconcileRPC, nonce.ObserverConfig{
+		RPCTimeout:   cfg.IndexRPCTimeout,
+		RetryInitial: cfg.IndexRetryInitial,
+		RetryMax:     cfg.IndexRetryMax,
+	}), chainID, cfg.IndexPollInterval, slog.Default())
 	startupCancel()
 
 	observer := &indexerObserver{scanner: scanner, m: m, chainID: chainID}
@@ -380,6 +397,15 @@ func Serve(ctx context.Context, d Deps) int {
 	go runner.Run(runCtx)
 	serveErr := make(chan error, 1)
 	go func() { serveErr <- srv.Serve(listener) }()
+	// The reconcile observer runs beside the coordinator, not inside it: it
+	// takes no lease (008 never acquires one) and is serialized only by the
+	// shared coordination row, so it must keep reconciling even while another
+	// instance owns the lease. cancel() stops it and shutdown joins it.
+	reconcileDone := make(chan struct{})
+	go func() {
+		defer close(reconcileDone)
+		reconcileLoop.Run(runCtx)
+	}()
 	indexerErr := make(chan error, 1)
 	indexerDone := make(chan struct{})
 	go func() {
@@ -440,9 +466,9 @@ serveLoop:
 	}
 	cancel() // stop probe loop and indexer before releasing resources
 
-	// 6. Shutdown: stop accepting work, let the indexer exit, then release
-	// resources, all sharing one 15s budget. Budget exhaustion is recorded and
-	// exits non-zero.
+	// 6. Shutdown: stop accepting work, let the indexer and the reconcile
+	// observer exit, then release resources, all sharing one 15s budget.
+	// Budget exhaustion is recorded and exits non-zero.
 	if err := runShutdown(context.Background(), cfg.ShutdownTimeout,
 		func(shCtx context.Context) error { return srv.Shutdown(shCtx) },
 		func(shCtx context.Context) error {
@@ -453,7 +479,15 @@ serveLoop:
 				return shCtx.Err()
 			}
 		},
-		func(context.Context) error { ethClient.Close(); return nil },
+		func(shCtx context.Context) error {
+			select {
+			case <-reconcileDone:
+				return nil
+			case <-shCtx.Done():
+				return shCtx.Err()
+			}
+		},
+		func(context.Context) error { reconcileRPC.Close(); ethClient.Close(); return nil },
 		func(context.Context) error { pool.Close(); return nil },
 	); err != nil {
 		fmt.Fprintf(stderr, "txharbor serve: shutdown error: %s\n", logx.Redact(err.Error()))

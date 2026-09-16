@@ -259,9 +259,29 @@ func (p *ReadProvider) Read(ctx context.Context, req ReadRequest) (ReadResponse,
 		return unavailableResponse(), readUnavailable("read failed", err)
 	}
 	if cerr := tx.Commit(ctx); cerr != nil {
+		_ = tx.Rollback(ctx)
+		// The one in-tx statement whose failure is deliberately swallowed is
+		// the best-effort 006 probe (readRecoveryStateTx). On a real backend
+		// that error also aborts the whole transaction, so COMMIT comes back
+		// as a rollback. Every fact was already read before the probe under
+		// the same snapshot, and the annotation is already degraded to
+		// `unknown`, so serve the contract response rather than collapsing an
+		// otherwise successful read to `unavailable` (read-api.md §4).
+		if degradedBy006Failure(resp) {
+			return resp, nil
+		}
 		return unavailableResponse(), readUnavailable("commit read transaction", cerr)
 	}
 	return resp, nil
+}
+
+// degradedBy006Failure reports whether resp is a fully assembled fact response
+// whose only in-tx problem was the best-effort 006 probe: a bound/terminal body
+// carrying the `unknown` recovery degradation. That is exactly the case where
+// an aborted commit must still yield the contract response, never a 503.
+func degradedBy006Failure(resp ReadResponse) bool {
+	return (resp.Outcome == ReadBound || resp.Outcome == ReadTerminal) &&
+		resp.Annotations != nil && resp.Annotations.Recovery.State == RecoveryUnknown
 }
 
 // readBindingOutcomeTx is the in-tx read: identity lookup, expected-scope

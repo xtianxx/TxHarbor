@@ -33,6 +33,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"math/big"
 	"strconv"
 	"strings"
@@ -41,6 +42,8 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
+
+	"github.com/xtianxx/txharbor/internal/logx"
 )
 
 // AllocationRequest is the canonical allocation input (data-model §Canonical
@@ -96,15 +99,131 @@ type allocTx interface {
 type Allocator struct {
 	observer *Observer
 	begin    func(ctx context.Context) (allocTx, error)
+	// gate is the fail-closed startup readiness gate (R5/FR-13): while it is
+	// closed every admission refuses rebuild_incomplete with the recorded
+	// cause, before any RPC or DB access. A nil gate is the unit-test seam
+	// (ungated); production wires the gate the startup verification drives.
+	gate *RebuildGate
+	// logger and sink are the optional observability seam (T020, R11/FR-21).
+	// A nil logger falls back to slog.Default; a nil sink skips counting.
+	// Both are emission-only and never affect an admission outcome.
+	logger *slog.Logger
+	sink   AllocationSink
+}
+
+// AllocationSink is the metrics seam for admission observability (R11/FR-21).
+// The *metrics.Metrics registry satisfies it structurally, so the nonce
+// package never imports the registry and the app layer stays the only wiring
+// point. Every argument is a fixed-vocabulary value: no sender, nonce, intent
+// or hold value is ever passed (FR-21/SC-09).
+type AllocationSink interface {
+	ObserveNonceAllocation(result string)
+	ObserveNonceReplay()
+	ObserveNonceObservation(classification string)
+}
+
+// allocationObservation is the structured, pre-redaction payload of one
+// admission for the T020 observability funnel. It carries no key material:
+// emitAllocation runs every string field through logx.Redact before slog.
+type allocationObservation struct {
+	chainID        int64
+	sender         string
+	nonce          *big.Int
+	bindingID      string
+	intentID       string
+	holdID         string
+	cause          string
+	classification string
+	registrySeq    int64
+	result         Outcome
+}
+
+// newAllocObservation seeds the request-derived fields.
+func newAllocObservation(req AllocationRequest) allocationObservation {
+	return allocationObservation{chainID: req.ChainID, sender: req.Sender, intentID: req.IntentID}
+}
+
+// mergeAllocObservation folds the in-tx attempt payload into dst, preserving
+// whatever dst already carries.
+func mergeAllocObservation(dst *allocationObservation, src allocationObservation) {
+	if src.result != "" {
+		dst.result = src.result
+	}
+	if src.cause != "" {
+		dst.cause = src.cause
+	}
+	if src.classification != "" {
+		dst.classification = src.classification
+	}
+	if src.holdID != "" {
+		dst.holdID = src.holdID
+	}
+	if src.bindingID != "" {
+		dst.bindingID = src.bindingID
+	}
+	if src.nonce != nil {
+		dst.nonce = src.nonce
+	}
+	if src.registrySeq != 0 {
+		dst.registrySeq = src.registrySeq
+	}
+}
+
+// WithObservability installs the optional observability seam: logger is the
+// structured-log destination (nil -> slog.Default) and sink the metrics seam
+// (nil -> no counting). It returns the allocator so NewAllocator can be
+// chained.
+func (a *Allocator) WithObservability(logger *slog.Logger, sink AllocationSink) *Allocator {
+	a.logger = logger
+	a.sink = sink
+	return a
+}
+
+// emitAllocation records one admission through the logx redaction funnel and
+// the optional metrics sink. It is emission-only and never changes an outcome.
+func (a *Allocator) emitAllocation(obs allocationObservation) {
+	if obs.result == "" {
+		return
+	}
+	if a.sink != nil {
+		a.sink.ObserveNonceAllocation(string(obs.result))
+		if obs.result == OutcomeReplayed {
+			a.sink.ObserveNonceReplay()
+		}
+		if obs.classification != "" {
+			a.sink.ObserveNonceObservation(obs.classification)
+		}
+	}
+	logger := a.logger
+	if logger == nil {
+		logger = slog.Default()
+	}
+	logger.Info("nonce allocation",
+		"chain_id", obs.chainID,
+		"sender", logx.Redact(obs.sender),
+		"nonce", logx.Redact(FormatDecimal(obs.nonce)),
+		"binding_id", logx.Redact(obs.bindingID),
+		"intent_id", logx.Redact(obs.intentID),
+		"hold_id", logx.Redact(obs.holdID),
+		"cause", logx.Redact(obs.cause),
+		"classification", obs.classification,
+		"registry_seq", obs.registrySeq)
 }
 
 // NewAllocator wires the pooled transaction opener and the pre-tx observer
-// (T017 constructs it with the serve pool and a real RPC observer).
-func NewAllocator(pool *pgxpool.Pool, observer *Observer) *Allocator {
-	return &Allocator{
+// (T017 constructs it with the serve pool and a real RPC observer). An
+// optional startup rebuild gate (R5/FR-13) may be supplied; while it is closed
+// every admission refuses rebuild_incomplete before any RPC or DB access. No
+// gate leaves the allocator ungated (the unit-test seam).
+func NewAllocator(pool *pgxpool.Pool, observer *Observer, gate ...*RebuildGate) *Allocator {
+	a := &Allocator{
 		observer: observer,
 		begin:    func(ctx context.Context) (allocTx, error) { return pool.Begin(ctx) },
 	}
+	if len(gate) > 0 {
+		a.gate = gate[0]
+	}
+	return a
 }
 
 // Allocate is the T-allocate entry point: it returns the volatile binding
@@ -113,8 +232,23 @@ func NewAllocator(pool *pgxpool.Pool, observer *Observer) *Allocator {
 // Every admission attempt persists its observation when classification was
 // reached; RPC runs strictly before BEGIN.
 func (a *Allocator) Allocate(ctx context.Context, req AllocationRequest) (*Binding, Outcome, error) {
+	obs := newAllocObservation(req)
+	defer func() { a.emitAllocation(obs) }()
+
 	if err := req.Validate(); err != nil {
 		return nil, "", err
+	}
+
+	// R5/FR-13: the rebuild gate is consulted before any RPC or DB access, so
+	// a closed gate fails closed with zero external effect and no memory-based
+	// nonce derivation.
+	if a.gate != nil && !a.gate.IsOpen() {
+		_, cause := a.gate.State()
+		if cause == "" {
+			cause = "startup rebuild verification has not completed"
+		}
+		obs.result, obs.cause = OutcomeRebuildIncomplete, cause
+		return nil, OutcomeRebuildIncomplete, Refuse(OutcomeRebuildIncomplete, cause)
 	}
 
 	// R4: the chain view is sampled once, before the transaction opens.
@@ -122,16 +256,29 @@ func (a *Allocator) Allocate(ctx context.Context, req AllocationRequest) (*Bindi
 
 	tx, err := a.begin(ctx)
 	if err != nil {
+		obs.result, obs.cause = OutcomeTemporarilyUnavailable, "open allocation transaction"
 		return nil, OutcomeTemporarilyUnavailable, storageRefusal("open allocation transaction", err)
 	}
 
 	res, err := allocateInTx(ctx, tx, req, observation)
+	mergeAllocObservation(&obs, res.obs)
 	switch {
 	case err != nil:
 		_ = tx.Rollback(ctx)
 		if bindingCarrierConstraint(err) {
-			return a.convergeAfterRace(ctx, req, attemptedNonce(res.attempted))
+			binding, outcome, rerr := a.convergeAfterRace(ctx, req, attemptedNonce(res.attempted))
+			obs.result = outcome
+			if binding != nil {
+				obs.nonce, obs.bindingID, obs.registrySeq = binding.Nonce, binding.BindingID, binding.RegistrySeq
+			} else {
+				obs.nonce = attemptedNonce(res.attempted)
+			}
+			if rerr != nil {
+				obs.result = OutcomeTemporarilyUnavailable
+			}
+			return binding, outcome, rerr
 		}
+		obs.result, obs.cause = OutcomeTemporarilyUnavailable, "allocation transaction failed"
 		return nil, OutcomeTemporarilyUnavailable, storageRefusal("allocation transaction failed", err)
 	case res.refuse != nil && res.refuse.Outcome == OutcomeReplayed:
 		// T-replay: the original binding was returned, no row was touched.
@@ -146,6 +293,7 @@ func (a *Allocator) Allocate(ctx context.Context, req AllocationRequest) (*Bindi
 		// Classification refusal: the observation (+ hold) is the evidence and
 		// must be committed.
 		if cerr := tx.Commit(ctx); cerr != nil {
+			obs.result, obs.cause = OutcomeTemporarilyUnavailable, "commit classification refusal"
 			return nil, OutcomeTemporarilyUnavailable, storageRefusal("commit classification refusal", cerr)
 		}
 		return nil, res.refuse.Outcome, res.refuse
@@ -153,6 +301,7 @@ func (a *Allocator) Allocate(ctx context.Context, req AllocationRequest) (*Bindi
 		if cerr := tx.Commit(ctx); cerr != nil {
 			// Commit-unknown: retry with the same input set converges through
 			// the UNIQUE carriers (T-converge).
+			obs.result, obs.cause = OutcomeTemporarilyUnavailable, "commit allocation"
 			return nil, OutcomeTemporarilyUnavailable, storageRefusal("commit allocation", cerr)
 		}
 		return res.binding, OutcomeAllocated, nil
@@ -173,10 +322,14 @@ type allocationTxResult struct {
 	// persist is true only for classification refusals, whose observation
 	// (+ hold) must be committed; every other refusal path is rolled back.
 	persist bool
+	// obs is the emission-only observability payload of this attempt (T020);
+	// the allocation logic never reads it.
+	obs allocationObservation
 }
 
 // allocateInTx runs the T-allocate steps inside the caller's transaction.
 func allocateInTx(ctx context.Context, tx txQuerier, req AllocationRequest, obs Observation) (allocationTxResult, error) {
+	o := newAllocObservation(req)
 	if err := lockChain(ctx, tx, req.ChainID); err != nil {
 		return allocationTxResult{}, err
 	}
@@ -188,8 +341,11 @@ func allocateInTx(ctx context.Context, tx txQuerier, req AllocationRequest, obs 
 		return allocationTxResult{}, err
 	}
 	if gates.Any() {
-		return allocationTxResult{refuse: Refuse(OutcomeRecoveryActive,
-			"006 gate active: "+strings.Join(gates.Causes(), ","))}, nil
+		o.result, o.cause = OutcomeRecoveryActive, "006 gate active: "+strings.Join(gates.Causes(), ",")
+		return allocationTxResult{
+			refuse: Refuse(OutcomeRecoveryActive, o.cause),
+			obs:    o,
+		}, nil
 	}
 
 	// Registry recheck (OC-2): must precede scope-row creation (FK carrier).
@@ -198,7 +354,11 @@ func allocateInTx(ctx context.Context, tx txQuerier, req AllocationRequest, obs 
 		return allocationTxResult{}, err
 	}
 	if refusal := registry.AdmissionRefusal(); refusal != "" {
-		return allocationTxResult{refuse: Refuse(refusal, registryRefusalReason(registry))}, nil
+		o.result, o.cause, o.registrySeq = Outcome(refusal), registryRefusalReason(registry), registry.RegistrySeq
+		return allocationTxResult{
+			refuse: Refuse(refusal, o.cause),
+			obs:    o,
+		}, nil
 	}
 
 	// Scope row FOR UPDATE: every later own-row read and write is serialized
@@ -215,8 +375,13 @@ func allocateInTx(ctx context.Context, tx txQuerier, req AllocationRequest, obs 
 		return allocationTxResult{}, err
 	}
 	if len(holds) > 0 {
-		return allocationTxResult{refuse: Refuse(OutcomeScopeHeld,
-			"active holds: "+strings.Join(holdCauseList(holds), ","))}, nil
+		o.result = OutcomeScopeHeld
+		o.cause = "active holds: " + strings.Join(holdCauseList(holds), ",")
+		o.holdID = holds[0].HoldID
+		return allocationTxResult{
+			refuse: Refuse(OutcomeScopeHeld, o.cause),
+			obs:    o,
+		}, nil
 	}
 
 	// 007 authorization row FOR SHARE: after the scope row, before own rows
@@ -228,8 +393,12 @@ func allocateInTx(ctx context.Context, tx txQuerier, req AllocationRequest, obs 
 		return allocationTxResult{}, err
 	}
 	if auth == nil {
-		return allocationTxResult{refuse: Refuse(OutcomeAuthorizationInvalid,
-			"authorization is missing, inactive, expired, or chain-mismatched")}, nil
+		o.result = OutcomeAuthorizationInvalid
+		o.cause = "authorization is missing, inactive, expired, or chain-mismatched"
+		return allocationTxResult{
+			refuse: Refuse(OutcomeAuthorizationInvalid, o.cause),
+			obs:    o,
+		}, nil
 	}
 
 	// R3: the durable intent re-read decides replay/conflict; it runs after
@@ -241,13 +410,19 @@ func allocateInTx(ctx context.Context, tx txQuerier, req AllocationRequest, obs 
 	}
 	if existing != nil {
 		if bindingMatchesInput(existing, req) {
+			o.result, o.cause = OutcomeReplayed, "allocation input equality"
+			o.bindingID, o.nonce, o.registrySeq = existing.BindingID, existing.Nonce, existing.RegistrySeq
 			return allocationTxResult{
 				binding: existing,
-				refuse:  Refuse(OutcomeReplayed, "allocation input equality"),
+				refuse:  Refuse(OutcomeReplayed, o.cause),
+				obs:     o,
 			}, nil
 		}
-		return allocationTxResult{refuse: Refuse(OutcomeAllocationConflict,
-			"intent already bound to a differing input set")}, nil
+		o.result, o.cause = OutcomeAllocationConflict, "intent already bound to a differing input set"
+		return allocationTxResult{
+			refuse: Refuse(OutcomeAllocationConflict, o.cause),
+			obs:    o,
+		}, nil
 	}
 
 	// M is recomputed from nonce_bindings under the scope lock; F and the
@@ -280,19 +455,23 @@ func allocateInTx(ctx context.Context, tx txQuerier, req AllocationRequest, obs 
 	}
 
 	if decision.Candidate == nil {
+		o.result, o.cause, o.classification = decision.Refusal, decision.Classification, decision.Classification
 		if decision.HoldCause != "" {
-			if _, err := establishHoldTx(ctx, tx, HoldEstablishment{
+			hold, err := establishHoldTx(ctx, tx, HoldEstablishment{
 				ChainID:       req.ChainID,
 				Sender:        req.Sender,
 				Cause:         decision.HoldCause,
 				ObservationID: observationID,
 				Detail:        decision.Classification,
-			}); err != nil {
+			})
+			if err != nil {
 				return allocationTxResult{}, err
 			}
+			o.holdID = hold.HoldID
 		}
 		return allocationTxResult{persist: true,
-			refuse: Refuse(decision.Refusal, decision.Classification)}, nil
+			refuse: Refuse(decision.Refusal, decision.Classification),
+			obs:    o}, nil
 	}
 
 	bindingID, err := newBindingID()
@@ -327,7 +506,9 @@ func allocateInTx(ctx context.Context, tx txQuerier, req AllocationRequest, obs 
 		return allocationTxResult{attempted: &binding},
 			errors.New("admission creation event was not written")
 	}
-	return allocationTxResult{binding: &binding}, nil
+	o.result, o.classification = OutcomeAllocated, decision.Classification
+	o.bindingID, o.nonce, o.registrySeq = binding.BindingID, binding.Nonce, binding.RegistrySeq
+	return allocationTxResult{binding: &binding, obs: o}, nil
 }
 
 // bindingMatchesInput is the full R3 input-equality set: intent identity is
