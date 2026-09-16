@@ -123,12 +123,21 @@ FROM withdrawal_authorizations WHERE authorization_id = $1`
 
 // OpInput is one supply op-input — the eight fields bound by data-model
 // Table 6 (action, authorization_id, caller_id, chain_id, asset, recipient,
-// amount, expires_at) — plus the attempt key OperationID.
+// amount, expires_at) — plus the attempt key OperationID, plus the optional
+// PB authorization-scope payload (PB-FR-01: intent_id, request_id, sender, the
+// PB-C2 fee triple, the purpose token, and the server-resolved attested_by).
 //
 // OperationID is the caller-minted, durably-captured attempt identity (R9):
 // it is the compare key, not compared content, so operator/reason retry
 // metadata never reopens an attempt. SupplyGrant's frozen signature has no
 // separate operation-id parameter, so it travels here.
+//
+// A scopeless OpInput leaves every scope field zero: that is the stock/OPEN
+// path, which stays byte-for-byte unchanged. Sender is the scope's mandatory
+// identity anchor, so any non-zero scope field makes the scope present and
+// Sender/AttestedBy are then required. AttestedBy is always the principal the
+// carrier resolved server-side (never caller-supplied) and joins op-input
+// equality, so the same operation id from a different principal conflicts.
 type OpInput struct {
 	OperationID     string
 	Action          string
@@ -139,6 +148,25 @@ type OpInput struct {
 	Recipient       string
 	Amount          string
 	ExpiresAt       *time.Time
+
+	// Optional PB authorization scope (absent = stock/OPEN).
+	IntentID             string
+	RequestID            string
+	Sender               string
+	FeeMaxTotal          int64
+	FeeMaxPerGas         int64
+	FeeMaxPriority       int64
+	AllowsFeeReplacement bool
+	AttestedBy           string
+}
+
+// scoped reports whether the op-input carries an authorization scope. Sender
+// is mandatory inside a scope, so any non-zero scope field marks the scope
+// present and the sender/attested_by rules apply.
+func (op OpInput) scoped() bool {
+	return op.IntentID != "" || op.RequestID != "" || op.Sender != "" ||
+		op.FeeMaxTotal != 0 || op.FeeMaxPerGas != 0 || op.FeeMaxPriority != 0 ||
+		op.AllowsFeeReplacement
 }
 
 // GrantOutcome is the recorded audit action for one attempt plus the grant id
@@ -162,9 +190,10 @@ func MintOperationID() (string, error) {
 
 // opInputDetail renders the canonical, redacted op-input snapshot stored in
 // the audit `detail` column and used for same-operation comparison. It binds
-// exactly the eight op-input fields; OperationID is the key and operator/reason
-// are retry metadata, so none of the three appear here. expiring values are
-// normalized to UTC microseconds (PostgreSQL timestamptz precision).
+// the eight Table 6 op-input fields plus the PB scope payload (PB-FR-01);
+// OperationID is the key and operator/reason are retry metadata, so none of the
+// three appear here. expiring values are normalized to UTC microseconds
+// (PostgreSQL timestamptz precision).
 func opInputDetail(op OpInput) string {
 	expires := ""
 	if op.ExpiresAt != nil {
@@ -179,6 +208,14 @@ func opInputDetail(op OpInput) string {
 		"recipient=" + strconv.Quote(op.Recipient),
 		"amount=" + strconv.Quote(op.Amount),
 		"expires_at=" + strconv.Quote(expires),
+		"intent_id=" + strconv.Quote(op.IntentID),
+		"request_id=" + strconv.Quote(op.RequestID),
+		"sender=" + strconv.Quote(op.Sender),
+		"fee_max_total=" + strconv.FormatInt(op.FeeMaxTotal, 10),
+		"fee_max_per_gas=" + strconv.FormatInt(op.FeeMaxPerGas, 10),
+		"fee_max_priority=" + strconv.FormatInt(op.FeeMaxPriority, 10),
+		"allows_fee_replacement=" + strconv.FormatBool(op.AllowsFeeReplacement),
+		"attested_by=" + strconv.Quote(op.AttestedBy),
 	}, ";")
 }
 
@@ -285,6 +322,34 @@ func validateSupplyOpInput(op OpInput, now time.Time) (OpInput, error) {
 	}
 	op.Asset = asset
 	op.Recipient = recipient
+
+	// PB scope payload (PB-FR-01). The scopeless stock/OPEN path skips this
+	// entirely, so pre-extension supply behavior is unchanged.
+	if op.scoped() {
+		sender, err := canonicalAddressField(op.Sender, "sender")
+		if err != nil {
+			return OpInput{}, err
+		}
+		if op.AttestedBy == "" {
+			return OpInput{}, New(CodeValidationFailed,
+				"attested_by is required on a scoped supply; it is the server-resolved issuance principal, never caller-supplied nor the operator").
+				WithField("attested_by")
+		}
+		op.Sender = sender
+	}
+	for _, fee := range []struct {
+		value int64
+		field string
+	}{
+		{op.FeeMaxTotal, "fee_max_total"},
+		{op.FeeMaxPerGas, "fee_max_per_gas"},
+		{op.FeeMaxPriority, "fee_max_priority"},
+	} {
+		if fee.value < 0 {
+			return OpInput{}, New(CodeValidationFailed, fee.field+" must not be negative").
+				WithField(fee.field)
+		}
+	}
 	return op, nil
 }
 
