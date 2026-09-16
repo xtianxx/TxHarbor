@@ -19,7 +19,7 @@ grant may exist without scope = pre-extension stock).
 | `fee_max_per_gas` | BIGINT ≥ 0, per-gas-unit cap |
 | `fee_max_priority` | BIGINT ≥ 0, EIP-1559 priority cap; MUST satisfy `≤ fee_max_per_gas` (CHECK) |
 | `allows_fee_replacement` | BOOLEAN, explicit purpose token (default false) |
-| `authorization_version` | BIGINT ≥ 1, monotonic per grant (bumped on revoke-then-re-supply cycles that keep scope; re-issuance mints a NEW grant id, never rewrites) |
+| `authorization_version` | BIGINT ≥ 1, monotonic per grant (revoke bumps on active→revoked; a re-supply of the revoked grant bumps again; re-issuance mints a NEW grant id, never rewrites) |
 | `attested_by` | TEXT, issuing principal (joins issuance audit); server-resolved, joins op-input equality (different principal + same operation id → `operation_conflict`) |
 
 No signature column (Q-A). No FK from audit tables into scope (audit stays
@@ -30,7 +30,9 @@ append-only and FK-free, matching Table 6 precedent).
 - **T-supply+scope**: `BEGIN → statement guard → api_key FOR SHARE +
   caller FOR SHARE + PermitIssue re-evaluation → grant FOR UPDATE →
   grant/scope/audit writes → COMMIT` (authority re-checks precede all writes;
-  R-PB10). Refusal (`supply_refused` + named reason) writes nothing.
+  R-PB10). An in-tx refusal (`supply_refused` + named reason) commits one
+  `supply_refused` audit row and zero grant/scope rows; a refusal before the tx
+  (usage, config, unreachable DB, pre-tx authority gate) writes nothing.
 - **T-revoke-sync**: existing revoke tx + scope state/version sync in the same
   tx (scope follows grant state; version bump rule per table above).
 - **T-reissue**: NEW grant id + NEW scope row in one supply tx, with an audit

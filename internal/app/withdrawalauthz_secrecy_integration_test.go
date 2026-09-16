@@ -12,6 +12,8 @@ import (
 	"bytes"
 	"context"
 	"log/slog"
+	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"testing"
@@ -57,11 +59,19 @@ func TestWithdrawalAuthzSupplyCredentialSecrecy(t *testing.T) {
 	slog.SetDefault(slog.New(slog.NewTextHandler(&slogBuf, nil)))
 	defer slog.SetDefault(origLog)
 
+	// The credential travels in a restricted file, not argv: the end-to-end
+	// proof covers the preferred input form, so the secret never enters the
+	// process arguments at all.
+	keyPath := filepath.Join(t.TempDir(), "api-key")
+	if err := os.WriteFile(keyPath, []byte(plaintext+"\n"), 0o600); err != nil {
+		t.Fatalf("write key file: %v", err)
+	}
+
 	opID := withdrawalAuthzMintID(t, ctx, env)
 	code, stdout, stderr := withdrawalAuthzRun(ctx, env, "supply",
 		"--operation-id", opID,
 		"--authorization-id", authID,
-		"--api-key", plaintext,
+		"--api-key-file", keyPath,
 		"--caller-id", strconv.FormatInt(callerID, 10),
 		"--chain-id", "31337",
 		"--asset", "0x1111111111111111111111111111111111111111",

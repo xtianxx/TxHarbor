@@ -27,7 +27,7 @@ runs it). No test doubles substitute for the legal path.
 | V-PB6 | Revoke vs supply race: loser observes winner state; scope consistent | green |
 | V-PB7 | Grant+scope+audit atomicity (kill -9 at phase points) | converge by operation id, zero partial |
 | V-PB8 | Commit-unknown retry with same operation id | converges, never second grant |
-| V-PB9 | Explicit re-issuance dry-run (procedure above) | trace complete; zero new rows (counts); zero mutation proven by T030 content snapshot; distinct intent set unchanged (re-issue reuses the business intent); first-supply new linkage NOT failed |
+| V-PB9 | Explicit re-issuance dry-run (procedure above) | trace complete; zero mutation proven by T031's own 7-table `row_to_json` content snapshot over a seeded non-empty fixture (in-place UPDATE and equal-size replacement both caught); library-level snapshot + `ctid`/`xmin` identity owned by T030; distinct intent set unchanged (re-issue reuses the business intent); first-supply new linkage NOT failed |
 | V-PB10 | Migration chain: empty→full, 007-era→carrier, down→re-up, **gap-fill ({1..8,10} + files {1..10} → up applies exactly 9, gate green)** | green; applied numbers untouched |
 | V-PB11 | Allowlist switchover rehearsal (R-PB10 §1–5: halt → drain-confirm → atomic swap + checksum → re-enable; T043) | old refused, new allowed; failure path keeps entry closed; unaccounted executor → switchover NOT declared |
 
@@ -54,3 +54,7 @@ runs it). No test doubles substitute for the legal path.
 - V-PB11 rehearsal: `TestAllowlistSwitchoverRehearsal`,
   `TestAllowlistSwitchoverRehearsalUnaccountedExecutorKeepsEntryClosed`
   (`internal/app/allowlist_switchover_integration_test.go`, T043).
+- Scoped-supply credential input (carrier, `withdrawalauthz.go`): pass exactly
+  one of `--api-key-file PATH` (preferred; restricted file read once and
+  trimmed) or `--api-key KEY` (discouraged compat) — both is a usage error
+  (exit 2); required for a scoped supply.

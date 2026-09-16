@@ -11,22 +11,35 @@
 // complement: the child calls the real production carrier entry
 // withdrawal.SupplyGrantAuthorized, which routes through runSupplyTx and writes
 // withdrawal_authorizations + withdrawal_authorization_scopes +
-// withdrawal_grant_audit in the same transaction (T012). Two deterministic kill
-// points:
+// withdrawal_grant_audit in the same transaction (T012). Three deterministic
+// kill states, each labelled with the EXACT instant it proves:
 //
-//  1. pre-commit (TestCarrierKillScopedSupplyPreCommit): the parent holds
+//  1. pre-commit abort (TestCarrierKillScopedSupplyPreCommit): the parent holds
 //     withdrawal_grant_audit ACCESS EXCLUSIVE, so the child's tx runs INSERT
 //     grant + INSERT scope, then parks on the in-tx audit INSERT. Both written
-//     rows are uncommitted and durable-invisible; SIGKILL proves the aborted tx
-//     left ZERO partial rows across all three tables, and the same operation id
-//     then converges to exactly one grant + scope + audit triple.
-//  2. post-commit (TestCarrierKillScopedSupplyPostCommit): the child writes a
-//     committed-marker file AFTER SupplyGrantAuthorized returns (COMMIT durable)
-//     and the parent SIGKILLs it before any result is delivered — the result is
-//     lost, the write is not. Convergence: still exactly one triple, same-op
-//     retry adds nothing, no duplicate grant, no duplicate audit.
+//     rows are uncommitted and durable-invisible; SIGKILL — attributed to
+//     SIGKILL, not a statement_timeout self-abort — proves the aborted tx left
+//     ZERO partial rows across all three tables, and the same operation id then
+//     converges to exactly one grant + scope + audit triple. Proven instant:
+//     before any COMMIT reached the server.
+//  2. restart-after-commit (TestCarrierKillScopedSupplyPostCommit): the child's
+//     calling frame RETURNED from SupplyGrantAuthorized (the committed marker
+//     records that returned success value), then the parent SIGKILLs the
+//     process before the PARENT sees any result. This is caller-KNOWN: the
+//     calling frame held the result in memory; only the parent lost it. It is
+//     NOT the commit-unknown window. Convergence: still exactly one triple,
+//     same-op retry adds nothing. Proven instant: after the calling frame
+//     returned.
+//  3. commit-unknown window (TestCarrierKillScopedSupplyUnknownWindow): the
+//     server durably committed, but the calling frame NEVER returned — its
+//     COMMIT acknowledgement is withheld at the transport layer by a test-only
+//     net.Conn wrapper, and the process is SIGKILLed inside that window. The
+//     barrier ("commit-acked-by-server") is the SERVER ack, distinct from the
+//     business return. Convergence: still exactly one triple, same-op retry
+//     adds nothing. Proven instant: after durable COMMIT, before the calling
+//     frame's return.
 //
-// Both cases then run a subsequent independent scoped supply on the same
+// All cases then run a subsequent independent scoped supply on the same
 // database to prove locks/connections recover.
 //
 // Test-only: the child is this test binary, fault injection is the parent's
@@ -37,18 +50,22 @@
 package withdrawal_test
 
 import (
+	"bytes"
 	"context"
+	"encoding/binary"
 	"net"
 	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strconv"
+	"sync"
 	"syscall"
 	"testing"
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/xtianxx/txharbor/internal/withdrawal"
@@ -386,6 +403,7 @@ func TestCarrierKillScopedSupplyPreCommit(t *testing.T) {
 
 	child := pbKillStartChild(t, dsn, opID, authID, callerID, key, "")
 	pbKillWaitForBlockedAudit(t, ctx, pool)
+	parkedAt := time.Now()
 
 	// Pre-commit proof: the parked tx's written grant and scope rows are
 	// invisible to the parent (the audit count would block on the parent's own
@@ -393,6 +411,17 @@ func TestCarrierKillScopedSupplyPreCommit(t *testing.T) {
 	pbKillWantGrantScope(t, ctx, pool, authID, 0)
 
 	child.sigkill(t)
+	// Attribution: the child died BY SIGKILL, not by its own 5s
+	// statement_timeout self-abort. Wait()'s non-nil error cannot tell those
+	// apart (a self-abort exits non-zero too); the WaitStatus signal can. Bound
+	// the park→kill latency well inside the 5s grantWriteGuard so the SIGKILL is
+	// the only terminator that could have fired.
+	parkToKill := time.Since(parkedAt)
+	pbKillAssertKilledBySigkill(t, child)
+	if parkToKill > pbKillMaxParkToKill {
+		t.Fatalf("park→kill latency %s exceeded %s; SIGKILL attribution is not distinct from the 5s statement_timeout", parkToKill, pbKillMaxParkToKill)
+	}
+	t.Logf("pre-commit abort: park→SIGKILL latency %s", parkToKill)
 
 	// Release the audit lock (its job, parking the child pre-commit, is done)
 	// and wait for the dead backend to be reaped so the retry cannot block.
@@ -421,11 +450,14 @@ func TestCarrierKillScopedSupplyPreCommit(t *testing.T) {
 		"auth-carrier-kill-precommit-after", "71000000000000000000000000000002")
 }
 
-// TestCarrierKillScopedSupplyPostCommit owns V-PB7 kill point 2. The child
-// commits the scoped three-table write, signals that with a committed-marker
-// file, and is SIGKILLed before it can deliver any result: the write survived
-// and the result was lost. The retry with the SAME operation id must converge
-// on exactly one triple — no duplicate grant, no duplicate audit.
+// TestCarrierKillScopedSupplyPostCommit owns V-PB7 restart-after-commit: the
+// child's calling frame RETURNED from SupplyGrantAuthorized — the committed
+// marker records that returned success value, so the result WAS in the caller's
+// memory — and only then is the process SIGKILLed before the PARENT receives
+// anything. This is caller-KNOWN, not the commit-unknown window (which is
+// TestCarrierKillScopedSupplyUnknownWindow): what is lost here is the parent's
+// view, not the caller's. The write survived; the retry with the SAME operation
+// id converges on exactly one triple — no duplicate grant, no duplicate audit.
 func TestCarrierKillScopedSupplyPostCommit(t *testing.T) {
 	ctx, dsn, pool := killSetup(t)
 	const (
@@ -438,16 +470,19 @@ func TestCarrierKillScopedSupplyPostCommit(t *testing.T) {
 	committedPath := filepath.Join(t.TempDir(), "committed")
 	child := pbKillStartChild(t, dsn, opID, authID, callerID, key, committedPath)
 
-	// Deterministic post-commit point: the marker is written only after the
-	// carrier returned, so COMMIT is durable before the parent acts.
+	// Caller-KNOWN point: the marker carries the value SupplyGrantAuthorized
+	// returned to the calling frame (committed:supplied), so the caller had the
+	// result before the kill. Deterministic: written only after that return.
 	if verdict := killWaitForFile(t, committedPath, child.logPath); verdict != "committed:supplied" {
 		t.Fatalf("child pre-kill verdict = %q, want committed:supplied", verdict)
 	}
 
 	child.sigkill(t)
+	pbKillAssertKilledBySigkill(t, child)
 	pbKillWaitBackendGone(t, ctx, pool)
 
-	// The committed write survived the kill even though the result was lost.
+	// The committed write survived the kill; only the PARENT never saw the
+	// result the caller frame already held.
 	pbKillWantTriple(t, ctx, pool, authID, opID, 1)
 
 	// Same-op retry: the recorded attempt converges; nothing is duplicated.
@@ -463,4 +498,358 @@ func TestCarrierKillScopedSupplyPostCommit(t *testing.T) {
 
 	pbKillAssertSubsequentSupply(t, ctx, pool, callerID, key,
 		"auth-carrier-kill-postcommit-after", "71000000000000000000000000000004")
+}
+
+// ---------------------------------------------------------------------------
+// V-PB7 kill state 3: the genuine commit-unknown window.
+//
+// The caller boundary under test is the LIBRARY caller of
+// withdrawal.SupplyGrantAuthorized: "success known to the caller" means that
+// function returned a non-error outcome to the child's frame. Neither earlier
+// kill state produces the unknown window — pre-commit is before any COMMIT, and
+// post-commit is AFTER the frame returned (caller-known). Here the DB durable
+// COMMIT has landed while the calling frame is still inside tx.Commit, so the
+// return is genuinely unknown at kill time.
+//
+// Mechanism (TEST ONLY, no production hook/flag/endpoint): pgx sends the COMMIT
+// over the simple query protocol (Conn.Exec with no arguments), so the server
+// answers with a CommandComplete ('C') tagged "COMMIT", then ReadyForQuery
+// ('Z'). The child's pool wraps every backend net.Conn through pgx's public
+// pgconn.Config.AfterNetConnect hook. The wrapper parses the backend message
+// stream; on the complete COMMIT CommandComplete it (1) writes the
+// "commit-acked-by-server" barrier and (2) WITHHOLDS that message and every byte
+// after it from pgx, parking in a blocking syscall. At that instant the server
+// has flushed the commit (CommandComplete is sent only after a successful
+// WAL flush under synchronous_commit=on), yet tx.Commit → Exec → Read never
+// returns. The parent observes the barrier, then SIGKILLs inside the window.
+//
+// The barrier is the transport acknowledgement, deliberately distinct from the
+// business success response: the child writes the returned-marker ONLY after
+// SupplyGrantAuthorized returns, and the test asserts that file never appears.
+// ---------------------------------------------------------------------------
+
+const (
+	pbKillCommitAckEnv = "TXHARBOR_CARRIER_KILL_COMMIT_ACK"
+	pbKillReturnedEnv  = "TXHARBOR_CARRIER_KILL_RETURNED"
+
+	// pbKillCommitAckValue is the barrier content: the server acknowledged the
+	// COMMIT; the wrapper withheld it from the calling frame.
+	pbKillCommitAckValue = "commit-acked-by-server"
+
+	// pbKillMaxParkToKill bounds park→kill latency under grant.go's 5s
+	// grantWriteGuard so a SIGKILL attribution cannot be a statement_timeout
+	// self-abort in disguise.
+	pbKillMaxParkToKill = 3 * time.Second
+)
+
+// pbKillCommitHoldConn wraps one backend net.Conn on the child side. It parses
+// the PostgreSQL backend stream and, on the COMMIT CommandComplete, records the
+// barrier and withholds that message from pgx — modelling a server-side durable
+// commit whose acknowledgement never reaches the client frame.
+type pbKillCommitHoldConn struct {
+	net.Conn
+
+	ackPath string
+	pending []byte // server bytes not yet classified (starts at a message boundary)
+	out     []byte // whole messages cleared for delivery
+	held    bool   // COMMIT ack seen; withhold everything from here on
+
+	once  sync.Once
+	parkR *os.File // read end of a pipe whose write end stays open
+	parkW *os.File
+}
+
+func (c *pbKillCommitHoldConn) Read(p []byte) (int, error) {
+	for {
+		if len(c.out) > 0 {
+			n := copy(p, c.out)
+			c.out = c.out[n:]
+			return n, nil
+		}
+		if c.held {
+			return c.park()
+		}
+		if off := pbKillScanCommitAck(c.pending); off >= 0 {
+			c.held = true
+			c.out = c.pending[:off]
+			c.pending = c.pending[off:]
+			c.once.Do(func() { _ = os.WriteFile(c.ackPath, []byte(pbKillCommitAckValue), 0o600) })
+			continue
+		}
+		if n := pbKillCompleteMessages(c.pending); n > 0 {
+			c.out = c.pending[:n]
+			c.pending = c.pending[n:]
+			continue
+		}
+		buf := make([]byte, 32*1024)
+		n, err := c.Conn.Read(buf)
+		if n > 0 {
+			c.pending = append(c.pending, buf[:n]...)
+			continue
+		}
+		if err != nil {
+			if len(c.pending) > 0 {
+				c.out = c.pending
+				c.pending = nil
+				continue
+			}
+			return 0, err
+		}
+	}
+}
+
+// park blocks in a real syscall — a pipe read whose write end stays open, so no
+// EOF — which keeps the Go runtime from declaring a spurious "all goroutines
+// asleep" deadlock while the parent SIGKILLs this process.
+func (c *pbKillCommitHoldConn) park() (int, error) {
+	if c.parkR == nil {
+		r, w, err := os.Pipe()
+		if err != nil {
+			return 0, err
+		}
+		c.parkR, c.parkW = r, w // parkW deliberately stays open
+	}
+	var b [1]byte
+	return c.parkR.Read(b[:])
+}
+
+// pbKillScanCommitAck returns the offset of the first whole CommandComplete
+// message whose tag is "COMMIT", or -1 while it is not yet fully buffered. It
+// walks whole messages from offset 0, so the reported offset is a message
+// boundary.
+func pbKillScanCommitAck(buf []byte) int {
+	for i := 0; i+5 <= len(buf); {
+		msgLen := int(binary.BigEndian.Uint32(buf[i+1 : i+5]))
+		if msgLen < 4 {
+			return -1
+		}
+		total := 1 + msgLen
+		if i+total > len(buf) {
+			return -1
+		}
+		if buf[i] == 'C' && string(bytes.TrimRight(buf[i+5:i+total], "\x00")) == "COMMIT" {
+			return i
+		}
+		i += total
+	}
+	return -1
+}
+
+// pbKillCompleteMessages returns the length of the longest whole-message prefix
+// of buf (0 when the first message is still incomplete).
+func pbKillCompleteMessages(buf []byte) int {
+	i := 0
+	for i+5 <= len(buf) {
+		msgLen := int(binary.BigEndian.Uint32(buf[i+1 : i+5]))
+		if msgLen < 4 {
+			return i
+		}
+		total := 1 + msgLen
+		if i+total > len(buf) {
+			break
+		}
+		i += total
+	}
+	return i
+}
+
+// pbKillOpenChildPoolCommitHold is pbKillOpenChildPool plus the commit-ack
+// withholding wrapper on every backend connection.
+func pbKillOpenChildPoolCommitHold(ctx context.Context, dsn, ackPath string) (*pgxpool.Pool, error) {
+	cfg, err := pgxpool.ParseConfig(dsn)
+	if err != nil {
+		return nil, err
+	}
+	if cfg.ConnConfig.RuntimeParams == nil {
+		cfg.ConnConfig.RuntimeParams = map[string]string{}
+	}
+	cfg.ConnConfig.RuntimeParams["application_name"] = pbKillAppName
+	cfg.ConnConfig.AfterNetConnect = func(_ context.Context, _ *pgconn.Config, conn net.Conn) (net.Conn, error) {
+		return &pbKillCommitHoldConn{Conn: conn, ackPath: ackPath}, nil
+	}
+	pool, err := pgxpool.NewWithConfig(ctx, cfg)
+	if err != nil {
+		return nil, err
+	}
+	pingCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	if err := pool.Ping(pingCtx); err != nil {
+		pool.Close()
+		return nil, err
+	}
+	return pool, nil
+}
+
+// TestCarrierKillChildScopedSupplyUnknownWindow is the re-exec'd child for the
+// genuine unknown window. Its pool withholds the server's COMMIT
+// acknowledgement, so the blocked call never returns. If it ever does return,
+// the child writes the returned-marker — which the parent asserts is absent —
+// so a missed window fails loudly instead of hanging.
+func TestCarrierKillChildScopedSupplyUnknownWindow(t *testing.T) {
+	if os.Getenv(pbKillChildEnv) != "1" {
+		return
+	}
+	ctx := context.Background()
+	pool, err := pbKillOpenChildPoolCommitHold(ctx, os.Getenv(pbKillDSNEnv), os.Getenv(pbKillCommitAckEnv))
+	if err != nil {
+		t.Fatalf("child open hold pool: %v", err)
+	}
+	defer pool.Close()
+
+	callerID, err := strconv.ParseInt(os.Getenv(pbKillCallerEnv), 10, 64)
+	if err != nil {
+		t.Fatalf("child caller id: %v", err)
+	}
+	op := pbKillScopedOp(os.Getenv(pbKillOpEnv), os.Getenv(pbKillAuthEnv), callerID)
+	auth := pbKillAuthority(t, callerID, os.Getenv(pbKillKeyEnv))
+
+	out, err := withdrawal.SupplyGrantAuthorized(ctx, pool, op, auth, pbKillOperator, pbKillReason)
+
+	// Unreachable in a passing run: returning here means the caller frame GOT a
+	// result, i.e. the withheld window was missed.
+	if path := os.Getenv(pbKillReturnedEnv); path != "" {
+		verdict := "returned:error"
+		if err != nil {
+			verdict = "returned:error:" + err.Error()
+		} else if out != nil {
+			verdict = "returned:" + out.Action
+		}
+		if werr := os.WriteFile(path, []byte(verdict), 0o600); werr != nil {
+			t.Fatalf("child returned marker: %v", werr)
+		}
+	}
+
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("child listen: %v", err)
+	}
+	_ = (&http.Server{ReadHeaderTimeout: 5 * time.Second}).Serve(ln)
+}
+
+// pbKillStartChildUnknownWindow re-execs the child for the withheld-COMMIT-ack
+// case, passing the commit-ack barrier and returned-marker paths. It mirrors
+// pbKillStartChild's SIGKILL-at-cleanup discipline.
+func pbKillStartChildUnknownWindow(t *testing.T, dsn, opID, authID string, callerID int64, key, ackPath, returnedPath string) *killChild {
+	t.Helper()
+	exe, err := os.Executable()
+	if err != nil {
+		t.Fatalf("os.Executable: %v", err)
+	}
+	logPath := filepath.Join(t.TempDir(), "child.log")
+	logFile, err := os.Create(logPath)
+	if err != nil {
+		t.Fatalf("create child log: %v", err)
+	}
+	cmd := exec.Command(exe, "-test.run=^TestCarrierKillChildScopedSupplyUnknownWindow$")
+	cmd.Env = append(os.Environ(),
+		pbKillChildEnv+"=1",
+		pbKillDSNEnv+"="+dsn,
+		pbKillOpEnv+"="+opID,
+		pbKillAuthEnv+"="+authID,
+		pbKillCallerEnv+"="+strconv.FormatInt(callerID, 10),
+		pbKillKeyEnv+"="+key,
+		pbKillCommitAckEnv+"="+ackPath,
+		pbKillReturnedEnv+"="+returnedPath,
+	)
+	cmd.Stdout = logFile
+	cmd.Stderr = logFile
+	if err := cmd.Start(); err != nil {
+		_ = logFile.Close()
+		t.Fatalf("start child: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = cmd.Process.Signal(syscall.SIGKILL)
+		_ = cmd.Wait()
+		_ = logFile.Close()
+	})
+	return &killChild{cmd: cmd, logPath: logPath}
+}
+
+// pbKillAssertKilledBySigkill proves the child died BY SIGKILL — not by its own
+// statement_timeout self-abort and not by a normal exit. cmd.Wait's non-nil
+// error cannot distinguish those; the WaitStatus signal can.
+func pbKillAssertKilledBySigkill(t *testing.T, child *killChild) syscall.WaitStatus {
+	t.Helper()
+	ps := child.cmd.ProcessState
+	if ps == nil {
+		t.Fatal("child process state unavailable; the child was not waited for")
+	}
+	ws, ok := ps.Sys().(syscall.WaitStatus)
+	if !ok {
+		t.Fatalf("child wait status type %T is not syscall.WaitStatus", ps.Sys())
+	}
+	if !ws.Signaled() {
+		t.Fatalf("child exited with code %d, not by a signal: the kill did not terminate it (statement_timeout self-abort or normal exit)", ws.ExitStatus())
+	}
+	if ws.Signal() != syscall.SIGKILL {
+		t.Fatalf("child died by signal %v, want SIGKILL", ws.Signal())
+	}
+	return ws
+}
+
+// TestCarrierKillScopedSupplyUnknownWindow owns the genuine commit-unknown
+// window. Proven instant: the server has durably committed the scoped
+// three-table write, but the calling frame of SupplyGrantAuthorized has not
+// returned — its COMMIT acknowledgement is withheld — and the parent SIGKILLs
+// inside that window. Asserted: (a) exactly one durable triple, visible while
+// the caller is still blocked and unchanged after the kill; (b) the calling
+// frame never returned (no returned-marker); (c) the same operation id retry
+// converges to exactly one triple; and the child died BY SIGKILL.
+func TestCarrierKillScopedSupplyUnknownWindow(t *testing.T) {
+	ctx, dsn, pool := killSetup(t)
+	const (
+		callerID int64 = 8503
+		authID         = "auth-carrier-kill-unknown-window"
+		opID           = "71000000000000000000000000000005"
+	)
+	key := pbKillSeedKey(t, ctx, pool, callerID)
+
+	dir := t.TempDir()
+	ackPath := filepath.Join(dir, "commit-acked")
+	returnedPath := filepath.Join(dir, "returned")
+	child := pbKillStartChildUnknownWindow(t, dsn, opID, authID, callerID, key, ackPath, returnedPath)
+
+	// Barrier: the server acknowledged the COMMIT; the wrapper withheld it from
+	// the calling frame. This is the server ack, not the business return.
+	if got := killWaitForFile(t, ackPath, child.logPath); got != pbKillCommitAckValue {
+		t.Fatalf("commit-ack barrier = %q, want %q", got, pbKillCommitAckValue)
+	}
+	// (b) The calling frame never returned: no returned-marker at the barrier.
+	if _, err := os.Stat(returnedPath); err == nil {
+		t.Fatal("child returned before the kill; the commit-unknown window was missed")
+	}
+	// (a) The commit is already durable and visible while the caller is blocked.
+	pbKillWantTriple(t, ctx, pool, authID, opID, 1)
+
+	// Kill inside the window and attribute it.
+	parkedAt := time.Now()
+	child.sigkill(t)
+	parkToKill := time.Since(parkedAt)
+	pbKillAssertKilledBySigkill(t, child)
+	if parkToKill > pbKillMaxParkToKill {
+		t.Fatalf("park→kill latency %s exceeded %s; SIGKILL attribution is not distinct from the 5s statement_timeout", parkToKill, pbKillMaxParkToKill)
+	}
+	t.Logf("commit-unknown window: park→SIGKILL latency %s", parkToKill)
+
+	// (b) Still no return after full reaping.
+	if _, err := os.Stat(returnedPath); err == nil {
+		t.Fatal("child wrote a return marker; the killed frame had returned")
+	}
+	pbKillWaitBackendGone(t, ctx, pool)
+	// (a) The durable triple is unchanged by the kill.
+	pbKillWantTriple(t, ctx, pool, authID, opID, 1)
+
+	// (c) Same-op retry converges: the recorded attempt is returned, no dup.
+	out, err := withdrawal.SupplyGrantAuthorized(ctx, pool, pbKillScopedOp(opID, authID, callerID),
+		pbKillAuthority(t, callerID, key), "retry-unknown-window", "same-op retry")
+	if err != nil {
+		t.Fatalf("same-op retry after commit-unknown kill: %v", err)
+	}
+	if out.Action != "supplied" {
+		t.Fatalf("same-op retry = %s, want supplied (the recorded attempt)", out.Action)
+	}
+	pbKillWantTriple(t, ctx, pool, authID, opID, 1)
+
+	pbKillAssertSubsequentSupply(t, ctx, pool, callerID, key,
+		"auth-carrier-kill-unknown-window-after", "71000000000000000000000000000006")
 }

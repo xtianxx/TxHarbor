@@ -273,13 +273,15 @@ func runSwitchoverRehearsal(ctx context.Context, t *testing.T, pool *pgxpool.Poo
 }
 
 // switchoverScopedSupplyArgs builds one scoped supply invocation by the issuer
-// holding apiKey. A scoped supply is the only path that consults the allowlist.
-func switchoverScopedSupplyArgs(opID, authID, apiKey string, callerID int64) []string {
+// whose credential is stored at keyPath. A scoped supply is the only path that
+// consults the allowlist; the file input keeps the key out of argv, so a real
+// switchover command line carries no secret.
+func switchoverScopedSupplyArgs(opID, authID, keyPath string, callerID int64) []string {
 	return []string{
 		"supply",
 		"--operation-id", opID,
 		"--authorization-id", authID,
-		"--api-key", apiKey,
+		"--api-key-file", keyPath,
 		"--caller-id", strconv.FormatInt(callerID, 10),
 		"--chain-id", "31337",
 		"--asset", "0x1111111111111111111111111111111111111111",
@@ -295,6 +297,17 @@ func switchoverScopedSupplyArgs(opID, authID, apiKey string, callerID int64) []s
 		"--fee-max-priority", "1",
 		"--allows-fee-replacement",
 	}
+}
+
+// switchoverKeyFile writes one credential to a 0600 file for the argv-free
+// supply invocations.
+func switchoverKeyFile(t *testing.T, key, name string) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), name)
+	if err := os.WriteFile(path, []byte(key+"\n"), 0o600); err != nil {
+		t.Fatalf("write key file %s: %v", name, err)
+	}
+	return path
 }
 
 // switchoverOpenSupplyTx opens a real PG backend that has BEGIN'd and executed
@@ -350,6 +363,8 @@ func TestAllowlistSwitchoverRehearsal(t *testing.T) {
 	if err != nil {
 		t.Fatalf("issue new key: %v", err)
 	}
+	oldKeyFile := switchoverKeyFile(t, oldKey, "old.key")
+	newKeyFile := switchoverKeyFile(t, newKey, "new.key")
 
 	base := withdrawalAuthzEnv(dsn)
 	oldConfig := fmt.Sprintf("%s=%d\n", withdrawal.EnvIssuerCallers, oldCaller)
@@ -368,7 +383,7 @@ func TestAllowlistSwitchoverRehearsal(t *testing.T) {
 	d2 := newSwitchoverDeployment(t, hosts[1], base)
 	entry := &switchoverEntry{}
 	oldSupply := func(authID string) (int, string, string) {
-		return entry.supply(ctx, d, switchoverScopedSupplyArgs(newOpID(t), authID, oldKey, oldCaller)...)
+		return entry.supply(ctx, d, switchoverScopedSupplyArgs(newOpID(t), authID, oldKeyFile, oldCaller)...)
 	}
 
 	// Precondition: with the entry open, the OLD principal is allowed.
@@ -417,14 +432,14 @@ func TestAllowlistSwitchoverRehearsal(t *testing.T) {
 
 	// Post-swap: OLD principal refused by the new mapping, NEW principal allowed.
 	// The old principal is a fresh invocation against host1's swapped file.
-	code, stdout, stderr := entry.supply(ctx, d, switchoverScopedSupplyArgs(newOpID(t), "switchover-post-old", oldKey, oldCaller)...)
+	code, stdout, stderr := entry.supply(ctx, d, switchoverScopedSupplyArgs(newOpID(t), "switchover-post-old", oldKeyFile, oldCaller)...)
 	if code != 1 {
 		t.Fatalf("post-swap old-principal supply exit = %d, want 1 (refused); stdout=%s stderr=%s", code, stdout, stderr)
 	}
 	if strings.Contains(stdout, "action=supplied") {
 		t.Fatalf("post-swap old-principal stdout %q reports an accepted supply", stdout)
 	}
-	code, stdout, stderr = entry.supply(ctx, d2, switchoverScopedSupplyArgs(newOpID(t), "switchover-post-new", newKey, newCaller)...)
+	code, stdout, stderr = entry.supply(ctx, d2, switchoverScopedSupplyArgs(newOpID(t), "switchover-post-new", newKeyFile, newCaller)...)
 	if code != 0 {
 		t.Fatalf("post-swap new-principal supply exit = %d, want 0; stdout=%s stderr=%s", code, stdout, stderr)
 	}
@@ -461,6 +476,7 @@ func TestAllowlistSwitchoverRehearsalUnaccountedExecutorKeepsEntryClosed(t *test
 	if err != nil {
 		t.Fatalf("issue old key: %v", err)
 	}
+	oldKeyFile := switchoverKeyFile(t, oldKey, "old.key")
 
 	base := withdrawalAuthzEnv(dsn)
 	oldConfig := fmt.Sprintf("%s=%d\n", withdrawal.EnvIssuerCallers, oldCaller)
@@ -498,7 +514,7 @@ func TestAllowlistSwitchoverRehearsalUnaccountedExecutorKeepsEntryClosed(t *test
 	if back, _ := os.ReadFile(host); string(back) != oldConfig {
 		t.Fatalf("config changed while entry closed: %q", back)
 	}
-	if code, _, stderr := entry.supply(ctx, d, switchoverScopedSupplyArgs(newOpID(t), "switchover-halted", oldKey, oldCaller)...); code != 1 || !strings.Contains(stderr, "entry halted") {
+	if code, _, stderr := entry.supply(ctx, d, switchoverScopedSupplyArgs(newOpID(t), "switchover-halted", oldKeyFile, oldCaller)...); code != 1 || !strings.Contains(stderr, "entry halted") {
 		t.Fatalf("halted entry supply = (%d, %q), want refusal naming the halt", code, stderr)
 	}
 

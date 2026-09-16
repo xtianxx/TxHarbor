@@ -23,7 +23,10 @@ principal when omitted; never to `--operator`).
    strings are absent from the mapping → deny-by-default.
 3. Inside T-supply+scope, before any write: api_key row `FOR SHARE` +
    caller row `FOR SHARE` + `PermitIssue` re-evaluation (R-PB10 order).
-   Failure at any point → `supply_refused` naming the failed check, zero writes.
+   Failure of this in-tx check → `supply_refused` naming the failed check:
+   zero grant/scope rows, one `supply_refused` audit row (committed, immutable).
+   Failures before the tx — usage, config, unreachable DB, and the pre-tx
+   `Authenticate`/`PermitIssue` gate — write nothing (no audit row).
 4. `--operator` (if given) is recorded verbatim in audit; it grants nothing
    and is never an input to (1)–(3).
 Failure of (1)/(2) → exit 1, zero rows. `attested_by` is always the

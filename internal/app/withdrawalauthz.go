@@ -7,7 +7,9 @@ import (
 	"fmt"
 	"io"
 	"math"
+	"os"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -31,12 +33,21 @@ import (
 // verbatim as the declared supply identity — an audit claim, not a
 // cryptographic proof.
 //
-// Supply additionally takes an optional --api-key: when presented it must
-// resolve through Authenticate to a caller permitted by the deployment's
+// Supply additionally takes an optional credential: --api-key-file PATH (a
+// restricted 0600 credential file, read once and trimmed — the preferred form,
+// since it keeps the secret out of argv, /proc and shell history) or the
+// discouraged compat flag --api-key KEY. Whichever is presented must resolve
+// through Authenticate to a caller permitted by the deployment's
 // TXHARBOR_AUTHZ_ISSUER_CALLERS mapping before any supply transaction, and the
-// resolved principal is what attestation records (never --operator). A scoped
-// supply requires the key; a scopeless supply without one stays the legacy
+// resolved principal is what attestation records (never --operator). Passing
+// both is a usage error (exit 2): there is no precedence guess. A scoped
+// supply requires a credential; a scopeless supply without one stays the legacy
 // DSN-trust path, so pre-extension callers are unchanged.
+//
+// A credential file that is missing, unreadable, or empty after trimming is a
+// usage error (exit 2), detected before any configuration or database access.
+// The file is not a defense against a trusted-host administrator — it removes
+// the secret from the process arguments, nothing more.
 //
 // Actions: `mint` prints one opaque operation id and is pure entropy — it
 // validates no configuration and opens no connection, so nothing is persisted
@@ -80,13 +91,18 @@ func WithdrawalAuthz(ctx context.Context, args []string, d Deps) int {
 func withdrawalAuthzUsage(w io.Writer) {
 	fmt.Fprint(w, `usage: txharbor withdrawal-authz mint
        txharbor withdrawal-authz supply --operation-id O --authorization-id G --caller-id C --chain-id N --asset 0x… --recipient 0x… --amount D [--expires-at RFC3339] --operator OP --reason R
-                                     [--api-key KEY] [--intent-id I --request-id Q --sender 0x… --fee-max-total T --fee-max-per-gas P --fee-max-priority F --allows-fee-replacement]
+                                     [--api-key-file PATH | --api-key KEY] [--intent-id I --request-id Q --sender 0x… --fee-max-total T --fee-max-per-gas P --fee-max-priority F --allows-fee-replacement]
                                      [--reissue-from-authorization-id OLD --reissue-from-request-id OLDREQ]
        txharbor withdrawal-authz revoke --operation-id O --authorization-id G --operator OP --reason R
 
 mint prints one opaque operation id; capture it durably before supply/revoke.
 --operation-id is required on supply and revoke (no auto-mint, no echo-fallback).
---api-key resolves the issuing principal and is required for a scoped supply.
+--api-key-file PATH reads the issuing principal's credential from a restricted
+file (0600 recommended), read once and trimmed; prefer it — it keeps the secret
+  out of argv, /proc and shell history.
+--api-key KEY is discouraged compat: the plaintext is visible in /proc and
+shell history. Pass exactly one of --api-key-file / --api-key; both is an error.
+A credential is required for a scoped supply.
 --reissue-from-authorization-id mints a NEW grant id (never rewrites OLD) and
 links the old grant/request ids in the audit detail; the new scope is required.
 `)
@@ -124,7 +140,8 @@ func withdrawalAuthzSupply(ctx context.Context, args []string, d Deps) int {
 	expiresAtRaw := fs.String("expires-at", "", "optional RFC3339 expiry (must be in the future)")
 	operator := fs.String("operator", "", "declared operator identity for the audit row")
 	reason := fs.String("reason", "", "audit reason")
-	apiKey := fs.String("api-key", "", "issuing operator's API key; resolved server-side, never recorded")
+	apiKey := fs.String("api-key", "", "issuing operator's API key (discouraged: visible in argv); resolved server-side, never recorded")
+	apiKeyFile := fs.String("api-key-file", "", "path to a restricted file holding the issuing operator's API key (preferred)")
 	intentID := fs.String("intent-id", "", "scope: operator-declared intent identity")
 	requestID := fs.String("request-id", "", "scope: originating withdrawal request id")
 	sender := fs.String("sender", "", "scope: 0x-prefixed sender address")
@@ -141,6 +158,11 @@ func withdrawalAuthzSupply(ctx context.Context, args []string, d Deps) int {
 	if fs.NArg() > 0 || *operationID == "" {
 		withdrawalAuthzUsage(stderr)
 		return 2
+	}
+	apiKeyValue, code := withdrawalAuthzCredential(stderr, fs, *apiKey, *apiKeyFile)
+	if code != 0 {
+		withdrawalAuthzUsage(stderr)
+		return code
 	}
 	callerID, err := strconv.ParseInt(*callerIDRaw, 10, 64)
 	if err != nil {
@@ -178,8 +200,8 @@ func withdrawalAuthzSupply(ctx context.Context, args []string, d Deps) int {
 
 	scoped := *intentID != "" || *requestID != "" || *sender != "" ||
 		feeMaxTotal != 0 || feeMaxPerGas != 0 || feeMaxPriority != 0 || *allowsFeeReplacement
-	if scoped && *apiKey == "" {
-		fmt.Fprintln(stderr, "txharbor withdrawal-authz supply: --api-key is required for a scoped supply")
+	if scoped && apiKeyValue == "" {
+		fmt.Fprintln(stderr, "txharbor withdrawal-authz supply: --api-key is required for a scoped supply (prefer --api-key-file PATH)")
 		withdrawalAuthzUsage(stderr)
 		return 2
 	}
@@ -222,8 +244,8 @@ func withdrawalAuthzSupply(ctx context.Context, args []string, d Deps) int {
 	// the api_key/caller `FOR SHARE` re-read inside that transaction (T015) so a
 	// revocation committed in between is still observed.
 	var authority *withdrawal.SupplyAuthority
-	if *apiKey != "" {
-		res, err := withdrawal.Authenticate(ctx, pool, *apiKey)
+	if apiKeyValue != "" {
+		res, err := withdrawal.Authenticate(ctx, pool, apiKeyValue)
 		if err != nil {
 			return withdrawalAuthzRefuse(d, *operationID, err)
 		}
@@ -231,7 +253,7 @@ func withdrawalAuthzSupply(ctx context.Context, args []string, d Deps) int {
 			return withdrawalAuthzRefuse(d, *operationID,
 				withdrawal.New(withdrawal.CodeUnauthorized, "authenticated principal is not an authorized issuer"))
 		}
-		authority = &withdrawal.SupplyAuthority{PresentedKey: *apiKey, Issuers: allow}
+		authority = &withdrawal.SupplyAuthority{PresentedKey: apiKeyValue, Issuers: allow}
 		if scoped {
 			op.AttestedBy = withdrawalAuthzPrincipal(res)
 		}
@@ -274,6 +296,50 @@ func withdrawalAuthzAllowlist(stderr io.Writer, d Deps) (*withdrawal.IssuerAllow
 		return nil, 2
 	}
 	return allow, 0
+}
+
+// withdrawalAuthzCredential resolves the single presented credential input.
+// --api-key-file and --api-key are mutually exclusive: passing both is a usage
+// error rather than a silent precedence pick. The file form is preferred; the
+// plaintext key flag stays accepted for compatibility. Neither the key nor the
+// file's content is ever echoed.
+func withdrawalAuthzCredential(stderr io.Writer, fs *flag.FlagSet, apiKey, apiKeyFile string) (string, int) {
+	var viaFlag, viaFile bool
+	fs.Visit(func(f *flag.Flag) {
+		switch f.Name {
+		case "api-key":
+			viaFlag = true
+		case "api-key-file":
+			viaFile = true
+		}
+	})
+	switch {
+	case viaFlag && viaFile:
+		fmt.Fprintln(stderr, "txharbor withdrawal-authz supply: --api-key and --api-key-file are mutually exclusive; pass exactly one")
+		return "", 2
+	case viaFile:
+		return withdrawalAuthzReadKeyFile(stderr, apiKeyFile)
+	default:
+		return apiKey, 0
+	}
+}
+
+// withdrawalAuthzReadKeyFile reads one credential from path and trims the
+// surrounding whitespace (a trailing newline is normal). A missing, unreadable,
+// or empty-after-trim file is a usage error; the message names the path, never
+// the content. The read happens once, before any configuration or connection.
+func withdrawalAuthzReadKeyFile(stderr io.Writer, path string) (string, int) {
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		fmt.Fprintf(stderr, "txharbor withdrawal-authz supply: cannot read --api-key-file: %s\n", logx.Redact(err.Error()))
+		return "", 2
+	}
+	key := strings.TrimSpace(string(raw))
+	if key == "" {
+		fmt.Fprintln(stderr, "txharbor withdrawal-authz supply: --api-key-file holds no credential")
+		return "", 2
+	}
+	return key, 0
 }
 
 // withdrawalAuthzFee parses one optional scope fee cap as a decimal integer.
