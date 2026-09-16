@@ -15,6 +15,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"fmt"
 	"io/fs"
 	"os/exec"
 	"strings"
@@ -257,6 +258,15 @@ var upstreamRowCounts = map[string]int{
 	"reorg_recovery":              1,
 }
 
+// withdrawalRollbackVersions lists rolled-back versions in runner order.
+func withdrawalRollbackVersions(results []*goose.MigrationResult) []int64 {
+	out := make([]int64, 0, len(results))
+	for _, r := range results {
+		out = append(out, r.Source.Version)
+	}
+	return out
+}
+
 // TestWithdrawalMigrationHistoryUntouched proves T006 modified no historical
 // migration: replaying 000001-000006 is allowed, editing them is not.
 func TestWithdrawalMigrationHistoryUntouched(t *testing.T) {
@@ -271,9 +281,13 @@ func TestWithdrawalMigrationHistoryUntouched(t *testing.T) {
 }
 
 // TestWithdrawalMigrationUpgradeDowngradeFrom006 covers the T006 upgrade path
-// on an isolated scratch database: a real 006 database gains ONLY 000007, the
-// status reports 7/clean, 000007 Down drops exactly the six 007 tables while
-// 002-006 rows survive, and re-up reproduces the same state.
+// on an isolated scratch database: a real 006 database gains every embedded
+// version above 006 (000007 plus any later lane migration), the status reports
+// the chain head clean, the 000007 Down leg drops exactly the six 007 tables
+// while 002-006 rows survive, and re-up reproduces the same state. The above-6
+// set derives from the embedded file list — never from the runner's output —
+// while the 007-table and upstream-row assertions keep 007's own upgrade
+// correctness pinned.
 func TestWithdrawalMigrationUpgradeDowngradeFrom006(t *testing.T) {
 	dsn := withdrawalStartPostgres(t)
 	ctx := context.Background()
@@ -289,22 +303,36 @@ func TestWithdrawalMigrationUpgradeDowngradeFrom006(t *testing.T) {
 	sqlDB := withdrawalOpenSQL(t, dsn)
 	withdrawalSeedUpstreamRows(t, sqlDB)
 
-	// Full embedded set applies ONLY 000007.
+	// Full embedded set applies every version above 006.
 	fullOpts := withdrawalMigrateOptions(dsn)
 	out.Reset()
 	if err := db.MigrateUp(ctx, fullOpts, &out); err != nil {
 		t.Fatalf("upgrade MigrateUp() error = %v (output %q)", err, out.String())
 	}
-	if !strings.Contains(out.String(), "applied=1 skipped=6 pending=0") {
-		t.Fatalf("upgrade output = %q, want applied=1 skipped=6 pending=0", out.String())
+	chainFiles, err := db.MigrationFiles(migrations.FS)
+	if err != nil {
+		t.Fatalf("list embedded migrations: %v", err)
+	}
+	var above6 []int64
+	for _, f := range chainFiles {
+		if f.Version > 6 {
+			above6 = append(above6, f.Version)
+		}
+	}
+	if len(above6) == 0 {
+		t.Fatal("embedded chain has no version above 6; 000007 missing")
+	}
+	head := above6[len(above6)-1]
+	if want := fmt.Sprintf("applied=%d skipped=6 pending=0", len(above6)); !strings.Contains(out.String(), want) {
+		t.Fatalf("upgrade output = %q, want %q", out.String(), want)
 	}
 
 	out.Reset()
 	if err := db.MigrateStatus(ctx, fullOpts, &out); err != nil {
 		t.Fatalf("MigrateStatus() after upgrade error = %v", err)
 	}
-	if !strings.Contains(out.String(), "current_version=7") || !strings.Contains(out.String(), "pending=none") {
-		t.Fatalf("status after upgrade = %q, want current_version=7 and pending=none", out.String())
+	if want := fmt.Sprintf("current_version=%d", head); !strings.Contains(out.String(), want) || !strings.Contains(out.String(), "pending=none") {
+		t.Fatalf("status after upgrade = %q, want %q and pending=none", out.String(), want)
 	}
 	for _, rel := range withdrawalSevenTables {
 		if !withdrawalRelationExists(t, sqlDB, rel) {
@@ -312,14 +340,20 @@ func TestWithdrawalMigrationUpgradeDowngradeFrom006(t *testing.T) {
 		}
 	}
 
-	// 000007 Down via a provider mirroring internal/db: exactly version 7.
+	// Down to 6 rolls back the whole above-6 set, highest first; 000007's own
+	// leg still drops exactly the six 007 tables.
 	provider := withdrawalNewProvider(t, sqlDB, migrations.FS)
 	results, err := provider.DownTo(ctx, 6)
 	if err != nil {
 		t.Fatalf("DownTo(6): %v", err)
 	}
-	if len(results) != 1 || results[0].Source.Version != 7 {
-		t.Fatalf("DownTo(6) rolled back %d migration(s), want exactly version 7", len(results))
+	if len(results) != len(above6) {
+		t.Fatalf("DownTo(6) rolled back %d migration(s), want every version above 6 %v in order", len(results), above6)
+	}
+	for i, v := range above6 {
+		if results[len(results)-1-i].Source.Version != v {
+			t.Fatalf("DownTo(6) rolled back versions %v, want every version above 6 %v in order", withdrawalRollbackVersions(results), above6)
+		}
 	}
 	for _, rel := range withdrawalSevenTables {
 		if withdrawalRelationExists(t, sqlDB, rel) {
@@ -336,8 +370,8 @@ func TestWithdrawalMigrationUpgradeDowngradeFrom006(t *testing.T) {
 	if err := db.MigrateStatus(ctx, fullOpts, &out); err != nil {
 		t.Fatalf("MigrateStatus() after Down error = %v", err)
 	}
-	if !strings.Contains(out.String(), "current_version=6") || !strings.Contains(out.String(), "pending=1") {
-		t.Fatalf("status after Down = %q, want current_version=6 and pending=1", out.String())
+	if !strings.Contains(out.String(), "current_version=6") || !strings.Contains(out.String(), fmt.Sprintf("pending=%d", len(above6))) {
+		t.Fatalf("status after Down = %q, want current_version=6 and pending=%d", out.String(), len(above6))
 	}
 
 	// Re-up reproduces the same clean state.
@@ -345,15 +379,15 @@ func TestWithdrawalMigrationUpgradeDowngradeFrom006(t *testing.T) {
 	if err := db.MigrateUp(ctx, fullOpts, &out); err != nil {
 		t.Fatalf("re-up MigrateUp() error = %v (output %q)", err, out.String())
 	}
-	if !strings.Contains(out.String(), "applied=1 skipped=6 pending=0") {
-		t.Fatalf("re-up output = %q, want applied=1 skipped=6 pending=0", out.String())
+	if want := fmt.Sprintf("applied=%d skipped=6 pending=0", len(above6)); !strings.Contains(out.String(), want) {
+		t.Fatalf("re-up output = %q, want %q", out.String(), want)
 	}
 	out.Reset()
 	if err := db.MigrateStatus(ctx, fullOpts, &out); err != nil {
 		t.Fatalf("MigrateStatus() after re-up error = %v", err)
 	}
-	if !strings.Contains(out.String(), "current_version=7") || !strings.Contains(out.String(), "pending=none") {
-		t.Fatalf("status after re-up = %q, want current_version=7 and pending=none", out.String())
+	if want := fmt.Sprintf("current_version=%d", head); !strings.Contains(out.String(), want) || !strings.Contains(out.String(), "pending=none") {
+		t.Fatalf("status after re-up = %q, want %q and pending=none", out.String(), want)
 	}
 	for _, rel := range withdrawalSevenTables {
 		if !withdrawalRelationExists(t, sqlDB, rel) {
