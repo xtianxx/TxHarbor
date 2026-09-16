@@ -180,7 +180,11 @@ MUST block it (or the read MUST be re-evaluated on the same guarantee). Only the
 "008 pause since the last attempt" ordering in research R6 sound; 009 records the observed class
 and never substitutes its own release evidence (OC-6/OC-7). **Bilateral acceptance**: provided by
 008 `contracts/read-api.md` §4 (scope-row `FOR SHARE` during the snapshot; 008-owned writers take
-the same row `FOR UPDATE`); 006 ordering for this read stays best-effort here and is covered
+the same row `FOR UPDATE`); additionally 009 takes the same scope row `FOR SHARE` directly inside
+its own sign/delivery transactions BEFORE any gate read (persistence.md §§1–2, fixed order scope
+row → 006 gate tables → 007 grant → own rows), so 008 pause/registry/release writes racing 009's
+admission block until 009 commits — the returned `ReadBinding` facts alone are never the
+admission's isolation basis. 006 ordering for this read stays best-effort here and is covered
 009-side by the R6 gate-table lock, not by this read.
 
 **Delivery re-check**: every delivery attempt re-reads the binding and requires

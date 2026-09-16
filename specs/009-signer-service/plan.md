@@ -11,11 +11,10 @@ component with key access: authenticated, structured-transaction-only signing re
 content validation (chain/sender/asset/calldata/recipient/amount/fees); identity↔content binding
 in PostgreSQL with same-identity replay and conflict refusal; sign+persist in one row-locked
 transaction before any response; read-only consumption of 006 pause/recovery and 007
-authorization gates with a shared gate-table `SHARE` lock on the 006 gate tables plus `FOR SHARE`
+authorization gates with 008 scope-row `FOR SHARE` first, then a shared gate-table `SHARE` lock on the 006 gate tables plus `FOR SHARE`
 on the 007 grant (one ring-free lock order — research R6); recorded delivery admission that
 re-verifies 006/007/008 + `can_sign` gates on every response (first and retry alike) with a
-**bounded admission validity** (an admission permits only the immediate write; delayed sends must
-re-admit); persisted results never re-delivered after expiry/revocation/pause (status-only);
+**bounded admission validity** (executable TTL: write iff `now() <= valid_until`, else re-admit); persisted results never re-delivered after expiry/revocation/pause (status-only);
 conditional OC-5 fee replacement (reuse the grant only if it explicitly permits replacement and
 the fee is in scope, else fresh authorization + new identity — research R7); no broadcast and no
 RPC code path. Technical approach from research R1–R11: go-ethereum `types`+`crypto` (no custom
@@ -153,10 +152,11 @@ Participants, write entries, and effective points (full protocol in research R6)
 | 009 first delivery / old-result replay | T-deliver admission `INSERT` | admission row | admission `COMMIT` (ordered by gate-table `SHARE`) | — |
 
 Two required concurrency timelines (R6): **(a) pause/revoke before admission** → 009 observes it
-under the `SHARE` lock and returns status-only with zero signature bytes; **(b) admission first,
-pause/revoke after** → ordered after the admission `COMMIT`; the immediate write proceeds, any
-delayed send must re-admit, and only bytes already written are in-flight approved (an
-admitted-but-unwritten row means "write outcome unknown", not "permission"). Crash, commit-unknown,
+under the `SHARE` locks and returns status-only with zero signature bytes; **(b) admission first,
+pause/revoke after** → ordered after the admission `COMMIT`; a write with `now() <= valid_until`
+proceeds (in-flight approved), a write past `valid_until` — including a process suspended after
+`COMMIT` and resumed late — must re-admit first, and only bytes already written are in-flight
+approved (an admitted-but-unwritten row means "write outcome unknown", not "permission"). Crash, commit-unknown,
 and response-loss all resolve by same-identity retry re-reading durable rows and re-gating; the
 result is never re-signed.
 
@@ -294,7 +294,7 @@ are justified explicitly:
   one result; different anchors on one grant → one winner; conditional replacement reuse vs fresh
   grant); crash points (pre-commit / post-commit / admission / response); the two R6 timelines
   (pause/revoke committed before delivery admission → status-only; admission committed before a
-  pause/revoke → immediate write, delayed send must re-admit); `can_sign` disabled between sign
+   pause/revoke → write iff `now() <= valid_until`, past-TTL send must re-admit); `can_sign` disabled between sign
   and delivery; read-only diff of 006/007 tables with the gate-table `SHARE` lock asserted; status
   privacy (identical 404).
 - **Race detector**: `make test-race` on signer paths (row lock/insert classification).
@@ -318,8 +318,10 @@ are justified explicitly:
 - This step produced **documentation only** (plan/research/data-model/contracts/quickstart); no
   code, migrations, tests, services, or containers were written or executed; V1–V8 are design-only
   and MUST be executed in tasks/implement.
-- No bilateral conformance is claimed with 008 (parallel, artifacts not read), 010, or 011; the
-  downstream statements are one-directional consumption contracts.
+- Bilateral conformance with 008 is limited to the stated lock/read contracts (008 read-api §4
+  scope-row `FOR SHARE`; 009 persistence §§1–2 joint participation; fixed lock order); full
+  integration acceptance still waits for 008. No conformance is claimed with 010 or 011; the
+  downstream statements there are one-directional consumption contracts.
 - T000-P remains open; local success (future) does not imply production readiness.
 
 ## Deferred items (explicit, with owner)
@@ -334,7 +336,7 @@ are justified explicitly:
 | D-3 | 007 carrier gap: no fee-scope/purpose — OC-5 conditional rule restored (R7); reuse branch unreachable until the R11 carrier lands; fresh authorization is the operative branch, not the rule | 007/011 extension (R11) |
 | D-4 | 007 carrier gap: no `revoked_at` (revocation observed as `state='revoked'`); closure column in R11 | 007/011 extension (R11) |
 | Q-A/Q-B | **Decided 2026-09-16** (research R11 resolutions): Q-A → trusted-issuance control without mandatory per-grant cryptography (`--operator` audit-only; authenticated+authorized issuer; explicit trust boundary; evidence-or-fix in tasks); Q-B → per-grant `authorization_unverifiable` refusal, no bulk backfill, re-issuance with traceability and no second intent/nonce or silent rebinding; neither self-certifies merge/deploy readiness | business ruling recorded (007/011) |
-| Merge order | 008 (`000008`) then 009 (`000009`) merge and implement WITHOUT the scopes carrier; the carrier lands later as a 007-extension/011 migration and only unlocks the R7 reuse branch; 011 capabilities MUST NOT be treated as available now | 007/011 extension, after 008/009 |
+| Merge order | 008 (`000008`) then 009 (`000009`) may develop and merge independently with fail-closed behavior, but COMPLETE delivery (first signatures and replacements) is gated on the scopes-carrier batch: a 007-extension batch owns the additive migration, the extended `withdrawal-authz supply` entry, and the Q-A trusted-issuance permission control (same table family, same CLI — recorded assignment, overridable); 011 is a consumer, not the owner. That batch lands after 008/009; 011 capabilities MUST NOT be treated as available now. Fail-closed refusal is the incomplete-delivery safe state, not the completion standard. | 007-extension batch, after 008/009 |
 | F-1 | 010/011 consumption fixtures: a contract-conforming test caller (OC-4 input shape) keeps 009 developable; no 010/011 specs, tables, or fixtures beyond the test caller are created here | 010/011 (later specs) |
 
 

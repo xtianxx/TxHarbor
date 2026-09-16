@@ -268,6 +268,7 @@ CREATE TABLE delivery_admissions (
     recovery_basis            TEXT        NOT NULL DEFAULT 'none',
     reason                    TEXT        NOT NULL DEFAULT '',
     decided_at                TIMESTAMPTZ NOT NULL DEFAULT now(),
+    valid_until               TIMESTAMPTZ NOT NULL,
     delivered_at              TIMESTAMPTZ,
     CONSTRAINT delivery_admissions_pkey PRIMARY KEY (admission_id),
     CONSTRAINT delivery_admissions_request_fkey FOREIGN KEY (signing_request_row)
@@ -287,11 +288,19 @@ CREATE TABLE delivery_admissions (
   **before** response bytes are written, and the post-write marker flips `admitted → delivered`
   (best-effort). `binding_class` and `can_sign` record the observed 008 binding class and caller
   permission at decision time.
-- **Bounded admission validity (research R6)**: an `admitted` row authorizes only the immediate
-  response write of the same attempt — it is not a durable permit. A delayed send (retry,
-  restart, scheduling gap) MUST re-run T-deliver and record a new `attempt_seq`; a row left at
-  `admitted` means "cleared at that snapshot, write outcome unknown", not a standing permission
-  (OC-7). Only bytes already written are in-flight approved and not reclaimable.
+- **Bounded admission validity (research R6; executable TTL, not a scheduling judgment)**:
+  every `admitted` row carries `valid_until = decided_at + admission_ttl` (deployment parameter,
+  seconds-scale; `admission_ttl` is fixed config, not per-request). The write path may emit bytes
+  iff `now() <= valid_until`; otherwise it MUST re-run T-deliver (new `attempt_seq`) instead of
+  using the old admission — no code path may "recognize a scheduling gap", the clock decides.
+  A pause/revoke/`can_sign`-off that commits after the admission `COMMIT` but before the handoff
+  does not cancel a still-valid write (ordered after the admission: in-flight approved); once
+  `valid_until` lapses, the same event blocks via re-admission. Exact states: `admitted` =
+  cleared at snapshot, writable only while unexpired (NEVER "in-flight" by label);
+  `delivered` = bytes handed to the transport (only bytes already written are in-flight
+  approved and not reclaimable); `admitted` + lost marker / post-`COMMIT` crash = "write outcome
+  unknown" (`unknown_reconcile`), never a standing permission. Re-admission of byte-identical
+  content is allowed (idempotent re-delivery); re-signing is never involved.
 - `blocked` records the refusal and its basis (`pause_basis` names the observed pause table(s),
   `recovery_basis` the recovery phase/seq, `reason` the class). No signature material is
   delivered and none appears in the response.
@@ -306,15 +315,15 @@ CREATE TABLE delivery_admissions (
 
 | ID | Transaction | Statements (fixed order) | Owner file (planned) |
 |----|-------------|--------------------------|----------------------|
-| T-submit-first | first receipt of an identity | BEGIN → statement-timeout guard → gate-table `LOCK … IN SHARE MODE` (R6) → plain INSERT request row (`received`) → `SELECT … FOR UPDATE` own row → 006 gate read (one read sequence) → 008 binding read → 007 grant `FOR SHARE` + validity/equality → policy validation → `KeyProvider.SignTx` → INSERT `signature_results` → UPDATE state `signed` (or `rejected`; transient refusal keeps non-terminal state) → audit INSERT → COMMIT | `internal/signer/submit.go` |
+| T-submit-first | first receipt of an identity | BEGIN → statement-timeout guard → 008 scope-row `SELECT … FOR SHARE` (joint coordination; fixed order scope row → gate tables → grant → own rows) → gate-table `LOCK … IN SHARE MODE` (R6) → plain INSERT request row (`received`) → `SELECT … FOR UPDATE` own row → 006 gate read (one read sequence) → 008 binding read → 007 grant `FOR SHARE` + validity/equality → policy validation → `KeyProvider.SignTx` → INSERT `signature_results` → UPDATE state `signed` (or `rejected`; transient refusal keeps non-terminal state) → audit INSERT → COMMIT | `internal/signer/submit.go` |
 | T-submit-replay | duplicate identity arrives | INSERT → catch 23505 exact `signing_requests_caller_request_uniq` → ROLLBACK → read row → envelope equal → delivery path (T-deliver) with persisted result; envelope differ → 409 `request_conflict` (+ audit best-effort); row exists, no result yet → `503`-shape "outcome not yet visible; retry same identity" | `internal/signer/submit.go` |
-| T-deliver | first response or same-identity retry | BEGIN → statement-timeout guard → gate-table `LOCK … IN SHARE MODE` (R6) → 006 gate re-read (one statement) + version equality → 008 binding re-read → 007 grant `FOR SHARE` + fingerprint/version equality → `signer_caller.can_sign` `FOR SHARE` → INSERT `delivery_admissions` (`admitted`/`blocked`; records `binding_class`/`can_sign`) → COMMIT → write response → best-effort UPDATE to `delivered` | `internal/signer/delivery.go` |
+| T-deliver | first response or same-identity retry | BEGIN → statement-timeout guard → 008 scope-row `SELECT … FOR SHARE` (joint coordination; fixed order scope row → gate tables → grant → own rows) → gate-table `LOCK … IN SHARE MODE` (R6) → 006 gate re-read (one statement) + version equality → 008 binding re-read → 007 grant `FOR SHARE` + fingerprint/version equality → `signer_caller.can_sign` `FOR SHARE` → INSERT `delivery_admissions` (`admitted`+`valid_until`/`blocked`; records `binding_class`/`can_sign`) → COMMIT → write response iff unexpired, else re-admit → best-effort UPDATE to `delivered` | `internal/signer/delivery.go` |
 | T-status | authenticated status read | single read: request row by `(caller_id, signing_request_id)` + latest admission row; other callers/nonexistent → identical 404 | `internal/signer/status.go` |
 | T-auth | per-request authentication | read `signer_credential` by `secret_hash` (+ caller row); constant-time compare; revoked/absent → generic 401 | `internal/signer/auth.go` |
 
 Discipline: T-submit-* and T-deliver are the only 009 transactions that touch upstream tables;
-against them 009 issues only `SELECT` and the gate-table `LOCK … IN SHARE MODE` (lock acquisition
-with no data mutation — research R6), never `INSERT`/`UPDATE`/`DELETE`. No RPC, no external calls
+against them 009 issues only `SELECT` and lock acquisition (gate-table `LOCK … IN SHARE MODE`,
+008 scope-row `FOR SHARE`, grant/`can_sign` `FOR SHARE`) with no data mutation — research R6. No RPC, no external calls
 inside any transaction. `writeGuard`-style per-statement timeout (5s literal, same as the repo's
 existing guard) bounds every transaction and the `LOCK TABLE` wait.
 

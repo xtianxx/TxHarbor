@@ -231,13 +231,14 @@ grant carrier read-only; it owns its own credential, request, result, admission,
 - **Decision — wallet/permission gates**: delivery re-reads `signer_caller.can_sign` with
   `SELECT … FOR SHARE`; 009's operator disable path (`signer-auth`) is required to take
   `FOR UPDATE` on the same row. The 008-side pause/registry-disabled gate is consumed through
-  `BindingReader`; the 008 adapter contract MUST make `ReadBinding` serialized against 008's own
-  pause transitions (008-side obligation, gates.md §3), so a paused/reconciling/disabled binding
-  can never be read as `BindingMatches`.
-- **Fixed lock order (one ring-free order)**: (1) 006 gate tables `SHARE` (single statement) →
+  `BindingReader` (serialized per gates.md §3) AND through 009's direct scope-row `FOR SHARE`
+  (below), so a paused/reconciling/disabled binding can never be admitted as `BindingMatches`.
+- **Fixed lock order (one ring-free order)**: (0) 008 scope row `FOR SHARE` (joint coordination,
+  same DB) → (1) 006 gate tables `SHARE` (single statement) →
   (2) 007 grant `FOR SHARE` → (3) `signer_caller` `FOR SHARE` → (4) own `signing_requests` row
   (`FOR UPDATE` on submit / read on delivery) → (5) `delivery_admissions` `INSERT`. No 006/007
-  writer ever acquires a 009 table and no 009 path acquires two of its objects out of this order,
+  writer ever acquires a 009 table, 008 writers take the scope row `FOR UPDATE` first and only
+  read afterwards, and no 009 path acquires two of its objects out of this order,
   so no lock-order cycle can form.
 - **Decision — admission ordering (evidence order kept)**: T-deliver takes the locks above,
   re-reads 006/007/008 + `can_sign` in one read sequence, `INSERT`s one `delivery_admissions` row
@@ -246,16 +247,17 @@ grant carrier read-only; it owns its own credential, request, result, admission,
   → no signature material in any field: desensitized status only (`state`, `content_hash`,
   refusal class/reason, timestamps; no signature bytes, no `tx_hash` unless a prior admission is
   `delivered`/`admitted`). Explicit inversion of the 007 still-200 replay (OC-6 MUST NOT 类比).
-- **Decision — bounded admission validity (an admission is not an indefinite permit)**: an
-  `admitted` row authorizes only the **immediate** response write of the **same handling
-  attempt**; it is not a durable, reusable permit. Any send delayed beyond the current attempt
-  (retry, restart, scheduling gap) MUST NOT use the stored admission — it MUST run T-deliver
+- **Decision — bounded admission validity (executable TTL, `valid_until`)**: an `admitted` row
+  carries `valid_until = decided_at + admission_ttl` (deployment config, seconds-scale) and
+  authorizes a write iff `now() <= valid_until` — the clock, not a scheduling-gap judgment,
+  decides. Any send past `valid_until` MUST NOT use the stored admission — it MUST run T-deliver
   again, re-read all gates, and record a new admission (`attempt_seq`+1). If the re-admission
   observes a pause/revoke/can_sign-off, delivery is `blocked` status-only. Effective boundary:
-  the **admission `COMMIT`, linearly ordered by the gate-table `SHARE` lock**; a gate change
-  committed after that boundary is not retroactive but governs every later send. Only bytes
-  actually written are in-flight approved and not recallable (OC-7); an admitted-but-unwritten
-  material remains withholdable and its row means "write outcome unknown", not "permission".
+  the **admission `COMMIT`, linearly ordered by the scope-row `FOR SHARE` + gate-table `SHARE`
+  locks**; a gate change committed after that boundary is not retroactive but governs every
+  later send. Only bytes actually written are in-flight approved and not recallable (OC-7);
+  `admitted` alone is NEVER "in-flight" by label — an admitted-but-unwritten row means "write
+  outcome unknown", not "permission".
 - **Decision — two concurrency timelines**:
   - (a) **Pause/revoke first → no delivery**: 006 pause tx `BEGIN → INSERT pause → COMMIT`; 009
     T-deliver then takes the gate-table `SHARE` lock (waiting up to the 5s guard if that tx is
@@ -263,10 +265,12 @@ grant carrier read-only; it owns its own credential, request, result, admission,
     status-only, zero signature bytes. If the pause tx outlives the guard, `LOCK TABLE` times out
     → `gate_read_failed`, fail-closed, retry same identity, still zero bytes. 007 revoke is the
     same shape through the grant `FOR SHARE` (revoke commits first → `revoked` read → blocked).
-  - (b) **Admission first → pause/revoke after**: 009 T-deliver holds the gate-table `SHARE`
-    lock, admits, commits; a concurrent pause/revoke tx's write waits for that commit, so it is
-    ordered after the admission. The immediate write proceeds. An in-flight admitted send is
-    **withholdable** if any delay occurs before the write (it must re-admit, above); if the write
+  - (b) **Admission first → pause/revoke after**: 009 T-deliver holds the scope-row + gate-table
+    `SHARE` locks, admits, commits; a concurrent pause/revoke tx's write waits for that commit, so it is
+    ordered after the admission. A write while `now() <= valid_until` proceeds (in-flight
+    approved); a write attempted past `valid_until` — including a process that was suspended
+    after `COMMIT` and resumed late — MUST re-admit first and is `blocked` if the pause/revoke
+    is now visible. If the write
     already happened the bytes are in-flight approved and MUST NOT be claimed recallable. A crash
     after admission `COMMIT` but before the write leaves `admitted` (write outcome unknown) →
     `unknown_reconcile`/`outcome_unknown`, never a permit for a later ungated send, and the result
@@ -469,6 +473,18 @@ Per-attribute closure (OC-5 attribute → carrier → 009 verification):
 | fee-replacement purpose | **absent** | not verifiable (R7 branch 1 unreachable) |
 | intent / attempt / binding linkage | **absent** in the grant | 009 persists declarations; no carrier equality |
 | authorization version | **absent** | fingerprint surrogate only; version binding unmet |
+
+- **Applicability — first signatures need the carrier too (not only fee replacement)**: the
+  table above is path-independent. A FIRST signature verifies the same attribute set
+  (issuer/permission, request/intent/sender/content linkage, fee scope, expiry, revocation,
+  version); the 007 row alone supplies only identity/caller/chain/asset/recipient/amount/state/
+  expiry. Until the scopes carrier lands, first signatures operate in the same reduced mode as
+  replacements: 007-columns-only verification + policy caps + fail-closed (`authorization_
+  unverifiable`) on anything unverifiable (Q-B resolution). The carrier therefore unlocks
+  COMPLETE delivery for both paths — the earlier "only unlocks the R7 reuse branch" phrasing is
+  corrected here and in plan.md (Merge order). Independent development/merge of 008/009 with
+  fail-closed behavior is allowed; complete delivery and integration acceptance are gated on the
+  carrier batch below.
 
 - **Concrete closure — new carrier, upstream-owned (009 does not build it)**:
   a 007/011-owned additive carrier `withdrawal_authorization_scopes` (1:1, PK

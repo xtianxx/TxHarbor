@@ -14,6 +14,8 @@ One transaction owns the decision. Fixed order (research R4):
 ```text
 BEGIN
   statement-timeout guard (SET LOCAL statement_timeout = '5s')
+  SELECT … FOR SHARE the 008 scope row (nonce_scope_state for the request scope; same DB) -- joint
+       008 coordination, held to COMMIT; fixed order scope row → gate tables → grant → own rows
   LOCK TABLE indexer_pause, log_pause, deposit_pause, reorg_recovery,
        reorg_recovery_events IN SHARE MODE                    -- R6 gate coord, held to COMMIT
   plain INSERT signing_requests (state='received')            -- identity + envelope bound first
@@ -49,29 +51,29 @@ Invariants this ordering establishes:
 
 Delivery is never a pure read of Table 4; it is a recorded assessment (research R6, OC-6/OC-7):
 
-1. `BEGIN` → gate-table `LOCK … IN SHARE MODE` (R6, held to COMMIT) → 006 gate re-read (one
-   statement) + version equality; 008 binding re-read (the adapter read MUST be serialized
-   against 008's pause transitions, gates.md §3); 007 grant re-read `FOR SHARE` + fingerprint/
-   version equality; `signer_caller.can_sign` re-read `FOR SHARE`.
+1. `BEGIN` → 008 scope-row `SELECT … FOR SHARE` (joint coordination, held to COMMIT; a racing
+   008 pause/registry/release writer blocks until this transaction commits, i.e. is ordered after
+   it) → gate-table `LOCK … IN SHARE MODE` (R6, held to COMMIT) → 006 gate re-read (one
+   statement) + version equality; 008 binding re-read (fresh `ReadBinding` call inside the lock
+   window; the earlier submit-time read is never reused as the admission basis); 007 grant
+   re-read `FOR SHARE` + fingerprint/version equality; `signer_caller.can_sign` re-read
+   `FOR SHARE`.
 2. Persist one `delivery_admissions` row recording the snapshot (`binding_class`, `can_sign`,
    pause/recovery basis): verdict `admitted` **before** any response byte, or `blocked` with the
    observed basis. `COMMIT`.
-3. Write the response. On `admitted`, a bounded best-effort `UPDATE … SET verdict='delivered',
-   delivered_at=now()` follows. An `admitted` row authorizes **only the immediate write of this
-   attempt** — it is not a durable permit: any delayed send (retry, restart, scheduling gap) MUST
-   re-run T-deliver, re-read all gates and `can_sign`, and record a new `attempt_seq`
-   (re-admission). If a pause/revoke/`can_sign`-off became visible after the old admission, the
-   re-admission is `blocked`; a lost marker leaves `admitted` = "write outcome unknown" (unknown
-   reconcile), never a standing permission. Only bytes already written are in-flight approved.
-   Linearization: the admission `COMMIT`, ordered by the gate-table `SHARE` lock (R6).
-   **Immediate-write rule**: the admission authorizes only the causally-immediate write in the
-   same task execution (no yield to retry/restart/scheduler between `COMMIT` and the socket
-   write). A pause/revoke/`can_sign`-off that commits after the admission `COMMIT` is ordered
-   after the admission and does not cancel that immediate write (in-flight approved); any
-   non-immediate send is a delayed send and MUST re-admit. Locks are never held across network
-   I/O (held to `COMMIT` only, `statement_timeout` guard); a post-`COMMIT` crash or lost marker
-   leaves `admitted` = "write outcome unknown" (`unknown_reconcile`), never permission to assume
-   delivery.
+3. Write the response iff the admission is still valid (`now() <= valid_until`); otherwise
+   re-run T-deliver (new `attempt_seq`) instead of using the old admission — the clock, not a
+   scheduling-gap judgment, decides (data-model Table 6). A pause/revoke/`can_sign`-off that
+   commits after the admission `COMMIT` but before the handoff does not cancel a still-valid
+   write (ordered after the admission: in-flight approved); after `valid_until` lapses the same
+   event blocks via re-admission. A row left at `admitted` with a lost marker or after a
+   post-`COMMIT` crash means "write outcome unknown" (`unknown_reconcile`), never a standing
+   permission and never "in-flight" by label — only bytes already written are in-flight
+   approved. Re-admission of byte-identical content is allowed (idempotent); re-signing never.
+   Linearization: the admission `COMMIT`, ordered by the scope-row `FOR SHARE` + gate-table
+   `SHARE` locks (R6). Locks are never held across network I/O (held to `COMMIT` only,
+   `statement_timeout` guard); a network stall past `valid_until` triggers re-admission, and a
+   `LOCK TABLE` wait past the guard fails closed (`gate_read_failed`).
 
 Consequences:
 
