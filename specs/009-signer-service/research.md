@@ -283,6 +283,20 @@ grant carrier read-only; it owns its own credential, request, result, admission,
     (safety-positive; no 007 semantic change, only long-stalled writes now fail instead of
     hanging). Recorded here so the tasks/implement diff on shared `serve.go` is expected, not
     incidental.
+- **Guarantee-scope revision (user ruling 2026-09-16, fault-model limitation accepted)**:
+  protection-effective ⇒ ordering holds (pause/revoke before region entry blocks, racers wait);
+  protection-lost (DB session death and kin) ⇒ NO absolute zero-byte promise. On detecting the
+  loss the path MUST best-effort stop (pre-write session/tx liveness check in T-deliver; any
+  detected death → `ROLLBACK`, zero bytes — stated as best-effort, TOCTOU-limited). The
+  residual covers BOTH "bytes out, marker lost" AND "protection lost, sender unaware, sending
+  continues" — undeterminable outcomes are `unknown`, never presented as success or as
+  safe-failure. Same-bytes redelivery is NOT unconditional: every redelivery re-passes current
+  authentication, authorization (incl. expiry/revocation), pause, and admission gates — a
+  revoked/expired grant or an active pause blocks even byte-identical redelivery. Audit records
+  only confirmed facts; unconfirmed outcomes stay `unknown`, never backfilled as confirmed.
+  This residual is not claimed to be the only possible fault, and accepting it replaces no
+  remaining design check or fault acceptance. Retracted stronger claims (history kept):
+  "write failure ⇒ nothing delivered", "locks never span network", the TTL permission window.
 - **Feasibility verification 2026-09-16 (probes + code + official docs; PG 18.6, Go 1.26.5)**:
   - `statement_timeout` bounds ONE statement's server execution, not the transaction and not
     network waits. Probed on stock PG 18: `pg_sleep(5)` under 2s `SET LOCAL` aborts the

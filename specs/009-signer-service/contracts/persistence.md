@@ -61,8 +61,10 @@ Delivery is never a pure read of Table 4; it is a recorded assessment (research 
 2. Persist one `delivery_admissions` row recording the snapshot (`binding_class`, `can_sign`,
    pause/recovery basis): verdict `admitted`, or `blocked` with the observed basis (then
    `ROLLBACK`, status-only response, zero bytes).
-3. While still holding all locks, write the response bytes (bounded send region; research
-   R6). Write success means "accepted by the OS transport", NOT "received by the client" —
+3. Best-effort pre-write liveness check (session/tx still alive; TOCTOU-limited, stated as
+   such — it narrows, never closes, the unaware window): if the loss is detected → `ROLLBACK`,
+   zero bytes. While still holding all locks, write the response bytes (bounded send region;
+   research R6). Write success means "accepted by the OS transport", NOT "received by the client" —
    receipt is unobservable server-side (verified by probe: small Write+Flush returns success
    with zero bytes read). On write success, `UPDATE … SET verdict='delivered',
    delivered_at=now()`; `COMMIT`. On write failure/timeout, `ROLLBACK` — but the bytes MAY
@@ -179,7 +181,11 @@ durable rows say what was decided, and reconciliation uses the audit + admission
 proof of non-delivery (bytes may be out) and never as permission (re-gate required). Recovery
 is same-identity retry → re-gate all revocable gates → redeliver byte-identical content or
 withhold status-only; never re-sign (`signature_results_pkey`), never different bytes (content
-hash bound), never a new identity or intent.
+hash bound), never a new identity or intent. Redelivery is NOT unconditional: every redelivery
+re-passes current authentication, authorization validity (expiry/revocation kill even
+byte-identical redelivery), pause, and admission gates. Audit records only confirmed facts —
+`unknown` stays `unknown` in the rows; reconciliation MUST NOT backfill unconfirmed outcomes
+as confirmed.
 An unknown outcome MUST NOT be resolved by creating a new identity or a new payment intent
 (011 owns intent rework; 006 forbids "compensate by re-paying"). Reconciliation verification is
 listed in quickstart V7; a `signature_withheld` state is the standing-safe answer until the gate
