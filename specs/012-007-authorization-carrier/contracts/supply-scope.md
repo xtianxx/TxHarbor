@@ -17,11 +17,15 @@ principal when omitted; never to `--operator`).
 1. Operator presents an API key (required supply flag) resolving via existing
    `Authenticate` to `(key_id, caller_id)` — single indexed read, revocation
    observed immediately, no cache (`internal/withdrawal/auth.go:127`).
-2. `PermitIssue(caller_id)` passes against the deployment-configured issuance
-   allowlist (pure, unit-tested). Ordinary callers, 011 executors, and bare
-   `--operator` strings are absent from the mapping → deny-by-default.
-3. `--operator` (if given) is recorded verbatim; it grants nothing and is never
-   an input to (1)/(2).
+2. `PermitIssue(caller_id)` passes against `TXHARBOR_AUTHZ_ISSUER_CALLERS`
+   (comma-separated caller_ids; missing/empty → deny-all; illegal → startup
+   error exit 2). Ordinary callers, 011 executors, and bare `--operator`
+   strings are absent from the mapping → deny-by-default.
+3. Inside T-supply+scope, before any write: api_key row `FOR SHARE` +
+   caller row `FOR SHARE` + `PermitIssue` re-evaluation (R-PB10 order).
+   Failure at any point → `supply_refused` naming the failed check, zero writes.
+4. `--operator` (if given) is recorded verbatim in audit; it grants nothing
+   and is never an input to (1)–(3).
 Failure of (1)/(2) → exit 1, zero rows. `attested_by` is always the
 server-resolved principal (never caller-supplied) and joins op-input equality:
 same operation id from a different principal → `operation_conflict`.

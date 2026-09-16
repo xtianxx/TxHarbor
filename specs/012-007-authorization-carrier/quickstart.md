@@ -20,7 +20,8 @@ runs it). No test doubles substitute for the legal path.
 |---|---|---|
 | V-PB1 | Legal supply + 009-style read-back (all fields, version 1) | green |
 | V-PB2 | Unauthenticated / unmapped principal supply | refusal, zero rows |
-| V-PB3 | Scopeless stock grant read path | per-grant refuse (009-side), stock queryable |
+| V-PB3-PB | Scopeless stock grant PB part: queryable/auditable, scope row absent | PB executes |
+| V-PB3-009 | Scopeless per-grant refuse on the 009 lane | joint — 009 lane post-merge, NOT closed by PB |
 | V-PB4 | Fee boundaries: total/per-gas/priority each at cap, cap+1, missing, illegal; priority > max_fee | refuse exactly the over/illegal ones |
 | V-PB5 | Fee replacement: allowed+in-range reuses; otherwise fresh grant+identity required | green |
 | V-PB6 | Revoke vs supply race: loser observes winner state; scope consistent | green |

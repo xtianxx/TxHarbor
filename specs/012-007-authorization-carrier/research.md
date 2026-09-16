@@ -135,6 +135,37 @@
   id retried by a *different* principal yields `operation_conflict` instead of
   converging (same principal still converges — existing semantics kept).
 
+## R-PB10 — Supply-time authority protocol (closes F1/F2; no leniency)
+
+Authoritative sources and their change entries (verified in-tree):
+- Key validity: `api_key` row (`revoked_at`); writers are `RotateKey`
+  (`internal/withdrawal/auth.go:214-249`, grace) and direct revoke
+  (`auth.go:267`, single-statement `UPDATE`) — both commit independently of
+  any supply tx.
+- Caller state: `caller` row (`can_create`); the tree has exactly one writer,
+  `INSERT` at `auth.go:190` — no UPDATE path exists, so in-flight change is
+  possible only via direct operator DB writes (still re-read, defense in depth).
+- Business allowlist: deployment config `TXHARBOR_AUTHZ_ISSUER_CALLERS`
+  (comma-separated decimal caller_ids; whitespace trimmed, empty entries
+  ignored; missing/empty → deny-all; illegal → startup config error, exit 2).
+  Loaded once at process start; changes require restart. The residual window
+  (old process + new config) is closed by attribution, not by permission:
+  every supply audit carries principal + timestamp, so post-change supplies
+  from stale processes are exactly identifiable — stated limit, not a
+  revocation grace.
+
+Fixed order inside T-supply+scope (after the existing grant `FOR UPDATE`
+is NOT enough — authority re-checks come first):
+`BEGIN → statement guard → api_key row FOR SHARE (by key_hash; miss →
+refuse) → caller row FOR SHARE + re-evaluate PermitIssue against the loaded
+mapping → grant FOR UPDATE → grant/scope/audit writes → COMMIT`.
+A revoke/rotate/caller UPDATE either commits before our SHARE (observed →
+`supply_refused` with the failed check named in `reason`) or blocks until our
+COMMIT (governs the next supply) — the same share-vs-update ordering 009
+uses on the grant row and 006 uses at pre-commit. No advisory/lease objects.
+Failure behavior uses the existing action vocabulary (`supply_refused` +
+reason); no new action, no new business semantic, no revocation grace.
+
 ## R-PB7 — Adjacent lanes (no interaction by design)
 
 - 008 merged (`02641fb`): read-api scope-row order and reconcile are 008-owned;

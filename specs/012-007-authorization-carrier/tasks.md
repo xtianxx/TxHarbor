@@ -29,7 +29,7 @@ green requires the stated verification, never the plan's existence.
 **Purpose**: verify the lane can build, migrate, and test before any behavior work.
 
 - [ ] T001 Verify lane baseline in `.slim/worktrees/prep-pb-auth`: `git rev-parse HEAD` recorded, `go build ./...` + `go vet ./...` clean, `go test ./internal/withdrawal/ ./internal/app/ ./internal/db/` green on the unmodified tree. Done: recorded SHAs + clean outputs.
-- [ ] T002 [P] Pin the 009 reference: record 009 worktree HEAD SHA and copy `migrations/000009_signer_service.sql` @pinned-SHA into a scratch-only dir (e.g. `/tmp/pb-009ref/`); NEVER commit it into this lane. Done: SHA + scratch path recorded; `git status` shows no 009 file in the lane.
+- [ ] T002 [P] Pin the 009 reference: record 009 worktree HEAD SHA and copy `migrations/000009_signer_service.sql` @pinned-SHA into a scratch-only dir (e.g. `/tmp/pb-009ref/`); NEVER commit it into this lane. If 009 HEAD advances before Phase 6 runs, re-pin and judge the re-verify scope (new 009 migration content → re-run T040/T041). Done: SHA + scratch path recorded; `git status` shows no 009 file in the lane.
 
 ## Phase 2: Foundational (blocks US1–US3)
 
@@ -37,7 +37,7 @@ green requires the stated verification, never the plan's existence.
 
 - [ ] T003 Additive migration `migrations/000010_withdrawal_authorization_scopes.sql` (planning number; renumber-at-merge applies): `+goose Up` creates `withdrawal_authorization_scopes` per data-model.md (PK/FK, fee triple + `priority ≤ max_fee` CHECKs, version ≥ 1, purpose boolean, attested_by); `+goose Down` drops it. Pure DDL, zero 007 change. Done: `goose validate`-equivalent (`MigrationFiles` parse) + up/down on scratch DB green.
 - [ ] T004 Extend supply op-input types in `internal/withdrawal/grant.go` (`OpInput`: scope fields + `attested_by`), validation (`validateSupplyOpInput`: sender shape, fee values ≥ 0, purpose boolean, attested_by presence rule), and `opInputDetail` snapshot extension. Done: unit tests green (valid/invalid matrices, nil-pool-safe like existing).
-- [ ] T005 [P] Issuance allowlist config: new deployment config source (exact env name fixed here, e.g. `TXHARBOR_AUTHZ_ISSUER_CALLERS`), loader + pure `PermitIssue(callerID)` in `internal/withdrawal/` (nil-pool-safe). Done: unit tests (mapped → allow; unmapped/empty → deny).
+- [ ] T005 [P] Issuance allowlist config: `TXHARBOR_AUTHZ_ISSUER_CALLERS` (comma-separated decimal caller_ids; whitespace trimmed, empty entries ignored; missing/empty → deny-all; illegal → startup config error exit 2), loader + pure `PermitIssue(callerID)` in `internal/withdrawal/` (nil-pool-safe). Done: unit tests (mapped → allow; unmapped/empty → deny; illegal → startup error).
 
 **Checkpoint**: foundation ready — migration applies, types validate, permission predicate exists.
 
@@ -51,9 +51,9 @@ green requires the stated verification, never the plan's existence.
 - [ ] T011 [US1] Integration test: permission gate in `internal/app/withdrawalauthz_integration_test.go` (unmapped principal → refusal + zero rows; mapped principal → green). Must FAIL before T013.
 - [ ] T012 [US1] T-supply+scope in `internal/withdrawal/grant.go`: same-tx grant + scope + audit writes; scope fields in guarded resupply comparison; scope row in commit-unknown re-read. (Depends on T004; sequenced with T013 on the shared file.)
 - [ ] T013 [US1] CLI carrier in `internal/app/withdrawalauthz.go`: new flags, resource order **validate-flags → open pool → Authenticate → PermitIssue → SupplyGrant** (Authenticate needs the pool for well-formed keys; only shape failures are pool-free — wire the order explicitly, not just "pre-pool"); `--operator` stays audit-only. (Sequenced with T012.)
-- [ ] T014 [US1] Credential secrecy on the supply path: presented key never logged/stored (redaction assertion over CLI stderr + slog capture); `attested_by` mismatch semantics — same operation id from a different principal → `operation_conflict` (test), same principal → converge (existing semantics kept).
-- [ ] T015 ⚠️ [US1] Auth-to-write window: key revocation / permission change between Authenticate and the supply-tx commit. Implement ONE of: (a) in-tx re-verification (key_hash re-read `FOR SHARE` inside T-supply+scope), or (b) bounded-window rationale (short-lived CLI process + principal/timestamp in audit) with a test pinning the chosen behavior. **BLOCKS US1 completion until decided in implement — flagged here, not silently defaulted.**
-- [ ] T016 [US1] Fee triple validation (PB-C2): total/per-gas/priority caps, `priority ≤ max_fee` cross-check, missing/illegal/over-limit refuse, legacy `gas_price` path, native最小单位 integers. Unit + integration (each boundary both sides).
+- [ ] T014 [P] [US1] Credential secrecy on the supply path: presented key never logged/stored (redaction assertion over CLI stderr + slog capture); `attested_by` mismatch semantics — same operation id from a different principal → `operation_conflict` (test), same principal → converge (existing semantics kept). (Test-only files, parallel-safe.)
+- [ ] T015 [US1] In-tx authority re-verification in `internal/withdrawal/grant.go` (design closed this round, R-PB10 — no bounded-window option): inside T-supply+scope before any write, re-read api_key row `FOR SHARE` + caller row `FOR SHARE` + re-evaluate `PermitIssue`; failure → `supply_refused` naming the check, zero writes. Test: revoke-then-supply refused; race where revocation commits first wins (loser observes revoked). Sequenced after T012 (same file, extends its tx).
+- [ ] T016 [US1] Fee triple validation (PB-C2): total/per-gas/priority caps, `priority ≤ max_fee` cross-check, missing/illegal/over-limit refuse, legacy `gas_price` path, native最小单位 integers. Unit + integration (each boundary both sides). (Touches `grant.go` — sequenced after T012/T015, not parallel with them.)
 
 **Checkpoint**: US1 independently functional — legal supply verifiable end-to-end.
 
@@ -61,7 +61,7 @@ green requires the stated verification, never the plan's existence.
 
 **Goal**: refusals hold; revoke keeps scope consistent; versions monotonic.
 
-- [ ] T020 [P] [US2] Negative tests: unmapped/unauthenticated supply (zero rows), malformed scope input (zero rows), over-limit fee (zero rows). New cases in existing test files.
+- [ ] T020 [US2] Negative tests: unmapped/unauthenticated supply (zero rows), malformed scope input (zero rows), over-limit fee (zero rows). New cases in existing test files (shares files with T010/T011 — sequenced after them, not parallel).
 - [ ] T021 [US2] T-revoke-sync in `internal/withdrawal/grant.go`: revoke tx syncs scope state/version; version monotonicity (re-supply cycles bump, never rewrite applied rows). Integration test: supply → revoke → re-supply round-trip with version assertions.
 - [ ] T022 [US2] Revoke-vs-supply race test: concurrent revoke + supply on one grant; loser observes winner state; scope consistent in both outcomes. (Real PG, no sleeps-as-proof — use barrier/lock-step like existing race tests.)
 
@@ -71,7 +71,7 @@ green requires the stated verification, never the plan's existence.
 
 **Goal**: stock stays queryable-but-refused; explicit re-issuance with traceability; PB-01–PB-05 done exactly once, here.
 
-- [ ] T030 [US3] T-reissue procedure in `internal/withdrawal/grant.go` + CLI: NEW grant id + scope in one supply tx, audit detail links old ids; asserts no UPDATE to old rows and no intent/nonce writes (table-set assertion). Integration test with old/new row census.
+- [ ] T030 [US3] T-reissue procedure in `internal/withdrawal/grant.go` + CLI: NEW grant id + scope in one supply tx, audit detail links old ids; asserts no UPDATE to old rows. No-second-nonce proof (008 baseline is merged — no import check): per-scope `nonce_bindings` census identical before/after for every touched scope AND row counts of all seven `nonce_*` tables unchanged; intent tables do not exist yet in this tree — record the 009/011 integration re-check as a handoff obligation (H5), do not invent future tables. Integration test with old/new row census.
 - [ ] T031 [US3] OPEN-3 dry-run execution (quickstart.md procedure): pick stock grant → re-verify → re-issue → assert trace + zero new intent/nonce; record the dry-run log pointer in quickstart.md. (Execution task; procedure already designed.)
 - [ ] T032 PB-01 migration ownership: this lane's T003 IS PB-01 (renumber-at-merge rule applied at merge; applied numbers immutable). No second migration task elsewhere.
 - [ ] T033 PB-02 entry ownership: this lane's T012/T013 IS PB-02. No 009-side entry work.
@@ -97,7 +97,8 @@ green requires the stated verification, never the plan's existence.
 |---|---|---|
 | V-PB1 legal supply + read-back | T004, T012, T013 | T050 |
 | V-PB2 unauthorized supply refused | T005, T013, T020 | T050 |
-| V-PB3 scopeless per-grant refuse | T030 (procedure) + 009-side (handoff H4) | T050 (PB part) |
+| V-PB3-PB stock queryable + scope absent | T030 (procedure) | T050 (closes PB part only) |
+| V-PB3-009 per-grant refuse on 009 lane | handoff H4 (009 lane, post-merge) | joint — NOT closed by T050 |
 | V-PB4 fee boundaries (total/per-gas/priority/cross/missing/illegal/over) | T016 | T050 |
 | V-PB5 fee replacement conditional | T016 + data-model rule | T050 |
 | V-PB6 revoke vs supply race | T021, T022 | T050 |
@@ -112,9 +113,9 @@ PB-FR-01 → T003, T004, T012; PB-FR-02 → T012, T021, T030; PB-FR-03 → T005,
 
 ### PB-SC ↔ case map
 
-PB-SC-01 → V-PB1, V-PB5; PB-SC-02 → V-PB2, V-PB6; PB-SC-03 → V-PB3, V-PB9; PB-SC-04 → V-PB10.
+PB-SC-01 → V-PB1, V-PB5; PB-SC-02 → V-PB2, V-PB6; PB-SC-03 → V-PB3-PB, V-PB9 (V-PB3-009 joint); PB-SC-04 → V-PB10.
 
-- [ ] T050 Execute quickstart.md V-PB1–V-PB10 matrix; record per-case log pointers + code SHA; PB-FR-01–PB-FR-08 ↔ tasks and PB-SC-01–PB-SC-04 ↔ cases mapping table completed. Refusal paths MUST NOT substitute for legal-supply acceptance (V-PB1 green is mandatory).
+- [ ] T050 Execute quickstart.md V-PB1–V-PB10 matrix PB-executable part (V-PB3-009 stays joint-open for the 009 lane); record per-case log pointers + code SHA; PB-FR-01–PB-FR-08 ↔ tasks and PB-SC-01–PB-SC-04 ↔ cases mapping table completed. Refusal paths MUST NOT substitute for legal-supply acceptance (V-PB1 green is mandatory).
 - [ ] T051 009 handoff requirements doc (lane-local note, 009 untouched): consumption fields, version persist/re-check, `replacement_of` threading, `GrantScope{Present:false}` replacement point (009 `submit.go:211`), delivery re-check point — all as *requirements on the 009 lane*, not implemented here.
 - [ ] T052 Regression: `go test ./...` + affected integration packages + `gofmt`/`vet`/`build` green on final tree; evidence index appended (commands + SHAs + logs, MISSING where not persisted).
 
@@ -122,12 +123,12 @@ PB-SC-01 → V-PB1, V-PB5; PB-SC-02 → V-PB2, V-PB6; PB-SC-03 → V-PB3, V-PB9;
 
 - T001 → everything (baseline). T002 → T040/T041 (009-file source).
 - Phase 2 (T003/T004/T005) BLOCKS US phases. T005 → T013/T011 (predicate before carrier/tests).
-- US1: T010/T011 (fail-first) → T012/T013 (sequenced, shared files) → T014/T016 (parallel [P] after) → T015 decision BLOCKS US1-done.
-- US2 (T020/T021/T022): needs Phase 2 only; T021 shares `grant.go` → sequenced after T012. Otherwise parallel with US1's tail.
-- US3: T030 needs T012/T021 (same tx patterns); T031 needs T030; T032–T036 are ownership records completed by their mapped tasks; T036 needs T003 + T040.
-- Phase 6: T040 → T041/T042. Phase 7: needs all behavior phases.
-- Wave plan: W1 = T001/T002; W2 = T003/T004/T005; W3 = T010/T011/T020 (fail-first tests); W4 = T012→T013 (sequenced) + T021; W5 = T014/T016/T022/T030; W6 = T015 decision + T031 + T036 + Phase 6; W7 = Phase 7. No fixed model/task-count caps; shared files coordinated by the orchestrator.
-- Dependency cycle check (tasks-internal, not formal analyze): T015→US1-done; US1→nothing (no back-edge); US3→US1/US2 files (forward only); Phase 6→Phase 2/009-ref (forward); Phase 7→all (terminal). No cycles; no dangling refs (every dep named above exists in this list).
+- US1: T010/T011 (fail-first) → T012/T013 (sequenced, shared files) → T014[P]/T015/T016/T021-tail in file order: T014 parallel-safe (test-only files); T015 then T016 sequenced after T012 (all touch `grant.go`).
+- US2 (T020/T021/T022): needs Phase 2 only; T020 sequenced after T010/T011 (shared test files); T021 shares `grant.go` → sequenced after T012/T015/T016. Otherwise parallel with US1's tail.
+- US3: T030 needs T012/T015/T016/T021 (same tx patterns + `grant.go` order); T031 needs T030; T032–T036 are ownership records completed by their mapped tasks; T036 needs T003 + T040.
+- Phase 6: T040 → T041/T042. Phase 7: needs all behavior phases; T050 closes everything except joint V-PB3-009.
+- Wave plan: W1 = T001/T002; W2 = T003/T004/T005; W3 = T010/T011 fail-first (T020 follows, not parallel); W4 = T012→T013→T015→T016→T021 (single `grant.go`/`withdrawalauthz.go` lane, strictly sequenced) + T014[P] alongside; W5 = T022/T030; W6 = T031 + T036 + Phase 6; W7 = Phase 7. No fixed model/task-count caps; shared files coordinated by the orchestrator.
+- Dependency cycle check (tasks-internal, not formal analyze): Phase 2 → US phases forward; T015→T016→T021→T030 chain forward; US3→US1/US2 files forward; Phase 6→Phase 2/009-ref forward; Phase 7 terminal. No cycles; no dangling refs (every dep named above exists in this list).
 
 ## 009 handoff points (requirements, not tasks here)
 
@@ -136,5 +137,5 @@ H1: carrier read shape + scope checks (009 `gates.go`); H2: `authorization_versi
 ## Notes
 
 - All tasks `[ ]` (unchecked); counts: 28 tasks (T001–T052 numbered by phase).
-- Genuine blocker flagged: T015 (auth-to-write window decision in implement).
+- Design closed this round (R-PB10): T015 implements in-tx re-verification, no bounded-window option, no decision left for implement.
 - A-13 / T000-P stay OPEN; 009 files untouched; no push/PR/merge/deploy.

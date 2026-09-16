@@ -106,3 +106,7 @@ existing files only — no new packages, no new binaries, no new infrastructure.
 8. Merge/deploy order determined (R-PB8): PB merges first as `000010`,
    009 later as `000009` unchanged; gap-fill is native goose `Up`
    (`provider.go:244`), serve gate enforces it — no merge-time decision left.
+9. Authority protocol closed (R-PB10): in-tx re-verification (api_key +
+   caller `FOR SHARE` + `PermitIssue` re-eval, `supply_refused` on failure);
+   allowlist env `TXHARBOR_AUTHZ_ISSUER_CALLERS` fixed; V-PB3 split into
+   PB-executed and joint-009 parts. No bounded-window option remains.

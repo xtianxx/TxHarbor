@@ -27,10 +27,10 @@ append-only and FK-free, matching Table 6 precedent).
 
 ## Transaction catalog
 
-- **T-supply+scope**: `BEGIN → SET LOCAL statement_timeout='5s' → grant row
-  FOR UPDATE → INSERT/UPDATE grant → INSERT scope row (same tx)
-  → INSERT grant audit → COMMIT`. One tx, existing lock #1 first; scope row
-  adds no new lock object (fresh insert). Refusal paths write nothing.
+- **T-supply+scope**: `BEGIN → statement guard → api_key FOR SHARE +
+  caller FOR SHARE + PermitIssue re-evaluation → grant FOR UPDATE →
+  grant/scope/audit writes → COMMIT` (authority re-checks precede all writes;
+  R-PB10). Refusal (`supply_refused` + named reason) writes nothing.
 - **T-revoke-sync**: existing revoke tx + scope state/version sync in the same
   tx (scope follows grant state; version bump rule per table above).
 - **T-reissue**: NEW grant id + NEW scope row in one supply tx, with an audit
@@ -40,12 +40,15 @@ append-only and FK-free, matching Table 6 precedent).
 - **Commit-unknown**: existing `resolveByOperationID` pattern extended to
   include the scope row in the re-read (same operation id, same convergence).
 
-## Lock order (extends grant.go, no reordering)
+## Lock order (extends grant.go: api_key/caller shares first, then the existing order)
 
-`BEGIN → statement guard → grant FOR UPDATE → grant write → scope write →
-audit append → COMMIT`. Readers: 009 grant `FOR SHARE` + scope read in the
+`BEGIN → statement guard → api_key FOR SHARE → caller FOR SHARE →
+grant FOR UPDATE → grant write → scope write → audit append → COMMIT`.
+A key/caller UPDATE writer either lands before our SHARE (observed) or waits
+for our COMMIT (R-PB10). Readers: 009 grant `FOR SHARE` + scope read in the
 same sequence (009 lane). Intake `FOR SHARE` on grant unaffected. No
-grant↔scope lock cycle possible (single writer order; readers share-lock).
+grant↔scope↔api_key lock cycle possible (single writer order; readers
+share-lock; key/caller rows are never written by supply).
 
 ## Concurrency argument
 
