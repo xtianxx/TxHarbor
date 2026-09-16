@@ -103,3 +103,6 @@ existing files only — no new packages, no new binaries, no new infrastructure.
 5. 009 plug-in points enumerated read-only; 009 lane owns consumption (R-PB6).
 6. OPEN-3 acceptance designed here (quickstart.md V-PB9 + matrix); tasks assign execution.
 7. No new business questions raised; PB-C1/PB-C2/Q-A/Q-B not reopened.
+8. Merge/deploy order determined (R-PB8): PB merges first as `000010`,
+   009 later as `000009` unchanged; gap-fill is native goose `Up`
+   (`provider.go:244`), serve gate enforces it — no merge-time decision left.

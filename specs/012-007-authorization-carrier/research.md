@@ -87,6 +87,54 @@
   checks, persist `authorization_version`, re-check at delivery.
   **This batch owns carrier + supply only.**
 
+## R-PB8 — Merge/deploy order and gap-fill (verified against runner code)
+
+- Determination (not deferred): **PB merges first as `000010`** (gap at 9
+  reserved for the 009 lane); **009 merges later as `000009` unchanged** —
+  no renumbering is needed on either side, and incomplete 009 is never merged
+  early for numbering reasons. Feature numbers (012) and migration numbers
+  (000010) are unrelated namespaces.
+- Gap-fill proof (`internal/db/migrate.go` + goose v3.28.0 `provider.go`):
+  `MigrationFiles` requires only `NNNNNN_name.sql` format/positivity/
+  uniqueness — **no contiguity requirement** (`migrate.go:65-93`); `Pending`
+  is computed per version (`!applied[f.Version]`, `migrate.go:145-149`);
+  goose `Provider.Up` "applies all pending migrations" (`provider.go:244`),
+  so a DB at {1..8,10} later runs plain `migrate up` and applies exactly 9 —
+  **no special option**. `CheckCompatibility` refuses serve while any version
+  is pending (`migrate.go:164-194`), so the gap can never serve unfilled.
+  Rollback descends applied versions (`Down`, `provider.go:308`).
+- PB-05 grows sequence (d): DB at {1..8,10} + files {1..10} → `migrate up`
+  applies exactly 9, serve gate green after. Sequences (a)–(c) unchanged.
+- PB independence: carrier FK → `withdrawal_authorizations` (007) only;
+  grant.go/supply reference no 009 table or package. PB merges and serves
+  with 009 absent; 009 needs PB, never the reverse — dependency is acyclic.
+
+## R-PB9 — Issuance permission control points (concrete, PB-C1 mechanization)
+
+- Identity source: operator presents an API key (new required supply flag);
+  resolved by the existing `Authenticate` (`internal/withdrawal/auth.go:127`:
+  single indexed read on `api_key`, constant-time compare, no cache, revocation
+  observed immediately) to `(key_id, caller_id)`.
+- Role mapping: deployment config allowlist of issuance `caller_id`s (exact
+  env name to implement; mapping lives in config, never in code constants).
+- Independent gate: new pure `PermitIssue(callerID)` in `internal/withdrawal`
+  (nil-pool-safe, unit-tested like `validateSupplyOpInput`); the CLI carrier
+  calls Authenticate → PermitIssue **pre-pool**, before any DB access.
+  Failure → exit 1, zero rows.
+- Deny-by-default: ordinary callers, 011 executors, and bare `--operator`
+  strings are simply absent from the mapping → refused. `--operator` is never
+  an input to PermitIssue.
+- Direct library calls: `grant.go` stays transport-free (intake `can_create`
+  precedent — permission lives at the carrier layer, not the library).
+  Library docs state `SupplyGrant` assumes an authorized caller; tests assert
+  the refusal at the carrier. DB roles unchanged: DSN remains the operator
+  tooling trust root (same as `migrate`); permission is application-level at
+  the single CLI entry — stated, not silently extended.
+- Audit binding: `attested_by` = server-resolved `(key_id, caller_id)`, never
+  a caller-supplied string; it joins op-input equality, so the same operation
+  id retried by a *different* principal yields `operation_conflict` instead of
+  converging (same principal still converges — existing semantics kept).
+
 ## R-PB7 — Adjacent lanes (no interaction by design)
 
 - 008 merged (`02641fb`): read-api scope-row order and reconcile are 008-owned;

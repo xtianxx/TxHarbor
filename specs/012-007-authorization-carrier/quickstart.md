@@ -27,7 +27,7 @@ runs it). No test doubles substitute for the legal path.
 | V-PB7 | Grant+scope+audit atomicity (kill -9 at phase points) | converge by operation id, zero partial |
 | V-PB8 | Commit-unknown retry with same operation id | converges, never second grant |
 | V-PB9 | Explicit re-issuance dry-run (procedure above) | trace complete, zero new intent/nonce |
-| V-PB10 | Migration chain: empty→full, 007-era→carrier, down→re-up | green; applied numbers untouched |
+| V-PB10 | Migration chain: empty→full, 007-era→carrier, down→re-up, **gap-fill ({1..8,10} + files {1..10} → up applies exactly 9, gate green)** | green; applied numbers untouched |
 
 ## Acceptance tiers (do not conflate)
 

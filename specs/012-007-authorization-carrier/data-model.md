@@ -20,7 +20,7 @@ grant may exist without scope = pre-extension stock).
 | `fee_max_priority` | BIGINT ≥ 0, EIP-1559 priority cap; MUST satisfy `≤ fee_max_per_gas` (CHECK) |
 | `allows_fee_replacement` | BOOLEAN, explicit purpose token (default false) |
 | `authorization_version` | BIGINT ≥ 1, monotonic per grant (bumped on revoke-then-re-supply cycles that keep scope; re-issuance mints a NEW grant id, never rewrites) |
-| `attested_by` | TEXT, issuing principal (joins issuance audit) |
+| `attested_by` | TEXT, issuing principal (joins issuance audit); server-resolved, joins op-input equality (different principal + same operation id → `operation_conflict`) |
 
 No signature column (Q-A). No FK from audit tables into scope (audit stays
 append-only and FK-free, matching Table 6 precedent).
@@ -55,10 +55,22 @@ grant↔scope lock cycle possible (single writer order; readers share-lock).
   difference → `operation_conflict`, zero writes.
 - Audit `operation_id` UNIQUE stays the commit-unknown convergence key.
 
-## 009 read contract (for the 009 lane; stated here so both sides match)
+## Write/read + lock matrix (PB scope only; 009 rows are 009-lane duties)
 
-009 reads grant + scope in one `FOR SHARE` sequence, requires
-`authorization_id` equality, checks sender / fee triple / purpose /
-intent+request linkage against the request, persists `authorization_version`,
-re-checks version at delivery. Scopeless grant → `authorization_unverifiable`
-(009-side, already built).
+| Path | Reads | Writes | Locks held |
+|---|---|---|---|
+| T-supply+scope | grant row; issuance mapping (config, no lock) | grant INSERT/UPDATE; scope INSERT; audit INSERT | grant `FOR UPDATE` (existing #1); fresh scope insert (no lock); audit uniq index only |
+| T-revoke-sync | grant row | grant state UPDATE; scope state/version sync; audit INSERT | same as above |
+| T-reissue | old grant/request (read-only, for detail link) | NEW grant + NEW scope + audit (never UPDATE old) | new-row locks only |
+| 009 submit (later lane) | grant + scope `FOR SHARE` in one sequence; version persisted | 009-owned request rows only | existing 009 order; scope read shares the sequence, no new lock object |
+| 009 delivery (later lane) | grant + scope re-read `FOR SHARE`; version equality vs persisted | 009-owned admission rows only | same; version mismatch blocks |
+
+- Shared coordination basis: writer and 009 readers meet on the **same grant
+  row** (`FOR UPDATE` vs `FOR SHARE`) plus the **persisted
+  `authorization_version`** that delivery re-checks — a scope/version change
+  between submit and delivery is observed, never silently adopted. No advisory,
+  lease, or new lock object is introduced (constraint, not just intent: the tx
+  catalog above lists every lock; anything else is a plan violation).
+- 009 follow-up duties (not this batch): extend read shape, implement scope
+  checks, persist + re-check version, thread `replacement_of` (see R-PB6
+  plug-in points).

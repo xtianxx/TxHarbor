@@ -14,12 +14,17 @@ principal when omitted; never to `--operator`).
 
 ## Preconditions (new, before pool use)
 
-1. Caller presents credentials resolving to an authenticated principal.
-2. Principal is mapped to the issuance role (PB-C1; mapping source is
-   deployment config, fixed in implement).
-3. `--operator` (if given) is recorded verbatim; it grants nothing.
-Failure of (1)/(2) → exit 1, zero rows, audit row optional-but-identifiable
-(no grant/scope mutation either way).
+1. Operator presents an API key (required supply flag) resolving via existing
+   `Authenticate` to `(key_id, caller_id)` — single indexed read, revocation
+   observed immediately, no cache (`internal/withdrawal/auth.go:127`).
+2. `PermitIssue(caller_id)` passes against the deployment-configured issuance
+   allowlist (pure, unit-tested). Ordinary callers, 011 executors, and bare
+   `--operator` strings are absent from the mapping → deny-by-default.
+3. `--operator` (if given) is recorded verbatim; it grants nothing and is never
+   an input to (1)/(2).
+Failure of (1)/(2) → exit 1, zero rows. `attested_by` is always the
+server-resolved principal (never caller-supplied) and joins op-input equality:
+same operation id from a different principal → `operation_conflict`.
 
 ## Transactional guarantees (unchanged shape, extended payload)
 
