@@ -2,16 +2,16 @@
 
 **Feature**: `012-007-authorization-carrier` | **Docs baseline**: HEAD `b680cb4`
 (branch `012-007-authorization-carrier`).
-**CODE_HEAD**: `bcc01bece1a69924925084aebd0e5b505f67bf67` (review-closeout batch).
+**CODE_HEAD**: `f18155f58fba0ace5352398a2d72612f01f9adf0` (final closeout batch).
 
-**GATE RESULTS** (closeout regression, real runs — per-case tee logs not
-persisted, commands + outcomes recorded instead):
-- `go build ./...`, `go vet ./...`, `gofmt -l` clean.
-- `go test ./... -count=1` → 964 passed, 12 packages.
-- `go test -tags integration -count=1 ./internal/withdrawal/ ./internal/app/ ./internal/db/` → 697 passed, 3 packages (rerun after one flake, see below); `-race` same set → 697 passed.
-- `go test -tags integration -count=1 -timeout 30m ./...` → 1689 passed, 1 skipped; 2 flakes, both isolated-green on rerun, both in files PB never touched: `TestWithdrawalRevocationLockWaitExpiry` (007 lock-wait timing) and `TestDepositObservabilityEndToEnd` (006 state-poll timing).
-- New/changed suites green: D1 version-sync, T2 resolve-retryable, race, reissue, carrier-kill pre/post-commit, exit-2, open3 content snapshot, T036a/b/c, T040-T042, T043 both paths.
-- `TestNonceMigrationUpStatusDownUp` fixed (FS pinned through 000008; PB 000010 no longer leaks into the 008-era baseline) and green.
+**GATE RESULTS f18155f** (frozen-SHA runs; runner summarizes per-case lines,
+exit codes captured per command, no pipe-masking):
+- `go build ./...` exit 0; `go vet ./...` exit 0; `gofmt -l` clean.
+- `go test ./... -count=1` exit 0 → 979 passed, 12 packages.
+- `go test -tags integration -count=1 ./internal/withdrawal/ ./internal/app/ ./internal/db/` exit 0 → 714 passed, 3 packages; `-race` same set exit 0 → 714 passed.
+- `go test -tags integration -count=1 -timeout 30m ./...` exit 1 → 1705 passed, 2 failed, 1 skipped. Failures: `TestWithdrawalAuthIssueAuthenticate` (container START failed: "context deadline exceeded" — docker pressure, 007 file PB never touched) and `TestReadyzFlipsAndRecoversWithRealDependencies` (006 health timing, file PB never touched). Both isolated-green on rerun on this SHA. Shared-code association checked: PB shared diffs are `migrate.go` (allow-out-of-order) + `grant.go` (revoke bump, resolve re-read) — neither touches auth issuance nor health/readiness paths.
+- Prior SHA gates (bcc01be, retained): unit 964; 3-pkg 697 (+race 697); full 1689 + 2 flakes isolated-green (`TestWithdrawalRevocationLockWaitExpiry`, `TestDepositObservabilityEndToEnd`).
+- New suites green on f18155f: unknown-window kill + pre/post-commit kill, `--api-key-file` + conflict + secrecy, exit-2, open3 content snapshot, D1 version-sync, T2 resolve-retryable.
 **LOG POINTERS**: every per-case log path below is `MISSING` — no old run logs
 were persisted in this lane; do NOT treat any absence as a pass. Final T052
 regression fills each `LOG` line from a real run.
@@ -79,7 +79,7 @@ revoke-then-re-supply cycle bumps it again.
 **Disposition**: contract and code agree; the `handoff-009.md:94-98` assumption
 ("sibling D1 revoke-bump change has landed; `runRevokeTx` carries it") is
 discharged. No PB doc change needed beyond the sentence already written. The
-change is committed in the frozen code tree (`bcc01be`); final regression
+change is committed in the frozen code tree (`f18155f`); final regression
 re-confirms on the frozen SHA.
 
 ### T1 — `can_create` read but ignored (`grant.go:1044-1064`)
@@ -175,7 +175,7 @@ library-level census + grant/scope tuple identity. No "counts only" claim.
 
 ## Remaining gaps to close at final regression
 
-1. `CODE_HEAD` — filled (`bcc01be`); re-confirm the frozen tree still matches.
+1. `CODE_HEAD` — filled (`f18155f`); frozen tree matches (this commit).
 2. Every `LOG` cell — attach the real run log path; do not fabricate.
 3. V-PB7 — kill-9 tests exist (`carrier_kill_integration_test.go`); attach
    their real logs at final regression.
