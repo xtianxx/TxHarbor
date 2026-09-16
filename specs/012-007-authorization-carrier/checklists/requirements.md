@@ -13,13 +13,13 @@
 
 ## Requirement Completeness
 
-- [x] No [NEEDS CLARIFICATION] markers remain — 本规格零标记；真正未决的 3 项以 Assumptions OPEN-1–OPEN-3 记录（供给主体映射、fee_scope 精确表示、演练用例选择），`grep -o 'NEEDS CLARIFICATION' spec.md` 计数 = 0。Q-A/Q-B 不在其中（已裁决）。
+- [x] No [NEEDS CLARIFICATION] markers remain — 本规格零标记（`grep -o 'NEEDS CLARIFICATION' spec.md` 计数 = 0）；但零标记 ≠ 零歧义：clarify 轮已将 OPEN-1/OPEN-2 闭合为 PB-C1/PB-C2（用户裁决），OPEN-3 交 implement，Assumptions 已同步，无遗留未决业务问题。Q-A/Q-B 不在其中（已裁决）。
 - [x] Requirements are testable and unambiguous — PB-FR-01–PB-FR-08 均为可测断言（同写/拒绝/零行/追溯/零第二意图/零改写）；歧义隔离在 OPEN 行。
 - [x] Success criteria are measurable — PB-SC-01–PB-SC-04 均为 100%/0 次/恰好计数断言。
 - [x] Success criteria are technology-agnostic — SC 只谈签发/拒绝/追溯/升级结果，未提语言、表实现、密码学库。
 - [x] Edge cases are identified — supply/revoke 并发、无 scope vs 无 grant、费用替换条件、`--operator` 误用、迁移三序列；每条有归属（009 侧 / 007 侧 / 本批次）。
 - [x] Scope is clearly bounded — 009 消费逻辑、010/011 能力、007 列/读形态/intake 变更、余额/KYC/风控、迁移编号锁定均排除；只读引用 009/SHA 依据。
-- [x] Dependencies and assumptions identified — 009 R11/PB-01–PB-05 输入关系、007 FR-03b 供给模型、Q-A/Q-B 引用、OPEN-1–OPEN-3；A-13/T000-P 保持 OPEN 声明。
+- [x] Dependencies and assumptions identified — 009 R11/PB-01–PB-05 输入关系、007 FR-03b 供给模型、Q-A/Q-B 引用、PB-C1/PB-C2 裁决 + plan 承接项（供给映射、字段表示）+ OPEN-3（implement）；A-13/T000-P 保持 OPEN 声明。
 
 ## Feature Readiness
 

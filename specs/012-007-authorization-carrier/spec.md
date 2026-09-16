@@ -91,15 +91,15 @@ grant/request，不创建第二意图/nonce，不静默换绑，不回填历史�
 
 - **PB-FR-01**: 新增 `withdrawal_authorization_scopes` 载体（1:1，主键
   `authorization_id`，FK → `withdrawal_authorizations`），字段至少：
-  `intent_id`、`request_id`（007）、`sender`、`fee_scope`（最大费用/tip 或
-  范围）、`allows_fee_replacement`（显式用途标记）、`authorization_version`
+  `intent_id`、`request_id`（007）、`sender`、`fee_scope`（三维度，PB-C2：
+  单次最大总费用、每单位 gas 上限、EIP-1559 小费上限）、`allows_fee_replacement`（显式用途标记）、`authorization_version`
   （每 grant 单调）、`attested_by`。无签名密码学字段（Q-A 已裁决；后续裁决
   要求时才加）。
 - **PB-FR-02**: 载体行 MUST 由同一 supply 事务与 grant 同写；供给入口为既有
   受控 `withdrawal-authz supply` 的扩展 op-input；普通调用方与 009 MUST NOT
   可写；`RevokeGrant` MUST 同步 scope 状态/版本。
-- **PB-FR-03**: 供给 MUST 由经认证且具签发权限的主体执行（复用 OS/部署/DB
-  实际权限体系，明确控制点与信任边界）；`--operator` 声明仅审计字段，
+- **PB-FR-03**: 供给 MUST 由经认证且被显式授予签发权的单一业务操作角色执行
+  （PB-C1；复用 OS/部署/DB 实际权限体系，明确控制点与信任边界）；`--operator` 声明仅审计字段，
   MUST NOT 替代认证与签发权限（Q-A）。grant 内容 ↔ 签发审计 MUST 一致可追溯。
 - **PB-FR-04**: 无 scope 行/版本的存量授权在 009 侧逐笔拒绝，本批次不强制
   全量回填；重签发 MUST 由有权限主体重核验后显式执行并保留对旧 grant/request
@@ -147,8 +147,9 @@ grant/request，不创建第二意图/nonce，不静默换绑，不回填历史�
 - 011 intent 创建/绑定语义沿用 OC-1/OC-5 已裁决；本批次不创建意图。
 - 迁移编号、技术方案（表结构细节除外载体字段清单）、锁机制为 plan 留白；
   仅 PB-FR-08 的编号规则为例外（009 已批准 renumber-at-merge）。
-- **OPEN（未决，需后续裁决，不自行批准）**：
-  - OPEN-1：供给权限在具体部署中的主体映射（哪个 OS/DB 角色）留待 plan 明确。
-  - OPEN-2：`fee_scope` 的精确表示（单上限 vs 范围）留待 plan，规格只要求覆盖“费用范围”。
-  - OPEN-3：重签发演练的具体业务用例选择留待 implement 阶段。
+- **PB Clarifications 2026-09-16 (this round; Q-A/Q-B/OC unchanged)**:
+  - **PB-C1（供给签发主体，闭合 OPEN-1）**：单一业务操作角色持有授权供给权，不新增双人确认流程。签发者 MUST 为经认证且被显式授予该权限的主体；普通 API 调用方、011 执行者、仅提供 `--operator` 名称者 MUST NOT 因此获得签发权。具体账号/角色映射、部署访问控制、权限校验位置及防绕过措施留给 plan 明确并提供可验证依据；现有控制不足时补齐最小控制，MUST NOT 以“可访问部署环境”视为有权签发。每次供给 MUST 关联真实认证主体、授权内容与审计记录；身份或权限无法验证时拒绝。沿用 Q-A：v1 不强制逐授权密码学签名。
+  - **PB-C2（费用维度，闭合 OPEN-2）**：`fee_scope` 约束三个维度——(1) 单次交易最大总网络费用；(2) 每单位 gas 费用上限；(3) EIP-1559 priority fee（小费）上限。校验：最大总费用按 `gas_limit × max_fee_per_gas`，并分别校验 `max_fee_per_gas`、`max_priority_fee_per_gas`，小费 MUST NOT 高于 max_fee；legacy 按 `gas_limit × gas_price`（不因此新增交易类型）。金额一律链原生币最小单位整数；缺少适用上限、数值非法或超限 MUST 拒绝。具体字段表示留 plan；服务自身更严格策略仍须同时满足。费用替换沿用 OC-5 条件式：原授权明确允许且新交易各维度均在范围内才可复用，否则新授权 + 新请求身份。单次交易上限，不引入累计预算或多链策略。
+  - **OPEN-3（演练用例）**：测试组织事项，不问业务选择，直接交 implement 承接（行为已由 PB-FR-04/PB-SC-03 锁定）。
+- **OPEN（剩余未决，不自行批准）**：OPEN-1/OPEN-2 已由 PB-C1/PB-C2 闭合；供给映射与字段表示的 plan 承接项见 PB-C1/PB-C2 尾句；OPEN-3 交 implement。
 - A-13 全链 E2E 与 T000-P 分别保持 OPEN，不在本规格关闭或改变含义。
