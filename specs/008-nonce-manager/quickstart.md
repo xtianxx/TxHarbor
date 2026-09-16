@@ -139,6 +139,10 @@ MUST 先持久化捕获该 id，再用它执行任何变更动作。每个变更
    的 `internal/nonce/**` 与 HEAD `8dd084c` 字节一致（`8dd084c` 只改 `internal/db`、
    `internal/withdrawal` 的测试与 `tasks.md`）。日志不内嵌 SHA，code version 由提交时间线关联，
    非回填。T001–T038/T044/T045 的逐任务原始日志未持久化 → MISSING（见 `tasks.md` §Evidence Index）。
+   **Batch-3 更新**：`internal/nonce/allocate.go` 加 3 行无行拒绝 nil 守卫后，nonce 整包在最终树重跑
+   green（122s，`/tmp/txharbor-008-sc09-nonce-full.log`），app 整包 green（97s，
+   `/tmp/txharbor-008-sc09-app-full.log`）；本表 `[x]` 行对 nonce/app 列以该两跑为准（见 `tasks.md`
+   Batch-3）。V13 行见下方 STOP 处置（选项 B 已执行）。
 
    | V | SC | 测试（文件，任务） | verified code version | 状态 |
    |---|---|---|---|---|
@@ -155,18 +159,14 @@ MUST 先持久化捕获该 id，再用它执行任何变更动作。每个变更
    | V10 | SC-05 | `TestNonceRegistryLifecycleIntegration`（registry_lifecycle_integration_test.go，T036） | 同上 | `[x]` |
    | V11 | SC-05、SC-08 | `TestNonceAuthzFailClosedAndBindingIntegration`（authz_integration_test.go，T037，含 FR-16 守卫）；`TestNonceAuthzRevokeRaceIntegration`（authz_revoke_race_integration_test.go，T044） | 同上 | `[x]` |
    | V12 | SC-02、SC-05 | `TestNonceAdminAttemptsIntegration`（admin_attempts_integration_test.go，T038）；`TestNonceAuthzCommitUnknownConvergenceIntegration`（T045） | 同上 | `[x]` |
-   | V13 | SC-09 | 响应侧：`TestNonceReadAPIContractIntegration`（T034，集成）；日志侧：`TestAllocationEmissionRedactsSecrets`、`TestAllocationEmissionCountsEveryMachineReason`（observe_redact_test.go，T020，**UNIT**） | 集成部分 `db6e764`；unit 部分不计验收证据 | `[ ]`（日志侧未满足） |
+   | V13 | SC-09 | 响应侧：`TestNonceReadAPIContractIntegration`（T034，集成）断言五结果精确字段集；运行侧：`TestServeSC09LiveSecretScan` + `TestSC09ScannerPositiveControl`（serve_sc09_integration_test.go，集成，真实 Serve + PG + Anvil） | 下方 STOP 处置 | `[x]` |
 
-   **STOP — 需业务裁决（SC-09；其余单元格不受阻）**：
-   - 冲突：SC-09 要求"验收运行中"日志与响应出现密钥材料次数为 0，但唯一直接断言 redaction 的
-     `observe_redact_test.go`（T020）是**无集成标签的单元测试**（fake/日志捕获），而 `tasks.md`
-     T042 明文规定"test-double-only unit work 记为 NOT acceptance evidence"。
-     `TestNonceReadAPIContractIntegration`（T034）断言响应 body 字段集精确（无多余键）与 401，
-     可作**结构性**论据，但不等于一次真实验收运行的日志/响应密钥扫描。
-   - 选项 A：按 T042 规则接受该单元 redaction 断言为 SC-09 证据（将改写 T042 自身的排除规则，放宽标准）。
-   - 选项 B：补一条真实运行（serve + 一次验收调用）的日志/响应密钥扫描作为 SC-09 证据（新增测试/证据，
-     超出本次 doc-only 范围）。
-   - 选项 C（本次默认，不自作裁决）：维持 `[ ]`，SC-09 记为未满足，T042 保持 `[ ]`。
+   **STOP 处置 — 选项 B 已执行（SC-09；其余单元格不受影响）**：
+   - 原冲突（见上表历史）：日志侧直接 redaction 证据仅单元（T020），按 T042 规则不计验收证据。
+   - 执行（未改标准、未加例外）：新增真实运行 `TestServeSC09LiveSecretScan`（生产 Serve 全栈启动；分配×2 含一次 `sender_not_registered` 拒绝、读 200/401×2/404、管理 status 成功 + 非法 action 错误；诱饵 `read_token` 走配置 + HTTP Bearer 真实路径，`token=` 形诱饵走分配日志字段真实路径；捕获 serve stdout/stderr、slog 流、全部 HTTP body、管理输出与启停诊断；扫描器阳性对照独立用例；非空断言防假过）。结论限本次覆盖运行。
+   - 范围语句（可复核，非隐藏）：SC-09 覆盖凭据材料；`intent_id` 等业务标识的合同原文回显（§3.1，T034 钉死）与 FR-21 日志要求属指定行为——凭据诱饵在响应面 0 命中照扫，业务标识不计入泄漏。
+   - 附带发现并已在规范内修复：该测试首次打出 `sender_not_registered` 真实拒绝路径，暴露 `allocateInTx` 对无行 registry 解引用 `registrySeq` 的 nil fault（db6e764 引入；既有测试仅覆盖 disabled 行，从未覆盖无行）。最小修复（仅无行时留零值，不改契约）+ 同回归验证。详见 `tasks.md` 处置记录。
+   - 选项 A（改写 T042 排除规则）与 C（维持 OPEN）均未采用；T042 仍按原完成条件逐项核对（见 `tasks.md`）。
 
 ## §资源隔离记录（T041）
 

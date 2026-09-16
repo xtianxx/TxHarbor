@@ -143,7 +143,7 @@
 - [X] T039 [P] 002–007 regression gate (unit + integration): `go test ./...` + `go test -tags integration ./...` green. Diff allowlist (reviewed with test evidence; being listed does NOT bless arbitrary changes inside a file): ALLOWED-NEW `internal/nonce/**`, `internal/app/nonceadmin.go` + `nonceadmin_test.go`, `internal/config/config_008_test.go`, `internal/nonce/*_integration_test.go`, `migrations/000008_nonce_manager.sql`, `specs/008-nonce-manager/**`; ALLOWED-MODIFY `cmd/txharbor/main.go` (dispatch case only), `internal/app/serve.go` (read mount + rebuild gate + reconcile loop start only), `internal/config/config.go` (read-token + knob passthrough only), `internal/metrics/metrics.go` + `metrics_test.go` (new series only). Any diff to `internal/indexer/**`, `internal/withdrawal/**`, `internal/db/**`, `migrations/000001–000007`, or the shared `writeGuard`/lease/coordinator constants → STOP, explicit review + full regression re-run. Historical CI runs are baseline context, never 008 evidence. done: gate green. NOTE (2026-09-16 directed verification): unchecked — full-gate red on 3 migration-discovery failures (internal/db TestConfirmationMigrationDowngradeTo4RemovesAbove4 / internal/withdrawal TestWithdrawalMigrationUpgradeDowngradeFrom006 / internal/withdrawal TestWithdrawalRecoveryPeriodNoExecutionArtefacts), each proven byte-identical at base 6a3ce1d; cause = lane migration 000008 in the embedded FS vs hardcoded 000001–000007 expectations; gate condition NOT narrowed; fix in progress. STOP triggered (test-only diff to internal/db + internal/withdrawal): reviewed — no 000001–000007 SQL, prod code, or shared-constant change; expectations derived from embedded file list, 007 upgrade assertions + 007-range absence proof retained. RECHECK (2026-09-16): gate green after fix — gofmt empty, vet + vet-integration 0, build 0, unit 10pkgs ok, integration per-package ok (app/config/db/eth/health/logx/metrics/nonce/withdrawal/indexer), directed 3/3 pass. Evidence index: see §Evidence Index & Appendix (T039).
 - [X] T040 [P] Lint/vet/build gate: `gofmt -l .` empty + `go vet ./...` + `go vet -tags integration ./...` + `go build ./...` per Makefile (existing `ci.yml` four jobs; no workflow change). done: green. Evidence index: see §Evidence Index & Appendix (T040).
 - [X] T041 Operator runbook + environment-isolation record in `specs/008-nonce-manager/quickstart.md` (append §操作 runbook + §资源隔离记录, 007 T032 / 005 T029 precedent; no new contracts file): `nonce-admin mint → hold-release / binding-release / register / disable / status` flows, operation-id capture rule, exit codes 0/1/2, DSN trust root, uncertain-COMMIT same-op-id retry rule, and the V1–V13 checklist execution record; isolation is workdir-local only — database/schema `txharbor_008`, PostgreSQL `127.0.0.1:55432`, Anvil `127.0.0.1:58545`, distinct compose project/volume (`txharbor008`); NEVER the shared `compose.yaml` `pgdata` / 5432 / 8545, so the sibling 009 workdir cannot collide. deps: T015 | FR-08; quickstart.md §Environment | done: runbook present; no behavior change
-- [ ] T042 Full V-matrix validation run + FR/SC mapping sign-off: execute V1–V13 with each SC-01–SC-09 tied to a green test; record T000-P still open; mark test-double-only unit work as NOT acceptance evidence. deps: T018–T038 | FR-22; SC-01–SC-09; V1–V13 | done: matrix record green. NOTE (2026-09-16, doc-only): the real V1–V13 × SC-01–SC-09 × test-name × verified-code-version table now lives in `quickstart.md` §7; SC-01–SC-08 are satisfied by integration tests (log `/tmp/txharbor-008-int-nonce.log`, code `db6e764` = `8dd084c` for `internal/nonce/**`). SC-09 is NOT satisfied: its log-side redaction evidence is unit-only, and this task's own rule marks test-double-only unit work NOT acceptance evidence. That cell is STOPped pending a business ruling (options in `quickstart.md` §7). This task therefore stays OPEN — the earlier `[X]` is reverted because the matrix is not green (do not mark complete what is not). T000-P and plan.md gate A-13 both remain OPEN.
+- [X] T042 Full V-matrix validation run + FR/SC mapping sign-off: execute V1–V13 with each SC-01–SC-09 tied to a green test; record T000-P still open; mark test-double-only unit work as NOT acceptance evidence. deps: T018–T038 | FR-22; SC-01–SC-09; V1–V13 | done: matrix record green (see per-condition check below; checked only now that every cell is satisfied — not on the SC-09 change alone). CHECK (2026-09-16, option-B run): (a) V1–V13 × SC-01–SC-09 every cell `[x]` in `quickstart.md` §7 — SC-01–SC-08 by prior integration runs (unchanged code, evidence index batch-1/2), SC-09 by NEW `TestServeSC09LiveSecretScan` + `TestSC09ScannerPositiveControl` (`internal/app/serve_sc09_integration_test.go`, real Serve + PG + Anvil, `/tmp/txharbor-008-sc09-new6.log` then full-package `/tmp/txharbor-008-sc09-app-full.log`); (b) T000-P recorded OPEN (unchanged); (c) test-double-only unit work (T020 `observe_redact_test.go`) remains NOT acceptance evidence — SC-09 no longer relies on it (the live run supersedes it; the unit test stays as mechanism coverage only). T000-P and plan.md gate A-13 both remain OPEN (independent gates, untouched by this sign-off). History: this task was `[X]` → reverted to `[ ]` (dishonest green) → now `[X]` on a real full matrix.
 - [X] T043 Deferred-acceptance record (no code): state that real 009 client integration, 010 attempt linkage and 011 intent-existence/linkage cross-checks are deferred (contracts/downstream.md §4), that the FR-18 deferred half (attempt traceability, contracts/downstream.md §2) is a recorded gap and not a simulated behavior, that 008's own acceptance is scoped to admission/reconcile/read-provider behavior (quickstart.md), and that T000-P remains open. deps: T042 | FR-18 (deferred half) /FR-23; downstream.md §2/§4 | done: record present
 
 ---
@@ -205,11 +205,11 @@ must run on the HEAD containing this change and fill these placeholders:
   `EARLY-VALIDATION` and are **not** acceptance evidence.
 - No per-task raw logs survive → **MISSING**; the aggregate runs above are the only retained evidence.
 
-### Open items (unchanged)
+### Open items (updated batch-3)
 
 - **T000-P** (production provider selection) remains **OPEN**.
 - **plan.md gate A-13** (constitution XI chain-level `API → queue → nonce → signing → broadcast → confirmation` E2E) remains **OPEN**; 008 does not claim complete acceptance.
-- **T042** stays **OPEN**: its V-matrix table is now real (quickstart §7), but SC-09's log-side evidence is unit-only and is excluded by T042's own rule (see the quickstart §7 STOP cell).
+- **T042** is now **DONE** (option-B run; per-condition CHECK on the task line). Unit-only work stays excluded; T000-P/A-13 unaffected.
 
 ### Batch-2 review disposition (2026-09-16; static review 007→8dd084c → fixes in this tree)
 
@@ -322,8 +322,43 @@ VERIFY (unconfirmed suspicions — checked, none became defects):
    assertions living in `TestWithdrawalRecoveryPeriodZeroSideEffectsOutsideScope`
    (comment-only change to a 007-owned file; no SQL/prod change; withdrawal directed 2/2 green).
 
-Remaining gaps (not defects, recorded open): T042 (SC-09 business ruling), T000-P, A-13 —
-see Open items above, unchanged.
+Remaining gaps (not defects, recorded open): T000-P, A-13 — see Open items above,
+unchanged. T042 no longer gaps (option-B run, see T042 CHECK).
+
+### Batch-3 option-B run (2026-09-16; SC-09 live evidence + one in-spec fix)
+
+Scope: NEW `internal/app/serve_sc09_integration_test.go`
+(`TestServeSC09LiveSecretScan` + `TestSC09ScannerPositiveControl`) and a 3-line
+nil guard in `internal/nonce/allocate.go`. No standard/exception added, no T042
+rule rewritten.
+
+- Finding (real, triggered by the new test, fixed in-spec): the first-ever
+  end-to-end `sender_not_registered` refusal faulted with a nil dereference —
+  `o.registrySeq = registry.RegistrySeq` on an absent row (introduced db6e764;
+  prior tests only refused disabled senders, never the row-absent case). Fix:
+  record the version only when the row is present, zero value otherwise; refusal
+  outcome/reason unchanged. Regression: the SC-09 run itself (refusal path green)
+  + full nonce integration below.
+- SC-09 evidence: credential decoy (read token, real config + Bearer paths) 0 hits
+  across serve stdout/stderr, slog stream, all HTTP bodies, admin outputs, startup/
+  shutdown; `token=`-shaped decoy 0 hits with its `sc09-kv-` prefix present in logs
+  (emitted, only the shape masked); scanner positive control independent; non-empty
+  assertions on every surface (no vacuous pass). Conclusion scoped to the covered run.
+  Scope statement (reviewable): SC-09 covers key/credential material; contract-pinned
+  verbatim echo of operator-chosen IDs (§3.1/T034) and FR-21 log fields are specified
+  behavior, not leaks.
+- Code version: nonce rows re-verified on the final tree (allocate.go guard):
+  `go test -tags integration ./internal/nonce` ok 122s
+  (`/tmp/txharbor-008-sc09-nonce-full.log`); `.../internal/app` ok 97s
+  (`/tmp/txharbor-008-sc09-app-full.log`); `go test ./...` 10 pkgs ok
+  (`/tmp/txharbor-008-sc09-unit.log`); `gofmt -l` empty, `go vet ./...` +
+  `go vet -tags integration ./internal/app/ ./internal/nonce/` + `go build ./...`
+  clean. quickstart §7's `db6e764`＝`8dd084c` code-version line predates the guard;
+  the batch-3 runs above supersede it for `internal/nonce/**` and `internal/app/**`.
+- Old-evidence validity (dependency-checked, not package-diff-only): indexer/db/eth/
+  health/logx/config neither import `internal/nonce` nor traverse the changed
+  `Serve()` startup order, and the metrics change is additive — their 8dd084c
+  evidence stands; every package touching the change (app, nonce, metrics) was re-run.
 
 
 ---

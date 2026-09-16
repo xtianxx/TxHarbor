@@ -370,7 +370,13 @@ func allocateInTx(ctx context.Context, tx txQuerier, req AllocationRequest, obs 
 		return allocationTxResult{}, err
 	}
 	if refusal := registry.AdmissionRefusal(); refusal != "" {
-		o.result, o.cause, o.registrySeq = Outcome(refusal), registryRefusalReason(registry), registry.RegistrySeq
+		// An absent row (sender_not_registered) carries no version: only a
+		// present row has a registry_seq to record. Dereferencing unconditionally
+		// faults on exactly the fail-closed path that must never fault.
+		o.result, o.cause = Outcome(refusal), registryRefusalReason(registry)
+		if registry != nil {
+			o.registrySeq = registry.RegistrySeq
+		}
 		return allocationTxResult{
 			refuse: Refuse(refusal, o.cause),
 			obs:    o,
