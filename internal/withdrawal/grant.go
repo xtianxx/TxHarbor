@@ -120,6 +120,12 @@ SELECT action, authorization_id, detail FROM withdrawal_grant_audit WHERE operat
 SELECT caller_id, chain_id, asset, recipient, amount::text, state, expires_at
 FROM withdrawal_authorizations WHERE authorization_id = $1`
 
+	// grantOldSelectSQL reads the OLD grant a T-reissue links to. Plain read, no
+	// lock: T-reissue holds new-row locks only (data-model.md lock matrix), so
+	// nothing about the old row is read under a lock or ever written.
+	grantOldSelectSQL = `
+SELECT state FROM withdrawal_authorizations WHERE authorization_id = $1`
+
 	// scopeSelectSQL reads the 1:1 scope row for a grant (T012). The supply/revoke
 	// tx holds the grant row FOR UPDATE, so all scope writers are serialized on
 	// the grant and no separate lock is taken here (data-model.md lock matrix:
@@ -488,6 +494,62 @@ func validateRevokeInput(operationID, authorizationID string) error {
 	return nil
 }
 
+// ReissueInput is one T-reissue (PB-FR-04) attempt: a NEW grant identity Op
+// carrying the same business intent as an explicit old grant, with an audit
+// detail link to the old grant/request ids. Op is the new grant's op-input and
+// MUST be scoped (T-reissue writes a new scope row in the same tx); Old* are
+// link metadata only and never become an op-input field of the old row.
+//
+// Deleted-update rule: the old grant is read (no lock) and then NEVER written —
+// re-issue mints a new identity, it does not rewrite. The business intent lives
+// in the new scope's intent_id, re-declared by the operator after off-system
+// re-verification; no independent intent table exists in this tree, so intent
+// and signing-request linkage are re-checked by the 009 lane under H5 (full
+// legal-path acceptance post-PB-merge). This procedure invents no such table.
+type ReissueInput struct {
+	Op                 OpInput
+	OldAuthorizationID string
+	OldRequestID       string
+}
+
+// reissueDetail is the persisted audit `detail` for a T-reissue attempt: the
+// ordinary redacted op-input snapshot plus the traceability link to the old
+// grant/request ids. It is the same string recovery compares on a same-O retry,
+// so the link is part of the recorded attempt, not decoration.
+func reissueDetail(op OpInput, oldAuthorizationID, oldRequestID string) string {
+	return opInputDetail(op) +
+		";reissued_from_authorization_id=" + strconv.Quote(oldAuthorizationID) +
+		";reissued_from_request_id=" + strconv.Quote(oldRequestID)
+}
+
+// validateReissueInput validates a T-reissue attempt before any pool use and
+// returns the normalized new-grant op-input. Re-issue MUST mint a distinct new
+// authorization_id (equal ids would mean an UPDATE of the old row) and MUST
+// carry a scope payload (the new scope row is written in the same tx).
+func validateReissueInput(in ReissueInput) (ReissueInput, error) {
+	if in.OldAuthorizationID == "" {
+		return ReissueInput{}, New(CodeValidationFailed,
+			"reissue requires the old authorization_id so the attempt can link it").
+			WithField("reissue_from_authorization_id")
+	}
+	if in.Op.AuthorizationID == in.OldAuthorizationID {
+		return ReissueInput{}, New(CodeValidationFailed,
+			"re-issue must mint a NEW authorization_id; rewriting the old grant row is forbidden").
+			WithField("authorization_id")
+	}
+	op, err := validateSupplyOpInput(in.Op, time.Now())
+	if err != nil {
+		return ReissueInput{}, err
+	}
+	if !op.scoped() {
+		return ReissueInput{}, New(CodeValidationFailed,
+			"re-issue writes a new authorization scope; the scope payload is required").
+			WithField("sender")
+	}
+	in.Op = op
+	return in, nil
+}
+
 // grantCommitUnknownError marks a failed COMMIT whose outcome is indeterminate;
 // the caller must recover by re-reading the attempt with the SAME operation id.
 type grantCommitUnknownError struct{ err error }
@@ -606,6 +668,21 @@ func bumpScopeVersionTx(ctx context.Context, tx pgx.Tx, authorizationID string) 
 func insertAuditTx(ctx context.Context, tx pgx.Tx, op OpInput, callerID int64, operator, reason, action string) error {
 	tag, err := tx.Exec(ctx, grantAuditInsertSQL, op.OperationID, op.AuthorizationID,
 		callerID, action, operator, reason, opInputDetail(op))
+	if err != nil {
+		return fmt.Errorf("insert grant audit: %w", err)
+	}
+	if tag.RowsAffected() != 1 {
+		return fmt.Errorf("insert grant audit affected %d rows, want 1", tag.RowsAffected())
+	}
+	return nil
+}
+
+// insertReissueAuditTx appends the T-reissue audit row: same append-only shape
+// as insertAuditTx, but its detail carries the old grant/request link.
+func insertReissueAuditTx(ctx context.Context, tx pgx.Tx, in ReissueInput, operator, reason, action string) error {
+	tag, err := tx.Exec(ctx, grantAuditInsertSQL, in.Op.OperationID, in.Op.AuthorizationID,
+		in.Op.CallerID, action, operator, reason,
+		reissueDetail(in.Op, in.OldAuthorizationID, in.OldRequestID))
 	if err != nil {
 		return fmt.Errorf("insert grant audit: %w", err)
 	}
@@ -761,6 +838,68 @@ func runRevokeTx(ctx context.Context, pool *pgxpool.Pool, op OpInput, operator, 
 	return &GrantOutcome{Action: action, AuthorizationID: op.AuthorizationID}, nil
 }
 
+// runReissueTx owns BEGIN..COMMIT for one T-reissue attempt. It writes only the
+// three new rows (grant, scope, audit) and never touches the old grant: the old
+// grant is read without a lock purely to refuse linking to a nonexistent row.
+// auth is the optional in-tx authority re-check, identical to the supply path.
+func runReissueTx(ctx context.Context, pool *pgxpool.Pool, in ReissueInput, auth *SupplyAuthority, operator, reason string) (*GrantOutcome, error) {
+	tx, err := pool.BeginTx(ctx, pgx.TxOptions{})
+	if err != nil {
+		return nil, fmt.Errorf("begin reissue transaction: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	if _, err := tx.Exec(ctx, grantWriteGuard); err != nil {
+		return nil, fmt.Errorf("reissue transaction statement guard: %w", err)
+	}
+	if auth != nil {
+		check, err := verifySupplyAuthority(ctx, tx, *auth)
+		if err != nil {
+			return nil, err
+		}
+		if check != "" {
+			if err := insertReissueAuditTx(ctx, tx, in, operator,
+				"supply authority: "+check, grantOutcomeSupplyRefused); err != nil {
+				return nil, err
+			}
+			if err := tx.Commit(ctx); err != nil {
+				return nil, &grantCommitUnknownError{err: err}
+			}
+			return nil, authorityRefused(check)
+		}
+	}
+
+	var oldState string
+	err = tx.QueryRow(ctx, grantOldSelectSQL, in.OldAuthorizationID).Scan(&oldState)
+	switch {
+	case errors.Is(err, pgx.ErrNoRows):
+		return nil, New(CodeValidationFailed,
+			"reissue_from_authorization_id does not exist; re-issue links an existing grant").
+			WithField("reissue_from_authorization_id")
+	case err != nil:
+		return nil, fmt.Errorf("read old grant: %w", err)
+	}
+
+	tag, err := tx.Exec(ctx, grantInsertSQL, in.Op.AuthorizationID, in.Op.CallerID, in.Op.ChainID,
+		in.Op.Asset, in.Op.Recipient, in.Op.Amount, in.Op.ExpiresAt, operator)
+	if err != nil {
+		return nil, fmt.Errorf("insert grant: %w", err)
+	}
+	if tag.RowsAffected() != 1 {
+		return nil, fmt.Errorf("insert grant affected %d rows, want 1", tag.RowsAffected())
+	}
+	if err := insertScopeTx(ctx, tx, in.Op, 1); err != nil {
+		return nil, err
+	}
+	if err := insertReissueAuditTx(ctx, tx, in, operator, reason, grantOutcomeSupplied); err != nil {
+		return nil, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return nil, &grantCommitUnknownError{err: err}
+	}
+	return &GrantOutcome{Action: grantOutcomeSupplied, AuthorizationID: in.Op.AuthorizationID}, nil
+}
+
 // readAttemptPool reads one attempt row via the pool (no transaction).
 func readAttemptPool(ctx context.Context, pool *pgxpool.Pool, operationID string) (attemptRow, bool, error) {
 	var r attemptRow
@@ -790,6 +929,29 @@ func resolveByOperationID(ctx context.Context, pool *pgxpool.Pool, op OpInput) (
 			"operation outcome is not yet visible; retry with the same operation_id")
 	}
 	if !row.opInputMatches(op) {
+		return nil, New(CodeOperationConflict,
+			"operation_id was already recorded with a different op-input").
+			WithField("operation_id")
+	}
+	return &GrantOutcome{Action: row.action, AuthorizationID: row.authorizationID}, nil
+}
+
+// resolveReissueByOperationID is the T-reissue recovery for a 23505 on the
+// audit operation-id UNIQUE and for an uncertain COMMIT: read the recorded
+// attempt, compare it against the same reissue detail (op-input + old link),
+// and report. A miss is retryable with the SAME operation id; a different
+// recorded detail is operation_conflict, and a recorded refusal is never
+// upgraded.
+func resolveReissueByOperationID(ctx context.Context, pool *pgxpool.Pool, in ReissueInput) (*GrantOutcome, error) {
+	row, found, err := readAttemptPool(ctx, pool, in.Op.OperationID)
+	if err != nil {
+		return nil, grantRetryable(err)
+	}
+	if !found {
+		return nil, New(CodeTemporarilyUnavailable,
+			"operation outcome is not yet visible; retry with the same operation_id")
+	}
+	if row.detail != reissueDetail(in.Op, in.OldAuthorizationID, in.OldRequestID) {
 		return nil, New(CodeOperationConflict,
 			"operation_id was already recorded with a different op-input").
 			WithField("operation_id")
@@ -937,6 +1099,59 @@ func SupplyGrant(ctx context.Context, pool *pgxpool.Pool, op OpInput, operator, 
 // records `supply_refused` naming the check and writes zero grant/scope rows.
 func SupplyGrantAuthorized(ctx context.Context, pool *pgxpool.Pool, op OpInput, auth SupplyAuthority, operator, reason string) (*GrantOutcome, error) {
 	return supply(ctx, pool, op, &auth, operator, reason)
+}
+
+// reissue runs the shared validation + transaction + recovery path for a
+// T-reissue; auth is nil for ReissueGrant and non-nil for ReissueGrantAuthorized.
+func reissue(ctx context.Context, pool *pgxpool.Pool, in ReissueInput, auth *SupplyAuthority, operator, reason string) (*GrantOutcome, error) {
+	norm, err := validateReissueInput(in)
+	if err != nil {
+		return nil, err
+	}
+	out, err := runReissueTx(ctx, pool, norm, auth, operator, reason)
+	if err == nil {
+		return out, nil
+	}
+	var unknown *grantCommitUnknownError
+	switch {
+	case errors.As(err, &unknown):
+		return resolveReissueByOperationID(ctx, pool, norm)
+	case grantPgError(err) != nil:
+		pgErr := grantPgError(err)
+		if pgErr.Code == "23505" {
+			switch pgErr.ConstraintName {
+			case grantAuditOperationIDUniq:
+				return resolveReissueByOperationID(ctx, pool, norm)
+			case grantAuthorizationsPK:
+				// The NEW id already carries a grant: re-issue must mint a fresh
+				// identity, so this is a conflict, never an adopted resupply.
+				return nil, New(CodeOperationConflict,
+					"authorization_id already has a grant; re-issue must mint a NEW grant id").
+					WithField("authorization_id")
+			}
+		}
+		if pgErr.Code == "23503" {
+			return nil, New(CodeValidationFailed, "caller_id does not exist").
+				WithField("caller_id")
+		}
+	}
+	return nil, grantRetryable(err)
+}
+
+// ReissueGrant runs one T-reissue attempt (PB-FR-04): a NEW grant id + NEW
+// scope row in one supply tx, with an audit detail linking the old
+// grant/request ids. The old rows are never updated — this mints a new identity
+// rather than rewriting one. It owns BEGIN..COMMIT (do not nest it) and
+// performs no authority check; use ReissueGrantAuthorized for the in-tx
+// re-verification.
+func ReissueGrant(ctx context.Context, pool *pgxpool.Pool, in ReissueInput, operator, reason string) (*GrantOutcome, error) {
+	return reissue(ctx, pool, in, nil, operator, reason)
+}
+
+// ReissueGrantAuthorized is ReissueGrant plus the in-tx authority
+// re-verification, exactly as SupplyGrantAuthorized adds it to SupplyGrant.
+func ReissueGrantAuthorized(ctx context.Context, pool *pgxpool.Pool, in ReissueInput, auth SupplyAuthority, operator, reason string) (*GrantOutcome, error) {
+	return reissue(ctx, pool, in, &auth, operator, reason)
 }
 
 // RevokeGrant runs one revoke attempt. It owns BEGIN..COMMIT (do not nest it).

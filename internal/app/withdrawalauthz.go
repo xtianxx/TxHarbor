@@ -44,7 +44,10 @@ import (
 // durably capture the id first). `supply`/`revoke` REQUIRE --operation-id (no
 // auto-mint, no echo-fallback): a missing id is a usage error with zero DB side
 // effects. `supply` additionally binds --chain-id to this deployment's chain
-// (FR-04) before any connection is opened.
+// (FR-04) before any connection is opened. Passing
+// --reissue-from-authorization-id switches `supply` to the T-reissue procedure
+// (PB-FR-04): a NEW grant id + scope in one tx, with the old grant/request ids
+// linked in the audit detail and the old rows never updated.
 //
 // Exit codes mirror ConfirmAuth: 0 the attempt committed (or an equal retry
 // converged on the recorded outcome), 1 the attempt was refused or failed
@@ -78,11 +81,14 @@ func withdrawalAuthzUsage(w io.Writer) {
 	fmt.Fprint(w, `usage: txharbor withdrawal-authz mint
        txharbor withdrawal-authz supply --operation-id O --authorization-id G --caller-id C --chain-id N --asset 0x… --recipient 0x… --amount D [--expires-at RFC3339] --operator OP --reason R
                                      [--api-key KEY] [--intent-id I --request-id Q --sender 0x… --fee-max-total T --fee-max-per-gas P --fee-max-priority F --allows-fee-replacement]
+                                     [--reissue-from-authorization-id OLD --reissue-from-request-id OLDREQ]
        txharbor withdrawal-authz revoke --operation-id O --authorization-id G --operator OP --reason R
 
 mint prints one opaque operation id; capture it durably before supply/revoke.
 --operation-id is required on supply and revoke (no auto-mint, no echo-fallback).
 --api-key resolves the issuing principal and is required for a scoped supply.
+--reissue-from-authorization-id mints a NEW grant id (never rewrites OLD) and
+links the old grant/request ids in the audit detail; the new scope is required.
 `)
 }
 
@@ -126,6 +132,8 @@ func withdrawalAuthzSupply(ctx context.Context, args []string, d Deps) int {
 	feeMaxPerGasRaw := fs.String("fee-max-per-gas", "", "scope: per-gas-unit fee cap, native最小单位")
 	feeMaxPriorityRaw := fs.String("fee-max-priority", "", "scope: EIP-1559 priority fee cap (0 = legacy gas_price)")
 	allowsFeeReplacement := fs.Bool("allows-fee-replacement", false, "scope: authorization permits fee replacement")
+	reissueFromAuthID := fs.String("reissue-from-authorization-id", "", "T-reissue: old grant id the new grant links to (mints a NEW grant id)")
+	reissueFromRequestID := fs.String("reissue-from-request-id", "", "T-reissue: old originating request id recorded in the audit link")
 	if err := fs.Parse(args); err != nil {
 		withdrawalAuthzUsage(stderr)
 		return 2
@@ -230,9 +238,21 @@ func withdrawalAuthzSupply(ctx context.Context, args []string, d Deps) int {
 	}
 
 	var out *withdrawal.GrantOutcome
-	if authority != nil {
+	switch {
+	case *reissueFromAuthID != "":
+		in := withdrawal.ReissueInput{
+			Op:                 op,
+			OldAuthorizationID: *reissueFromAuthID,
+			OldRequestID:       *reissueFromRequestID,
+		}
+		if authority != nil {
+			out, err = withdrawal.ReissueGrantAuthorized(ctx, pool, in, *authority, *operator, *reason)
+		} else {
+			out, err = withdrawal.ReissueGrant(ctx, pool, in, *operator, *reason)
+		}
+	case authority != nil:
 		out, err = withdrawal.SupplyGrantAuthorized(ctx, pool, op, *authority, *operator, *reason)
-	} else {
+	default:
 		out, err = withdrawal.SupplyGrant(ctx, pool, op, *operator, *reason)
 	}
 	if err != nil {
