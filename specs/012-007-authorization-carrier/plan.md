@@ -108,5 +108,6 @@ existing files only — no new packages, no new binaries, no new infrastructure.
    (`provider.go:244`), serve gate enforces it — no merge-time decision left.
 9. Authority protocol closed (R-PB10): in-tx re-verification (api_key +
    caller `FOR SHARE` + `PermitIssue` re-eval, `supply_refused` on failure);
-   allowlist env `TXHARBOR_AUTHZ_ISSUER_CALLERS` fixed; V-PB3 split into
-   PB-executed and joint-009 parts. No bounded-window option remains.
+   allowlist env `TXHARBOR_AUTHZ_ISSUER_CALLERS` fixed; controlled switchover
+   procedure (halt → drain-confirm → atomic swap + checksum → re-enable;
+   rehearsed by T043/V-PB11); V-PB3 split into PB-executed and joint-009 parts. No bounded-window option remains.

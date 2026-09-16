@@ -148,11 +148,31 @@ Authoritative sources and their change entries (verified in-tree):
 - Business allowlist: deployment config `TXHARBOR_AUTHZ_ISSUER_CALLERS`
   (comma-separated decimal caller_ids; whitespace trimmed, empty entries
   ignored; missing/empty → deny-all; illegal → startup config error, exit 2).
-  Loaded once at process start; changes require restart. The residual window
-  (old process + new config) is closed by attribution, not by permission:
-  every supply audit carries principal + timestamp, so post-change supplies
-  from stale processes are exactly identifiable — stated limit, not a
-  revocation grace.
+- Controlled switchover (replaces the earlier attribution-closure note; no key
+  revocation by default, no hot-reload required). Model correction: supply runs
+  as short-lived per-invocation CLI processes, each loading config at start —
+  there is no long-lived daemon holding a stale mapping, so the problem
+  reduces to in-flight invocations, which are bounded (seconds) and
+  confirmable:
+  1. Editing the config file is NOT effective. The operations role (PB-C1)
+     first halts new supply invocations (entry control: stop schedulers and
+     manual invocation; concurrent CLI invocations are all covered, not just
+     one daemon).
+  2. Drain: let running invocations exit, or terminate them and confirm via
+     process table + `pg_stat_activity` that no supply tx remains in `BEGIN`
+     (idle-in-transaction from a killed CLI rolls back on disconnect).
+  3. Atomically swap the config (rename, not in-place edit) and record its
+     checksum + swap timestamp as the verifiable effective point.
+  4. Re-enable the entry only after (2)–(3) are confirmed; any new invocation
+     then loads the new mapping by construction.
+  5. Failure at any step → entry stays closed (no new invocations) until
+     confirmed; never declare the switchover complete while an old executor
+     is unaccounted for.
+  Precondition: the config file (and its replicas, if multi-host) is swapped
+  atomically on every host that can invoke supply; a host that cannot meet
+  (1)–(5) is reported as a deployment gap, not waved through.
+  Standalone key revocation/rotation keeps following the DB ordering protocol
+  above; it is never implied by a mapping change.
 
 Fixed order inside T-supply+scope (after the existing grant `FOR UPDATE`
 is NOT enough — authority re-checks come first):

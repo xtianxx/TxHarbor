@@ -1,6 +1,6 @@
 # Tasks: 007 Authorization Carrier Supplement (PB)
 
-**Input**: Design documents from `/specs/012-007-authorization-carrier/` (spec.md, plan.md, research.md R-PB1–R-PB9, data-model.md, contracts/supply-scope.md, quickstart.md V-PB1–V-PB10)
+**Input**: Design documents from `/specs/012-007-authorization-carrier/` (spec.md, plan.md, research.md R-PB1–R-PB10, data-model.md, contracts/supply-scope.md, quickstart.md V-PB1–V-PB11)
 
 **Prerequisites**: plan.md, spec.md, research.md, data-model.md, contracts/
 
@@ -63,7 +63,7 @@ green requires the stated verification, never the plan's existence.
 
 - [ ] T020 [US2] Negative tests: unmapped/unauthenticated supply (zero rows), malformed scope input (zero rows), over-limit fee (zero rows). New cases in existing test files (shares files with T010/T011 — sequenced after them, not parallel).
 - [ ] T021 [US2] T-revoke-sync in `internal/withdrawal/grant.go`: revoke tx syncs scope state/version; version monotonicity (re-supply cycles bump, never rewrite applied rows). Integration test: supply → revoke → re-supply round-trip with version assertions.
-- [ ] T022 [US2] Revoke-vs-supply race test: concurrent revoke + supply on one grant; loser observes winner state; scope consistent in both outcomes. (Real PG, no sleeps-as-proof — use barrier/lock-step like existing race tests.)
+- [ ] T022 [US2] Revoke-vs-supply race test in `internal/withdrawal/grant_integration_test.go` (existing race-test file): concurrent revoke + supply on one grant; loser observes winner state; scope consistent in both outcomes. (Real PG, no sleeps-as-proof — barrier/lock-step like the file's existing race tests.)
 
 **Checkpoint**: US1 + US2 both green; refusals never write.
 
@@ -71,7 +71,7 @@ green requires the stated verification, never the plan's existence.
 
 **Goal**: stock stays queryable-but-refused; explicit re-issuance with traceability; PB-01–PB-05 done exactly once, here.
 
-- [ ] T030 [US3] T-reissue procedure in `internal/withdrawal/grant.go` + CLI: NEW grant id + scope in one supply tx, audit detail links old ids; asserts no UPDATE to old rows. No-second-nonce proof (008 baseline is merged — no import check): per-scope `nonce_bindings` census identical before/after for every touched scope AND row counts of all seven `nonce_*` tables unchanged; intent tables do not exist yet in this tree — record the 009/011 integration re-check as a handoff obligation (H5), do not invent future tables. Integration test with old/new row census.
+- [ ] T030 [US3] T-reissue procedure in `internal/withdrawal/grant.go` + CLI: NEW grant id + scope in one supply tx, audit detail links old ids; asserts no UPDATE to old rows. Side-effect proof on an isolated small fixture: full-content snapshot compare (all business columns, ordered) of the seven `nonce_*` tables before/after (catches in-place UPDATE and equal-size replacement, not just counts); 007/PB tables per-operation allowlist (re-issue allows exactly +1 grant/+1 scope/+1 audit with expected values, everything else byte-identical). Intent scope: distinct-`intent_id`-unchanged applies to RE-ISSUE ONLY (same business intent reused); first legal supply MAY introduce new authorization linkage and MUST NOT be failed by it. No independent intent table exists in this tree — record the 009/011 re-check obligation (H5), invent no future tables. Integration test with old/new row census.
 - [ ] T031 [US3] OPEN-3 dry-run execution (quickstart.md procedure): pick stock grant → re-verify → re-issue → assert trace + zero new intent/nonce; record the dry-run log pointer in quickstart.md. (Execution task; procedure already designed.)
 - [ ] T032 PB-01 migration ownership: this lane's T003 IS PB-01 (renumber-at-merge rule applied at merge; applied numbers immutable). No second migration task elsewhere.
 - [ ] T033 PB-02 entry ownership: this lane's T012/T013 IS PB-02. No 009-side entry work.
@@ -88,6 +88,7 @@ green requires the stated verification, never the plan's existence.
 - [ ] T040 Scratch-harness for 009-file integration: source = `/tmp/pb-009ref/` copy @pinned-SHA (T002); isolation = scratch PostgreSQL per sequence, files copied into a temp migrations FS overlay — the PB lane tree never contains 009's file. Done: harness documented + green on empty sequence.
 - [ ] T041 Gap-fill sequence (d): applied {1..8,10} + embedded {1..10} → `migrate up` output `applied=1`, then `CheckCompatibility` green and a serve-gate dry check green; pre-fill gate red recorded (serve must refuse while 9 pending). Done: log pointers recorded.
 - [ ] T042 Rollback order + limits: `down` from full chain reverts 10 before 9 (applied-descending); scopes data loss on 10-down stated as designed-for-scratch limit; `down` of an applied-then-merged number is forbidden (renumber rule). Done: order asserted, limits written into quickstart.md.
+- [ ] T043 Allowlist switchover rehearsal (R-PB10 procedure, scratch only; needs T005, T013): halt entry → drain + confirm via process table and `pg_stat_activity` (no supply tx open) → atomic config swap with recorded checksum/timestamp → re-enable → old principal refused, new principal allowed; failure path (unaccounted old executor) keeps entry closed. Done: rehearsal log pointer recorded; per-host replica precondition checked or reported as gap.
 
 ## Phase 7: Acceptance mapping & handoff (no new behavior)
 
@@ -106,16 +107,17 @@ green requires the stated verification, never the plan's existence.
 | V-PB8 commit-unknown same-op retry | T012 | T050 |
 | V-PB9 re-issuance dry-run (OPEN-3) | T030, T031 | T031, T050 |
 | V-PB10 migration chain incl. gap-fill | T003, T036, T040, T041, T042 | T050 |
+| V-PB11 allowlist switchover rehearsal | T043 | T050 |
 
 ### PB-FR ↔ task map
 
-PB-FR-01 → T003, T004, T012; PB-FR-02 → T012, T021, T030; PB-FR-03 → T005, T011, T013, T014, T015; PB-FR-04 → T030, T031; PB-FR-05 → T016; PB-FR-06 → T003 (additive-only gate), T052 (regression); PB-FR-07 → T051 (boundary); PB-FR-08 → T003, T036, T041, T042.
+PB-FR-01 → T003, T004, T012; PB-FR-02 → T012, T021, T030; PB-FR-03 → T005, T011, T013, T014, T015, T043; PB-FR-04 → T030, T031; PB-FR-05 → T016; PB-FR-06 → T003 (additive-only gate), T052 (regression); PB-FR-07 → T051 (boundary); PB-FR-08 → T003, T036, T041, T042.
 
 ### PB-SC ↔ case map
 
-PB-SC-01 → V-PB1, V-PB5; PB-SC-02 → V-PB2, V-PB6; PB-SC-03 → V-PB3-PB, V-PB9 (V-PB3-009 joint); PB-SC-04 → V-PB10.
+PB-SC-01 → V-PB1, V-PB5; PB-SC-02 → V-PB2, V-PB6, V-PB11; PB-SC-03 → V-PB3-PB, V-PB9 (V-PB3-009 joint); PB-SC-04 → V-PB10.
 
-- [ ] T050 Execute quickstart.md V-PB1–V-PB10 matrix PB-executable part (V-PB3-009 stays joint-open for the 009 lane); record per-case log pointers + code SHA; PB-FR-01–PB-FR-08 ↔ tasks and PB-SC-01–PB-SC-04 ↔ cases mapping table completed. Refusal paths MUST NOT substitute for legal-supply acceptance (V-PB1 green is mandatory).
+- [ ] T050 Execute quickstart.md V-PB1–V-PB11 matrix PB-executable part (V-PB3-009 stays joint-open for the 009 lane); record per-case log pointers + code SHA; PB-FR-01–PB-FR-08 ↔ tasks and PB-SC-01–PB-SC-04 ↔ cases mapping table completed. Refusal paths MUST NOT substitute for legal-supply acceptance (V-PB1 green is mandatory).
 - [ ] T051 009 handoff requirements doc (lane-local note, 009 untouched): consumption fields, version persist/re-check, `replacement_of` threading, `GrantScope{Present:false}` replacement point (009 `submit.go:211`), delivery re-check point — all as *requirements on the 009 lane*, not implemented here.
 - [ ] T052 Regression: `go test ./...` + affected integration packages + `gofmt`/`vet`/`build` green on final tree; evidence index appended (commands + SHAs + logs, MISSING where not persisted).
 
@@ -127,7 +129,7 @@ PB-SC-01 → V-PB1, V-PB5; PB-SC-02 → V-PB2, V-PB6; PB-SC-03 → V-PB3-PB, V-P
 - US2 (T020/T021/T022): needs Phase 2 only; T020 sequenced after T010/T011 (shared test files); T021 shares `grant.go` → sequenced after T012/T015/T016. Otherwise parallel with US1's tail.
 - US3: T030 needs T012/T015/T016/T021 (same tx patterns + `grant.go` order); T031 needs T030; T032–T036 are ownership records completed by their mapped tasks; T036 needs T003 + T040.
 - Phase 6: T040 → T041/T042. Phase 7: needs all behavior phases; T050 closes everything except joint V-PB3-009.
-- Wave plan: W1 = T001/T002; W2 = T003/T004/T005; W3 = T010/T011 fail-first (T020 follows, not parallel); W4 = T012→T013→T015→T016→T021 (single `grant.go`/`withdrawalauthz.go` lane, strictly sequenced) + T014[P] alongside; W5 = T022/T030; W6 = T031 + T036 + Phase 6; W7 = Phase 7. No fixed model/task-count caps; shared files coordinated by the orchestrator.
+- Wave plan: W1 = T001/T002; W2 = T003/T004/T005; W3 = T010/T011 fail-first (T020 follows, not parallel); W4 = T012→T013→T015→T016→T021 (single `grant.go`/`withdrawalauthz.go` lane, strictly sequenced) + T014[P] alongside; W5 = T022/T030; W6 = T031 + T036 + Phase 6 (T040→T041/T042, T043 rehearsal); W7 = Phase 7. No fixed model/task-count caps; shared files coordinated by the orchestrator.
 - Dependency cycle check (tasks-internal, not formal analyze): Phase 2 → US phases forward; T015→T016→T021→T030 chain forward; US3→US1/US2 files forward; Phase 6→Phase 2/009-ref forward; Phase 7 terminal. No cycles; no dangling refs (every dep named above exists in this list).
 
 ## 009 handoff points (requirements, not tasks here)
@@ -136,6 +138,6 @@ H1: carrier read shape + scope checks (009 `gates.go`); H2: `authorization_versi
 
 ## Notes
 
-- All tasks `[ ]` (unchecked); counts: 28 tasks (T001–T052 numbered by phase).
+- All tasks `[ ]` (unchecked); counts: 29 tasks (T001–T052 numbered by phase, incl. T043 rehearsal).
 - Design closed this round (R-PB10): T015 implements in-tx re-verification, no bounded-window option, no decision left for implement.
 - A-13 / T000-P stay OPEN; 009 files untouched; no push/PR/merge/deploy.
