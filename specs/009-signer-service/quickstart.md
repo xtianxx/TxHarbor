@@ -121,6 +121,15 @@ any code path (static check + integer-typed validators).
    reconcile path (persistence.md §6) uses audit + admission rows; no new identity, no new intent.
 5. Injection points: after gate check, during signing, after result commit, at admission, at
    response — each asserts no ungated delivery and a recorded basis.
+6. Guarantee-scope acceptance (fault-model limitation, user ruling 2026-09-16): kill the DB
+   session mid-region → locks released server-side; sender-side outcome MUST be `unknown`
+   (never "nothing delivered"), retry re-gates with a pre-write liveness check; partial
+   write then RST → `unknown` + overlap audit, never zero-delivery claim; restart with a
+   `signature_results` row and no `delivered` marker → identified as unknown via durable rows
+   only (no rolled-back marker consulted), recovery = same-identity re-gate; revoke/expire
+   the grant (or activate a pause) then retry the same bytes → `blocked`/`signature_withheld`
+   status-only even for byte-identical redelivery; audit rows contain no backfilled
+   unconfirmed-as-confirmed facts.
 
 ## V8 — Failure paths, secrecy, isolation (FR-20–FR-25; SC-05/SC-07/SC-08)
 

@@ -64,9 +64,11 @@ Delivery is never a pure read of Table 4; it is a recorded assessment (research 
 3. Best-effort pre-write liveness check (session/tx still alive; TOCTOU-limited, stated as
    such — it narrows, never closes, the unaware window): if the loss is detected → `ROLLBACK`,
    zero bytes. While still holding all locks, write the response bytes (bounded send region;
-   research R6). Write success means "accepted by the OS transport", NOT "received by the client" —
-   receipt is unobservable server-side (verified by probe: small Write+Flush returns success
-   with zero bytes read). On write success, `UPDATE … SET verdict='delivered',
+   research R6). Write/Flush success means the local transport stack accepted the bytes into
+   its buffers — with no transport-layer receipt evidence it MUST NOT be named "handed to the
+   OS" as a delivery proof, and it is NOT "received by the client" (verified by probe: small
+   Write+Flush returns success with zero bytes read; a write deadline does not retract already
+   accepted or buffered bytes, and timeout/write-failure still maps to `unknown`). On write success, `UPDATE … SET verdict='delivered',
    delivered_at=now()`; `COMMIT`. On write failure/timeout, `ROLLBACK` — but the bytes MAY
    already be out (a failed write never proves zero delivery): the outcome is `unknown`
    (`unknown_reconcile`, §6), never "nothing delivered". A post-write pre-`COMMIT` crash is

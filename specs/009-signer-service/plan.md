@@ -156,8 +156,9 @@ Participants, write entries, and effective points (full protocol in research R6)
 Two required concurrency timelines (R6): **(a) pause/revoke before the region** → 009 observes
 it under the held locks and returns status-only with zero signature bytes; **(b) region first,
 pause/revoke after** → the pause/revoke write waits for the region `COMMIT` (ordered after);
-bytes written inside the region are in-flight approved with a committed `delivered` marker, and
-an admitted-but-unwritten outcome is impossible by construction (write failure → `ROLLBACK`).
+bytes written inside the region are in-flight approved with a committed `delivered` marker; no
+committed admitted-without-write-attempt outcome exists by construction (write failure →
+`ROLLBACK` → `unknown`, never "nothing delivered").
 Post-write pre-`COMMIT` crash → `unknown_reconcile` (honest unknown). Crash, commit-unknown,
 and response-loss all resolve by same-identity retry re-reading durable rows and re-gating; the
 result is never re-signed.
@@ -319,7 +320,15 @@ are justified explicitly:
   verification.
 - This step produced **documentation only** (plan/research/data-model/contracts/quickstart); no
   code, migrations, tests, services, or containers were written or executed; V1–V8 are design-only
-  and MUST be executed in tasks/implement.
+  and MUST be executed in tasks/implement. Probes run during feasibility verification (Go
+  HTTP buffering, PG 18 statement/idle/lock-timeout behavior) were throwaway evidence in
+  `/tmp`, not repo artifacts.
+- **Follow-up task inputs (listed, NOT implemented, NOT verified here)**: `WriteTimeout`
+  wiring on the shared `serve` listener + impact review on 007 routes sharing it; Q-A
+  trusted-issuance permission-control evidence (or minimum fix) on the supply path; scopes
+  carrier batch (007-extension migration + extended supply entry, R11); fault-acceptance
+  scenarios per quickstart V7-step-6 (DB-session-loss, partial-write, missing-marker restart,
+  post-revoke same-bytes refusal). None of these is claimed done or verified by this plan.
 - Bilateral conformance with 008 is limited to the stated lock/read contracts (008 read-api §4
   scope-row `FOR SHARE`; 009 persistence §§1–2 joint participation; fixed lock order); full
   integration acceptance still waits for 008. No conformance is claimed with 010 or 011; the

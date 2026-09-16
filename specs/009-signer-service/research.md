@@ -263,16 +263,21 @@ grant carrier read-only; it owns its own credential, request, result, admission,
 - **Decision — bounded send region mechanics (locks span the write, bounded both sides)**:
   the earlier "locks never span network I/O" constraint is lifted for exactly this region, with
   both sides bounded. Transport = the existing `txharbor serve` HTTP response path (009 has no
-  broadcast; plan Summary): "handoff" = the response-write syscall returning success (bytes
-  accepted by the OS); "cancelled" = write error / client disconnect (plan-level requirement:
+  broadcast; plan Summary): "handoff" = the response-write call returning success (bytes
+  accepted into local transport buffers — NOT proof of receipt, and a write deadline does not
+  retract accepted/buffered bytes); "cancelled" = write error / client disconnect
+  (plan-level requirement:
   server write timeout, e.g. ≤2s, strictly inside the 5s `statement_timeout`, both deployment
-  config). Write failure or timeout → `ROLLBACK`: no admission row survives, no bytes counted
-  as delivered; retry re-gates fresh. DB connection loss mid-region → transaction aborts →
+  config). Write failure or timeout → `ROLLBACK` → `unknown` (bytes MAY already be out; a
+  failed write never proves zero delivery); retry re-gates fresh. DB connection loss mid-region → transaction aborts →
   `unknown_reconcile` on retry (bytes may have gone out: honest unknown, identical-bytes
   re-delivery only). Process suspend mid-region → locks stay held AND the server-side
   `statement_timeout` still fires → region aborts on resume (or writers were merely delayed);
-  suspension can delay pause/revoke writers but can never let an ungated byte out, because no
-  byte is written outside the region. Writer-side impact (stated, bounded): 006 pause INSERTs,
+  suspension can delay pause/revoke writers but the design never claims suspension alone
+  authorizes a byte: any send attempted after protection dissolved without re-gating is
+  classified `unknown` with overlap accounting, never approved. No byte is written outside
+  the region by construction; bytes emitted while protection is unknowingly lost are the
+  stated residual, not a licensed delivery. Writer-side impact (stated, bounded): 006 pause INSERTs,
   007 revokes, and 008 writers wait on 009's `SHARE` locks for at most the region budget
   (send timeout + `statement_timeout`); they are ordered after, never starved, never failed —
   delay, not denial. Same-identity concurrent deliveries serialize on the request row
@@ -308,7 +313,8 @@ grant carrier read-only; it owns its own credential, request, result, admission,
     (tasks/implement acceptance).
   - A small `Write`+`Flush` returns success with the peer provably receiving nothing (probed:
     23 bytes, nil error, RST-without-read); `Flusher.Flush` returns no error at all. Write
-    success = handed to the OS; write failure = MAY already be partially out. The contract
+    success = bytes accepted into local transport buffers (NOT receipt — a small Write+Flush
+  returns success with zero bytes read); write failure = MAY already be partially out. The contract
     therefore claims neither receipt-on-success nor zero-delivery-on-error — both map to
     `unknown` with same-bytes-only recovery.
   - DB-session death releases the region's locks server-side (locks live to transaction end;

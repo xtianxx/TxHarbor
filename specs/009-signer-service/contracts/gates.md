@@ -63,7 +63,7 @@ A `LOCK TABLE` wait or deadlock is `gate_read_failed` (fail-closed, retryable, s
 009 admits, writes, and marks inside one protected region; only a committed `delivered` marker
 or already-written bytes are in-flight approved and not
 recallable, while any send outside an active region MUST run T-deliver under current gates (research R6). No 006 change
-is required and no residual window is deferred.
+is required; no permission window is granted — the accepted fault-model residual (research R6 feasibility block) is stated, not deferred.
 
 ## 2. 007 authorization read (`withdrawal_authorizations`, `FOR SHARE`)
 
