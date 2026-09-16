@@ -37,3 +37,20 @@ runs it). No test doubles substitute for the legal path.
 - **009 real integration**: 009 lane re-runs its legal path against PB-supplied
   grants (009-owned, after PB merges).
 - **010/011 chain-level**: out of scope for both lanes (A-13 stays OPEN).
+
+## Execution pointers (implement evidence, scratch DBs)
+
+- V-PB9 dry-run: `TestWithdrawalAuthzOpen3DryRunReissue`
+  (`internal/app/open3_dryrun_integration_test.go`, T031).
+- V-PB10 chain: `TestT040OverlayGreenOnEmptySequence`,
+  `TestT041GapFillSequenceD`, `TestT042RollbackRevertsTenBeforeNine`,
+  `TestT042DownOfAppliedThenRenumberedNumberForbidden`
+  (`internal/db/scratch_009_overlay_integration_test.go`); lane guard
+  `TestLaneMigrationsExclude009` (`internal/db/lane_migrations_test.go`).
+  Gap-fill needs the allow-missing provider (`newProvider`,
+  `internal/db/migrate.go`); serve gate unchanged. 10-down drops the carrier
+  table (designed-for-scratch limit); down of an applied-then-renumbered
+  number is refused, never silently re-pointed.
+- V-PB11 rehearsal: `TestAllowlistSwitchoverRehearsal`,
+  `TestAllowlistSwitchoverRehearsalUnaccountedExecutorKeepsEntryClosed`
+  (`internal/app/allowlist_switchover_integration_test.go`, T043).
