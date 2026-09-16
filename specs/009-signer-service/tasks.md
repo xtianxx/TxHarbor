@@ -24,14 +24,16 @@
 
 ## Phase 0: Prerequisite batch PB (007-extension, external delivery)
 
-**Purpose**: 007-extension batch deliverables that 009's complete delivery depends on. Single ownership (007-extension batch, NOT 008, NOT duplicated in 009 implementation phases). 009 independent module work may proceed in parallel with fail-closed behavior; 009 completion/merge waits for this batch plus full legal-path acceptance (plan Merge order).
+**Purpose**: 007-extension batch deliverables that 009's complete delivery depends on. Single ownership (007-extension batch, NOT 008, NOT duplicated in 009 implementation phases). 009 independent module work may proceed in parallel with fail-closed behavior; 009 completion/merge waits for this batch plus full legal-path acceptance (plan Merge order). **PB working baseline**: PB is its own lane branched off `main` (not off 009) and converges after 009 merges; the carrier migration is then numbered deterministically at merge time (PB-01 `renumber-at-merge`).
 
-- [ ] PB-01 Additive scopes-carrier migration (owner: 007-extension batch) in `migrations/` (number rule: 008 occupies `000008`, 009 occupies `000009`; scopes takes `max(merged)+1`, planning value `000010`, defers if 011 merges first — collision settled by orchestrator; pure DDL, zero change to 007 columns/read shapes/intake semantics; existing grants valid at storage level, scope row optional). Deps: none (external). Maps: R11 carrier, Q-B. Done: `goose validate` + up/down on scratch DB green, 007 regression suite green.
+- [ ] PB-01 Additive scopes-carrier migration (owner: 007-extension batch) in `migrations/` (deterministic number rule **renumber-at-merge**: at merge time the carrier takes `max(merged migration number)+1` — planning value `000010`; numbering is decided at merge, no fixed assumption about which branch lands first; if 011 merges first the same `max+1` rule applies; **only *unapplied* PB migration numbers may be renumbered — applied migration numbers MUST NOT be rewritten at merge**; pure DDL, zero change to 007 columns/read shapes/intake semantics; existing grants valid at storage level, scope row optional). Deps: none (external; PB lane off `main`, converges after 009 merges). Maps: R11 carrier, Q-B. Done: `goose validate` + up/down on scratch DB green, 007 regression suite green.
 - [ ] PB-02 Extended `withdrawal-authz supply` entry with scope op-input (owner: 007-extension batch) in `internal/app/withdrawalauthz.go` (same supply transaction writes grant + scope row: `intent_id`, `request_id`, `sender`, `fee_scope`, `allows_fee_replacement`, `authorization_version`, `attested_by`; `RevokeGrant` keeps scope state/version consistent; never writable by ordinary callers or 009). Deps: PB-01. Maps: R11 write entry/consistency protocol. Done: supply+revoke round-trip integration test green, audit shows matching grant+scope.
 - [ ] PB-03 Q-A trusted-issuance permission-control evidence or minimum fix (owner: 007-extension batch) against `internal/app/withdrawalauthz.go` + deployment/OS/DB permission chain (`--operator` audit-only; authenticated + authorized issuer; explicit control points and trust boundary; grant content ↔ audit traceability). Cite real evidence or add the minimum control; no per-grant cryptography required by ruling. Deps: PB-02. Maps: Q-A ruling. Done: written evidence reviewed + any fix covered by test.
 - [ ] PB-04 Scope/audit consistency + Q-B controlled re-issuance procedure (owner: 007-extension batch): per-grant `authorization_unverifiable` refusal stays 009-side; historic business continuation = authorized-issuer re-verification + explicit re-issuance with traceability to old grant/request, no second intent/nonce, no silent rebinding, no history backfill; scopeless old grants stay queryable/auditable only. Deps: PB-01, PB-02. Maps: Q-B ruling. Done: procedure documented + one re-issuance dry-run recorded.
 
-**Checkpoint**: PB-01–PB-04 delivered by 007-extension batch. 009 merge gate re-checks this phase.
+- [ ] PB-05 Full-chain upgrade verification (owner: 007-extension batch) on scratch DB, three sequences: (a) empty DB → full chain `000001…000009` + carrier; (b) 007-era DB (`000001–000007`, pre-PB) → carrier upgrade; (c) carrier `down` then re-`up` (rollback / re-upgrade order asserted). Deps: PB-01. Maps: R11 migration compatibility, plan Merge order. Done: all three sequences green; no applied migration number rewritten.
+
+**Checkpoint (PB delivery gate)**: PB-01–PB-05 delivered by 007-extension batch — carrier migration renumbered only while unapplied; scope↔grant round-trip (PB-02) and Q-A/Q-B evidence (PB-03/PB-04) recorded; full-chain upgrade sequences (empty / 007-era / rollback-re-upgrade, PB-05) green. 009 merge gate re-checks this phase.
 
 ---
 
@@ -70,7 +72,7 @@
 
 **Independent Test**: V1 happy path + V2 refusal vectors on real PG (SC-01).
 
-- [ ] T014 [P] [US1] V1 happy-path integration test in `internal/signer/submit_integration_test.go` (compliant request → persist-first result → signature+hash; no broadcast/RPC imports asserted). Deps: Phase 2. Maps: FR-01/FR-03/FR-13/FR-16, contracts/api.md, persistence §1. Done: green on isolated DB.
+- [ ] T014 [P] [US1] V1 happy-path integration test in `internal/signer/submit_integration_test.go` (compliant request → persist-first result → signature+hash; no broadcast/RPC imports asserted). Deps: Phase 2. Maps: FR-01/FR-03/FR-13/FR-16, contracts/api.md, persistence §1. **PB-gate**: without the scopes carrier (PB-01) no grant is verifiable, so the legal happy path is unreachable — until PB lands this task accepts the fail-closed branch only (`authorization_unverifiable`), and no legal-path sign-off is claimed here. Done: green on isolated DB (fail-closed branch until PB).
 - [ ] T015 [P] [US1] V2 refusal integration test in `internal/signer/refusal_integration_test.go` (digest-only/hash-only/message/incomplete → 4xx, zero signatures; unknown-field strict JSON). Deps: Phase 2. Maps: FR-02, SC-01. Done: green, signature count 0.
 - [ ] T016 [US1] Submit path `internal/signer/submit.go` (T-submit-first: insert-first → 23505 classify → row lock → gates → policy → `KeyProvider.SignTx` → persist result → `signed`; T-submit-replay incl. `outcome_not_yet_visible`). Deps: T014, T015 (tests first). Maps: FR-13/FR-14/FR-15, persistence §§1/3. Done: tests pass, `go vet` clean.
 
@@ -97,7 +99,7 @@
 
 - [ ] T019 [P] [US3] V4 binding/conflict/determinism integration test in `internal/signer/binding_integration_test.go` (same-identity same-content incl. concurrent/response-loss → one persisted result, exactly one observable signature; same-identity different-content → 409, second signature count 0). Deps: Phase 2. Maps: FR-13/FR-14/FR-15, persistence §3. Done: green with `-race`.
 - [ ] T020 [US3] Restart recovery test in `internal/signer/restart_integration_test.go` (crash pre/post result-COMMIT → same-identity retry converges, never re-signs via `signature_results_pkey`). Deps: T019. Maps: FR-14/FR-15, persistence §5. Done: green.
-- [ ] T021 [US3] OC-5 conditional fee replacement in `internal/signer/replacement_integration_test.go` (`replacement_of` + partial anchor index; explicit-permit + in-scope fee reuses grant, else fresh grant + new identity; persisted rows never rebound). Deps: T019. Maps: FR-05, contracts/gates.md §2, R7/R11. Done: green (full reuse branch covered after PB batch; until then, fresh-branch + fail-closed paths).
+- [ ] T021 [US3] OC-5 conditional fee replacement in `internal/signer/replacement_integration_test.go` (`replacement_of` + partial anchor index; explicit-permit + in-scope fee reuses grant, else fresh grant + new identity; persisted rows never rebound). Deps: T019. Maps: FR-05, contracts/gates.md §2, R7/R11. Done: green (full reuse branch covered after PB batch; until then, fresh-branch + fail-closed paths). Must include one explicit **scopeless-grant → `authorization_unverifiable`** assertion as behavior (refusal recorded, zero signature, audit class), not merely the taxonomy string; the full legal-path reuse acceptance is retained for after the PB carrier lands.
 
 ---
 
@@ -129,19 +131,21 @@
 
 **Independent Test**: V6 + V7 on real PG (SC-06/SC-08); 008 real-integration when available.
 
-- [ ] T026 [P] [US6] V6 gate-consumption read-only test in `internal/signer/gates_integration_test.go` (006 pause rows + active recovery + version change → refuse/version-mismatch; 008 five classes incl. `BindingTerminal`; 007 `FOR SHARE` revoke ordering; read-only diff on 006/007 tables asserted; `can_sign` off). Deps: Phase 2. Maps: FR-17/FR-18/FR-19, contracts/gates.md, SC-06. Done: green.
-- [ ] T027 [US6] V7 delivery/unknown test in `internal/signer/delivery_integration_test.go` (lock order; admission+write+marker atomic region; write-failure/timeout → `unknown` never "nothing delivered"; post-write pre-COMMIT crash → `unknown_reconcile`; overlap accounting; redelivery re-passes current gates — revoked/expired/paused blocks even byte-identical bytes; V7-step-6: session-loss, partial-write+RST, missing-marker restart, audit honesty). Deps: T026. Maps: FR-17/FR-23, contracts/persistence.md §§2/5/6, SC-06/SC-08. Done: green with `-race`.
-- [ ] T028 [US6] 008 real-integration acceptance in `internal/signer/binding_live_integration_test.go` (real `ReadBinding` against live 008 when 008 merges; five-class mapping; consumer scope-row `FOR SHARE` participation; contract-shape doubles retired for this path). Deps: T026 + external 008 merge. Maps: FR-18, contracts/gates.md §3, D3. Done: green; doubles for this path deleted.
+- [ ] T026 [P] [US6] V6 gate-consumption read-only test in `internal/signer/gates_integration_test.go` (006 pause rows + active recovery + version change → refuse/version-mismatch; 008 five classes incl. `BindingTerminal`; 007 `FOR SHARE` revoke ordering; read-only diff on 006/007 tables asserted; `can_sign` off) **plus one explicit scopeless-grant → `authorization_unverifiable` behavior assertion** (refusal recorded, zero signature, audit class — not just the class string). Deps: Phase 2. Maps: FR-17/FR-18/FR-19, contracts/gates.md, SC-06. Done: green.
+- [ ] T027 [US6] V7 delivery/unknown test in `internal/signer/delivery_integration_test.go` (lock order; admission+write+marker atomic region; write-failure/timeout → `unknown` never "nothing delivered"; post-write pre-COMMIT crash → `unknown_reconcile`; overlap accounting; redelivery re-passes current gates — revoked/expired/paused blocks even byte-identical bytes; V7-step-6: session-loss, partial-write+RST, missing-marker restart, audit honesty). This is the test that drives T034 (`delivery.go`); there is **no pre-existing Phase-2 delivery implementation** to wire. Deps: T026. Maps: FR-17/FR-23, contracts/persistence.md §§2/5/6, SC-06/SC-08. Done: green with `-race` against T034.
+- [ ] T028 [US6] 008 real-integration acceptance in `internal/signer/binding_live_integration_test.go` (real `ReadBinding` against live 008 when 008 merges; five-class mapping; consumer scope-row `FOR SHARE` participation; contract-shape doubles retired for this path; wires T034's delivery path against the live adapter). Deps: T026 + T034 + external 008 merge. Maps: FR-18, contracts/gates.md §3, D3. Done: green; doubles for this path deleted.
 - [ ] T029 [US6] Desensitized status path in `internal/signer/status.go` (own-request status only; refusal carries no signature material; `tx_hash` only on delivered/admitted) + `internal/signer/status_test.go`. Deps: Phase 2. Maps: contracts/api.md §3, FR-17. Done: unit + integration green.
+- [ ] T034 [US6] T-deliver implementation in `internal/signer/delivery.go` — the final delivery protocol (there is no Phase-2 delivery implementation to inherit): fixed lock order (008 scope-row `FOR SHARE` → 006 gate tables `LOCK … IN SHARE MODE` → 007 grant `FOR SHARE` → own request/admission rows `FOR UPDATE`); gate re-read inside the lock window (fresh `ReadBinding`, never the submit-time read); one protected region = admission `INSERT` + bytes write + `delivered` marker `UPDATE` + `COMMIT`; delivery-unknown basis persisted (write failure/timeout → `ROLLBACK` → `unknown_reconcile`, never "nothing delivered"); write-failure and restart recovery by same-identity re-read + re-gate; byte-identical re-delivery re-passes current gates (revoked/expired/paused blocks even identical bytes) and never re-signs. Fault-guarantee scope only — no absolute zero-delivery claim, no TTL/`valid_until` permission window. Deps: T011, T016 (Phase-2 gates/submit), T026, T027 (tests). Maps: FR-14/FR-17/FR-23, contracts/persistence.md §§2/5/6, contracts/gates.md §3, R6. Done: T027 green with `-race`, `go vet ./internal/signer/...` clean.
 
 ---
 
 ## Phase 9: Polish & Cross-Cutting Concerns
 
-- [ ] T030 [P] Full V1–V8 validation run + FR/SC trace sign-off (matrix recorded; SC-01–SC-08 evidenced). Deps: US1–US6. Done: all green, trace complete.
+- [ ] T030 [P] Full V1–V8 validation run + FR/SC trace sign-off (matrix recorded; SC-01–SC-08 evidenced). Deps: US1–US6. **PB-gate**: the full legal path requires the PB scopes carrier (PB-01); until it lands the matrix runs the fail-closed subset only and MUST NOT claim delivery completeness — full legal-path acceptance is retained for after PB. Done: all green, trace complete (fail-closed subset until PB).
 - [ ] T031 [P] Lint/vet/build gate (`go vet ./...`, repo lint, `go vet -tags integration ./internal/signer/...`) + 002–007 regression + migration diff allowlist. Deps: US1–US6. Done: green.
 - [ ] T032 Operator runbook + isolation record in `specs/009-signer-service/quickstart.md` (append: `signer-serve`/`signer-auth` ops, env knobs, dedicated DB/ports/volumes, V1–V8 execution record with SHAs). Deps: T030. Done: quickstart executes end-to-end on isolated resources.
 - [ ] T033 Deferred/evidence record: 010/011 fixtures stay contract-shape test caller only (F-1); T000-P open; no conformance claimed with 010/011; probes remain throwaway context. Deps: T030. Done: recorded in plan Evidence separation (append).
+- [ ] T035 Mainline sync & integration responsibility (ownership + gate only; **no sync is executed in this planning round**): when 008 merges, 009 rebases/merges onto the then-current `main` and reconciles every shared file it touches — `cmd/txharbor/main.go`, `internal/config/config.go`, `internal/app/serve.go` (`WriteTimeout`) — resolving conflicts and re-verifying affected config and migration: rerun T005 (migration integration), T026 (gate reads), T028 (008 live binding) on the merged tree. Merge vs rebase is chosen at that time from the real branch state and repo rules; history is not pre-rewritten here. **Shared-file ownership registered in this task**: `cmd/txharbor/main.go`, `internal/config/config.go`, `internal/app/serve.go` are shared with 008; `internal/signer/**` and `migrations/000009_signer_service.sql` are 009-owned. Deps: T028 + external 008 merge. Maps: plan Merge order, R6/R9. Done: post-sync build + T005/T026/T028 green on the merged tree; reconciled shared-file diff recorded.
 
 ---
 
@@ -149,23 +153,38 @@
 
 - **Phase 0 (PB)**: external 007-extension batch; no 009 code dependency. Blocks 009 completion/merge, NOT independent module work.
 - **Phase 1 → Phase 2**: strict order; Phase 2 blocks all stories.
-- **Stories**: US1 → US2 → US3 → US4 → US5 → US6 preferred (priority + file layering: submit → auth → binding → policy → boundary → gates/delivery); US1/US2/US4/US5 validation tasks may parallelize after Phase 2 if staffed, but US3 needs T019 semantics before US6 redelivery tests, and US6/T028 needs external 008 merge.
-- **Within a story**: tests first (fail before implementation where new code is written), then implementation; T016/T018/T021/T027/T028 wire existing Phase-2 code to tests.
-- **No cycles**: PB ← nothing in 009; 009 implementation → PB (waits); stories → Phase 2 only; Polish → all.
+- **Stories**: US1 → US2 → US3 → US4 → US5 → US6 preferred (priority + file layering: submit → auth → binding → policy → boundary → gates/delivery); US1/US2/US4/US5 validation tasks may parallelize after Phase 2 if staffed, but US3 needs T019 semantics before US6 redelivery tests, and US6/T028 needs external 008 merge. T034 implements the delivery protocol after its tests T026/T027; T035 runs only after 008 merges.
+- **Within a story**: tests first (fail before implementation where new code is written), then implementation; T016/T018/T021 wire Phase-2 code to tests; T027 is the test that drives the new T034 delivery implementation (no pre-existing delivery code is wired); T028 wires T034 against the live 008 adapter.
+- **No cycles**: PB ← nothing in 009 (PB lane off `main`, converges post-009); 009 implementation → PB (waits); stories → Phase 2 only; T034 ← T011/T016/T026/T027 → T028; T035 ← T028 + 008 merge; Polish → all.
 
 ### Parallel opportunities
 - [P] tasks within a phase (different files) run together: T002+T003; T006–T010; T014+T015; T023+T024; T026 V6/V7 splits by file.
 -Stories parallelize after Phase 2 subject to the ordering notes above; T028 always last (external 008).
-- Shared files single ownership: `migrations/000009_*` (T004 only), `internal/app/signerserve.go` + `cmd/txharbor/main.go` (T013 only), shared `serve.go` `WriteTimeout` (T013 only, with 007-route review inside the same task).
+- Shared files single ownership: `migrations/000009_*` (T004 only), `internal/signer/delivery.go` (T034 only), `internal/app/signerserve.go` + `cmd/txharbor/main.go` (T013 only), shared `serve.go` `WriteTimeout` (T013 only, with 007-route review inside the same task); post-008-merge reconciliation of the shared `main.go`/`config.go`/`serve.go` is owned by T035.
 
 ## Implementation Strategy
 
 - **MVP**: Phase 0 tracked externally + Phase 1 + Phase 2 + US1 (structured signing, persist-first, digest refusal). STOP and VALIDATE.
 - **Incremental**: US2 → US3 → US4 → US5 → US6; each story independently testable on the isolated DB.
-- **fail-closed ≠ done**: stories passing with refusals do not certify delivery completeness; merge waits for PB batch + full legal-path acceptance (plan Merge order).
+- **fail-closed ≠ done**: stories passing with refusals do not certify delivery completeness; merge waits for the PB batch (incl. PB-05 full-chain upgrade verification) + full legal-path acceptance (plan Merge order).
 
 ## Notes
 
 - Every task carries its FR / contract § / V-scenario mapping; completion conditions are executable (`go test`, `-tags integration`, `-race` where noted).
 - Real PG + real (test-container) resources for all integration tasks; doubles retire at T028 for the binding path.
 - Commit after each task or logical group; stop at checkpoints to validate.
+
+## Plan-review disposition (2026-09-16)
+
+First-round `analyze` gap fixes; planning-only, no implement/sync/test/service run, no commit.
+
+| Item | Disposition | File § |
+|---|---|---|
+| B-01 deliver-task gap | Added **T034** T-deliver implementation (`internal/signer/delivery.go`): fixed lock order, gate re-read, protected send region, persisted delivery-unknown basis, write-failure/restart recovery, same-byte re-delivery re-gate; wired to T011/T016 (prereqs), T026/T027 (tests), T028 (live 008). Removed the dangling "existing Phase-2 code" claim from T027 and the execution-order note. Fault-guarantee scope kept (no absolute zero-delivery, no TTL). | tasks.md §Phase 8 (T034), §Dependencies; T027/T028 |
+| B-02 PB-gate dependency | **T014** and **T030** now state the PB carrier dependency explicitly: without a scope carrier the legal path is unreachable, only the fail-closed branch (`authorization_unverifiable`) is runnable, no legal-path sign-off. | tasks.md §Phase 3 (T014), §Phase 9 (T030) |
+| B-05 scopeless assertion | **T021** and **T026** now require one explicit scopeless-grant → `authorization_unverifiable` **behavior** assertion (refusal + zero signature + audit class), not just the taxonomy string; full legal-path acceptance retained. | tasks.md §Phase 5 (T021), §Phase 8 (T026) |
+| B-03 / A-04 sync ownership | Added **T035** mainline sync & integration responsibility (post-008-merge reconcile of shared `main.go`/`config.go`/`serve.go`, rerun T005/T026/T028); merge-vs-rebase decided at that time; no history rewrite and no sync executed now; shared-file ownership registered in-task. | tasks.md §Phase 9 (T035), §Parallel opportunities |
+| B-04 PB numbering/baseline/gate | **PB-01** rewritten to deterministic `renumber-at-merge` (`max(merged)+1`, planning `000010`; only unapplied numbers renumbered; 011-first case uses the same `max+1` rule; the unfounded "011 merges first" assumption removed). PB baseline declared as its own lane off `main` converging post-009. Added **PB-05** full-chain upgrade verification (empty / 007-era / rollback-re-upgrade) and an explicit PB delivery-gate checkpoint. | tasks.md §Phase 0 (Purpose, PB-01, PB-05, Checkpoint) |
+| Immediate-write / TTL / `valid_until` residues | grep found no "immediate write" permit phrasing; the only `TTL`/`valid_until` occurrences are explicitly marked retracted/withdrawn and "MUST NOT reappear" (research.md §§R6/R11, data-model.md §Admission) — no permissive residue to remove. No new test duplicating 008 (PB-05 is upgrade-sequence only; T028 covers the real 008 path). | research.md, data-model.md (no change) |
+
+Task count: PB 4 → 5 (**+1**), implementation T001–T033 → T001–T035 (**+2**), total 37 → 40.
