@@ -2,7 +2,16 @@
 
 **Feature**: `012-007-authorization-carrier` | **Docs baseline**: HEAD `b680cb4`
 (branch `012-007-authorization-carrier`).
-**CODE_HEAD**: `<MISSING — fill at final regression>`.
+**CODE_HEAD**: `bcc01bece1a69924925084aebd0e5b505f67bf67` (review-closeout batch).
+
+**GATE RESULTS** (closeout regression, real runs — per-case tee logs not
+persisted, commands + outcomes recorded instead):
+- `go build ./...`, `go vet ./...`, `gofmt -l` clean.
+- `go test ./... -count=1` → 964 passed, 12 packages.
+- `go test -tags integration -count=1 ./internal/withdrawal/ ./internal/app/ ./internal/db/` → 697 passed, 3 packages (rerun after one flake, see below); `-race` same set → 697 passed.
+- `go test -tags integration -count=1 -timeout 30m ./...` → 1689 passed, 1 skipped; 2 flakes, both isolated-green on rerun, both in files PB never touched: `TestWithdrawalRevocationLockWaitExpiry` (007 lock-wait timing) and `TestDepositObservabilityEndToEnd` (006 state-poll timing).
+- New/changed suites green: D1 version-sync, T2 resolve-retryable, race, reissue, carrier-kill pre/post-commit, exit-2, open3 content snapshot, T036a/b/c, T040-T042, T043 both paths.
+- `TestNonceMigrationUpStatusDownUp` fixed (FS pinned through 000008; PB 000010 no longer leaks into the 008-era baseline) and green.
 **LOG POINTERS**: every per-case log path below is `MISSING` — no old run logs
 were persisted in this lane; do NOT treat any absence as a pass. Final T052
 regression fills each `LOG` line from a real run.
