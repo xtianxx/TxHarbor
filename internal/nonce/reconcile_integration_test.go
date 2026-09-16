@@ -384,6 +384,114 @@ func TestNonceReconcileDivergenceNeverTransitions(t *testing.T) {
 	}
 }
 
+// recWaterline reads the durable last_latest/last_pending waterline.
+func recWaterline(t *testing.T, ctx context.Context, pool *pgxpool.Pool) (string, string) {
+	t.Helper()
+	var latest, pending string
+	if err := pool.QueryRow(ctx, `SELECT last_latest::text, last_pending::text
+		FROM nonce_scope_state WHERE chain_id = $1 AND sender = $2`,
+		recChainID, recSender).Scan(&latest, &pending); err != nil {
+		t.Fatalf("read scope waterline: %v", err)
+	}
+	return latest, pending
+}
+
+// fullReconcileUnavailable drives reconcileScopeInTx with an unavailable read
+// (nil counts), the shape a failed RPC observation takes on the tick path.
+func fullReconcileUnavailable(t *testing.T, ctx context.Context, pool *pgxpool.Pool) {
+	t.Helper()
+	tx, err := pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin unavailable reconcile tx: %v", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	obs := Observation{
+		ChainID:        recChainID,
+		Sender:         recSender,
+		Kind:           ObservationKindReconcile,
+		Classification: ClassificationUnavailable,
+		HeadNumber:     big.NewInt(1),
+		HeadHash:       "0x" + strings.Repeat("cd", 32),
+	}
+	if err := reconcileScopeInTx(ctx, tx, recChainID, recSender, obs); err != nil {
+		t.Fatalf("reconcileScopeInTx unavailable: %v", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		t.Fatalf("commit unavailable reconcile tx: %v", err)
+	}
+}
+
+// TestNonceReconcileAnomalyNeverPoisonsWaterline proves the tick path treats
+// the waterline as trusted-only, exactly like the admission path: a
+// contradictory view (L > P), a regressing view (P < trusted P_prev), and an
+// unavailable read (nil counts) never overwrite last_latest/last_pending, so
+// one anomaly cannot move the PendingPrev baseline and mask a later real
+// regression. Anomaly observations and the divergence hold still persist —
+// skipping the waterline drops no evidence.
+func TestNonceReconcileAnomalyNeverPoisonsWaterline(t *testing.T) {
+	ctx, pool := convergeSetup(t)
+	recSeedScope(t, ctx, pool)
+	// nonce 12 sits above every view below: no transition may ever touch it.
+	recSeedBinding(t, ctx, pool, "rec-wl-keep", 12, StateAllocated)
+	wantWater := func(step, latest, pending string) {
+		t.Helper()
+		if l, p := recWaterline(t, ctx, pool); l != latest || p != pending {
+			t.Fatalf("waterline after %s = (%s, %s), want trusted (%s, %s)", step, l, p, latest, pending)
+		}
+	}
+
+	// (a) Trusted view 9/9: consistent, advances the waterline to 9/9.
+	fullReconcile(t, ctx, pool, 9, 9)
+	wantWater("trusted 9/9", "9", "9")
+
+	// (b) Contradictory view 10/4: divergence — anomaly + hold persist, the
+	// waterline stays at the trusted 9/9.
+	fullReconcile(t, ctx, pool, 10, 4)
+	wantWater("divergent 10/4", "9", "9")
+
+	// (c) The masked-alarm scenario: a consistent-shaped view 3/5 against the
+	// trusted P=9 must still read as a regression (divergence), which is only
+	// possible because (b) did not move the baseline to 4. The waterline
+	// stays 9/9 and the active divergence hold is reused, not duplicated.
+	fullReconcile(t, ctx, pool, 3, 5)
+	wantWater("regressing 3/5", "9", "9")
+	if n := recCount(t, ctx, pool, `SELECT count(*) FROM nonce_observations
+		WHERE chain_id = $1 AND sender = $2 AND classification = 'divergence'`,
+		recChainID, recSender); n != 2 {
+		t.Fatalf("divergence observations = %d, want exactly the 2 anomalies", n)
+	}
+	if n := recCount(t, ctx, pool, `SELECT count(*) FROM nonce_scope_holds
+		WHERE chain_id = $1 AND sender = $2 AND cause = 'chain_view_divergence' AND status = 'active'`,
+		recChainID, recSender); n != 1 {
+		t.Fatalf("active divergence holds = %d, want exactly 1 (re-detected cause converges)", n)
+	}
+
+	// (d) Unavailable read: observation persists, waterline intact, no hold change.
+	fullReconcileUnavailable(t, ctx, pool)
+	wantWater("unavailable", "9", "9")
+	if n := recCount(t, ctx, pool, `SELECT count(*) FROM nonce_observations
+		WHERE chain_id = $1 AND sender = $2 AND classification = 'unavailable'`,
+		recChainID, recSender); n != 1 {
+		t.Fatalf("unavailable observations = %d, want 1", n)
+	}
+	if n := recCount(t, ctx, pool, `SELECT count(*) FROM nonce_scope_holds
+		WHERE chain_id = $1 AND sender = $2 AND status = 'active'`,
+		recChainID, recSender); n != 1 {
+		t.Fatalf("active holds after unavailable = %d, want still exactly 1", n)
+	}
+
+	// No anomaly ever terminally touched the binding.
+	if got := recBindingState(t, ctx, pool, "rec-wl-keep"); got != StateAllocated {
+		t.Fatalf("anomaly path moved rec-wl-keep to %q, want untouched allocated", got)
+	}
+	if got := recEventTargets(t, ctx, pool, "rec-wl-keep"); len(got) != 0 {
+		t.Fatalf("anomaly path wrote events for rec-wl-keep: %v", got)
+	}
+	if n := recCount(t, ctx, pool, `SELECT count(*) FROM nonce_bindings WHERE state = 'consumed'`); n != 0 {
+		t.Fatalf("anomaly path produced %d consumed bindings, want 0", n)
+	}
+}
+
 // fullReconcile drives reconcileScopeInTx end to end for the seeded scope with
 // the given chain view, so the hold/anomaly behavior of the real T-observe path
 // is exercised (not just the applier).

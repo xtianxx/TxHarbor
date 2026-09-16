@@ -409,15 +409,20 @@ func reconcileScopeInTx(ctx context.Context, tx txQuerier, chainID int64, sender
 			return err
 		}
 	}
-	// Record the fresh last_* facts. updateScopeFrontierSQL overwrites
-	// last_latest/last_pending unconditionally, which is correct here because
-	// the reconcile loop is their ONLY writer (allocation persists
-	// nonce_bindings, never the scope frontier; floor movement goes through
-	// advanceScopeFloorTx) and it runs one sequential goroutine per chain, so
-	// no later commit can carry an older sample. last_* are "last observed"
-	// facts, deliberately NOT monotonic — a chain reorg may legitimately lower
-	// them; monotonicity is a property of reconciled_floor alone (hold.go).
-	if obs.LatestCount != nil && obs.PendingCount != nil {
+	// Record the fresh last_* facts. Only a trusted view advances the
+	// waterline: an unavailable read carries no counts, and a contradictory
+	// (divergent) view is not a value — persisting it would let one anomaly
+	// move the PendingPrev baseline and mask a later real regression. The
+	// anomaly observation and its hold are persisted above regardless, so
+	// skipping the waterline never drops evidence. Both durable writers
+	// (this tick and the admission in allocate.go) apply the same exclusion.
+	// last_* are "last observed" facts, deliberately NOT monotonic — a chain
+	// reorg may legitimately lower them; monotonicity is a property of
+	// reconciled_floor alone (hold.go). Floor movement goes through
+	// advanceScopeFloorTx only.
+	if obs.LatestCount != nil && obs.PendingCount != nil &&
+		obs.Classification != ClassificationUnavailable &&
+		obs.Classification != ClassificationDivergence {
 		if err := updateScopeFrontierTx(ctx, tx, chainID, sender, obs.LatestCount, obs.PendingCount, observationID); err != nil {
 			return err
 		}

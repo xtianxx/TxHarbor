@@ -183,15 +183,42 @@ are stated **MISSING**, never reconstructed and never given an invented hash.
 | `go vet ./...`; `go vet -tags integration ./...`; `go build ./...` | clean, 0 output | post-fix tree (committed as `8dd084c`) | `/tmp/txharbor-008-vet.log`, `-vet-int.log`, `-build.log` — present, 0 bytes (a clean run emits nothing; 0 bytes is consistent with, not proof of, a clean run) |
 | `gofmt -l .` | empty (per the T040 line record) | same | **MISSING** — no dedicated log persisted |
 
-### PENDING-GATE — orchestrator final regression gate (do not invent)
+### Final-gate record (replaces the stale PENDING-GATE placeholders below)
 
-This change is doc/comment-only (`tasks.md`, `quickstart.md`, one comment block in
-`internal/withdrawal/recovery_period_integration_test.go`); production code is unchanged. The final gate
-must run on the HEAD containing this change and fill these placeholders:
+The old line claiming `production code == 8dd084c` is deleted: batch-2/3 and the
+final waterline fix all changed production code (`internal/nonce/**`,
+`internal/app/serve.go`, `internal/metrics/metrics.go`). What actually ran, on
+which tree, and what is still open:
 
 | command | result | code version | log |
 |---|---|---|---|
-| `go test ./...` | PENDING-GATE | `<final HEAD; production code == 8dd084c>` | PENDING-GATE |
+| `go test ./...` (unit) | ok, all pkgs / 0 FAIL | final tree (see commit) | `/tmp/txharbor-008-final-unit.log` |
+| `go test -tags integration ./internal/nonce` | ok (incl. NEW waterline test + all T018–T038/T044/T045) | final tree | `/tmp/txharbor-008-final-nonce.log` |
+| `go test -tags integration ./internal/app` | ok (incl. SC-09 live scan) | final tree | `/tmp/txharbor-008-sc09-app-full.log` (batch-3; app untouched since) |
+| `go test -tags integration ./internal/withdrawal` | ok 319 | final tree (untouched since batch-2 run) | `/tmp/txharbor-008-batch2-withdrawal.log` |
+| `gofmt -l .`; `go vet ./...`; `go vet -tags integration ./...`; `go build ./...` | clean | final tree | (clean runs emit nothing; see commit-time re-verification) |
+| `go test -tags integration ./...` (full, incl. remote CI) | **尚未执行** | — | — |
+
+- Local green is NOT remote green: the full-suite run and any remote CI on the
+  final SHA are explicitly pending and are pre-PR gates, not claimed here.
+- No SHA is pre-filled for the final commit (it does not exist until committed);
+  logs above are associated by run order on this worktree, never back-filled.
+- T042 applicability re-checked for this change: the waterline guard only
+  *narrows* what a divergent tick may write (anomaly observations + holds
+  unchanged and still asserted); every §7 `[x]` row's test re-ran green on the
+  final tree (nonce full run), so T042 stays `[X]` with no matrix edit needed
+  beyond this record.
+
+### PENDING-GATE (superseded by the Final-gate record above; kept for history)
+
+~~This change is doc/comment-only (`tasks.md`, `quickstart.md`, one comment block in
+`internal/withdrawal/recovery_period_integration_test.go`); production code is unchanged.~~
+Struck: production code changed after 8dd084c (see Final-gate record). The
+placeholders below are not filled and must not be quoted as results:
+
+| command | result | code version | log |
+|---|---|---|---|
+| `go test ./...` | PENDING-GATE | ~~`<final HEAD; production code == 8dd084c>`~~ | PENDING-GATE |
 | `go test -tags integration ./...` | PENDING-GATE | same | PENDING-GATE |
 | `gofmt -l .`; `go vet ./...`; `go vet -tags integration ./...`; `go build ./...` | PENDING-GATE | same | PENDING-GATE |
 
@@ -359,6 +386,21 @@ rule rewritten.
   health/logx/config neither import `internal/nonce` nor traverse the changed
   `Serve()` startup order, and the metrics change is additive — their 8dd084c
   evidence stands; every package touching the change (app, nonce, metrics) was re-run.
+
+### Final waterline fix (this round; closes the review's minor defect)
+
+- `reconcileScopeInTx` persisted `last_*` on every non-nil view, including
+  contradictory ones — the tick path missed the trusted-only exclusion the
+  admission path has. Fixed with the identical guard
+  (`!= Unavailable && != Divergence`); anomaly observations + holds unchanged.
+  Stale "reconcile is the ONLY waterline writer" comment corrected to the real
+  dual-writer design with the shared exclusion.
+- Regression: NEW `TestNonceReconcileAnomalyNeverPoisonsWaterline`
+  (real PG): trusted 9/9 advances; divergent 10/4 and regressing 3/5 leave 9/9
+  intact with anomaly rows + exactly 1 deduplicated hold; unavailable leaves all
+  intact; the 3/5-after-poisoned-baseline masked alarm stays caught (divergence
+  count == 2 would collapse to 1 without the guard). Binding never terminal.
+  Holds are never released to construct this test.
 
 
 ---
