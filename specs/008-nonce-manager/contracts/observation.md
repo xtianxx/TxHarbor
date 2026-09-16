@@ -60,9 +60,16 @@ auditable, and never a silent adoption.
   write re-reads (a) the three 006 pause rows (`indexer_pause`/`log_pause`/`deposit_pause`) and
   the active `reorg_recovery` row; (b) the registry row (`state`, `registry_seq`); (c)
   `nonce_bindings` by `intent_id` and the scope max `M`; (d) `nonce_scope_state`
-  (`reconciled_floor`, `last_*`); (e) the scope's active `nonce_scope_holds`. Any item that
-  differs from the pre-tx basis, and any 006/registry/hold gate hit, refuses with the cause
-  recorded and zero writes (data-model transaction catalog).
+  (`reconciled_floor`, `last_*`); (e) the scope's active `nonce_scope_holds`; (f) for an
+  admission that binds an authorization, the 007 `withdrawal_authorizations` row named by
+  `authorization_id` via `SELECT … FOR SHARE` (identity/state/expiry/chain still valid; 008 writes
+  zero 007 rows). The lock order is fixed: coordination row → scope `nonce_scope_state` row → 006
+  gate reads → 007 authorization row → 008-owned rows. A `RevokeGrant`/`SupplyGrant` that commits
+  before the share lock is observed (refuse, zero binding), and one racing it blocks until this tx
+  commits — so 008's own admission carries the approved-admission/revocation serialization;
+  009/011's re-validation is defense-in-depth, never a substitute. Any item that differs from the
+  pre-tx basis, and any 006/registry/hold/authorization gate hit, refuses with the cause recorded
+  and zero writes (data-model transaction catalog).
 - **Non-atomicity with the chain (stated limit)**: the DB lock serializes 008 writers (and, because
   006 shares the coordination row, 006 establish/pause/release) only. It does **not** and cannot
   prevent an external transaction from being mined or queued during the observation window; no

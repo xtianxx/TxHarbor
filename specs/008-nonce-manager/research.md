@@ -247,7 +247,9 @@ as the only clock**; money/EVM quantities integer-only (`big.Int` / `NUMERIC(78,
   deployment env (`TXHARBOR_NONCE_READ_TOKEN`, constant-time compare; not a business caller key;
   never logged; rotation = env change + restart; no key table in 008). Endpoints: lookup by
   `binding_id` and by `intent_id` (with optional expected `chain_id`/`sender` cross-check). Every
-  request opens one `REPEATABLE READ, READ ONLY` transaction (007 query precedent), reads the
+  request opens one `REPEATABLE READ` read-write transaction that acquires only `SELECT … FOR
+  SHARE` locks and writes zero data (never `READ ONLY`, which rejects the lock; business semantics
+  stay read-only — see contracts/read-api.md §4), reads the
   binding + scope holds + (for annotation only) the 006 recovery state in the same snapshot, and
   returns exactly one of **five outcomes** (contracts/read-api.md): `bound`, `terminal`,
   `not_bound`, `mismatch`, `unavailable`. Pauses are annotations on `bound` (OC-6: paused

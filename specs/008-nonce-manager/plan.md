@@ -92,17 +92,28 @@ Pre-Phase-0 (2026-09-16, against Constitution 1.1.0):
   append-only transition log; release only through one controlled operator path.
 - **VI Transaction boundaries preserve invariants**: PASS — admission commits binding + event +
   evidence observation in one tx; release commits hold + floor + audit in one tx; no dual writes,
-  no assumption of DB-plus-publish atomicity.
+  no assumption of DB-plus-publish atomicity. Basis for the FR-04 intent binding: the
+  intent↔binding association is written inside that same single admission tx (binding row +
+  creation event + evidence observation commit atomically), so no window exists where a binding is
+  visible without its intent identity or its evidence.
 - **VII Nonce allocation concurrency-safe**: PASS — shared durable row lock (the chain
   coordination row, same discipline as 006 transactions) + UNIQUE backstops; in-memory mutexes are
   never relied on; recovery covers restart, pending, unknown outcomes, replacement linkage,
-  RPC divergence, and external submission; real-concurrency integration tests required.
+  RPC divergence, and external submission; real-concurrency integration tests required. Basis for
+  the FR-07 persistent-unknown mapping: an unknown-outcome nonce is held in the non-terminal,
+  never-auto-resolved `in_flight` state, so "结果未知为持续态" is carried by the durable state
+  machine (not memory) and stays inside principle VII's recovery coverage.
 - **IX Failure paths are first-class**: PASS — RPC failure classes, divergence, gaps, external
   consumption, DB unavailability, crash/restart, release races are all design-visible with
   recorded causes and fail-closed behavior; retries bounded and intentional.
-- **XI Test the invariant, not only the happy path**: PASS — the V-matrix is failure-first and
-  exercises real concurrency; mocks are explicitly not a substitute; the deferred real
-  009–011 acceptance is stated, not hidden.
+- **XI Test the invariant, not only the happy path**: CONDITIONAL — the in-scope MUSTs are met
+  (failure-first V-matrix on real concurrency; mocks explicitly not a substitute). The
+  chain-level withdrawal-flow E2E MUST (`API request → queue → nonce allocation → signing →
+  broadcast → confirmation`, constitution XI:218-221) cannot be satisfied inside any single
+  bounded spec (XIV:269-284) and is NOT waived: it stays OPEN as gate A-13, owned by the
+  010/011 chain completion with merge-gate re-check. Disclosure ≠ exception; no charter
+  amendment is proposed (that would require an explicit versioned amendment per
+  constitution:414-417, which is out of scope here).
 - **XII Observability is part of correctness**: PASS — structured logs with chain/sender/nonce/
   binding/intent/hold/cause/classification fields (redacted) and metrics for allocations, holds,
   observations, read outcomes, operator actions from day one.
@@ -118,12 +129,19 @@ Pre-Phase-0 (2026-09-16, against Constitution 1.1.0):
   one operator carrier reusing the `confirm-auth`/`withdrawal-authz` shape; tables are minimal
   carriers for state the upstream tables cannot hold.
 
-No violations, no complexity-tracking entries.
+No violations within 008's bounded scope, no complexity-tracking entries. One conditionally-open
+charter gate is recorded (not waived, not downgraded): **A-13 (XI chain-level E2E)** — 008 holds
+scope-implementation readiness (provider contract + real-concurrency/recovery acceptance) but
+MUST NOT claim complete acceptance until the 010/011-chain E2E gate passes at merge-gate
+re-check. See the XI row above for the applicability (XIV bounded-spec scoping, constitution
+XI:218-221, XIV:269-284).
 
 Post-Phase-1 re-check (2026-09-16, after research/data-model/contracts/quickstart): all gates
 still pass; three points verified rather than waived — (1) the five-outcome read API and the
-operator release path share no writable state (reads are `REPEATABLE READ, READ ONLY`; OC-6
-"查询 MUST NOT 新增、变更、释放或重分配" holds by construction); (2) the seven new tables are
+operator release path share no writable state (reads are `REPEATABLE READ` read-write
+transactions that acquire only `SELECT … FOR SHARE` locks and write zero data — never
+`READ ONLY`, which rejects the lock; business semantics remain read-only, matching
+contracts/read-api.md §4; OC-6 "查询 MUST NOT 新增、变更、释放或重分配" holds by construction); (2) the seven new tables are
 required carriers (006/007 tables cannot hold bindings, holds, evidence, or registry state
 without redefining their locked contracts), and every chain-dependent classification is
 evidence-persisted so no hidden state exists; (3) observation concurrency is explicit and bounded
@@ -221,7 +239,7 @@ remain byte-identical.
 | FR-15 (pre-commit re-verify; OC-7 ordering) | locked admission + post-lock rechecks + fail-closed reads (R1/R8) | V5, V8 |
 | FR-16 (Accepted is not an intent/authorization) | no 007-triggered allocation path exists; input contract requires persisted intent + valid authorization (R10) | V11 + review |
 | FR-17 (authorization validation, fail-closed) | read-only 007 carrier validation + identity/version storage (R10) | V11 |
-| FR-18 (attempt/signing identities; no cross-intent claim) | binding identity contract; 010 linkage deferred (contracts/downstream.md) | review + deferred |
+| FR-18 (attempt/signing identities; no cross-intent claim) | scope half: binding-identity + no-second-intent-claim carriers (Tables 3/4); deferred half: attempt-traceability linkage (contracts/downstream.md §2/§4) | V1, V4 + review (scope half); T043 record (deferred half) |
 | FR-19 (no keys/signing/broadcast) | zero key paths in package; read-only API only (R8) | V9, V13 |
 | FR-20 (explicit state machine) | binding states + CHECK + events (R6) | V4, V13 |
 | FR-21 (observability, no secrets) | logs/metrics fields (R11) | V13 |
@@ -266,14 +284,16 @@ domain package; no new service, dependency, or infrastructure.
 
 ## Evidence separation (per instruction — status, not proof)
 
-- Baselines: branch `008-nonce-manager` at `93975fb`; spec + checklist authored/closed in this
-  workdir under the 008/009 parallel window (workflow R1/R2). 006 merge `8e1a440` and 007 merge
-  `19fa11e` are consumed as read-only inputs; nothing here re-verifies them or claims their
-  acceptance.
+- Baselines (HEAD-corrected): branch `008-nonce-manager` at HEAD `4e7f7d3`; spec + checklist were
+  authored/closed at `93975fb`, and plan/tasks were committed on the branch (plan `bd87796`, tasks
+  `4e7f7d3`) — authored/closed in this workdir under the 008/009 parallel window (workflow R1/R2).
+  006 merge `8e1a440` and 007 merge `19fa11e` are consumed as read-only inputs; nothing here
+  re-verifies them or claims their acceptance.
 - T000-P remains open per spec Assumptions; it neither blocks nor substitutes for 008
   verification.
 - No implementation code, migration, service, or test was written or executed in this step;
   V1–V13 and every verification line above are design-only.
-- This plan is **uncommitted** on purpose (orchestrator owns the commit); the sibling 009 plan
+- The plan/tasks artifacts are **committed** on the branch (HEAD `4e7f7d3`); this analyze-correction
+  pass is intentionally **uncommitted** (orchestrator owns the commit). The sibling 009 plan
   consumes the same shared basis independently, and interface cross-checks happen after both
   branches report.

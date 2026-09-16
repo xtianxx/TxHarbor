@@ -228,9 +228,24 @@ bound only) → ensureLeaseSQL → lockCoordSQL (FOR UPDATE, R1) → post-lock r
 with `RowsAffected` checks → COMMIT`. Zero RPC inside any transaction. RPC observations happen
 immediately before the tx and are passed in as data.
 
+**Fixed lock order** (inside an 008 write tx, and the cross-module order shared with 006/007/009):
+coordination row (R1) → scope `nonce_scope_state` row (`FOR UPDATE`) → 006 gate reads (non-locking
+`SELECT`) → 007 `withdrawal_authorizations` row (`SELECT … FOR SHARE` when the tx validates/binds
+an authorization) → 008-owned rows. 007's write entry points `SupplyGrant`/`RevokeGrant` take only
+the 007 authorization row `FOR UPDATE` (they never take a 008 scope row), and the 009 consumer
+takes scope row → 006 gate tables → 007 grant row → own rows, so the partial order
+**scope row → 006 tables → 007 authorization row → own rows** holds everywhere and no lock cycle
+can form.
+
 - **T-allocate** (first admission): pre-tx validate input → RPC observation → BEGIN → lock →
   recheck 006 gates (three stream pause rows + active `reorg_recovery` row; any hit → refuse,
-  rollback, zero writes) → recheck registry (`active`) → recheck active holds → re-read binding by
+  rollback, zero writes) → recheck registry (`active`) → recheck active holds → `SELECT … FOR
+  SHARE` the 007 `withdrawal_authorizations` row named by `authorization_id` (after the scope row,
+  so the order scope row → 006 gate reads → 007 authorization row holds; a `RevokeGrant`/
+  `SupplyGrant` that committed first is observed under this lock as `state='active'`/valid expiry/
+  chain match, a racing one blocks until this tx commits, and missing/inactive/expired/chain-
+  mismatch → refuse with zero writes; 008's own admission owns this serialization — 009/011
+  re-validation is defense-in-depth, never a substitute) → re-read binding by
   `intent_id` (hit + equality → T-replay; hit + differ → T-conflict) → compute `M`/`F` from
   bindings under lock → apply classification matrix → insert observation (always, on any outcome
   that reached classification) → consistent: insert binding + creation event → COMMIT → return
@@ -295,6 +310,19 @@ immediately before the tx and are passed in as data.
    inside their own admission transaction (ordering-only, never writes) under the fixed order
    scope row → 006 gate tables → 007 grant row → own rows; 008 writers take no locks in reverse
    order, so no cycle is introduced.
+7. **Authorization revoke/supply vs admission (007 boundary)**: an admission that binds an
+   authorization takes `SELECT … FOR SHARE` on the 007 `withdrawal_authorizations` row (order
+   scope row → 006 gate reads → 007 authorization row → own rows); 007's `SupplyGrant`/`RevokeGrant`
+   take that same row `FOR UPDATE`. A revoke that commits before 008's share lock is observed and
+   the admission refuses (`authorization_invalid`, zero binding); an admission that takes the share
+   lock first commits and the revoke waits until it does — so an approved admission is never
+   invalidated mid-flight by a concurrent revoke, and 008 does not offload that responsibility to
+   009/011 (their re-validation is defense-in-depth, not the admission's isolation basis). 008
+   writes zero 007 rows. Commit-unknown stays convergent on both sides: 008 retries the same
+   `intent_id` and resolves through the in-tx re-read / UNIQUE classify (T-converge); 007 retries
+   the same `operation_id` and resolves through `resolveByOperationID`. Neither 007 nor the 009
+   consumer takes a scope row, so acquiring the scope row before the authorization row adds no
+   cycle.
 
 ## Numeric and evidence conventions
 
