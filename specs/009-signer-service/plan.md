@@ -333,7 +333,7 @@ are justified explicitly:
 | D-2 | 007 carrier gap: no authorization version — closure via R11 `authorization_version`; the fingerprint remains a labelled surrogate, never a version | 007/011 extension (R11) |
 | D-3 | 007 carrier gap: no fee-scope/purpose — OC-5 conditional rule restored (R7); reuse branch unreachable until the R11 carrier lands; fresh authorization is the operative branch, not the rule | 007/011 extension (R11) |
 | D-4 | 007 carrier gap: no `revoked_at` (revocation observed as `state='revoked'`); closure column in R11 | 007/011 extension (R11) |
-| Q-A/Q-B | Genuine business questions from R11 (cryptographic authorization authenticity in v1; pre-extension grants fail-closed vs mandatory backfill) — listed, not self-decided | business ruling (007/011) |
+| Q-A/Q-B | **Decided 2026-09-16** (research R11 resolutions): Q-A → trusted-issuance control without mandatory per-grant cryptography (`--operator` audit-only; authenticated+authorized issuer; explicit trust boundary; evidence-or-fix in tasks); Q-B → per-grant `authorization_unverifiable` refusal, no bulk backfill, re-issuance with traceability and no second intent/nonce or silent rebinding; neither self-certifies merge/deploy readiness | business ruling recorded (007/011) |
 | Merge order | 008 (`000008`) then 009 (`000009`) merge and implement WITHOUT the scopes carrier; the carrier lands later as a 007-extension/011 migration and only unlocks the R7 reuse branch; 011 capabilities MUST NOT be treated as available now | 007/011 extension, after 008/009 |
 | F-1 | 010/011 consumption fixtures: a contract-conforming test caller (OC-4 input shape) keeps 009 developable; no 010/011 specs, tables, or fixtures beyond the test caller are created here | 010/011 (later specs) |
 

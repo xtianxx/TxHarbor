@@ -500,6 +500,31 @@ Per-attribute closure (OC-5 attribute → carrier → 009 verification):
   caller/API authentication are **not** authorization capabilities; none may be presented as
   satisfying the missing attributes above.
 
+- **R11 resolutions (user ruling, 2026-09-16)**:
+  - **Q-A → trusted-issuance control, no mandatory per-grant cryptography**: v1 does not
+    require an authorizer signature on every grant. `--operator` stays a declaration/audit
+    field only — never identity or authority by itself. Supply MUST be executed by an
+    authenticated principal with issuance permission (reuse the real OS/deployment/DB
+    permission system, with explicit control points and trust boundary); grant content and
+    issuance audit MUST agree and be traceable, writable only through the controlled supply
+    entry; 009 verifies provenance/content/validity against the trusted record, never against
+    caller-supplied references or the operator string alone. If the existing supply path
+    already satisfies this, tasks/implement cites the evidence and reuses it; otherwise the
+    minimum permission control is added there. This does not retroactively negate 007's
+    approved receiving semantics. The scope carrier ships WITHOUT a signature field unless a
+    later ruling requires it.
+  - **Q-B → per-grant refusal, no bulk backfill**: a grant without a trusted scope row/version
+    is refused per request (`authorization_unverifiable`); scope is never inferred from history,
+    config, or caller claims. New fully-conforming grants verify normally — no bulk backfill
+    gates the service. No automatic backfill this phase; continuing historic business requires
+    re-verification and explicit re-issuance by an authorized issuer, preserving traceability
+    to the old grant/request. Re-issuance MUST NOT create a second intent or a second nonce,
+    MUST reconcile existing intent/binding/attempt/signature state first, and MUST NOT
+    silently rebind old requests or backfill history to fabricate original facts. Scopeless
+    old grants stay queryable/auditable but never executable. Bulk-backfill as a precondition
+    is cancelled; the legal path, controlled entry, refusal path, and recovery acceptance for
+    new grants are still required and do not self-certify merge/deploy readiness.
+
 ## Open / deferred research items (carried into plan.md)
 
 - **T000-P** stays open: production provider (KMS/HSM) selection is out of scope; R2 only promises
@@ -516,4 +541,4 @@ Per-attribute closure (OC-5 attribute → carrier → 009 verification):
 - **D-3 / R7, R11**: fee-scope/purpose gap recorded; OC-5's conditional fee-replacement rule is
   restored, with the fresh-authorization branch operating until the R11 carrier lands.
 - **Q-A / Q-B (R11)**: genuine business questions on authenticity strength and pre-extension
-  fail-closed/backfill behavior — listed for a business ruling, not decided here.
+  fail-closed/backfill behavior — **decided by user 2026-09-16** (see R11 resolutions below).
