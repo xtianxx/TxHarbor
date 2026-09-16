@@ -127,6 +127,14 @@ type Metrics struct {
 	withdrawalUnavailable     *prometheus.CounterVec
 	withdrawalUnauthenticated *prometheus.CounterVec
 
+	// 009 signer surface (internal/metrics/signer.go; T012).
+	signerRequests     *prometheus.CounterVec
+	signerSigned       *prometheus.CounterVec
+	signerRefusals     *prometheus.CounterVec
+	signerGateRefusals *prometheus.CounterVec
+	signerAdmissions   *prometheus.CounterVec
+	signerCommits      *prometheus.CounterVec
+
 	handler http.Handler
 }
 
@@ -357,7 +365,7 @@ func New(ready func() bool) *Metrics {
 	}, nil)
 	registry.MustRegister(withdrawalAccepted, withdrawalReplayed, withdrawalConflict,
 		withdrawalRejected, withdrawalUnavailable, withdrawalUnauthenticated)
-	return &Metrics{
+	m := &Metrics{
 		registry:                     registry,
 		probeTotal:                   probeTotal,
 		indexerHeight:                indexerHeight,
@@ -399,6 +407,8 @@ func New(ready func() bool) *Metrics {
 		withdrawalUnauthenticated:    withdrawalUnauthenticated,
 		handler:                      promhttp.HandlerFor(registry, promhttp.HandlerOpts{}),
 	}
+	m.registerSigner(registry)
+	return m
 }
 
 // Handler serves the Prometheus exposition format.

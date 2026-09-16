@@ -21,6 +21,21 @@ Commands are illustrative sketches of the validation flow, not implementation ar
 - **No Anvil / no RPC**: 009 has no RPC client; none of these scenarios needs a chain. This is a
   structural property to assert (V8), not an environment choice.
 
+Concrete 009 values (T003; pinned by `internal/signer/isolation_test.go`, which fails on any
+collision with the 008 or default values below):
+
+| Resource | 009 value | Must never collide with |
+|---|---|---|
+| PostgreSQL database | `txharbor_009` | shared `txharbor`, 008 `txharbor_008` |
+| PG host port (explicit compose override only) | `5433` | default `5432`, 008 `55432` |
+| Signer HTTP listener | `127.0.0.1:8091` | `8080`, 008 listener `58545`, RPC `8545` |
+| PG data volume (explicit override only) | `txharbor_009_pgdata` | shared `pgdata`, 008 volume |
+
+The override is explicit, never auto-merged:
+`docker compose -f compose.yaml -f compose.009.yaml up -d postgres` (starts no anvil), with
+`TXHARBOR_PG_DSN=postgres://txharbor:txharbor@127.0.0.1:5433/txharbor_009`. Automated tests stay
+on per-test testcontainers (container-local DB, random published port) and share nothing.
+
 ## V1 — Structured signing happy path (US1/FR-01–FR-03, FR-16; SC-01)
 
 1. Seed a caller + credential (`txharbor signer-auth issue …`), a 006-clean database (no pause

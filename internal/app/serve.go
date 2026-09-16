@@ -304,6 +304,12 @@ func Serve(ctx context.Context, d Deps) int {
 	srv := &http.Server{
 		Handler:           mux,
 		ReadHeaderTimeout: cfg.ProbeTimeout,
+		// WriteTimeout bounds response writes on the shared probe listener
+		// (009 T013 007-route review: 007 withdrawal routes share this
+		// listener; their responses are small bounded JSON, so a 5s write
+		// bound changes no route behavior — it only closes slowloris-style
+		// write stalls that ReadHeaderTimeout alone does not cover).
+		WriteTimeout: cfg.ProbeTimeout,
 	}
 	listener, err := net.Listen("tcp", cfg.HTTPAddr)
 	if err != nil {

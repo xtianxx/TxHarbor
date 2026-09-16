@@ -1,0 +1,20 @@
+# 009-signer-service isolated local dependencies (T003; quickstart.md §Isolation scheme).
+# Explicit override, never auto-merged:
+#   docker compose -f compose.yaml -f compose.009.yaml up -d postgres
+# Disjoint from 008 (txharbor_008 / 55432 / 58545) and from the defaults
+# (txharbor / 5432 / 8545): separate project, database, host port and data
+# volume; the shared `pgdata` volume is never touched. 009 needs no anvil/RPC:
+# start only `postgres`.
+name: txharbor-009
+
+services:
+  postgres:
+    environment:
+      POSTGRES_DB: txharbor_009
+    ports:
+      - "127.0.0.1:5433:5432"
+    volumes:
+      - txharbor_009_pgdata:/var/lib/postgresql
+
+volumes:
+  txharbor_009_pgdata:
