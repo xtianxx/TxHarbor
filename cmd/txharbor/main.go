@@ -8,6 +8,7 @@
 //	txharbor confirm-auth     run one guarded confirmation-policy switch
 //	txharbor withdrawal-authz supply an upstream grant (or mint/revoke)
 //	txharbor apikey-auth      manage caller API keys (issue/rotate/revoke)
+//	txharbor nonce-admin      operate 008 nonce holds/registry (mint/release/status)
 package main
 
 import (
@@ -46,6 +47,8 @@ func run(args []string) int {
 		return app.WithdrawalAuthz(ctx, args[1:], d)
 	case "apikey-auth":
 		return app.APIKeyAuth(ctx, args[1:], d)
+	case "nonce-admin":
+		return app.NonceAdmin(ctx, args[1:], d)
 	case "help", "-h", "--help":
 		usage(os.Stdout)
 		return 0
@@ -66,6 +69,7 @@ commands:
   confirm-auth      run one guarded confirmation-policy switch
   withdrawal-authz  supply an upstream grant (or mint/revoke)
   apikey-auth       manage caller API keys (issue/rotate/revoke)
+  nonce-admin       operate 008 nonce holds/registry (mint/release/status)
   help              show this help
 `)
 }

@@ -5,6 +5,7 @@ package app
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -15,6 +16,8 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strconv"
+	"strings"
 	"syscall"
 	"time"
 
@@ -28,6 +31,7 @@ import (
 	"github.com/xtianxx/txharbor/internal/indexer"
 	"github.com/xtianxx/txharbor/internal/logx"
 	"github.com/xtianxx/txharbor/internal/metrics"
+	"github.com/xtianxx/txharbor/internal/nonce"
 )
 
 // Deps carries process dependencies so commands are testable in-process.
@@ -285,6 +289,18 @@ func Serve(ctx context.Context, d Deps) int {
 		return fail("startup failed (recovery): %s", logx.Redact(err.Error()))
 	}
 
+	// 008 rebuild gate (R5/FR-13): the read-only per-known-scope integrity
+	// verification runs once at startup, before the listener opens. Success is
+	// the only condition that opens the allocation admission gate; a failure
+	// keeps it closed with the structured reason — no silent repair, no
+	// memory-based allocation. Reads stay available either way; allocations
+	// stay refused rebuild_incomplete until an operator resolves the failure
+	// and the process restarts.
+	rebuildGate := nonce.NewRebuildGate()
+	runRebuildGate(startupCtx, chainID, rebuildGate, func(ctx context.Context, chainID int64) (nonce.RebuildReport, error) {
+		return nonce.VerifyRebuild(ctx, pool, chainID)
+	})
+
 	// 007 withdrawal routes mount on the same probe listener: the parent mux
 	// takes precedence over the health handler's "/" subtree, and health/metrics
 	// stay unchanged on the child mux. No new listener or address. The FR-05
@@ -299,6 +315,12 @@ func Serve(ctx context.Context, d Deps) int {
 	mux := http.NewServeMux()
 	mux.Handle("/withdrawals", withdrawH)
 	mux.Handle("/withdrawals/", withdrawH)
+	// 008 read endpoints mount on the same listener next to /withdrawals: no
+	// new listener or address. The bearer credential comes from config and is
+	// never logged; an unconfigured token admits nothing (fail closed).
+	// readapi.go is transport-free, so this handler owns the auth check and
+	// the two contract routes.
+	mux.Handle("/nonce/bindings/", &nonceReadHandler{provider: nonce.NewReadProvider(pool, cfg.NonceReadToken)})
 	mux.Handle("/", health.NewServer(agg, m.Handler()).Handler())
 
 	srv := &http.Server{
@@ -438,6 +460,128 @@ serveLoop:
 		exitCode = 1
 	}
 	return exitCode
+}
+
+// runRebuildGate executes the R5 startup rebuild verification and applies its
+// verdict to the admission gate: success opens it, any failure keeps it closed
+// with the structured reason. It never repairs anything, never guesses from
+// memory, and never fails startup itself — reads stay available while every
+// allocation is refused rebuild_incomplete. verify is a seam for the lifecycle
+// glue test (production: nonce.VerifyRebuild over the serve pool).
+func runRebuildGate(ctx context.Context, chainID int64, gate *nonce.RebuildGate,
+	verify func(context.Context, int64) (nonce.RebuildReport, error)) {
+	report, err := verify(ctx, chainID)
+	if err != nil {
+		reason := "rebuild_incomplete: " + err.Error()
+		gate.KeepClosed(reason)
+		slog.Error("nonce rebuild verification failed; allocation gate stays closed",
+			"chain_id", chainID, "reason", logx.Redact(reason))
+		return
+	}
+	gate.Open()
+	slog.Info("nonce rebuild verification complete; allocation gate open",
+		"chain_id", chainID, "scopes", report.Scopes,
+		"bindings", report.Bindings, "holds", report.Holds)
+}
+
+// nonceReadProvider is the readapi surface the transport drives;
+// *nonce.ReadProvider satisfies it (the glue test substitutes a fake).
+type nonceReadProvider interface {
+	Authenticate(presented string) bool
+	Read(ctx context.Context, req nonce.ReadRequest) (nonce.ReadResponse, error)
+}
+
+// nonceReadHandler is the HTTP transport for the 008 read endpoints
+// (contracts/read-api.md §1–§3). The credential is checked before any routing
+// or read: a missing or wrong bearer is the 401 unauthenticated outcome, and
+// the credential never appears in a log line or in the 401 body.
+type nonceReadHandler struct {
+	provider nonceReadProvider
+}
+
+func (h *nonceReadHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		w.Header().Set("Allow", http.MethodGet)
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	bearer, ok := strings.CutPrefix(r.Header.Get("Authorization"), "Bearer ")
+	if !ok || !h.provider.Authenticate(bearer) {
+		writeReadResponse(w, nonce.UnauthenticatedResponse())
+		return
+	}
+	rest := strings.TrimPrefix(r.URL.Path, "/nonce/bindings/")
+	if intentID, isByIntent := strings.CutPrefix(rest, "by-intent/"); isByIntent {
+		h.read(w, r, nonce.ReadRequest{
+			IntentID:        intentID,
+			ExpectedChainID: expectedChainID(r.URL.Query().Get("chain_id")),
+			ExpectedSender:  r.URL.Query().Get("sender"),
+		})
+		return
+	}
+	h.read(w, r, nonce.ReadRequest{BindingID: rest})
+}
+
+// read performs one lookup and writes its outcome. A path that names no
+// identity is the fail-closed 404, exactly like an unknown key; a malformed
+// expected scope rides the provider's own mismatch answer, never a
+// transport-invented status.
+func (h *nonceReadHandler) read(w http.ResponseWriter, r *http.Request, req nonce.ReadRequest) {
+	if (req.BindingID == "") == (req.IntentID == "") {
+		writeReadResponse(w, readNotBoundResponse())
+		return
+	}
+	resp, err := h.provider.Read(r.Context(), req)
+	if err != nil {
+		slog.Warn("nonce read request failed", "error", logx.Redact(err.Error()))
+		if resp.Outcome == "" {
+			resp = readUnavailableResponse()
+		}
+	}
+	writeReadResponse(w, resp)
+}
+
+// expectedChainID parses the optional by-intent chain_id cross-check. A
+// malformed value becomes 0, which no durable chain id can equal, so the
+// provider reports mismatch without inventing a status; an absent value is no
+// cross-check at all.
+func expectedChainID(raw string) *int64 {
+	if raw == "" {
+		return nil
+	}
+	id, err := strconv.ParseInt(raw, 10, 64)
+	if err != nil {
+		id = 0
+	}
+	return &id
+}
+
+// readNotBoundResponse mirrors nonce's fail-closed 404 body for a path that
+// names no identity, emitted before any provider call.
+func readNotBoundResponse() nonce.ReadResponse {
+	return nonce.ReadResponse{
+		Outcome: nonce.ReadNotBound,
+		Error:   &nonce.ReadErrorBody{Code: string(nonce.ReadNotBound)},
+		Notice:  nonce.ReadNoticeNotBound,
+	}
+}
+
+// readUnavailableResponse mirrors nonce's retryable 503 body for a request
+// the provider refused before producing an outcome.
+func readUnavailableResponse() nonce.ReadResponse {
+	return nonce.ReadResponse{
+		Outcome: nonce.ReadUnavailable,
+		Error:   &nonce.ReadErrorBody{Code: string(nonce.ReadUnavailable)},
+		Notice:  nonce.ReadNoticeUnavailable,
+	}
+}
+
+// writeReadResponse maps ReadResponse.HTTPStatus onto the wire; it encodes
+// only the outcome's defined fields and never credential material.
+func writeReadResponse(w http.ResponseWriter, resp nonce.ReadResponse) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(resp.HTTPStatus())
+	_ = json.NewEncoder(w).Encode(resp)
 }
 
 // indexerMetricInterval is how often scanner state and checkpoint snapshots
