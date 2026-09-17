@@ -76,12 +76,10 @@ legally in-flight (it entered the uncancellable external stage while every gate 
 governs later replays/replacements only. The evidence is the committed send row's gate snapshot, its
 `dispatched_at`, and the invalidation writer's own commit order.
 
-**(c) time-based expiry (G-010-1).** Expiry has no writer and therefore no lock. The region re-evaluates
+**(c) time-based expiry (G-010-1; 2026-09-17 approved limited exception to Q3).** Expiry has no writer and therefore no lock. The region re-evaluates
 authorization and claim expiry with `clock_timestamp()` (statement wall-clock, never transaction-start
 `now()`) as the last read before dispatch and records
-`observed_expires_at`/`observed_now`. The residual interval between that read and entering dispatch is
-irreducible inside PostgreSQL; it is reported, not hidden. No grace period, no TTL, no widened in-flight
-definition is introduced.
+`observed_expires_at`/`observed_now`. A natural expiry taking effect in the residual interval between that read and entering dispatch is recorded as a "post-final-check natural-expiry send residual" and reconciled; it MUST NOT be described as legally in-flight before invalidation. This exception covers natural expiry ONLY — not explicit revocation, pause, execution-version replacement, DB lock/connection failure, or any other residual — and approves no configurable grace period. Queueing, backoff, reconnects, auto-retries, or resumed execution MUST NOT reuse a prior check as permission and MUST re-evaluate gates; the plan constrains those paths and the thread-stall limits instead of assuming a fixed or tiny window. Preserve the final-evaluation time, authorization expiry, lease expiry, execution version, and observable send evidence; unobservable instants MUST NOT be fabricated as precise facts. Definitive send results are kept; only indeterminate outcomes are recorded `unknown` and reconciled. G-010-1 closure does not pass any other residual or the overall send-protection design.
 
 **(d) database/network independent failure (G-010-2).** If the region's transaction/connection dies after
 dispatch began, the dispatch may have happened with no committed record. The attempt is treated as
