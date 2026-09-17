@@ -312,11 +312,17 @@ grant carrier read-only; it owns its own credential, request, result, admission,
     exists), strictly inside the statement budget, plus the serve path actually setting it
     (tasks/implement acceptance).
   - A small `Write`+`Flush` returns success with the peer provably receiving nothing (probed:
-    23 bytes, nil error, RST-without-read); `Flusher.Flush` returns no error at all. Write
-    success = bytes accepted into local transport buffers (NOT receipt — a small Write+Flush
-  returns success with zero bytes read); write failure = MAY already be partially out. The contract
-    therefore claims neither receipt-on-success nor zero-delivery-on-error — both map to
-    `unknown` with same-bytes-only recovery.
+    23 bytes, nil error, RST-without-read); a bare `http.Flusher.Flush` returns no error, so the
+    send path flushes through the error-returning `http.NewResponseController(w).Flush()`
+    (Go 1.20+; net/http's response implements `FlushError`) and a peer reset or write-deadline
+    expiry at flush is observable instead of silently discarded. Write success = bytes accepted
+    into local transport buffers (NOT receipt — a small Write+Flush returns success with zero
+    bytes read); write failure = MAY already be partially out. The contract claims neither
+    receipt-on-success nor zero-delivery-on-error: a successful write commits the `delivered`
+    marker (committed-delivered — the marker records that a delivery happened, it is never a
+    retransmit permit), while a detectable write/flush/short-write/deadline error resolves the
+    current attempt to `unknown` (bytes may be out) with same-bytes-only recovery, never success
+    from a historic marker.
   - DB-session death releases the region's locks server-side (locks live to transaction end;
     the backend aborts the open tx). The sender learns of the death only on its next
     interaction (`pgx`: `ErrConnClosed`/op error; pool reuse detects via `ResetSession`);

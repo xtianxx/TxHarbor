@@ -129,7 +129,12 @@ type signerHTTPDeliverySink struct {
 
 // WriteDelivery writes the region-produced payload as the 200 response. It is
 // called only from inside the T-deliver protected region (admission INSERT +
-// bytes write + delivered marker + COMMIT happen together).
+// bytes write + delivered marker + COMMIT happen together). Every transport
+// failure it can observe — a write error, a short write, a flush error, or the
+// server's WriteTimeout expiry surfaced at flush — is returned so the region
+// resolves the current attempt as `unknown` (bytes MAY be out); it never claims
+// success, and a marker already recorded by an earlier attempt is never used to
+// turn a failed attempt into a success.
 func (s *signerHTTPDeliverySink) WriteDelivery(_ context.Context, payload []byte) error {
 	s.w.Header().Set("Content-Type", "application/json")
 	s.w.Header().Set("Content-Length", strconv.Itoa(len(payload)))
@@ -137,11 +142,28 @@ func (s *signerHTTPDeliverySink) WriteDelivery(_ context.Context, payload []byte
 	s.started = true
 	s.w.WriteHeader(http.StatusOK)
 	n, err := s.w.Write(payload)
-	if f, ok := s.w.(http.Flusher); ok {
-		f.Flush()
-	}
 	if err == nil && n != len(payload) {
 		err = io.ErrShortWrite
+	}
+	// A bare http.Flusher.Flush() discards the transport error. net/http
+	// buffers the small payload, so the flush is the first real socket write:
+	// a peer reset or a WriteTimeout expiry is only observable here.
+	// ResponseController.Flush returns it (Go 1.20+; net/http's response
+	// implements FlushError). A writer that cannot flush cannot be verified, so
+	// it is left on the conservative unknown path too.
+	if err == nil {
+		if ferr := http.NewResponseController(s.w).Flush(); ferr != nil {
+			err = ferr
+		}
+	}
+	if err != nil {
+		// Secrets-free diagnostic: trace id + the redacted transport error.
+		// The payload (signature/tx hash) never reaches a log.
+		slog.Default().Warn("signer delivery write failed",
+			"trace_id", s.trace,
+			"outcome", "unknown",
+			"bytes_may_be_out", true,
+			"error", logx.Redact(err.Error()))
 	}
 	return err
 }
@@ -191,7 +213,7 @@ func SignerServe(ctx context.Context, args []string, d Deps) int {
 	}
 	transport := &signerTransport{
 		pool:    pool,
-		submit:  signer.SubmitDeps{DB: pool, Policy: policy, Provider: provider, Binding: live.Binding},
+		submit:  signer.SubmitDeps{DB: pool, Policy: policy, Provider: provider, Binding: live.Binding, ScopeLock: live.Scope},
 		deliver: signer.DeliveryDeps{DB: pool, Binding: live.Binding, ScopeLock: live.Scope},
 	}
 

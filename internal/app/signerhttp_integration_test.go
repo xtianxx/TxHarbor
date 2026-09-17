@@ -928,16 +928,19 @@ func TestSignerHTTPTransportAcceptance(t *testing.T) {
 		firstBytes := append([]byte(nil), raw...)
 		shWaitAdmission(t, ctx, h.pool, rowID, "delivered", 2)
 
-		// A second same-identity retry is the already-delivered marker path:
-		// identical bytes, no new admission, still exactly one signature.
+		// A second same-identity retry re-gates under current gates (the
+		// committed marker is not a retransmit permit): identical bytes, one
+		// new delivered admission, still exactly one signature.
 		status2, raw2 := h.post(t, h.body(t, withheld), h.cred)
 		if status2 != http.StatusOK || !bytes.Equal(raw2, firstBytes) {
 			t.Fatalf("idempotent retry = %d/%s, want the identical delivered bytes", status2, raw2)
 		}
-		adm, ok := shLastAdmission(t, ctx, h.pool, rowID)
-		if !ok || adm.verdict != "delivered" || adm.attemptSeq != 2 || shAdmissionCount(t, ctx, h.pool, rowID) != 2 {
-			t.Fatalf("retry admission = %+v found=%v (count=%d), want exactly one new delivered admission at attempt 2",
-				adm, ok, shAdmissionCount(t, ctx, h.pool, rowID))
+		// The 200 body is flushed before the marker COMMIT lands, so poll for
+		// the committed admission instead of asserting on a racy first read.
+		adm := shWaitAdmission(t, ctx, h.pool, rowID, "delivered", 3)
+		if shAdmissionCount(t, ctx, h.pool, rowID) != 3 {
+			t.Fatalf("admission count = %d, want exactly one new delivered admission at attempt 3",
+				shAdmissionCount(t, ctx, h.pool, rowID))
 		}
 		if sig2, hash2 := shResult(t, ctx, h.pool, rowID); sig2 != sig || hash2 != hash {
 			t.Fatalf("retry rewrote the persisted result: %s/%s", sig2, hash2)
