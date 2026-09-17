@@ -12,8 +12,13 @@ const (
 )
 
 // AdvanceRequest is the identity/fencing/action payload 011 passes to 010. It
-// carries no nonce, fees, calldata, signatures or raw bytes: construction
-// belongs to 010 and signing to 009 (contracts/lifecycle.md §2).
+// carries no nonce, calldata, signatures or raw bytes: construction belongs to
+// 010 and signing to 009 (contracts/lifecycle.md §2). Fee replacement is the
+// one exception the round-2 contract adds: 010 has no fee oracle, so the
+// caller supplies the candidate fee dimensions (exact decimal strings) and the
+// replacement's fresh-grant/signing identity, and 010 validates all of them
+// against the PB scope caps and the anchor before any write. The fields are
+// ignored for first_broadcast/replay.
 type AdvanceRequest struct {
 	IntentID        string
 	RequestID       string
@@ -25,6 +30,23 @@ type AdvanceRequest struct {
 	Action          AdvanceAction
 	AnchorAttemptID string
 	ExpectedTxHash  string
+
+	// ReplacementFeeMaxPerGas / ReplacementFeeMaxPriorityFeePerGas are the
+	// caller-supplied candidate fee dimensions for ActionReplace (decimal
+	// strings, native-coin smallest units, exact integers). 010 never derives
+	// or invents a fee rate; both must be set or the replace is refused.
+	ReplacementFeeMaxPerGas            string
+	ReplacementFeeMaxPriorityFeePerGas string
+	// ReplacementAuthorizationID names the PB grant the replacement is
+	// submitted under. Empty = the anchor's own grant (conditional reuse,
+	// gated on allows_fee_replacement + fee caps); a fresh grant passes the
+	// full grant/scope gate instead.
+	ReplacementAuthorizationID string
+	// ReplacementSigningRequestID is the caller-preallocated signing identity
+	// of the replacement (the 009 scope carrier fixes request_id ==
+	// signing_request_id; 010 persists it 1:1 with the new attempt). Empty
+	// falls back to a deterministic identity derived from StepID.
+	ReplacementSigningRequestID string
 }
 
 // AdvanceOutcome is 010's classified answer: outcome class plus identity

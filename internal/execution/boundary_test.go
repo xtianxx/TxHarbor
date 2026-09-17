@@ -208,9 +208,13 @@ func TestV12BoundaryNoSigningOrBroadcastPath(t *testing.T) {
 }
 
 // TestV12BoundarySingleConsumer checks the 010 boundary is exactly one interface
-// pair carrying identity/fencing/action only — no fees, nonce, calldata,
-// signatures or raw bytes — and that the business graph never imports 010's
-// package.
+// pair carrying identity/fencing/action only — no nonce, calldata, signatures or
+// raw bytes — and that the business graph never imports 010's package. The
+// round-2 fee-replacement contract is the single sanctioned exception to the
+// identity-only rule: 010 has no fee oracle, so ActionReplace carries the
+// caller-supplied replacement candidate (fee dimensions plus the replacement's
+// grant/signing identity) and 010 validates it. The exception is closed to
+// exactly those four fields; every other field and struct stays identity-only.
 func TestV12BoundarySingleConsumer(t *testing.T) {
 	advancer, reader := 0, 0
 	for _, s := range productionSources(t) {
@@ -238,8 +242,17 @@ func TestV12BoundarySingleConsumer(t *testing.T) {
 		t.Fatalf("consumer boundary interfaces: LifecycleAdvancer=%d LifecycleReader=%d, want exactly one each", advancer, reader)
 	}
 
-	// The boundary payload must not smuggle fee/nonce/calldata/signature/raw
-	// fields into 011's request (construction belongs to 010, signing to 009).
+	// The boundary payload must not smuggle non-identity values into 011's
+	// request (construction belongs to 010, signing to 009). The four
+	// sanctioned replacement-candidate fields are the only exception; any new
+	// fee/gas/signing-shaped field still fails this scan.
+	sanctioned := map[string]bool{
+		"ReplacementFeeMaxPerGas":            true,
+		"ReplacementFeeMaxPriorityFeePerGas": true,
+		"ReplacementAuthorizationID":         true,
+		"ReplacementSigningRequestID":        true,
+	}
+	sanctionedSeen := map[string]bool{}
 	boundaryStructs := map[string]bool{
 		"AdvanceRequest": true, "AdvanceOutcome": true,
 		"AttemptRef": true, "UnknownRef": true, "LifecycleFacts": true,
@@ -260,6 +273,10 @@ func TestV12BoundarySingleConsumer(t *testing.T) {
 			}
 			for _, field := range st.Fields.List {
 				for _, name := range field.Names {
+					if ts.Name.Name == "AdvanceRequest" && sanctioned[name.Name] {
+						sanctionedSeen[name.Name] = true
+						continue
+					}
 					lower := strings.ToLower(name.Name)
 					for _, bad := range forbiddenField {
 						if strings.Contains(lower, bad) {
@@ -270,6 +287,11 @@ func TestV12BoundarySingleConsumer(t *testing.T) {
 			}
 			return true
 		})
+	}
+	for name := range sanctioned {
+		if !sanctionedSeen[name] {
+			t.Errorf("sanctioned replacement field AdvanceRequest.%s is missing", name)
+		}
 	}
 	for name := range boundaryStructs {
 		if !seen[name] {

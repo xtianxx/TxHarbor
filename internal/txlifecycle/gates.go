@@ -299,20 +299,27 @@ func sendabilityRefusal(kind SendKind, state string, accepted bool) *RefusalErro
 // checkFeeScope enforces the PB fee bounds with exact big.Int arithmetic and
 // per-dimension evidence (PB-C2; T031).
 func checkFeeScope(a *Attempt, feeMaxTotal, feeMaxPerGas, feeMaxPriority int64) *RefusalError {
-	gasLimit, ok := new(big.Int).SetString(a.GasLimit, 10)
-	if !ok {
-		return Refuse(ClassFeeScopeExceeded, "gas_limit", "unparseable gas_limit")
-	}
 	feePerGas := a.GasPrice
-	priority := a.MaxPriorityFeePerGas
 	if a.TxType == int(TxTypeDynamicFee) {
 		feePerGas = a.MaxFeePerGas
+	}
+	return checkFeeTriple(a.TxType, a.GasLimit, feePerGas, a.MaxPriorityFeePerGas, feeMaxTotal, feeMaxPerGas, feeMaxPriority)
+}
+
+// checkFeeTriple is the shared PB-C2 fee test over a candidate fee shape. The
+// T3 reuse gate measures the persisted attempt with it, and replace()
+// measures the caller-supplied candidate before any write, so both use one
+// arithmetic (exact integers, never floats).
+func checkFeeTriple(txType int, gasLimit, feePerGas, priority string, feeMaxTotal, feeMaxPerGas, feeMaxPriority int64) *RefusalError {
+	gas, ok := new(big.Int).SetString(gasLimit, 10)
+	if !ok {
+		return Refuse(ClassFeeScopeExceeded, "gas_limit", "unparseable gas_limit")
 	}
 	fee, ok := new(big.Int).SetString(feePerGas, 10)
 	if !ok {
 		return Refuse(ClassFeeScopeExceeded, "fee", "unparseable fee")
 	}
-	total := new(big.Int).Mul(gasLimit, fee)
+	total := new(big.Int).Mul(gas, fee)
 	if total.Cmp(big.NewInt(feeMaxTotal)) > 0 {
 		return &RefusalError{Class: ClassFeeScopeExceeded, Field: "fee_max_total",
 			Basis: fmt.Sprintf("gas_limit*fee=%s > fee_max_total=%d", total.String(), feeMaxTotal)}
@@ -321,7 +328,7 @@ func checkFeeScope(a *Attempt, feeMaxTotal, feeMaxPerGas, feeMaxPriority int64) 
 		return &RefusalError{Class: ClassFeeScopeExceeded, Field: "fee_max_per_gas",
 			Basis: fmt.Sprintf("fee_per_gas=%s > fee_max_per_gas=%d", fee.String(), feeMaxPerGas)}
 	}
-	if a.TxType == int(TxTypeDynamicFee) {
+	if txType == int(TxTypeDynamicFee) {
 		p, ok := new(big.Int).SetString(priority, 10)
 		if !ok {
 			return Refuse(ClassFeeScopeExceeded, "max_priority_fee_per_gas", "unparseable priority fee")

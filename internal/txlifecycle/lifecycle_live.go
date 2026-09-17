@@ -68,8 +68,9 @@ var (
 
 // Advance drives one send-class action. first_broadcast builds and persists
 // the attempt under the current gates; replay resends the anchor's persisted
-// bytes under the same identity; replace is refused fail-closed (no fee policy
-// exists to construct a differing replacement — see replace()).
+// bytes under the same identity; replace constructs a new attempt under the
+// caller-supplied fee candidate (010 never invents a fee rate) and the same
+// intent/nonce/semantics, then persists and sends it under the full gates.
 func (l *LifecycleLive) Advance(ctx context.Context, req execution.AdvanceRequest) (execution.AdvanceOutcome, error) {
 	switch req.Action {
 	case execution.ActionFirstBroadcast:
@@ -77,7 +78,7 @@ func (l *LifecycleLive) Advance(ctx context.Context, req execution.AdvanceReques
 	case execution.ActionReplay:
 		return l.replay(ctx, req)
 	case execution.ActionReplace:
-		return l.replace(req)
+		return l.replace(ctx, req)
 	default:
 		return execution.AdvanceOutcome{}, fmt.Errorf("lifecycle advance: unknown action %q", req.Action)
 	}
@@ -139,14 +140,94 @@ func (l *LifecycleLive) replay(ctx context.Context, req execution.AdvanceRequest
 	return l.dispatch(ctx, req, att.AttemptID, SendReplay)
 }
 
-// replace is refused fail-closed: a replacement must carry fee dimensions that
-// differ from the anchor and stay inside the PB scope caps, and 010 has no
-// fee-construction policy (or oracle) to derive them. The refusal is recorded
-// as a basis-bearing converged step, never a silent no-op; wiring replace needs
-// a construction-policy ruling first.
-func (l *LifecycleLive) replace(req execution.AdvanceRequest) (execution.AdvanceOutcome, error) {
-	return execution.AdvanceOutcome{Class: execution.OutcomeRefusedBasis,
-		Basis: "replace construction has no 010 fee policy; refused before any write"}, nil
+// signingRequestIDForStep derives the replacement signing identity when the
+// caller did not preallocate one; it is stable per step, so a same-step retry
+// re-observes the same identity.
+func signingRequestIDForStep(stepID string) string { return "sr-" + stepID }
+
+// replace persists a new attempt + signing identity over the anchor's
+// intent/binding/nonce with the caller-supplied fee candidate, submitted under
+// the anchor's grant (conditional reuse) or a caller-named fresh grant. Fees
+// are never derived here; a same-step retry converges on the recorded attempt.
+func (l *LifecycleLive) replace(ctx context.Context, req execution.AdvanceRequest) (execution.AdvanceOutcome, error) {
+	if req.StepID == "" {
+		return execution.AdvanceOutcome{Class: execution.OutcomeRefusedBasis, Basis: "replace requires a step id"}, nil
+	}
+	if req.AnchorAttemptID == "" {
+		return execution.AdvanceOutcome{Class: execution.OutcomeRefusedBasis, Basis: "replace requires an anchor attempt"}, nil
+	}
+	if req.ReplacementFeeMaxPerGas == "" || req.ReplacementFeeMaxPriorityFeePerGas == "" {
+		return execution.AdvanceOutcome{Class: execution.OutcomeRefusedBasis,
+			Basis: "no 010 fee policy: replace requires caller-supplied max_fee_per_gas + max_priority_fee_per_gas"}, nil
+	}
+	if req.RecoveryVersion < 0 {
+		return l.refusalOutcome(ctx, attemptIDForStep(req.StepID),
+			Refuse(ClassAttemptConflict, "recovery_version", "negative recovery version"), SendResult{})
+	}
+
+	attemptID := attemptIDForStep(req.StepID)
+	if att, err := l.store.AttemptByID(ctx, attemptID); err == nil {
+		if att.IntentID != req.IntentID || att.ReplacementOf != req.AnchorAttemptID {
+			return execution.AdvanceOutcome{AttemptID: att.AttemptID, Class: execution.OutcomeRefusedBasis,
+				Basis: "replacement step maps to a different intent/anchor"}, nil
+		}
+		return outcomeForAttempt(att), nil
+	} else {
+		var ref *RefusalError
+		if !errors.As(err, &ref) || ref.Class != ClassAttemptNotFound {
+			return execution.AdvanceOutcome{}, err
+		}
+	}
+
+	anchor, err := l.store.AttemptByID(ctx, req.AnchorAttemptID)
+	if err != nil {
+		return l.refusalOutcome(ctx, attemptID, err, SendResult{})
+	}
+	if anchor.IntentID != req.IntentID {
+		return execution.AdvanceOutcome{AttemptID: anchor.AttemptID, Class: execution.OutcomeRefusedBasis,
+			Basis: "anchor attempt belongs to another intent"}, nil
+	}
+	authID := req.ReplacementAuthorizationID
+	if authID == "" {
+		authID = anchor.AuthorizationID
+	}
+	scope, err := l.scopeCaps(ctx, authID)
+	if err != nil {
+		return l.refusalOutcome(ctx, attemptID, err, SendResult{})
+	}
+	// Conditional reuse of the anchor's own grant is adjudicated here with the
+	// Store's shared fee arithmetic before any write or 009 call; the T3 gate
+	// re-checks the persisted attempt under its locks. A fresh grant instead
+	// passes the full grant/scope gate in T3.
+	if authID == anchor.AuthorizationID {
+		if !scope.allowsReplacement {
+			return l.refusalOutcome(ctx, attemptID,
+				Refuse(ClassScopeReuseForbidden, "allows_fee_replacement", "scope forbids fee replacement"), SendResult{})
+		}
+		if ref := checkFeeTriple(int(TxTypeDynamicFee), advanceGasLimit, req.ReplacementFeeMaxPerGas,
+			req.ReplacementFeeMaxPriorityFeePerGas, scope.feeMaxTotal, scope.feeMaxPerGas, scope.feeMaxPriority); ref != nil {
+			return l.refusalOutcome(ctx, attemptID, ref, SendResult{})
+		}
+	}
+
+	signingID := req.ReplacementSigningRequestID
+	if signingID == "" {
+		signingID = signingRequestIDForStep(req.StepID)
+	}
+	content := &PrepareRequest{
+		AttemptID: attemptID, SigningRequestID: signingID, ReplacementOf: anchor.AttemptID,
+		IntentID: anchor.IntentID, BindingRef: anchor.BindingRef,
+		AuthorizationID: authID, AuthorizationVersion: scope.version,
+		RecoveryVersion: uint64(req.RecoveryVersion), ChainID: uint64(anchor.ChainID),
+		Sender: anchor.Sender, Nonce: anchor.Nonce,
+		TxType: TxTypeDynamicFee, GasLimit: advanceGasLimit,
+		MaxFeePerGas: req.ReplacementFeeMaxPerGas, MaxPriorityFeePerGas: req.ReplacementFeeMaxPriorityFeePerGas,
+		Asset: anchor.Asset, Recipient: anchor.Recipient, Amount: anchor.Amount,
+	}
+	if _, err := l.store.PrepareAttempt(ctx, content); err != nil {
+		return l.refusalOutcome(ctx, attemptID, err, SendResult{})
+	}
+	return l.dispatch(ctx, req, attemptID, SendInitial)
 }
 
 // dispatch runs T2/T3 through Send under the presented claim and maps the
@@ -329,22 +410,24 @@ func (l *LifecycleLive) requestEconomics(ctx context.Context, requestID string) 
 	return e, nil
 }
 
-// advanceScopeCaps is the PB scope's version and fee ceilings.
+// advanceScopeCaps is the PB scope's version, fee ceilings and reuse purpose
+// token.
 type advanceScopeCaps struct {
-	version        int64
-	feeMaxTotal    int64
-	feeMaxPerGas   int64
-	feeMaxPriority int64
+	version           int64
+	feeMaxTotal       int64
+	feeMaxPerGas      int64
+	feeMaxPriority    int64
+	allowsReplacement bool
 }
 
-// scopeCaps reads the PB fee caps and version; a grant without a scope cannot
-// carry content (the send gate refuses it the same way).
+// scopeCaps reads the PB fee caps, purpose token and version; a grant without
+// a scope cannot carry content (the send gate refuses it the same way).
 func (l *LifecycleLive) scopeCaps(ctx context.Context, authorizationID string) (advanceScopeCaps, error) {
 	var s advanceScopeCaps
 	err := l.pool.QueryRow(ctx,
-		`SELECT authorization_version, fee_max_total, fee_max_per_gas, fee_max_priority
+		`SELECT authorization_version, fee_max_total, fee_max_per_gas, fee_max_priority, allows_fee_replacement
 		   FROM withdrawal_authorization_scopes WHERE authorization_id = $1`,
-		authorizationID).Scan(&s.version, &s.feeMaxTotal, &s.feeMaxPerGas, &s.feeMaxPriority)
+		authorizationID).Scan(&s.version, &s.feeMaxTotal, &s.feeMaxPerGas, &s.feeMaxPriority, &s.allowsReplacement)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return s, Refuse(ClassAuthorizationUnverifiable, "authorization_scope", "grant has no PB scope row")
 	}
