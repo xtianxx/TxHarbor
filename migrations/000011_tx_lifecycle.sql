@@ -262,9 +262,32 @@ CREATE TABLE tx_attempt_events (
         'signature_persisted', 'signature_refused', 'signature_mismatch',
         'gate_refused', 'send_rejected', 'send_unknown',
         'reconcile_observed', 'receipt_verified', 'receipt_ineffective',
-        'confirmed', 'orphaned', 'reconfirmed', 'replaced', 'unknown_cleared'))
+        'confirmed', 'orphaned', 'reconfirmed', 'replaced', 'unknown_cleared',
+        'post_final_check_expiry', 'region_aborted_no_dispatch',
+        'frozen', 'released'))
 );
 CREATE INDEX tx_attempt_events_attempt_idx ON tx_attempt_events (attempt_id, event_seq);
+
+-- Table 7 - tx_intent_freezes. Additive carrier for the G-010-2 class (c)
+-- adjudication (2026-09-17): a confirmed protection loss (or an unexcludable
+-- post-invalidation send) freezes that intent's further sends pending manual
+-- review. Chain observation/query/reconcile remain allowed. released_at IS
+-- NULL = frozen; a controlled manual release lifts only this cause and never
+-- overrides any other gate. One row per intent (the freeze is intent-scoped).
+CREATE TABLE tx_intent_freezes (
+    intent_id     TEXT        NOT NULL,
+    cause         TEXT        NOT NULL,
+    evidence      TEXT        NOT NULL DEFAULT '',
+    frozen_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
+    released_at   TIMESTAMPTZ,
+    released_by   TEXT,
+    release_basis TEXT,
+    CONSTRAINT tx_intent_freezes_pkey PRIMARY KEY (intent_id),
+    CONSTRAINT tx_intent_freezes_cause_check
+        CHECK (cause IN ('protection_loss_residual')),
+    CONSTRAINT tx_intent_freezes_release_consistency
+        CHECK ((released_at IS NULL) = (released_by IS NULL))
+);
 
 -- +goose Down
 -- Drop only 010 objects, in exact reverse FK-dependency order: every other
@@ -272,6 +295,7 @@ CREATE INDEX tx_attempt_events_attempt_idx ON tx_attempt_events (attempt_id, eve
 -- their tables; the identity sequences are table-owned. Authoring/scratch
 -- hygiene only (cf. 000009 Down); 010 rows are audit evidence in production.
 DROP TABLE IF EXISTS tx_attempt_events;
+DROP TABLE IF EXISTS tx_intent_freezes;
 DROP TABLE IF EXISTS tx_receipts;
 DROP TABLE IF EXISTS tx_reconciliations;
 DROP TABLE IF EXISTS tx_send_attempts;
