@@ -22,6 +22,7 @@ import (
 	"syscall"
 
 	"github.com/xtianxx/txharbor/internal/app"
+	"github.com/xtianxx/txharbor/internal/jointwire"
 )
 
 func main() {
@@ -32,7 +33,7 @@ func run(args []string) int {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	d := app.Deps{Getenv: os.LookupEnv, Stdout: os.Stdout, Stderr: os.Stderr}
+	d := app.Deps{Getenv: os.LookupEnv, Stdout: os.Stdout, Stderr: os.Stderr, JointWiring: jointwire.Worker}
 	if len(args) == 0 {
 		usage(os.Stderr)
 		return 2
