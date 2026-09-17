@@ -1,5 +1,3 @@
-//go:build integration
-
 // lifecycle_live.go owns 010's in-process implementation of 011's
 // LifecycleAdvancer/LifecycleReader boundary (contracts/lifecycle.md §2):
 // 011 passes identity, fencing, action and step_id only; this adapter composes
@@ -9,10 +7,11 @@
 // the reconcile side. It never allocates a nonce, never creates an intent and
 // never bypasses a gate.
 //
-// Build tag: the adapter implements 011-owned interfaces, so it is compiled
-// for the joint acceptance only (-tags integration) — the same seam shape as
-// 009's binding_live.go. The default 010 build stays free of the 011 package,
-// keeping the 010 lane independently buildable and mergeable ahead of 011.
+// Dependency direction: this package imports internal/execution for the
+// 011-owned boundary interfaces only; the reverse import is forbidden and is
+// pinned by internal/execution/boundary_test.go. The 008 binding read port for
+// the untagged build lives in internal/jointwire because internal/execution's
+// default import graph must stay free of 008's RPC-bearing read package.
 //
 // Idempotency (lifecycle.md §4, required of 010): 010 converges on
 // (intent_id, step_id). The attempt identity is derived deterministically from
