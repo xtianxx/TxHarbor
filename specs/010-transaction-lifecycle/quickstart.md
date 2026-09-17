@@ -144,6 +144,13 @@ V-scenarios. **Exit**: static boundary holds; observability present at introduct
   repaying.
 - **J4 reorg revision**: a joint reorg after confirmation revises 011's projection in revision order, keeps
   the original intent, and never rebuilds payment.
+- **J5 lock-loss residual, detectable path only** (G-010-2 class (c), 2026-09-17 exception): fault injection kills
+  the region's DB session after the gate reads without the sender's knowledge, commits a pause, then lets the
+  network send proceed. Assert: the send row's recorded versions vs the pause evidence prove a stale basis →
+  the intent's further sends freeze pending manual review (chain observation/query/reconcile stay available);
+  unresolvable ordering stays indeterminate (never defaulted to safe); manual review lifts only this freeze
+  cause and any resend re-verifies all current gates. Assert what is NOT claimed: no proof the window is
+  tiny/rare; no detection guarantee for unobservable faults.
 
 Joint exit requires real HTTP (007 + 009), real PG, real Anvil; the contract-shaped fixture, any mock, or a
 010-independent pass **never** substitutes (FR-16, workflow P5).

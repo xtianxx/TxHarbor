@@ -88,11 +88,18 @@ possibly-unrecorded send → send-`unknown`, resolved by probing `tx_hash`; the 
 dispatch is certain in-process → record `region_aborted_no_dispatch`; the attempt's business effect stays
 `unknown` pending reconcile; committed refusals and definitive verdicts are never rewritten into `unknown`.
 (c) lock protection lost without sender perception before dispatch (session dies silently after the gate reads;
-writers proceed; the network send starts afterwards) → irreducible window: mitigated by a `SELECT 1`
-liveness probe immediately before dispatch, exactly one dispatch attempt, and minimal entry latency; detected
-best-effort by version comparison at reconcile, and a proven-stale basis escalates to operator review (no
-auto-resend, no relabeling). Class (c) is a new residual pending adjudication — authorized by nothing in
-this contract. A crashed region is otherwise indistinguishable from "never dispatched" at the storage layer,
+writers proceed; the network send starts afterwards) → irreducible window, adjudicated 2026-09-17 as a second
+explicit limited Q3 exception: mitigated by a `SELECT 1` liveness probe on the same session/transaction holding
+the locks (never a reconnect; mitigation only — a successful probe proves nothing past its own return),
+exactly one dispatch attempt, and minimal entry latency (optimization goal, not a proven bound); detected
+best-effort by comparing recorded authorization/recovery/execution versions plus change evidence at reconcile
+(post-hoc version equality proves nothing; unresolvable ordering stays indeterminate), and a proven-stale basis
+or an unexcludable post-invalidation send freezes that intent's further sends pending manual review (chain
+observation/query/reconcile remain allowed; normal takeover/version updates are not violation evidence).
+Manual review lifts only this residual's independent freeze cause under controlled permission with evidence and
+audit, never overrides revoke/expiry/pause/eligibility gates; full re-verification precedes any resend and
+reconcile never directly permits resend. This exception covers this residual only — not other residuals and not
+actual verification. A crashed region is otherwise indistinguishable from "never dispatched" at the storage layer,
 so the next operation performs a reconcile probe before dispatching (R-010-06).
 
 **(e) known results are not rewritten.** `accepted`/`rejected` rows are immutable. Reconciliation appends
