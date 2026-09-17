@@ -133,6 +133,13 @@ in **research R11**. Summary of real vs extended capability:
   it read-only in the same `FOR SHARE` sequence, checks equality, persists the version on the
   request, and re-checks version/fingerprint at delivery; a grant with no scope row/version is
   **refused fail-closed** (`authorization_unverifiable`), never silently accepted.
+  **2026-09-17: this carrier is LANDED on main** (PB PR #11, merge `da316d5`;
+  requirements on 009 recorded as H1–H5 in the PB lane's T051 handoff
+  `specs/012-007-authorization-carrier/handoff-009.md`). What changed for 009:
+  the closure moves from "wait for the carrier" to "adapt to the carrier"
+  (H1 scope read + H2 version persist/re-check + H3 `replacement_of` threading +
+  H4 literal replacement + H5 joint acceptance). Fail-closed stays until H1–H4
+  land; the old fail-closed subset is NOT upgraded to complete.
 - **Not substitutes**: the `authz:v1` fingerprint, the `caller_id` FK, and ordinary caller/API
   authentication are not authorization capabilities.
 - **Open business questions (R11)**: Q-A (cryptographic authenticity required in v1?) and Q-B
@@ -356,14 +363,50 @@ are justified explicitly:
 | ID | Item | Owner |
 |---|---|---|
 | T000-P | Production KMS/HSM provider selection/integration (interface ready; no provider ships) | later production track |
-| D3 | 008 binding read adapter + five-class integration acceptance (interface defined in gates.md §3); the R6 `ReadBinding` serialization obligation is now bilateral (008 read-api §4 scope-row `FOR SHARE`; 006 ordering stays 009-side R6) — final integration acceptance still waits for 008 | 008 contract availability |
+| D3 | 008 binding read adapter + five-class integration acceptance (interface defined in gates.md §3). **2026-09-17: 008 is merged** (`origin/main` = `da316d5`; PR #10 `02641fb`). The adapter target is now concrete: `*nonce.ReadProvider` (`internal/nonce/readapi.go:220`; `NewReadProvider` :231; `Authenticate` :251; `Read`/`ReadByIntent`/`ReadByBindingID` :261-276) returning the five read outcomes (`bound`/`terminal`/`not_bound`/`mismatch`/`unavailable` + 401, `errors.go:79+`). There is no `BindingReader` type in 008 — T028 implements 009's gates.md §3 interface over `ReadProvider.Read`, deriving the class from `(Outcome, Annotations)` per gates.md:149-158. The R6 serialization obligation is confirmed bilateral against merged 008: its read path takes scope-row `FOR SHARE` (`readapi.go:355,388` via `coord.go:214`) and all its scope-row writers take `FOR UPDATE` (`allocate.go:388,391`; `admin.go:238,338`; `reconcile.go:365,368`). Remaining: T028 (`binding_live_integration_test.go`, doubles retired for that path) | T028 (008 now available) |
 | G-1 | **CLOSED in-plan** (2026-09-16): the pause/revoke-vs-delivery window is closed by the gate-table `SHARE` lock (research R6); no 006 change and no deferred residue | 009 plan (R6) |
-| D-1 | 007 carrier gap: no `intent_id`/`request_id` linkage — concrete closure carrier/owner/entry/protocol in research R11 (`withdrawal_authorization_scopes`); 009 fails closed until available | 007/011 extension (R11) |
-| D-2 | 007 carrier gap: no authorization version — closure via R11 `authorization_version`; the fingerprint remains a labelled surrogate, never a version | 007/011 extension (R11) |
-| D-3 | 007 carrier gap: no fee-scope/purpose — OC-5 conditional rule restored (R7); reuse branch unreachable until the R11 carrier lands; fresh authorization is the operative branch, not the rule | 007/011 extension (R11) |
+| D-1 | 007 carrier gap: no `intent_id`/`request_id` linkage — **2026-09-17: carrier LANDED on main** (PB merge `da316d5`; `migrations/000010_withdrawal_authorization_scopes.sql`; scope fields `grant.go:192-212`; contract `specs/012-007-authorization-carrier/contracts/supply-scope.md`; 009-side requirements H1/H4 in T051 handoff). 009 adaptation pending: real scope-row read in the same `FOR SHARE` sequence (H1), replace `submit.go:211` literal (H4); scopeless stock still refuses per-request (V-PB3-009 stays 009-owned) | 009 adaptation (H1, H4) |
+| D-2 | 007 carrier gap: no authorization version — **2026-09-17: version semantics LANDED on main** (`authorization_version` starts 1, bumped only by `scopeBumpVersionSQL` on non-active re-supply incl. bare revoke per D1; `grant.go:141-157,774-778,825-831`; requirements H2 in T051 handoff). 009 adaptation pending: persist the version at submit (009-owned DDL in still-unapplied `000009`) + equality re-check at delivery alongside the fingerprint; keep grant state/validity re-check, never version-alone | 009 adaptation (H2) |
+| D-3 | 007 carrier gap: no fee-scope/purpose — **2026-09-17: fee rules LANDED on main** (`validateFeeScope`, `grant.go:448-481`; `allows_fee_replacement` purpose token; requirements H1/H3 in T051 handoff). 009 adaptation pending: thread `replacement_of` = anchor row id on fee-replacement requests, gate reuse on scope permission + in-range fee (fresh authorization otherwise); OC-5 rule unchanged, reuse branch becomes reachable | 009 adaptation (H1, H3) |
 | D-4 | 007 carrier gap: no `revoked_at` (revocation observed as `state='revoked'`); closure column in R11 | 007/011 extension (R11) |
 | Q-A/Q-B | **Decided 2026-09-16** (research R11 resolutions): Q-A → trusted-issuance control without mandatory per-grant cryptography (`--operator` audit-only; authenticated+authorized issuer; explicit trust boundary; evidence-or-fix in tasks); Q-B → per-grant `authorization_unverifiable` refusal, no bulk backfill, re-issuance with traceability and no second intent/nonce or silent rebinding; neither self-certifies merge/deploy readiness | business ruling recorded (007/011) |
-| Merge order | Development of 008 (`000008`) and 009 (`000009`) may proceed in parallel with fail-closed behavior, but NEITHER merges early on the back of incompleteness: 008 merges on its own complete acceptance; 009 merges only with the scopes-carrier batch (a 007-extension batch owns the additive migration, the extended `withdrawal-authz supply` entry, and the Q-A trusted-issuance permission control — recorded assignment, overridable; 011 is a consumer) PLUS full legal-path acceptance (new-grant path, controlled entry, refusal paths, recovery scenarios per Q-A/Q-B rulings). 011 capabilities MUST NOT be treated as available now. | 007-extension batch + 009 acceptance |
+| Merge order | **2026-09-17: 008 and the scopes-carrier batch are both merged** (`origin/main` = `da316d5`: PR #10 `02641fb` for 008, PR #11 `da316d5` for PB). The recorded assignment is discharged on the provider side. 009 now merges on its own complete acceptance: H1–H5 + V-PB3-009 + full legal-path acceptance (new-grant path, controlled entry, refusal paths, recovery scenarios per Q-A/Q-B rulings). 011 capabilities MUST NOT be treated as available now. T035 syncs onto then-current `main` and reconciles every shared file: `cmd/txharbor/main.go` (008 added `nonce-admin` case at the same switch 009 extends), `internal/app/serve.go` (008 added rebuild gate + `/nonce/bindings/` + reconcile loop; 009 touches the same `http.Server` literal), `internal/config/config.go` (008 added `NonceReadToken` in the same const/struct/Load/Summary blocks 009 extends ~179 lines into); `migrations/embed.go` is identical across lanes (clean union). Keep `000009` numbering: main already contains `000010`, and `WithAllowOutofOrder(true)` (`internal/db/migrate.go:277-285`) fills the 9-gap — no renumbering. PB's pinned 009 test fixture (`internal/db/testdata/000009_signer_service.sql` on main) is byte-identical to this lane's `migrations/000009_signer_service.sql` (sha256 `53e6ca6f…`, verified 2026-09-17); if this lane's `000009` changes before merge, re-pin deliberately and re-judge — never drift silently. At 009 merge, update/remove main-side `TestLaneMigrationsExclude009` + the hash pin. | 009 acceptance, then T035 |
 | F-1 | 010/011 consumption fixtures: a contract-conforming test caller (OC-4 input shape) keeps 009 developable; no 010/011 specs, tables, or fixtures beyond the test caller are created here | 010/011 (later specs) |
+
+## Tasks-input for the next round (2026-09-17 alignment; not executed here)
+
+Executable input for a later tasks increment (no tasks generated or run in this round):
+
+1. **H1 (scope read + checks)**: extend `GrantReadSQL` path to load the
+   `withdrawal_authorization_scopes` row for the same `authorization_id` in the
+   same `FOR SHARE` sequence; add consumption fields to `GrantScope`; enforce
+   per-request id/sender/intent/request linkage + fee triple within caps +
+   `allows_fee_replacement` purpose; keep 009 policy caps conjunctive; never
+   re-refuse on `attested_by` alone. Acceptance: legal scoped grant passes
+   submit; out-of-scope fee/sender/intent refuses; missing cap refuses.
+2. **H2 (version)**: 009-owned DDL adds `authorization_version` to still-unapplied
+   `000009`; persist at submit alongside the fingerprint; equality re-check at
+   delivery (`deliveryGrantClass`) + keep grant state/validity re-check.
+   Acceptance: revoke-then-resupply between submit and delivery blocks.
+3. **H3 (`replacement_of`)**: write anchor row id on fee-replacement requests;
+   gate reuse on scope permission + in-range fee; new authorization + PB
+   re-issue otherwise. Acceptance: anchor partial-unique preserved; forbidden
+   reuse refuses.
+4. **H4 (literal replacement)**: replace `submit.go:211` hardcoded refusal with
+   the H1 read result; update dependent fixtures
+   (`restart/binding/gates_integration_test`); SELECT-only boundary on
+   grant/scope/audit tables holds. Acceptance: scopeless stock still refuses
+   per-request (V-PB3-009); present-and-verifiable passes.
+5. **H5 + T028 (live paths)**: T028 wires T034 delivery against live
+   `*nonce.ReadProvider` (adapter per gates.md:149-158; doubles retired for that
+   path; real `ReadBinding` against merged 008); H5 runs the full legal path
+   submit → delivery with zero `authorization_unverifiable`. Deps: H1–H4 +
+   merged main.
+6. **T035 (sync)**: rebase/merge onto then-current `main` (merge-vs-rebase chosen
+   from real branch state at that time); reconcile `main.go`/`config.go`/`serve.go`;
+   keep `000009` numbering; re-pin PB fixture if `000009` changed; update/remove
+   `TestLaneMigrationsExclude009`; rerun T005/T026/T028 on the merged tree.
+   Parallel-safe now: H1–H4 adaptation + T028 test prep can proceed in this lane
+   against `origin/main` (`da316d5`) read-only; T035 executes after H1–H5 green.
 
 
