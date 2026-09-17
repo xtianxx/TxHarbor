@@ -68,6 +68,15 @@ const (
 
 	// Storage/coordination failure before dispatch.
 	ClassCoordinationUnavailable RefusalClass = "coordination_unavailable"
+
+	// G-010-2 class (c): an intent whose protection loss is confirmed (or an
+	// unexcludable post-invalidation send) is frozen pending manual review.
+	// This is an independent cause: releasing it never lifts revoke/expiry/
+	// pause/eligibility gates (T039/T040).
+	ClassIntentFrozen RefusalClass = "intent_frozen"
+	// A controlled manual release presented without the configured permission
+	// is refused fail-closed (T040).
+	ClassReleaseNotPermitted RefusalClass = "release_not_permitted"
 )
 
 // Retryability is the send-api.md §3 retry column as a machine value.
@@ -126,6 +135,12 @@ func RetryabilityOf(class RefusalClass) Retryability {
 		ClassAttemptConflict, ClassHashConflict, ClassReplacementMismatch, ClassReplacementNoFeeChange,
 		ClassBindingTerminal, ClassSignatureMismatch:
 		return RetryNever
+	case ClassIntentFrozen:
+		// Only a controlled manual release lifts this independent cause; then
+		// the caller retries and every gate is re-evaluated (T039/T040).
+		return RetryAfterStateChange
+	case ClassReleaseNotPermitted:
+		return RetryNever
 	case ClassSignatureRefused:
 		return RetrySignerDocumented
 	default:
@@ -153,6 +168,17 @@ const (
 	EventReconfirmed        = "reconfirmed"
 	EventReplaced           = "replaced"
 	EventUnknownCleared     = "unknown_cleared"
+	// G-010-1: a natural expiry landing between the last evaluation and
+	// dispatch entry. Recorded as a residual, never described as legally
+	// in-flight (send-gate.md §4(c)).
+	EventPostFinalCheckExpiry = "post_final_check_expiry"
+	// G-010-2(b): a reliably-preventable pre-dispatch abort. Not a send
+	// result; the business effect stays unknown pending reconcile.
+	EventRegionAbortedNoDispatch = "region_aborted_no_dispatch"
+	// G-010-2(c)/T039: the intent's further sends are frozen pending review.
+	EventFrozen = "frozen"
+	// T040: a controlled manual release lifted the freeze cause.
+	EventReleased = "released"
 )
 
 // validEvents mirrors Table 6's CHECK so append paths can reject a typo before
@@ -164,6 +190,8 @@ var validEvents = map[string]bool{
 	EventReconcileObserved: true, EventReceiptVerified: true, EventReceiptIneffective: true,
 	EventConfirmed: true, EventOrphaned: true, EventReconfirmed: true,
 	EventReplaced: true, EventUnknownCleared: true,
+	EventPostFinalCheckExpiry: true, EventRegionAbortedNoDispatch: true,
+	EventFrozen: true, EventReleased: true,
 }
 
 // ValidEvent reports whether event is one of the Table 6 vocabulary values.

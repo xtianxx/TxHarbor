@@ -16,7 +16,6 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/crypto"
-	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 )
 
@@ -221,13 +220,9 @@ func (s *Store) SignAndPersist(ctx context.Context, attempt *Attempt, result Sig
 	if _, err := tx.Exec(ctx, writeGuard); err != nil {
 		return SignedRecord{}, Refuse(ClassCoordinationUnavailable, "", "storage unavailable")
 	}
-	var revisionSeq int64
-	if err := tx.QueryRow(ctx,
-		`SELECT revision_seq FROM tx_attempts WHERE attempt_id = $1 FOR UPDATE`, attempt.AttemptID).Scan(&revisionSeq); err != nil {
-		if errors.Is(err, pgx.ErrNoRows) {
-			return SignedRecord{}, Refuse(ClassAttemptNotFound, "attempt_id", "no such attempt")
-		}
-		return SignedRecord{}, Refuse(ClassCoordinationUnavailable, "", "storage unavailable")
+	revisionSeq, _, err := lockAttemptRow(ctx, tx, attempt.AttemptID)
+	if err != nil {
+		return SignedRecord{}, err
 	}
 	if _, err := tx.Exec(ctx,
 		`INSERT INTO tx_attempt_signings (attempt_id, signature, signed_tx_bytes, tx_hash) VALUES ($1,$2,$3,$4)`,
@@ -238,28 +233,13 @@ func (s *Store) SignAndPersist(ctx context.Context, attempt *Attempt, result Sig
 		}
 		return SignedRecord{}, Refuse(ClassCoordinationUnavailable, "", "storage unavailable")
 	}
-	tag, err := tx.Exec(ctx,
-		`UPDATE tx_attempts SET state = 'signed', revision_seq = revision_seq + 1, updated_at = now()
-		  WHERE attempt_id = $1 AND revision_seq = $2 AND state = 'prepared'`,
-		attempt.AttemptID, revisionSeq)
-	if err != nil {
+	if _, err := applyStateTx(ctx, tx, attempt.AttemptID, revisionSeq, []string{"prepared"}, "signed", ""); err != nil {
+		if errors.Is(err, ErrRevisionMoved) {
+			return SignedRecord{}, Refuse(ClassSendStale, "", "attempt revision moved; retry from current state")
+		}
 		return SignedRecord{}, Refuse(ClassCoordinationUnavailable, "", "storage unavailable")
 	}
-	if tag.RowsAffected() != 1 {
-		return SignedRecord{}, Refuse(ClassSendStale, "", "attempt revision moved; retry from current state")
-	}
-	// T015 hook: event_seq allocation and the revision guard above are
-	// hand-rolled for W0. T015's shared revision/event machinery generalizes
-	// this (store.go writer chain T010→T015→T030) without duplicating it here.
-	var eventSeq int64
-	if err := tx.QueryRow(ctx,
-		`SELECT COALESCE(MAX(event_seq), 0) + 1 FROM tx_attempt_events WHERE attempt_id = $1`, attempt.AttemptID).Scan(&eventSeq); err != nil {
-		return SignedRecord{}, Refuse(ClassCoordinationUnavailable, "", "storage unavailable")
-	}
-	if _, err := tx.Exec(ctx,
-		`INSERT INTO tx_attempt_events (attempt_id, event_seq, event, recovery_version, detail)
-		 VALUES ($1,$2,$3,$4,$5)`,
-		attempt.AttemptID, eventSeq, EventSignaturePersisted, attempt.RecoveryVersion, "tx_hash="+strings.ToLower(result.TxHash)); err != nil {
+	if err := appendEventTx(ctx, tx, attempt.AttemptID, EventSignaturePersisted, "", recoveryVersionPtr(attempt.RecoveryVersion), "tx_hash="+strings.ToLower(result.TxHash)); err != nil {
 		return SignedRecord{}, Refuse(ClassCoordinationUnavailable, "", "storage unavailable")
 	}
 	if err := tx.Commit(ctx); err != nil {
