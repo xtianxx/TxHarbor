@@ -251,17 +251,17 @@
   - 只读 `claim-show` / `step-list` / `event-list`（无写、无审计）。
 - **阈值提案（供用户裁决，未批准；一切数值都是 proposal，不得被当作业务承诺）**：
 
-| 参数 | 提案值 | 依据 |
-|---|---|---|
-| `lease_ttl` | 30s | indexer 租约 15s TTL / 5s 心跳的 3:1 比例（`internal/indexer/lease.go:27-28`）；011 单步含一次跨包 010 调用（其内部语句受 5s statement guard 约束，`internal/signer/plan` 同款守卫 `renewLockGuard`）加签名与 RPC 往返；30s 容一次完整错失续租 |
-| `heartbeat` | 10s（TTL/3，±10% 抖动） | 同 indexer 比例与抖动（`:36,233-239`） |
-| `stall_window` | 300s（10×TTL） | 章程 IX 要求所有外部调用有界（仓库用 5s 语句守卫、RPC 超时）；健康 worker 每个退避周期至少落一条进度或权威观察；300s ≥ 10× 最长有界单步 |
-| `claim_backoff` | base 1s、cap 30s、±25% 抖动 | PG 点语句毫秒级；claim 行按 intent 分布、争抢低；抖动沿 indexer `jitter`（`internal/indexer/scanner.go:1012-1014`） |
-| `scan_interval` | 1s | 单机 PG 点查询量级；仅为 worker 自身节奏，不是业务时限 |
-| `step_retry` | 每轮 ≤3 次、仅对可重试/不可用类 | 章程 IX「重试必须有界」；未知/拒绝不重试（先对账） |
-| 投影刷新节奏 | 每轮消费 + 30s 全量追赶 + 失败即标可能过期 | C11：显示时限未指定；机制存在，**不写秒级 SLA** |
+| 参数 | 提案值 | 依据 | 状态 |
+|---|---|---|---|
+| `lease_ttl` | 30s | indexer 租约 15s TTL / 5s 心跳的 3:1 比例（`internal/indexer/lease.go:27-28`）；011 单步含一次跨包 010 调用（其内部语句受 5s statement guard 约束，`internal/signer/plan` 同款守卫 `renewLockGuard`）加签名与 RPC 往返 | 2026-09-17 批准为初始配置（正常调度/DB 响应下留一次错失心跳余量，不承诺任意延迟下容错） |
+| `heartbeat` | 10s（TTL/3，±10% 抖动） | 同 indexer 比例与抖动（`:36,233-239`） | 随上批准（派生比例） |
+| `stall_window` | 300s（独立取值，非 TTL 联动） | 章程 IX 有界调用；健康 worker 每退避周期至少落一条进度或权威观察；300s ≥ 10× 最长有界单步 | 2026-09-17 批准为初始阈值（心跳/续租/退避/重领/无新事实轮询不刷新进展；诊断与进展记录分开） |
+| `claim_backoff` | base 1s、cap 30s、±25% 抖动 | PG 点语句毫秒级；claim 行按 intent 分布、争抢低；抖动沿 indexer `jitter`（`internal/indexer/scanner.go:1012-1014`） | 技术参数，plan 决定 |
+| `scan_interval` | 1s | 单机 PG 点查询量级；仅为 worker 自身节奏，不是业务时限 | 技术参数，plan 决定 |
+| `step_retry` | 每轮 ≤3 次、仅对可重试/不可用类 | 章程 IX「重试必须有界」；未知/拒绝不重试（先对账） | 技术参数，plan 决定 |
+| 投影刷新节奏 | 每轮消费 + 30s 全量追赶 + 失败即标可能过期 | C11：显示时限未指定；机制存在，**不写秒级 SLA** | 技术参数，plan 决定 |
 
-- 上述数值全部实现为配置默认值（`TXHARBOR_WORKER_*`），启动时 fail-closed 校验（正数、heartbeat<TTL、stall_window>TTL）；`plan.md` 与 quickstart 记录「待裁决」状态，任务阶段不得把它们写成已批准的业务时限。
+- 批准附带条件（2026-09-17）：租约有效期以 DB 权威时间和成功提交的续租事实为准；心跳已发起/进程存活/续租结果未知均不延长资格；过期资格 MUST NOT 由迟到续租复活，须按新版本重领；plan 覆盖迟到续租、提交未知与接管竞争。批准值不定义停滞外其他语义；后续参数变更须明确校验及对在途租约生效规则，配置修改/重启 alone 不得延长既有资格。本次批准不代表其余缺口闭合或自动进入 tasks。其余未批准数值仍为提案：实现为配置默认值（`TXHARBOR_WORKER_*`），启动时 fail-closed 校验（正数、heartbeat<TTL、stall_window>TTL）。
 
 **Rationale**: 规范与 M3 明确要求「判定依据、竞争保护、防误判机制留 plan；业务超时阈值须提有依据的建议供确认，不自行设定」；把机制与数值分离，机制可以设计，数值只提案。
 

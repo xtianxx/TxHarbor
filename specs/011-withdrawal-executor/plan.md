@@ -122,7 +122,7 @@ evidence-required operator paths. Lock discipline stays ring-free: gate-table `S
 006 snapshot → 007 grant/scope `FOR SHARE` → 008 read → own rows; no upstream writer takes an 011 row, and
 010's only 011 interaction is the read-only claim-row verification (gates.md §4).
 
-Verification-round addendum (2026-09-17): no new violations introduced by verification. Status split: plan documents delivered; design closed except threshold proposals (`lease_ttl`/`stall_window`, pending user ruling) and C10/C12 execution; joint acceptance not executed.
+Verification-round addendum (2026-09-17): no new violations introduced by verification. Adjudication addendum (2026-09-17): `lease_ttl`=30s / heartbeat 10s approved as initial config, `stall_window`=300s approved as initial threshold (independent value; conditions in research R14); approval covers these items only. Status split: plan documents delivered; design closed except C10/C12 execution and plan-level mechanisms; joint acceptance not executed; no auto-entry into tasks.
 
 ## Inherited rulings (verbatim) and joint contract v1 mapping
 
