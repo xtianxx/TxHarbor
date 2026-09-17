@@ -17,15 +17,25 @@ redirected to persisted files; exit code captured per command, no pipes):
 - `go test -tags integration -count=1 -p 1 -timeout 30m ./...` exit 0 → all 10 test packages ok (indexer 798s / withdrawal 425s / nonce 140s / app 140s / db 97s …), zero FAIL, no package-level skips (2 no-test-files only). `-p 1` differs from default CI concurrency (GOMAXPROCS) — chosen to remove parallel-container pressure; no test/package/assertion changed.
 - Prior-run flakes (exit-1 run on f18155f: container-start timeout + health timing; bcc01be run: revocation lock-wait + deposit observability) all isolated-green on rerun AND absent in this clean full run — assessed as parallel-load flakes, records retained above.
 - T052 DONE (green on final tree + this index). 29/29 ticked.
+- Historic totals (964/979 unit, 697/714 3-pkg, 1689 full) came from runner
+  summaries and are NOT re-asserted as exact acceptance counts — the verifiable
+  record is the commands + exit-0 outcomes above plus the per-case `-v` logs
+  below. Do not quote totals without this caveat.
+- SHA roles (distinct meanings, do not conflate): `f18155f` = last code change;
+  `922046a` = tree the full gates ran on (code-identical to `f18155f`, docs-only
+  delta); `017d981` = evidence-doc HEAD at gate time; current HEAD = this
+  commit (per-case logs + this note only).
 - `go build ./...` exit 0; `go vet ./...` exit 0; `gofmt -l` clean.
 - `go test ./... -count=1` exit 0 → 979 passed, 12 packages.
 - `go test -tags integration -count=1 ./internal/withdrawal/ ./internal/app/ ./internal/db/` exit 0 → 714 passed, 3 packages; `-race` same set exit 0 → 714 passed.
 - `go test -tags integration -count=1 -timeout 30m ./...` exit 1 → 1705 passed, 2 failed, 1 skipped. Failures: `TestWithdrawalAuthIssueAuthenticate` (container START failed: "context deadline exceeded" — docker pressure, 007 file PB never touched) and `TestReadyzFlipsAndRecoversWithRealDependencies` (006 health timing, file PB never touched). Both isolated-green on rerun on this SHA. Shared-code association checked: PB shared diffs are `migrate.go` (allow-out-of-order) + `grant.go` (revoke bump, resolve re-read) — neither touches auth issuance nor health/readiness paths.
 - Prior SHA gates (bcc01be, retained): unit 964; 3-pkg 697 (+race 697); full 1689 + 2 flakes isolated-green (`TestWithdrawalRevocationLockWaitExpiry`, `TestDepositObservabilityEndToEnd`).
 - New suites green on f18155f: unknown-window kill + pre/post-commit kill, `--api-key-file` + conflict + secrecy, exit-2, open3 content snapshot, D1 version-sync, T2 resolve-retryable.
-**LOG POINTERS**: every per-case log path below is `MISSING` — no old run logs
-were persisted in this lane; do NOT treat any absence as a pass. Final T052
-regression fills each `LOG` line from a real run.
+**LOG POINTERS**: per-case `-v` logs for the V-PB matrix live in
+`/tmp/pb-percase-017d981/` (wd-batch1.log 20 PASS, app-batch2.log 12 PASS,
+wd-kill.log 3 PASS, db-batch.log 8 PASS, wd-unit.log 1 PASS; SHA256SUMS in dir;
+NOT committed — retention recorded here). Older gate summaries without per-case
+detail remain as historical context only.
 
 ## How to run (integration)
 
@@ -40,28 +50,28 @@ Single case:
 
 | Case | Test(s) | File:line | Run command | Log |
 |---|---|---|---|---|
-| V-PB1 legal supply + 009-style read-back | `TestWithdrawalGrantScopedSupplyWritesScopeRow`; CLI `TestWithdrawalAuthzCmdMintSupplyRevoke` | `internal/withdrawal/grant_integration_test.go:1045`; `internal/app/withdrawalauthz_integration_test.go:127` | `go test -tags integration -count=1 -run 'TestWithdrawalGrantScopedSupplyWritesScopeRow|TestWithdrawalAuthzCmdMintSupplyRevoke' ./internal/withdrawal/ ./internal/app/` | MISSING |
-| V-PB2 unauthorized/unmapped supply refused | `TestWithdrawalGrantAuthorityUnmappedRefused`; `TestWithdrawalGrantAuthorityInTxCheck`; CLI `TestWithdrawalAuthzCmdPermissionGate`, `TestWithdrawalAuthzCmdNegativeMatrix` | `internal/withdrawal/grant_authority_integration_test.go:127,68`; `internal/app/withdrawalauthz_integration_test.go:254,347` | `go test -tags integration -count=1 -run 'TestWithdrawalGrantAuthority' ./internal/withdrawal/ && go test -tags integration -count=1 -run 'TestWithdrawalAuthzCmd(PermissionGate|NegativeMatrix)' ./internal/app/` | MISSING |
-| V-PB3-PB scopeless stock queryable + scope absent | `TestGrantScopelessDetailUnchanged` (unit); stock path exercised in `TestWithdrawalAuthzOpen3DryRunReissue` step 1; content proof `TestWithdrawalReissueMintsNewIdentityWithSideEffectProof` | `internal/withdrawal/grant_test.go:334`; `internal/app/open3_dryrun_integration_test.go:275-296`; `internal/withdrawal/grant_integration_test.go:1573` | `go test -count=1 -run 'TestGrantScopelessDetailUnchanged' ./internal/withdrawal/ && go test -tags integration -count=1 -run 'TestWithdrawalAuthzOpen3DryRunReissue' ./internal/app/` | MISSING |
-| V-PB4 fee boundaries | `TestWithdrawalGrantScopedSupplyFeeTripleBoundaries` | `internal/withdrawal/grant_integration_test.go:1120` | `go test -tags integration -count=1 -run '^TestWithdrawalGrantScopedSupplyFeeTripleBoundaries$' ./internal/withdrawal/` | MISSING |
-| V-PB5 fee-replacement conditional | `TestWithdrawalGrantScopedSupplyFeeTripleBoundaries` (carrier only *expresses* `allows_fee_replacement`; the conditional-reuse decision is 009-owned per PB-FR-05) | `internal/withdrawal/grant_integration_test.go:1120` | same as V-PB4 | MISSING |
-| V-PB6 revoke vs supply race | `TestWithdrawalGrantRevokeSupplyRace`; authority race `TestWithdrawalGrantAuthorityRevokeRace` | `internal/withdrawal/grant_integration_test.go:1297`; `internal/withdrawal/grant_authority_integration_test.go:159` | `go test -tags integration -count=1 -run 'TestWithdrawalGrant(RevokeSupplyRace|AuthorityRevokeRace)' ./internal/withdrawal/` | MISSING |
-| V-PB7 atomicity (kill -9 phase points) | `TestCarrierKillScopedSupplyPreCommit`; `TestCarrierKillScopedSupplyPostCommit`; child helper `TestCarrierKillChildScopedSupply` | `internal/withdrawal/carrier_kill_integration_test.go:362,429,274` | `go test -tags integration -count=1 -run '^TestCarrierKillScopedSupply(PreCommit|PostCommit)$' ./internal/withdrawal/` | MISSING |
-| V-PB8 commit-unknown same-op retry | `TestWithdrawalGrantUncertainCommitSameOperationRetry` | `internal/withdrawal/grant_integration_test.go:643` | `go test -tags integration -count=1 -run '^TestWithdrawalGrantUncertainCommitSameOperationRetry$' ./internal/withdrawal/` | MISSING |
-| V-PB9 re-issuance dry-run (OPEN-3) | `TestWithdrawalAuthzOpen3DryRunReissue` (owns the 7-table `row_to_json` content snapshot over a seeded non-empty fixture); library-level snapshot + `ctid`/`xmin` identity owned by T030 `TestWithdrawalReissueMintsNewIdentityWithSideEffectProof` | `internal/app/open3_dryrun_integration_test.go:214`; `internal/withdrawal/grant_integration_test.go:1573` | `go test -tags integration -count=1 -run 'TestWithdrawalAuthzOpen3DryRunReissue|TestWithdrawalReissueMintsNewIdentityWithSideEffectProof' ./internal/app/ ./internal/withdrawal/` | MISSING |
-| V-PB10 migration chain incl. gap-fill | `TestT041GapFillSequenceD`; `TestT040OverlayGreenOnEmptySequence`; `TestT042RollbackRevertsTenBeforeNine`; `TestT042DownOfAppliedThenRenumberedNumberForbidden`; lane guard `TestLaneMigrationsExclude009` | `internal/db/scratch_009_overlay_integration_test.go:155,210,292,340`; `internal/db/lane_migrations_test.go:19` | `go test -tags integration -count=1 -run 'TestT04[012]|TestLaneMigrationsExclude009' ./internal/db/` | MISSING |
-| V-PB11 allowlist switchover rehearsal | `TestAllowlistSwitchoverRehearsal`; `TestAllowlistSwitchoverRehearsalUnaccountedExecutorKeepsEntryClosed` | `internal/app/allowlist_switchover_integration_test.go:331,446` | `go test -tags integration -count=1 -run '^TestAllowlistSwitchoverRehearsal' ./internal/app/` | MISSING |
+| V-PB1 legal supply + 009-style read-back | `TestWithdrawalGrantScopedSupplyWritesScopeRow`; CLI `TestWithdrawalAuthzCmdMintSupplyRevoke` | `internal/withdrawal/grant_integration_test.go:1045`; `internal/app/withdrawalauthz_integration_test.go:127` | wd-batch1.log + app-batch2.log (`--- PASS`, exit 0) |
+| V-PB2 unauthorized/unmapped supply refused | `TestWithdrawalGrantAuthorityUnmappedRefused`; `TestWithdrawalGrantAuthorityInTxCheck`; CLI `TestWithdrawalAuthzCmdPermissionGate`, `TestWithdrawalAuthzCmdNegativeMatrix` | `internal/withdrawal/grant_authority_integration_test.go:127,68`; `internal/app/withdrawalauthz_integration_test.go:254,347` | wd-batch1.log + app-batch2.log (`--- PASS`, exit 0) |
+| V-PB3-PB scopeless stock queryable + scope absent | `TestGrantScopelessDetailUnchanged` (unit); stock path exercised in `TestWithdrawalAuthzOpen3DryRunReissue` step 1; content proof `TestWithdrawalReissueMintsNewIdentityWithSideEffectProof` | `internal/withdrawal/grant_test.go:334`; `internal/app/open3_dryrun_integration_test.go:275-296`; `internal/withdrawal/grant_integration_test.go:1573` | wd-unit.log + app-batch2.log (`--- PASS`, exit 0) |
+| V-PB4 fee boundaries | `TestWithdrawalGrantScopedSupplyFeeTripleBoundaries` | `internal/withdrawal/grant_integration_test.go:1120` | wd-batch1.log (`--- PASS`, exit 0) |
+| V-PB5 fee-replacement conditional | `TestWithdrawalGrantScopedSupplyFeeTripleBoundaries` (carrier only *expresses* `allows_fee_replacement`; the conditional-reuse decision is 009-owned per PB-FR-05) | `internal/withdrawal/grant_integration_test.go:1120` | same as V-PB4 (wd-batch1.log) |
+| V-PB6 revoke vs supply race | `TestWithdrawalGrantRevokeSupplyRace`; authority race `TestWithdrawalGrantAuthorityRevokeRace` | `internal/withdrawal/grant_integration_test.go:1297`; `internal/withdrawal/grant_authority_integration_test.go:159` | wd-batch1.log (`--- PASS`, exit 0) |
+| V-PB7 atomicity (kill -9 phase points) | `TestCarrierKillScopedSupplyPreCommit`; `TestCarrierKillScopedSupplyPostCommit`; child helper `TestCarrierKillChildScopedSupply` | `internal/withdrawal/carrier_kill_integration_test.go:362,429,274` | wd-kill.log pre/post-commit + unknown-window (`--- PASS` x3, exit 0) |
+| V-PB8 commit-unknown same-op retry | `TestWithdrawalGrantUncertainCommitSameOperationRetry` | `internal/withdrawal/grant_integration_test.go:643` | wd-batch1.log (`--- PASS`, exit 0) |
+| V-PB9 re-issuance dry-run (OPEN-3) | `TestWithdrawalAuthzOpen3DryRunReissue` (owns the 7-table `row_to_json` content snapshot over a seeded non-empty fixture); library-level snapshot + `ctid`/`xmin` identity owned by T030 `TestWithdrawalReissueMintsNewIdentityWithSideEffectProof` | `internal/app/open3_dryrun_integration_test.go:214`; `internal/withdrawal/grant_integration_test.go:1573` | app-batch2.log + wd-batch1.log (`--- PASS`, exit 0) |
+| V-PB10 migration chain incl. gap-fill | `TestT041GapFillSequenceD`; `TestT040OverlayGreenOnEmptySequence`; `TestT042RollbackRevertsTenBeforeNine`; `TestT042DownOfAppliedThenRenumberedNumberForbidden`; lane guard `TestLaneMigrationsExclude009` | `internal/db/scratch_009_overlay_integration_test.go:155,210,292,340`; `internal/db/lane_migrations_test.go:19` | db-batch.log (`--- PASS`, exit 0) |
+| V-PB11 allowlist switchover rehearsal | `TestAllowlistSwitchoverRehearsal`; `TestAllowlistSwitchoverRehearsalUnaccountedExecutorKeepsEntryClosed` | `internal/app/allowlist_switchover_integration_test.go:331,446` | app-batch2.log (`--- PASS` x2, exit 0) |
 
 ## T040–T043 / T031 / T036 → tests + commands
 
 | Task | Test(s) | File:line | Run command | Log |
 |---|---|---|---|---|
-| T031 | `TestWithdrawalAuthzOpen3DryRunReissue` | `internal/app/open3_dryrun_integration_test.go:214` | `go test -tags integration -count=1 -run '^TestWithdrawalAuthzOpen3DryRunReissue$' ./internal/app/` | MISSING |
-| T036 | `TestT036SequenceAEmptyToFull`; `TestT036SequenceB007EraToCarrier`; `TestT036SequenceCDownThenReUp` | `internal/db/scratch_pb05_upgrade_integration_test.go:67,129,215` | `go test -tags integration -count=1 -run '^TestT036Sequence' ./internal/db/` | MISSING |
-| T040 | `TestT040OverlayGreenOnEmptySequence` | `internal/db/scratch_009_overlay_integration_test.go:155` | `go test -tags integration -count=1 -run '^TestT040OverlayGreenOnEmptySequence$' ./internal/db/` | MISSING |
-| T041 | `TestT041GapFillSequenceD` | `internal/db/scratch_009_overlay_integration_test.go:210` | `go test -tags integration -count=1 -run '^TestT041GapFillSequenceD$' ./internal/db/` | MISSING |
-| T042 | `TestT042RollbackRevertsTenBeforeNine`; `TestT042DownOfAppliedThenRenumberedNumberForbidden` | `internal/db/scratch_009_overlay_integration_test.go:292,340` | `go test -tags integration -count=1 -run '^TestT042' ./internal/db/` | MISSING |
-| T043 | `TestAllowlistSwitchoverRehearsal`; `TestAllowlistSwitchoverRehearsalUnaccountedExecutorKeepsEntryClosed` | `internal/app/allowlist_switchover_integration_test.go:331,446` | `go test -tags integration -count=1 -run '^TestAllowlistSwitchoverRehearsal' ./internal/app/` | MISSING |
+| T031 | `TestWithdrawalAuthzOpen3DryRunReissue` | `internal/app/open3_dryrun_integration_test.go:214` | app-batch2.log (`--- PASS`, exit 0) |
+| T036 | `TestT036SequenceAEmptyToFull`; `TestT036SequenceB007EraToCarrier`; `TestT036SequenceCDownThenReUp` | `internal/db/scratch_pb05_upgrade_integration_test.go:67,129,215` | db-batch.log (`--- PASS` x3, exit 0) |
+| T040 | `TestT040OverlayGreenOnEmptySequence` | `internal/db/scratch_009_overlay_integration_test.go:155` | db-batch.log (`--- PASS`, exit 0) |
+| T041 | `TestT041GapFillSequenceD` | `internal/db/scratch_009_overlay_integration_test.go:210` | db-batch.log (`--- PASS`, exit 0) |
+| T042 | `TestT042RollbackRevertsTenBeforeNine`; `TestT042DownOfAppliedThenRenumberedNumberForbidden` | `internal/db/scratch_009_overlay_integration_test.go:292,340` | db-batch.log (`--- PASS` x2, exit 0) |
+| T043 | `TestAllowlistSwitchoverRehearsal`; `TestAllowlistSwitchoverRehearsalUnaccountedExecutorKeepsEntryClosed` | `internal/app/allowlist_switchover_integration_test.go:331,446` | app-batch2.log (`--- PASS` x2, exit 0) |
 
 Note: T021 (T-revoke-sync, `tasks.md:65`) and T022 (revoke-vs-supply race,
 `tasks.md:66`) are both checked in `tasks.md` and covered by
