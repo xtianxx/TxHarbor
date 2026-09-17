@@ -147,3 +147,59 @@ PB-C1/C2、010 Q1–Q3、011 M1n/M3）；载体、锁、顺序等机制为 plan 
   （含 `000012` 建表），适配器读到真实 claim 行，真实联合验收方可执行；适用的联合门禁在
   011 合并到 main 之前完成；替身永不代替真实接线。无循环依赖：010 不需要 011 表即可
   迁移、启动与独立验收；011 不需要 010 表即可迁移与独立验收。
+
+## 联合批次执行记录（2026-09-17，010 单写者）
+
+工作区：`.slim/worktrees/joint-010-011`（分支 `joint-010-011-integration`）。
+基线 `f03e825`（010 `d2c14b9` + 011 `beba5e9` 已合入）；本记录提交 `dd40a47`。
+状态：**部分执行**。迁移/适配器接缝（T043–T045）与两项 held validation（T021、T026）
+已执行并有可复现证据；真实联合验收 J1–J5（T046–T050）与 T038（V9b 进程击杀矩阵）**未执行**。
+
+### 已执行（含证据命令与结果）
+
+| 任务 | 门禁 | 命令 | 结果 |
+|---|---|---|---|
+| T043 | 迁移集合 + 合并顺序 + 无改写 | `go test -tags integration -run TestT043MigrationSetMergeOrder ./internal/txlifecycle` | PASS：注入 `migrations/000011/000012/000013`；`goose` applied {..11,12,13}，无 pending；`000011`/`000012` 的 sha256 与各自 lane 提交逐字节一致；`000013` 为本批次新增（`ff17ebba…`/`29613714…`） |
+| T044 | intent-FK 加法迁移 | `go test -tags integration -run TestT044IntentFK ./internal/txlifecycle` | PASS：`tx_attempts_intent_fkey` 指向 `public.payment_intents(intent_id)`；`convalidated=true`（非 NOT VALID）；缺 intent 插入 → `23503` 且 `ConstraintName=tx_attempts_intent_fkey`；既有有效行不受影响 |
+| T045 | claim 适配器切换真实 `execution_claims` | `go test -tags integration ./internal/txlifecycle` | PASS（92s 全套）：`claimColumns` 读 `owner_id/lease_version/expires_at/state`；`state != 'active'` 记为 `claim_revoked`，自然过期记 `claim_expired`，同一拒绝效果不同 basis；V4/V6/T041 全部通过 |
+| T021 | V2 真实 009 signer-serve | `go test -tags integration -run TestT021V2RealSigner ./internal/txlifecycle` | PASS：真实 `app.SignerServe`（in-process，真实凭证 + dev key + `TXHARBOR_SIGNER_*`）；dispatch 钩子观测到 T2 先于首次派发；`keccak256(bytes)==持久 tx_hash==009.tx_hash` 且恢复 sender 相符；篡改签名 → `signature_mismatch`、零派发、记录 `signature_mismatch` 事件 |
+| T026 | V4 faultproxy（010↔009 HTTP 代理） | `go test -tags integration -run TestT026 ./internal/txlifecycle` | PASS：timeout/drop/503 → delivery-unknown 同身份重试（3 次，不换身份）；429/invalid/401 → 单次 fail-closed；409 `request_conflict` → `attempt_conflict` 且无重复签名请求；成功体透传；凭据不入错误文本。链上派发分类矩阵仍由 `TestV4DispatchClassification`（lane 链替身，V 层合法）与 `TestV4KnownRowsImmutableAndRetry` 覆盖 |
+
+### 本批次由真实接缝暴露的 010 交付缺陷（需回填 010 交付分支）
+
+1. `internal/txlifecycle/calldata.go` `TransferCalldata`：`amount.FillBytes(append(out, make([]byte,32)...))`
+   会填充**整个** 68 字节缓冲，选择子与收款人字被清零（实测 `selector=00000000`）。V8 用合成
+   receipt 从未触达该路径。已改为只填 amount 字。
+2. `internal/txlifecycle/attempt.go` `CanonicalEnvelope`：`canonicalDecimalOptional("")` 返回 `"0"`，
+   使 `omitempty` 失效，type-2 信封恒带 `gas_price:"0"`，真实 009 以 `validation_failed`
+   拒绝（实测 field=gas_price）。已改为按 fee 形状只发一个维度。
+
+两处均为 010 交付分支修复，需随 010 回填；不改变 Q1–Q3、G-010-1/2、PB-C1/C2、M1n/M2/M3、
+阈值与三事实分离。
+
+### 联合验收门禁（gating statement）
+
+- J1–J5（T046–T050）的真实联合验收**未完成**：011 侧的 `execution.StepDriver`↔010
+  `LifecycleAdvancer` 生产适配器在两条 lane 中均不存在（A-13 仍 OPEN，本分支非交付候选）。
+  因此本分支不能作为任一 lane 的联合验收通过依据。
+- **适用联合门禁未完成前，011 MUST NOT 合并到 main。**
+- A-13（全链 E2E）保持 OPEN；T000-P（生产 provider）保持 OPEN。本记录不声称 A-13 闭合。
+- 替身/夹具/010 独立通过均不构成本批次联合证据；上表 J 相关门禁尚未成立。
+
+### 未执行项与原因
+
+- T038（V9b 进程击杀崩溃矩阵）：需要为每个 T-boundary 注入进程级 kill（子进程 + 生产崩溃钩子），
+  本批次未实现；现有 T041 仅覆盖 G-010-2(a)/(b) 恢复路径，不等价。
+- T046–T050（J1–J5）：取决于真实 007/011/010/009/PG/Anvil 全链接线（含 008 binding 分配、
+  Anvil 上 ERC-20 事件合约与资金）与 010↔011 生命周期适配器；未在本批次构建。
+- T051 的完整内容（“真实联合验收已执行”）未成立，故 010 `tasks.md` 的 T051 框不勾选。
+
+### 011 侧输入需求（不修改 011 任务框，011 lane 拥有）
+
+- 011:T041 工作区：已由 010 建立并纳入 011 真实实现 + `000012`（本分支 `f03e825`）。
+- 011:T042 迁移：`000012_withdrawal_execution.sql` 与 lane 提交逐字节一致；`000013` 为 010 追加。
+- 011:T043 intent-FK：由 010 的 `000013_tx_lifecycle_intent_fk.sql` 闭合；011 无需改表。
+- 011:T044 claims：010 的 `claimColumns` 已对齐真实 `owner_id/state`；J2 语义不变。
+- 011:T045 联合测试：需要 011 提供 `execution.LifecycleAdvancer/LifecycleReader` 的真实 010 适配器
+  （或确认由 010 侧提供），J1–J5 方可执行。
+- 011:T046 记录：在联合门禁完成前不得声明联合验收通过。
