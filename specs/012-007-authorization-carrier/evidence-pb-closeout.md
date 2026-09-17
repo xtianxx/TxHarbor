@@ -4,8 +4,19 @@
 (branch `012-007-authorization-carrier`).
 **CODE_HEAD**: `f18155f58fba0ace5352398a2d72612f01f9adf0` (final closeout batch).
 
-**GATE RESULTS f18155f** (frozen-SHA runs; runner summarizes per-case lines,
-exit codes captured per command, no pipe-masking):
+**GATE RESULTS 922046a** (frozen-SHA rerun, direct `go` binary — the `rtk`
+runner truncates stdout to summaries, so gates were re-executed with output
+redirected to persisted files; exit code captured per command, no pipes):
+- Log dir `/tmp/pb-gates-922046a/` (build.log, vet.log, gofmt.log, unit.log,
+  integration-3pkg.log, race-3pkg.log, integration-full.log + SHA256SUMS;
+  NOT committed to git — retention location recorded here).
+- `go build ./...` exit 0; `go vet ./...` exit 0; `gofmt -l` empty (exit 0).
+- `go test ./... -count=1` exit 0 → all packages ok (10 ok + 2 no-test-files).
+- `go test -tags integration -count=1 -p 1 ./internal/withdrawal/ ./internal/app/ ./internal/db/` exit 0 → 3 ok (withdrawal 401s / app 137s / db 96s).
+- `go test -race -tags integration -count=1 -p 1` same 3 pkgs exit 0 → 3 ok.
+- `go test -tags integration -count=1 -p 1 -timeout 30m ./...` exit 0 → all 10 test packages ok (indexer 798s / withdrawal 425s / nonce 140s / app 140s / db 97s …), zero FAIL, no package-level skips (2 no-test-files only). `-p 1` differs from default CI concurrency (GOMAXPROCS) — chosen to remove parallel-container pressure; no test/package/assertion changed.
+- Prior-run flakes (exit-1 run on f18155f: container-start timeout + health timing; bcc01be run: revocation lock-wait + deposit observability) all isolated-green on rerun AND absent in this clean full run — assessed as parallel-load flakes, records retained above.
+- T052 DONE (green on final tree + this index). 29/29 ticked.
 - `go build ./...` exit 0; `go vet ./...` exit 0; `gofmt -l` clean.
 - `go test ./... -count=1` exit 0 → 979 passed, 12 packages.
 - `go test -tags integration -count=1 ./internal/withdrawal/ ./internal/app/ ./internal/db/` exit 0 → 714 passed, 3 packages; `-race` same set exit 0 → 714 passed.
