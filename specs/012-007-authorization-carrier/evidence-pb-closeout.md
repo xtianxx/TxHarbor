@@ -37,6 +37,22 @@ wd-kill.log 3 PASS, db-batch.log 8 PASS, wd-unit.log 1 PASS; SHA256SUMS in dir;
 NOT committed — retention recorded here). Older gate summaries without per-case
 detail remain as historical context only.
 
+**REMOTE CI RECORD (PR #11, run 35169843720)**: lint/build/unit+race SUCCESS;
+`integration tests (Docker)` FAILURE — the six db migration tests above failed
+on `read pinned 009 file /tmp/pb-009ref/000009_signer_service.sql: no such file
+or directory`. Root cause: hidden dependency on a local scratch dir (test
+defect, not migration logic). FIXTURE FIX (this commit): pinned 009 file now
+embedded from `internal/db/testdata/000009_signer_service.sql` (byte-identical,
+sha256 `53e6ca…01b9`, provenance in `internal/db/testdata/README.md`; production
+migrations still 009-free per `TestLaneMigrationsExclude009`). Re-verified:
+the six cases 6/6 PASS (`/tmp/pb-fixturefix-6.log`, exit 0, sha256
+`f070689ffcbb01413e36f03c2b3c1721094c1d2a222eaee299e851afd31a6f03`) + full
+`internal/db` integration package exit 0 (`/tmp/pb-fixturefix-db-full.log`).
+Original `/tmp/pb-009ref` scratch left untouched; dependence eliminated by
+construction (zero code references to the path remain outside historical
+comments) — same-machine green is corroboration, not the proof. Remote re-run
+left to the next step.
+
 ## How to run (integration)
 
 All cases are `//go:build integration` (real PostgreSQL scratch DBs; some spawn

@@ -8,9 +8,9 @@ import (
 
 // TestLaneMigrationsExclude009 pins the migration-chain isolation rule of
 // specs/012-007-authorization-carrier tasks T002/T040: this PB lane must never
-// carry 009's signer-service migration. 009's file stays pinned in scratch
-// (/tmp/pb-009ref, git 8f75450) and is only ever overlaid in memory by the
-// T040 harness; a stray 000009 in the lane tree would both violate T002 and
+// carry 009's signer-service migration. 009's file is pinned as a test-only
+// fixture (internal/db/testdata, git 8f75450; see testdata/README.md) and is
+// only ever overlaid in memory by the T040 harness; a stray 000009 in the lane tree would both violate T002 and
 // fake the gap-fill proof (the pending version would stop being pending), so
 // it fails here in the no-Docker unit run too.
 //

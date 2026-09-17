@@ -4,11 +4,13 @@
 // research R-PB8). It proves the PB carrier chain and 009's signer-service
 // migration compose WITHOUT 009's file ever entering this lane's tree.
 //
-// SOURCE (T002 pin): /tmp/pb-009ref/000009_signer_service.sql — a scratch-only
-// copy of the 009 lane at git 8f75450. Override the directory with
-// PB_009_REF_DIR. The file's sha256 is asserted below, so any 009 re-pin is
-// loud and forces a re-judge of T040/T041 scope (T002). `git status` must stay
-// clean: nothing here copies the scratch file into the lane.
+// SOURCE (T002 pin, testdata fixture): internal/db/testdata/
+// 000009_signer_service.sql — a byte-exact read-only copy of the 009 lane at
+// git 8f75450 (see testdata/README.md for provenance). Embedded, so a clean
+// checkout runs with no outside-tree fixture (this replaced the /tmp/pb-009ref
+// scratch dependency that broke remote CI on PR #11). The file's sha256 is
+// asserted below, so any 009 re-pin is loud and forces a re-judge of T040/T041
+// scope (T002).
 //
 // ISOLATION: one scratch PostgreSQL per sequence (testcontainers). The 009
 // file is read from the scratch dir and copied into an in-memory migrations
@@ -31,10 +33,9 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
+	_ "embed"
 	"fmt"
 	"io/fs"
-	"os"
-	"path/filepath"
 	"strconv"
 	"strings"
 	"testing"
@@ -43,36 +44,27 @@ import (
 )
 
 const (
-	pb009FileName      = "000009_signer_service.sql"
-	pb009PinnedGitSHA  = "8f75450"
-	pb009FileSHA256    = "53e6ca6fac0b03de86961175d5471612b54e7dad89dabf9cc45e1567013f04b9"
-	pb009RefDirEnv     = "PB_009_REF_DIR"
-	pb009DefaultRefDir = "/tmp/pb-009ref"
+	pb009FileName   = "000009_signer_service.sql"
+	pb009PinnedGitSHA = "8f75450"
+	pb009FileSHA256 = "53e6ca6fac0b03de86961175d5471612b54e7dad89dabf9cc45e1567013f04b9"
 )
 
-// pb009SourcePath resolves the T002 scratch pin path.
-func pb009SourcePath() string {
-	dir := os.Getenv(pb009RefDirEnv)
-	if dir == "" {
-		dir = pb009DefaultRefDir
-	}
-	return filepath.Join(dir, pb009FileName)
-}
+// pb009Fixture is the pinned 009 migration, embedded from testdata so tests
+// run on a clean checkout with no external fixture (testdata/README.md).
+//
+//go:embed testdata/000009_signer_service.sql
+var pb009Fixture []byte
 
-// pb009File reads the scratch 009 file and asserts the pinned content hash.
-// A mismatch means 009 advanced past the pin: re-pin and re-judge T040/T041
-// (T002), never edit this lane to make it pass.
+// pb009File returns the pinned 009 file bytes and asserts the pinned content
+// hash. A mismatch means 009 advanced past the pin: re-pin the testdata copy
+// and re-judge T040/T041 (T002), never edit this lane to make it pass.
 func pb009File(t *testing.T) []byte {
 	t.Helper()
-	p := pb009SourcePath()
-	data, err := os.ReadFile(p)
-	if err != nil {
-		t.Fatalf("read pinned 009 file %s (T002 scratch pin): %v", p, err)
-	}
+	data := bytes.Clone(pb009Fixture)
 	sum := fmt.Sprintf("%x", sha256.Sum256(data))
 	if sum != pb009FileSHA256 {
 		t.Fatalf("009 %s sha256 = %s, want pinned %s (git %s); 009 re-pinned -> re-judge T040/T041 scope (T002)",
-			p, sum, pb009FileSHA256, pb009PinnedGitSHA)
+			pb009FileName, sum, pb009FileSHA256, pb009PinnedGitSHA)
 	}
 	return data
 }
