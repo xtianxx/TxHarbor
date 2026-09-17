@@ -16,10 +16,11 @@ var transferSelector = crypto.Keccak256([]byte("transfer(address,uint256)"))[:4]
 // TransferCalldata builds v1's ERC-20 transfer(recipient, amount) calldata:
 // selector + 32-byte zero-padded recipient + 32-byte amount (R-010-08).
 func TransferCalldata(recipient common.Address, amount *big.Int) []byte {
-	out := make([]byte, 0, 4+32+32)
-	out = append(out, transferSelector...)
-	out = append(out, common.LeftPadBytes(recipient.Bytes(), 32)...)
-	return amount.FillBytes(append(out, make([]byte, 32)...))
+	out := make([]byte, 4+32+32)
+	copy(out[0:4], transferSelector)
+	copy(out[4:36], common.LeftPadBytes(recipient.Bytes(), 32))
+	amount.FillBytes(out[36:68])
+	return out
 }
 
 // ExpectedTransfer is the pinned semantics of the expected ERC-20 Transfer a

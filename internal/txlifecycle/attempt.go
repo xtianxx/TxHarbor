@@ -199,6 +199,15 @@ func (r *PrepareRequest) CanonicalEnvelope() ([]byte, error) {
 	nonce, _ := decimalUint64("nonce", r.Nonce)
 	amount, _ := new(big.Int).SetString(r.Amount, 10)
 	value := new(big.Int)
+	// 009 enforces exactly one fee shape: the inapplicable fee dimensions must
+	// be absent, not canonicalized to "0" (which would defeat omitempty).
+	gasPrice, maxFee, maxPriority := "", "", ""
+	if r.TxType == TxTypeLegacy {
+		gasPrice = canonicalDecimal(r.GasPrice)
+	} else {
+		maxFee = canonicalDecimal(r.MaxFeePerGas)
+		maxPriority = canonicalDecimal(r.MaxPriorityFeePerGas)
+	}
 	body := signerBody{
 		SigningRequestID:     r.SigningRequestID,
 		AttemptID:            r.AttemptID,
@@ -213,9 +222,9 @@ func (r *PrepareRequest) CanonicalEnvelope() ([]byte, error) {
 		Value:                value.String(),
 		Data:                 "0x" + hexutil.Encode(TransferCalldata(common.HexToAddress(recipient), amount))[2:],
 		GasLimit:             canonicalDecimal(r.GasLimit),
-		GasPrice:             canonicalDecimalOptional(r.GasPrice),
-		MaxFeePerGas:         canonicalDecimalOptional(r.MaxFeePerGas),
-		MaxPriorityFeePerGas: canonicalDecimalOptional(r.MaxPriorityFeePerGas),
+		GasPrice:             gasPrice,
+		MaxFeePerGas:         maxFee,
+		MaxPriorityFeePerGas: maxPriority,
 		Asset:                asset,
 		Recipient:            recipient,
 		Amount:               amount.String(),

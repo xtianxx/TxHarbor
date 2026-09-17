@@ -185,6 +185,27 @@ func mapSignerResponse(status int, body []byte) (SigningResult, error) {
 	}
 }
 
+// recordSignatureMismatch appends the fail-closed evidence for a tampered or
+// mismatched 009 result, so zero-dispatch refusals are auditable. Best-effort:
+// the refusal itself is already fail-closed.
+func (s *Store) recordSignatureMismatch(ctx context.Context, attempt *Attempt, basis string) {
+	tx, err := s.db.Begin(ctx)
+	if err != nil {
+		return
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	if _, err := tx.Exec(ctx, writeGuard); err != nil {
+		return
+	}
+	if _, _, err := lockAttemptRow(ctx, tx, attempt.AttemptID); err != nil {
+		return
+	}
+	if err := appendEventTx(ctx, tx, attempt.AttemptID, EventSignatureMismatch, "", recoveryVersionPtr(attempt.RecoveryVersion), basis); err != nil {
+		return
+	}
+	_ = tx.Commit(ctx)
+}
+
 // SignedRecord is the durable T2 result.
 type SignedRecord struct {
 	TxHash      string
@@ -205,9 +226,13 @@ func (s *Store) SignAndPersist(ctx context.Context, attempt *Attempt, result Sig
 	}
 	signedBytes, localHash, err := reconstructSignedBytes(req, result.Signature)
 	if err != nil {
+		if ref, ok := err.(*RefusalError); ok && ref.Class == ClassSignatureMismatch {
+			s.recordSignatureMismatch(ctx, attempt, ref.Basis)
+		}
 		return SignedRecord{}, err
 	}
 	if localHash.Hex() != strings.ToLower(result.TxHash) {
+		s.recordSignatureMismatch(ctx, attempt, "locally reconstructed hash differs from the 009 tx_hash")
 		return SignedRecord{}, Refuse(ClassSignatureMismatch, "tx_hash",
 			"locally reconstructed hash differs from the 009 tx_hash")
 	}
