@@ -95,6 +95,20 @@ const (
 	TxReconcileMetricName     = "txharbor_tx_reconcile_total"
 	TxReceiptEffectMetricName = "txharbor_tx_receipt_effect_total"
 	TxRevisionMetricName      = "txharbor_tx_revision_total"
+	// 011 withdrawal execution worker surface (T002; FR-13/R13,
+	// persistence.md §9). Every label is a fixed vocabulary (result/class),
+	// so no intent/owner/step/attempt identity ever becomes a label.
+	WorkerClaimAcquisitionsMetricName = "txharbor_worker_claim_acquisitions_total"
+	WorkerClaimTakeoversMetricName    = "txharbor_worker_claim_takeovers_total"
+	WorkerClaimRevocationsMetricName  = "txharbor_worker_claim_revocations_total"
+	WorkerStallFlagsMetricName        = "txharbor_worker_stall_flags_total"
+	WorkerStepsOpenMetricName         = "txharbor_worker_steps_open"
+	WorkerUnknownPendingMetricName    = "txharbor_worker_unknown_pending"
+	WorkerReconcileMetricName         = "txharbor_worker_reconcile_total"
+	WorkerGateRefusalsMetricName      = "txharbor_worker_gate_refusals_total"
+	WorkerProjectionStaleMetricName   = "txharbor_worker_projection_stale"
+	WorkerAdvanceMetricName           = "txharbor_worker_advance_total"
+	WorkerAdvanceSecondsMetricName    = "txharbor_worker_advance_seconds"
 )
 
 // Metrics owns a private registry so multiple instances (tests, restarts of
@@ -178,6 +192,20 @@ type Metrics struct {
 	txReconcile     *prometheus.CounterVec
 	txReceiptEffect *prometheus.CounterVec
 	txRevision      *prometheus.CounterVec
+	// 011 withdrawal execution worker (T002): claim/lease lifecycle, stall
+	// flags, step/reconcile/unknown position, gate refusals by class,
+	// projection staleness and advance outcomes.
+	workerClaimAcquisitions *prometheus.CounterVec
+	workerClaimTakeovers    *prometheus.CounterVec
+	workerClaimRevocations  *prometheus.CounterVec
+	workerStallFlags        *prometheus.CounterVec
+	workerStepsOpen         *prometheus.GaugeVec
+	workerUnknownPending    *prometheus.GaugeVec
+	workerReconcile         *prometheus.CounterVec
+	workerGateRefusals      *prometheus.CounterVec
+	workerProjectionStale   *prometheus.GaugeVec
+	workerAdvance           *prometheus.CounterVec
+	workerAdvanceSeconds    *prometheus.GaugeVec
 
 	handler http.Handler
 }
@@ -460,6 +488,57 @@ func New(ready func() bool) *Metrics {
 	}, nil)
 	registry.MustRegister(txDispatch, txGateRefusal, txUnknown, txReconcile, txReceiptEffect, txRevision)
 
+	// 011 withdrawal execution worker (T002). result/class are fixed
+	// vocabularies (see the metric-name consts); no identity value is ever a
+	// label.
+	workerClaimAcquisitions := prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: WorkerClaimAcquisitionsMetricName,
+		Help: "011 claim acquisitions by result: acquired or not_claimable.",
+	}, []string{"result"})
+	workerClaimTakeovers := prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: WorkerClaimTakeoversMetricName,
+		Help: "011 claim takeovers (generation advance) observed.",
+	}, nil)
+	workerClaimRevocations := prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: WorkerClaimRevocationsMetricName,
+		Help: "011 operator claim revocations applied.",
+	}, nil)
+	workerStallFlags := prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: WorkerStallFlagsMetricName,
+		Help: "011 stall flags recorded by the sweep without takeover.",
+	}, nil)
+	workerStepsOpen := prometheus.NewGaugeVec(prometheus.GaugeOpts{
+		Name: WorkerStepsOpenMetricName,
+		Help: "011 open (issued) execution steps at the last observation.",
+	}, nil)
+	workerUnknownPending := prometheus.NewGaugeVec(prometheus.GaugeOpts{
+		Name: WorkerUnknownPendingMetricName,
+		Help: "011 intents whose execution effect is unknown and pending reconcile.",
+	}, nil)
+	workerReconcile := prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: WorkerReconcileMetricName,
+		Help: "011 reconcile outcomes by result: converged, still_unknown or unavailable.",
+	}, []string{"result"})
+	workerGateRefusals := prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: WorkerGateRefusalsMetricName,
+		Help: "011 gate refusals by machine refusal class.",
+	}, []string{"class"})
+	workerProjectionStale := prometheus.NewGaugeVec(prometheus.GaugeOpts{
+		Name: WorkerProjectionStaleMetricName,
+		Help: "011 projections currently marked possibly_stale.",
+	}, nil)
+	workerAdvance := prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: WorkerAdvanceMetricName,
+		Help: "011->010 advance calls by result: the outcome class or an error class.",
+	}, []string{"result"})
+	workerAdvanceSeconds := prometheus.NewGaugeVec(prometheus.GaugeOpts{
+		Name: WorkerAdvanceSecondsMetricName,
+		Help: "Duration of the last 011->010 advance call in seconds; not an SLA (C11 unspecified).",
+	}, nil)
+	registry.MustRegister(workerClaimAcquisitions, workerClaimTakeovers,
+		workerClaimRevocations, workerStallFlags, workerStepsOpen,
+		workerUnknownPending, workerReconcile, workerGateRefusals,
+		workerProjectionStale, workerAdvance, workerAdvanceSeconds)
 	m := &Metrics{
 		registry:                     registry,
 		probeTotal:                   probeTotal,
@@ -511,6 +590,17 @@ func New(ready func() bool) *Metrics {
 		txReconcile:                  txReconcile,
 		txReceiptEffect:              txReceiptEffect,
 		txRevision:                   txRevision,
+		workerClaimAcquisitions:      workerClaimAcquisitions,
+		workerClaimTakeovers:         workerClaimTakeovers,
+		workerClaimRevocations:       workerClaimRevocations,
+		workerStallFlags:             workerStallFlags,
+		workerStepsOpen:              workerStepsOpen,
+		workerUnknownPending:         workerUnknownPending,
+		workerReconcile:              workerReconcile,
+		workerGateRefusals:           workerGateRefusals,
+		workerProjectionStale:        workerProjectionStale,
+		workerAdvance:                workerAdvance,
+		workerAdvanceSeconds:         workerAdvanceSeconds,
 		handler:                      promhttp.HandlerFor(registry, promhttp.HandlerOpts{}),
 	}
 	m.registerSigner(registry)
@@ -896,4 +986,61 @@ func (m *Metrics) ObserveTxReceiptEffect(effect string) {
 // ObserveTxRevision counts one reorg revision applied to the revision chain.
 func (m *Metrics) ObserveTxRevision() {
 	m.txRevision.WithLabelValues().Inc()
+}
+
+// ObserveWorkerClaimAcquisition counts one 011 claim attempt by result:
+// acquired or not_claimable.
+func (m *Metrics) ObserveWorkerClaimAcquisition(result string) {
+	m.workerClaimAcquisitions.WithLabelValues(result).Inc()
+}
+
+// ObserveWorkerClaimTakeover counts one 011 claim generation advance.
+func (m *Metrics) ObserveWorkerClaimTakeover() {
+	m.workerClaimTakeovers.WithLabelValues().Inc()
+}
+
+// ObserveWorkerClaimRevocation counts one applied operator claim revocation.
+func (m *Metrics) ObserveWorkerClaimRevocation() {
+	m.workerClaimRevocations.WithLabelValues().Inc()
+}
+
+// ObserveWorkerStallFlag counts one stall flag recorded without takeover.
+func (m *Metrics) ObserveWorkerStallFlag() {
+	m.workerStallFlags.WithLabelValues().Inc()
+}
+
+// SetWorkerStepsOpen records the open (issued) execution-step count.
+func (m *Metrics) SetWorkerStepsOpen(n int) {
+	m.workerStepsOpen.WithLabelValues().Set(float64(n))
+}
+
+// SetWorkerUnknownPending records the unknown-pending intent count.
+func (m *Metrics) SetWorkerUnknownPending(n int) {
+	m.workerUnknownPending.WithLabelValues().Set(float64(n))
+}
+
+// ObserveWorkerReconcile counts one reconcile outcome by result.
+func (m *Metrics) ObserveWorkerReconcile(result string) {
+	m.workerReconcile.WithLabelValues(result).Inc()
+}
+
+// ObserveWorkerGateRefusal counts one gate refusal by machine class.
+func (m *Metrics) ObserveWorkerGateRefusal(class string) {
+	m.workerGateRefusals.WithLabelValues(class).Inc()
+}
+
+// SetWorkerProjectionStale records the possibly-stale projection count.
+func (m *Metrics) SetWorkerProjectionStale(n int) {
+	m.workerProjectionStale.WithLabelValues().Set(float64(n))
+}
+
+// ObserveWorkerAdvance counts one 011->010 advance call by result (outcome
+// class or error class).
+func (m *Metrics) ObserveWorkerAdvance(result string) {
+	m.workerAdvance.WithLabelValues(result).Inc()
+}
+
+// SetWorkerAdvanceSeconds records the last advance call duration in seconds.
+func (m *Metrics) SetWorkerAdvanceSeconds(seconds float64) {
+	m.workerAdvanceSeconds.WithLabelValues().Set(seconds)
 }
