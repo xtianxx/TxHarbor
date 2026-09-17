@@ -10,62 +10,10 @@ import (
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core/types"
-	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/xtianxx/txharbor/internal/eth"
 	"github.com/xtianxx/txharbor/internal/execution"
 )
-
-// jointLifecycleReader is the real 010 authority reader 011 consumes: it reads
-// the attempt rows, the persisted tx_hash, the current revision and the unknown
-// recovery condition from 010's durable state.
-type jointLifecycleReader struct{ pool *pgxpool.Pool }
-
-func (r jointLifecycleReader) Read(ctx context.Context, intentID string) (execution.LifecycleFacts, error) {
-	rows, err := r.pool.Query(ctx,
-		`SELECT a.attempt_id, a.state, a.revision_seq, COALESCE(s.tx_hash, '')
-		   FROM tx_attempts a LEFT JOIN tx_attempt_signings s ON s.attempt_id = a.attempt_id
-		  WHERE a.intent_id = $1 ORDER BY a.created_at, a.attempt_id`, intentID)
-	if err != nil {
-		return execution.LifecycleFacts{}, err
-	}
-	defer rows.Close()
-	facts := execution.LifecycleFacts{Basis: "010 authority read"}
-	for rows.Next() {
-		var id, state, hash string
-		var rev int64
-		if err := rows.Scan(&id, &state, &rev, &hash); err != nil {
-			return execution.LifecycleFacts{}, err
-		}
-		facts.Attempts = append(facts.Attempts, execution.AttemptRef{AttemptID: id, State: state})
-		facts.CurrentAttemptID = id
-		if rev > facts.RevisionVersion {
-			facts.RevisionVersion = rev
-		}
-		if state == "unknown" {
-			facts.Unknown = &execution.UnknownRef{
-				AttemptID: id, TxHash: hash,
-				RecoveryCondition: "probe the same tx_hash; reconcile before any re-dispatch",
-			}
-		}
-	}
-	if rows.Err() != nil {
-		return execution.LifecycleFacts{}, rows.Err()
-	}
-	// A 010 protection-loss freeze is surfaced to 011 as a freeze condition so
-	// the joint reconcile loop records its own marker (given only to 011).
-	var cause string
-	if err := r.pool.QueryRow(ctx,
-		`SELECT cause FROM tx_intent_freezes WHERE intent_id = $1 AND released_at IS NULL`, intentID).Scan(&cause); err == nil {
-		if facts.Unknown == nil {
-			facts.Unknown = &execution.UnknownRef{AttemptID: facts.CurrentAttemptID,
-				RecoveryCondition: "freeze:" + execution.FreezeLockLoss}
-		} else {
-			facts.Unknown.RecoveryCondition = "freeze:" + execution.FreezeLockLoss
-		}
-	}
-	return facts, nil
-}
 
 // jointDropAfterAccept forwards the dispatch to the real node (so the tx is
 // genuinely accepted) and then loses the response: the joint "response drop
@@ -127,7 +75,11 @@ func TestJointJ3UnknownReconciliation(t *testing.T) {
 		t.Fatalf("bytes/hash lost: %v (%d bytes)", err, len(raw))
 	}
 
-	reconciler := &execution.Reconciler{Pool: j.pool, Reader: jointLifecycleReader{pool: j.pool}}
+	reader, err := NewLifecycleLive(j.pool, j.store)
+	if err != nil {
+		t.Fatalf("010 lifecycle adapter: %v", err)
+	}
+	reconciler := &execution.Reconciler{Pool: j.pool, Reader: reader}
 	// Joint loop while the chain is still uncleared: honest persist, no failure.
 	rec, err := reconciler.ReconcileIntent(ctx, jj.intentID, jj.ownerID, jj.claimVersion)
 	if err != nil {

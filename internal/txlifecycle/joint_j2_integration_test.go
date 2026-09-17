@@ -63,7 +63,7 @@ func TestJointJ2ExpiredWorkerIsolationAndTakeover(t *testing.T) {
 	replReq := &PrepareRequest{
 		AttemptID: "att-j2-repl", SigningRequestID: replSR, ReplacementOf: jj.attemptID,
 		IntentID: jj.intentID, BindingRef: jj.bindingID, AuthorizationID: replAuth,
-		AuthorizationVersion: 1, RecoveryVersion: 0, ChainID: uint64(jointChainID), Sender: j.sender, Nonce: "0",
+		AuthorizationVersion: 1, RecoveryVersion: 0, ChainID: uint64(jointChainID), Sender: j.sender, Nonce: jj.nonce,
 		TxType: TxTypeDynamicFee, GasLimit: "100000",
 		MaxFeePerGas: "1200000000", MaxPriorityFeePerGas: "100000000",
 		Asset: j.asset, Recipient: j.recipient, Amount: j.amount,
