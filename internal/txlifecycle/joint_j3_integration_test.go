@@ -49,7 +49,22 @@ func (r jointLifecycleReader) Read(ctx context.Context, intentID string) (execut
 			}
 		}
 	}
-	return facts, rows.Err()
+	if rows.Err() != nil {
+		return execution.LifecycleFacts{}, rows.Err()
+	}
+	// A 010 protection-loss freeze is surfaced to 011 as a freeze condition so
+	// the joint reconcile loop records its own marker (given only to 011).
+	var cause string
+	if err := r.pool.QueryRow(ctx,
+		`SELECT cause FROM tx_intent_freezes WHERE intent_id = $1 AND released_at IS NULL`, intentID).Scan(&cause); err == nil {
+		if facts.Unknown == nil {
+			facts.Unknown = &execution.UnknownRef{AttemptID: facts.CurrentAttemptID,
+				RecoveryCondition: "freeze:" + execution.FreezeLockLoss}
+		} else {
+			facts.Unknown.RecoveryCondition = "freeze:" + execution.FreezeLockLoss
+		}
+	}
+	return facts, nil
 }
 
 // jointDropAfterAccept forwards the dispatch to the real node (so the tx is
