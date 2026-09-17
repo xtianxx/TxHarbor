@@ -227,7 +227,8 @@ func signerMigrationWithArg(args []any, index int, value any) []any {
 
 // signerMigrationRequestArgs returns one full valid type-0 signing_requests
 // argument list for signerMigrationInsertRequest; callers override single
-// positions to isolate a probe to exactly one named constraint.
+// positions to isolate a probe to exactly one named constraint. $20 is the
+// submit-time scope-version snapshot (1 = observed scope version).
 func signerMigrationRequestArgs(callerID int64, requestID, attemptID, authID string) []any {
 	return []any{
 		callerID, requestID, attemptID, nil, // caller, signing_request_id, attempt_id, replacement_of
@@ -236,22 +237,23 @@ func signerMigrationRequestArgs(callerID int64, requestID, attemptID, authID str
 		"21000", "1", // gas_limit, gas_price
 		signerMigrationAddr("11"), signerMigrationAddr("22"), "100", // asset, recipient, amount
 		signerMigrationHash("cc"), authID, signerMigrationFingerprint("dd"), // content_hash, authorization_id, authorization_fingerprint
+		int64(1), // authorization_version
 	}
 }
 
 // signerMigrationInsertRequest inserts one signing_requests row from the
-// signerMigrationRequestArgs positional argument list ($1..$19 in slice order;
+// signerMigrationRequestArgs positional argument list ($1..$20 in slice order;
 // $9 is both to_addr and asset for the valid baseline, callers override single
 // positions to isolate a probe).
 const signerMigrationInsertRequest = `INSERT INTO signing_requests
 	(caller_id, signing_request_id, attempt_id, replacement_of, intent_id, binding_ref, chain_id,
 	 sender, nonce, tx_type, to_addr, value, data, gas_limit, gas_price,
 	 asset, recipient, amount, canonical_envelope, content_hash,
-	 authorization_id, authorization_fingerprint, authorization_state, policy_version)
+	 authorization_id, authorization_fingerprint, authorization_state, authorization_version, policy_version)
 	VALUES ($1, $2, $3, $4, 'intent-1', 'bind-1', $5,
 	 $6, $7, $8, $9, $10, $11, $12, $13,
 	 $14, $15, $16, 'envelope', $17,
-	 $18, $19, 'active', 'policy-v1')`
+	 $18, $19, 'active', $20, 'policy-v1')`
 
 // TestSignerMigrationHistoryUntouched proves the 000001-000009 diff allowlist:
 // every embedded migration except 000009 is frozen (git diff over each path is
@@ -493,6 +495,8 @@ func TestSignerMigrationConstraintNames(t *testing.T) {
 			signerMigrationWithArg(requestProbe("req-h1", "att-h1", "auth-h1"), 16, "0xnothex"), "23514", "signing_requests_content_hash_check"},
 		{"bad authorization fingerprint", signerMigrationInsertRequest,
 			signerMigrationWithArg(requestProbe("req-f1", "att-f1", "auth-f1"), 18, "not-a-fingerprint"), "23514", "signing_requests_authorization_fingerprint_check"},
+		{"authorization version below one", signerMigrationInsertRequest,
+			signerMigrationWithArg(requestProbe("req-av0", "att-av0", "auth-av0"), 19, int64(0)), "23514", "signing_requests_authorization_version_check"},
 		{"eip1559 shape with gas_price", signerMigrationInsertRequest,
 			signerMigrationWithArg(signerMigrationWithArg(requestProbe("req-f2", "att-f2", "auth-f2"), 7, 2), 12, nil), "23514", "signing_requests_fee_shape_check"},
 		{"unknown tx type", signerMigrationInsertRequest,
@@ -537,6 +541,8 @@ func TestSignerMigrationConstraintNames(t *testing.T) {
 	}{
 		{"negative recovery version", `UPDATE signing_requests SET recovery_version = -1 WHERE id = $1`,
 			"23514", "signing_requests_recovery_version_check"},
+		{"authorization version below one", `UPDATE signing_requests SET authorization_version = 0 WHERE id = $1`,
+			"23514", "signing_requests_authorization_version_check"},
 		{"state outside closed set", `UPDATE signing_requests SET state = 'bogus' WHERE id = $1`,
 			"23514", "signing_requests_state_check"},
 		{"non-empty access list", `UPDATE signing_requests SET access_list = '[{"k":1}]'::jsonb WHERE id = $1`,
@@ -574,6 +580,8 @@ func TestSignerMigrationConstraintNames(t *testing.T) {
 			[]any{int64(1001), signerMigrationSecret("b"), "txh_beta"}},
 		{"max uint256 amount accepted", signerMigrationInsertRequest,
 			signerMigrationWithArg(requestProbe("req-max", "att-max", "auth-max"), 15, signerMaxUint256)},
+		{"no scope observed is a NULL version, not a default", signerMigrationInsertRequest,
+			signerMigrationWithArg(requestProbe("req-avn", "att-avn", "auth-avn"), 19, nil)},
 		{"audit outlives a never-created request", insertAudit,
 			[]any{"rej-never-created", int64(1001), "gate_refused"}},
 	}
@@ -586,9 +594,11 @@ func TestSignerMigrationConstraintNames(t *testing.T) {
 	}
 }
 
-// TestSignerMigrationNoTTLColumns pins the withdrawn TTL revision: none of the
-// six 009 tables may carry a TTL/grace-shaped column, and delivery_admissions
-// keeps its exact 15-column shape.
+// TestSignerMigrationNoTTLColumns pins the withdrawn TTL revision and the
+// declared table shapes: none of the six 009 tables may carry a TTL/grace
+// column, delivery_admissions keeps its exact 15-column shape, and (T037)
+// signing_requests keeps its exact 34-column shape with authorization_version
+// a nullable BIGINT and no default.
 func TestSignerMigrationNoTTLColumns(t *testing.T) {
 	dsn := signerMigrationStartPostgres(t)
 	sqlDB := signerMigrationMigrateUp(t, dsn)
@@ -616,5 +626,31 @@ func TestSignerMigrationNoTTLColumns(t *testing.T) {
 	}
 	if admissionColumns != 15 {
 		t.Fatalf("delivery_admissions column count = %d, want exactly 15", admissionColumns)
+	}
+
+	// T037 storage shape: signing_requests gains the nullable submit-time
+	// scope-version snapshot (NULL = no scope observed, never a defaulted
+	// version), so the column set is pinned exactly.
+	var signingRequestColumns int
+	if err := sqlDB.QueryRowContext(context.Background(), `
+		SELECT count(*) FROM information_schema.columns
+		WHERE table_schema = 'public' AND table_name = 'signing_requests'
+	`).Scan(&signingRequestColumns); err != nil {
+		t.Fatalf("count signing_requests columns: %v", err)
+	}
+	if signingRequestColumns != 34 {
+		t.Fatalf("signing_requests column count = %d, want exactly 34", signingRequestColumns)
+	}
+	var versionType, versionNullable, versionDefault string
+	if err := sqlDB.QueryRowContext(context.Background(), `
+		SELECT data_type, is_nullable, COALESCE(column_default, '')
+		FROM information_schema.columns
+		WHERE table_schema = 'public' AND table_name = 'signing_requests'
+		  AND column_name = 'authorization_version'`).Scan(&versionType, &versionNullable, &versionDefault); err != nil {
+		t.Fatalf("probe signing_requests.authorization_version: %v", err)
+	}
+	if versionType != "bigint" || versionNullable != "YES" || versionDefault != "" {
+		t.Fatalf("authorization_version = %s nullable=%s default=%q, want a nullable bigint with no default",
+			versionType, versionNullable, versionDefault)
 	}
 }

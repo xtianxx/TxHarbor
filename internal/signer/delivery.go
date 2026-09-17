@@ -41,7 +41,8 @@ const deliverySendGuard = "SET LOCAL statement_timeout = '5s'"
 const deliveryRowSQL = `SELECT
   r.id, r.caller_id, r.signing_request_id, r.attempt_id, r.intent_id, r.binding_ref,
   r.recovery_version, r.chain_id, r.sender, r.authorization_id,
-  r.authorization_fingerprint, r.authorization_state, r.asset, r.recipient, r.amount::text,
+  r.authorization_fingerprint, r.authorization_state, r.authorization_version,
+  r.asset, r.recipient, r.amount::text,
   r.state, s.signature, s.tx_hash,
   EXISTS (SELECT 1 FROM delivery_admissions d
           WHERE d.signing_request_row = r.id AND d.verdict = 'delivered')
@@ -128,6 +129,7 @@ type deliveryRow struct {
 	authorizationID  string
 	fingerprint      string
 	authState        string
+	authVersion      *int64
 	asset            string
 	recipient        string
 	amount           string
@@ -229,9 +231,9 @@ func deliverGated(ctx context.Context, deps DeliveryDeps, caller Caller, row *de
 	binding, berr := deps.Binding.ReadBinding(ctx, row.intentID, row.attemptID)
 	bindingClass := BindingRefusal(binding, berr)
 
-	// The PB carrier row is loaded in the same sequence (H1/T036); T037
-	// extends this read with the persisted-version equality re-check.
-	grant, _, found, err := readGrantForShare(ctx, tx, row.authorizationID)
+	// The PB carrier row is loaded in the same sequence (H1/T036); the
+	// persisted-version equality re-check is applied against it (H2/T037).
+	grant, scope, found, err := readGrantForShare(ctx, tx, row.authorizationID)
 	if err != nil {
 		return nil, refuse(ClassGateReadFailed, "", "007 grant read failed")
 	}
@@ -239,7 +241,7 @@ func deliverGated(ctx context.Context, deps DeliveryDeps, caller Caller, row *de
 	if err := tx.QueryRow(ctx, submitClockSQL).Scan(&now); err != nil {
 		return nil, refuse(ClassGateReadFailed, "", "database clock read failed")
 	}
-	authzClass := deliveryGrantClass(found, grant, row, caller.ID, now)
+	authzClass := deliveryGrantClass(found, grant, scope, row, caller.ID, now)
 
 	var canSign bool
 	if err := tx.QueryRow(ctx, deliveryCanSignSQL, caller.ID).Scan(&canSign); err != nil {
@@ -372,7 +374,7 @@ func readDeliveryRow(ctx context.Context, db DB, callerID int64, signingRequestI
 	err := db.QueryRow(ctx, deliveryRowSQL, callerID, signingRequestID).Scan(
 		&row.rowID, &row.callerID, &row.signingRequestID, &row.attemptID, &row.intentID, &row.bindingRef,
 		&recoveryVersion, &chainID, &row.sender, &row.authorizationID,
-		&row.fingerprint, &row.authState, &row.asset, &row.recipient, &row.amount,
+		&row.fingerprint, &row.authState, &row.authVersion, &row.asset, &row.recipient, &row.amount,
 		&row.state, &row.signature, &row.txHash, &row.deliveredMarker)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
@@ -387,8 +389,10 @@ func readDeliveryRow(ctx context.Context, db DB, callerID int64, signingRequestI
 
 // deliveryGrantClass applies the 007 re-read rules against the row's bound
 // fields: state/expiry/field equality first, then the persisted `authz:v1`
-// fingerprint equality (a changed grant is authorization_invalid).
-func deliveryGrantClass(found bool, grant *AuthzGrant, row *deliveryRow, callerID int64, now time.Time) RefusalClass {
+// fingerprint equality (a changed grant is authorization_invalid), then the H2
+// persisted scope-version equality. The version check is additive: grant
+// current state/validity is always re-checked, never version-equality alone.
+func deliveryGrantClass(found bool, grant *AuthzGrant, scope GrantScope, row *deliveryRow, callerID int64, now time.Time) RefusalClass {
 	req := &Request{ChainID: uint64(row.chainID), Asset: row.asset, Recipient: row.recipient, Amount: row.amount}
 	if class := EvaluateGrant(found, grant, callerID, req, now); class != "" {
 		return class
@@ -397,6 +401,23 @@ func deliveryGrantClass(found bool, grant *AuthzGrant, row *deliveryRow, callerI
 		if fp := strings.TrimPrefix(grant.Fingerprint(), AuthzFingerprintDomain+":"); fp != row.fingerprint {
 			return ClassAuthorizationInvalid
 		}
+	}
+	return scopeVersionClass(row.authVersion, scope)
+}
+
+// scopeVersionClass re-checks the submit-time scope version against the value
+// observed now (H2). Only a snapshot and a live scope that agree pass; a
+// missing side matches a missing side (the pre-extension stock stays on the
+// fingerprint-only path), while a scope that appeared or vanished against the
+// snapshot blocks instead of being silently adopted.
+func scopeVersionClass(persisted *int64, scope GrantScope) RefusalClass {
+	switch {
+	case persisted == nil && !scope.Present:
+		return ""
+	case persisted == nil || !scope.Present:
+		return ClassAuthorizationInvalid
+	case *persisted != scope.AuthorizationVersion:
+		return ClassAuthorizationInvalid
 	}
 	return ""
 }

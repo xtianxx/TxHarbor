@@ -60,7 +60,7 @@ const GrantReadSQL = `SELECT caller_id, chain_id, asset, recipient, amount::text
 // this transaction. Row absence is pre-extension stock, not an error; pure
 // SELECT, never a write.
 const GrantScopeReadSQL = `SELECT authorization_id, intent_id, request_id, sender,
-  fee_max_total, fee_max_per_gas, fee_max_priority, allows_fee_replacement
+  fee_max_total, fee_max_per_gas, fee_max_priority, allows_fee_replacement, authorization_version
   FROM withdrawal_authorization_scopes WHERE authorization_id = $1 FOR SHARE`
 
 // BindingResult is the 009-side binding classification (gates.md §3). Only
@@ -265,6 +265,11 @@ type GrantScope struct {
 	// AllowsFeeReplacement is the explicit purpose token the fee-replacement
 	// path is gated on (consumed by H3/T038, carried here).
 	AllowsFeeReplacement bool
+	// AuthorizationVersion is the PB scope version observed at read time
+	// (PB carrier semantics: starts at 1, bumped on non-active re-supply).
+	// T037 snapshots it at submit and re-checks equality at delivery; only
+	// meaningful when Present.
+	AuthorizationVersion int64
 }
 
 // EvaluateGrantScope applies the R11 fail-closed rule and the PB consumption

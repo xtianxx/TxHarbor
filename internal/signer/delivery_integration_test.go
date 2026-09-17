@@ -212,6 +212,18 @@ func dlvSyncFingerprint(t *testing.T, pool *pgxpool.Pool, rowID int64, authzID s
 		WHERE id = $3`, fp, state, rowID)
 }
 
+// dlvSeedScope inserts the PB carrier row for a fixture at the given version,
+// deriving identity columns from the seeded request so the row is coherent
+// (delivery re-checks the version, not the scope content).
+func dlvSeedScope(t *testing.T, pool *pgxpool.Pool, f *dlvFixture, version int64) {
+	t.Helper()
+	gateExec(t, pool, `INSERT INTO withdrawal_authorization_scopes
+		(authorization_id, intent_id, request_id, sender, fee_max_total, fee_max_per_gas,
+		 fee_max_priority, allows_fee_replacement, authorization_version, attested_by)
+		SELECT authorization_id, intent_id, signing_request_id, sender, 0, 0, 0, TRUE, $2, 'dlv-test'
+		  FROM signing_requests WHERE id = $1`, f.rowID, version)
+}
+
 func dlvDeps(pool *pgxpool.Pool, binding BindingReader, scope ScopeLocker) DeliveryDeps {
 	return DeliveryDeps{DB: pool, Binding: binding, ScopeLock: scope}
 }
@@ -484,6 +496,67 @@ func TestSignerDeliveryV7(t *testing.T) {
 			t.Fatalf("audit = %s %q, want delivery_blocked recording authorization_revoked", action, detail)
 		}
 		dlvAssertNoResign(t, pool, f)
+	})
+
+	t.Run("scope version change between submit and delivery blocks", func(t *testing.T) {
+		gateReset006(t, pool)
+		deps := dlvDeps(pool, &dlvBinding{results: []BindingResult{BindingMatches}}, nil)
+
+		// The persisted submit-time snapshot and the live scope agree: the H2
+		// path admits exactly as the fingerprint-only path did.
+		matching := next()
+		gateExec(t, pool, `UPDATE signing_requests SET authorization_version = 1 WHERE id = $1`, matching.rowID)
+		dlvSeedScope(t, pool, matching, 1)
+		sink := &dlvSink{}
+		res, err := Deliver(ctx, deps, Caller{ID: matching.callerID, CanSign: true}, matching.requestID, sink)
+		if err != nil || res.Verdict != VerdictDelivered || sink.count() != 1 {
+			t.Fatalf("matching-version delivery = %+v / %v sink=%d, want delivered", res, err, sink.count())
+		}
+		dlvAssertNoResign(t, pool, matching)
+
+		// Revoke-then-resupply between submit and delivery bumps the scope
+		// version while the grant row (and its fingerprint) is untouched: only
+		// the H2 equality can block. The grant state/validity re-check still
+		// ran first and independently.
+		bumped := next()
+		gateExec(t, pool, `UPDATE signing_requests SET authorization_version = 1 WHERE id = $1`, bumped.rowID)
+		dlvSeedScope(t, pool, bumped, 1)
+		gateExec(t, pool, `UPDATE withdrawal_authorization_scopes SET authorization_version = 2
+			WHERE authorization_id = $1`, bumped.authzID)
+		sink = &dlvSink{}
+		res, err = Deliver(ctx, deps, Caller{ID: bumped.callerID, CanSign: true}, bumped.requestID, sink)
+		if res == nil || res.Verdict != VerdictBlocked {
+			t.Fatalf("version-bumped redelivery = %+v / %v, want blocked", res, err)
+		}
+		signerAuthRefusal(t, err, ClassSignatureWithheld)
+		if sink.count() != 0 {
+			t.Fatalf("version-bumped attempt wrote %d payload(s), want 0 bytes", sink.count())
+		}
+		var verdict, reason string
+		if err := pool.QueryRow(ctx,
+			`SELECT verdict, reason FROM delivery_admissions WHERE signing_request_row = $1`,
+			bumped.rowID).Scan(&verdict, &reason); err != nil {
+			t.Fatalf("read version-blocked admission: %v", err)
+		}
+		if verdict != string(VerdictBlocked) || reason != string(ClassSignatureWithheld) {
+			t.Fatalf("version-blocked admission = %s/%s, want blocked/signature_withheld", verdict, reason)
+		}
+		if _, _, detail := dlvLastAudit(t, pool, bumped.requestID); !strings.Contains(detail, "authorization_invalid") {
+			t.Fatalf("audit detail %q missing authorization_invalid", detail)
+		}
+		dlvAssertNoResign(t, pool, bumped)
+
+		// A scope appearing against a NULL submit-time snapshot never compares
+		// equal: the default-version trap is closed.
+		appeared := next()
+		dlvSeedScope(t, pool, appeared, 1)
+		sink = &dlvSink{}
+		res, err = Deliver(ctx, deps, Caller{ID: appeared.callerID, CanSign: true}, appeared.requestID, sink)
+		if res == nil || res.Verdict != VerdictBlocked || sink.count() != 0 {
+			t.Fatalf("appearing-scope delivery = %+v / %v sink=%d, want blocked with 0 bytes", res, err, sink.count())
+		}
+		signerAuthRefusal(t, err, ClassSignatureWithheld)
+		dlvAssertNoResign(t, pool, appeared)
 	})
 
 	t.Run("expired grant blocks byte-identical redelivery", func(t *testing.T) {

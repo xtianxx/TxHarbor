@@ -54,11 +54,13 @@ const submitRejectSQL = `UPDATE signing_requests
 	SET state = 'rejected', refusal_class = $1, updated_at = clock_timestamp()
 	WHERE id = $2`
 
-// submitFingerprintSQL fills the observed 007 grant fingerprint/state over the
-// provisional insert values once the grant read has run.
+// submitFingerprintSQL fills the observed 007 grant fingerprint/state and the
+// observed PB scope version over the provisional insert values once the grant
+// read has run. authorization_version stays NULL when no scope was observed, so
+// a carrier appearing before delivery can never compare equal (H2/T037).
 const submitFingerprintSQL = `UPDATE signing_requests
-	SET authorization_fingerprint = $1, authorization_state = $2, updated_at = clock_timestamp()
-	WHERE id = $3`
+	SET authorization_fingerprint = $1, authorization_state = $2, authorization_version = $3, updated_at = clock_timestamp()
+	WHERE id = $4`
 
 // submitResultSQL is THE durable signing result (FR-13), written inside the
 // signing transaction before any response byte.
@@ -196,11 +198,20 @@ func submitFirst(ctx context.Context, deps SubmitDeps, caller Caller, req *Reque
 		return nil, submitRefusal(ctx, tx, deps, rowID, caller.ID, req, class, "authorization_id", string(class), "authorization_id="+req.AuthorizationID+" state="+grantState(grant, found))
 	}
 	fingerprint, state := "unknown", "unknown"
+	var authVersion *int64
 	if found && grant != nil {
 		// Persist the bare digest; the column CHECK admits hex only.
 		fingerprint, state = strings.TrimPrefix(grant.Fingerprint(), AuthzFingerprintDomain+":"), grant.State
+		if scope.Present {
+			// H2: snapshot the observed PB scope version alongside the
+			// fingerprint. A scope absent at submit stays NULL so a carrier
+			// appearing later is never silently adopted (T039 swaps the
+			// scopeless literal below, not this snapshot).
+			version := scope.AuthorizationVersion
+			authVersion = &version
+		}
 	}
-	if _, err := tx.Exec(ctx, submitFingerprintSQL, fingerprint, state, rowID); err != nil {
+	if _, err := tx.Exec(ctx, submitFingerprintSQL, fingerprint, state, authVersion, rowID); err != nil {
 		return nil, refuse(ClassStorageUnavailable, "", "storage unavailable")
 	}
 
@@ -436,7 +447,8 @@ func readGrantScopeForShare(ctx context.Context, tx pgx.Tx, authorizationID stri
 	var s GrantScope
 	err := tx.QueryRow(ctx, GrantScopeReadSQL, authorizationID).Scan(
 		&s.AuthorizationID, &s.IntentID, &s.RequestID, &s.Sender,
-		&s.FeeMaxTotal, &s.FeeMaxPerGas, &s.FeeMaxPriority, &s.AllowsFeeReplacement)
+		&s.FeeMaxTotal, &s.FeeMaxPerGas, &s.FeeMaxPriority, &s.AllowsFeeReplacement,
+		&s.AuthorizationVersion)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return s, nil
 	}
