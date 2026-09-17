@@ -84,8 +84,10 @@ const (
 )
 
 // BindingReader reads the 008 binding for one request identity. The concrete
-// adapter lands against 008's provider contract (D3); until then callers use
-// contract-shape doubles retired at T028.
+// adapter is LiveBindingReader (binding_live.go, T028/D3) over 008's merged
+// *nonce.ReadProvider; the contract-shape doubles are retired for that path
+// (the adapter carries its own integration build tag so the business import
+// graph stays free of 008's RPC-bearing read package, T023).
 type BindingReader interface {
 	ReadBinding(ctx context.Context, intentID, attemptID string) (BindingResult, error)
 }
