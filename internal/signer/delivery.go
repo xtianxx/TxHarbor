@@ -229,7 +229,9 @@ func deliverGated(ctx context.Context, deps DeliveryDeps, caller Caller, row *de
 	binding, berr := deps.Binding.ReadBinding(ctx, row.intentID, row.attemptID)
 	bindingClass := BindingRefusal(binding, berr)
 
-	grant, found, err := readGrantForShare(ctx, tx, row.authorizationID)
+	// The PB carrier row is loaded in the same sequence (H1/T036); T037
+	// extends this read with the persisted-version equality re-check.
+	grant, _, found, err := readGrantForShare(ctx, tx, row.authorizationID)
 	if err != nil {
 		return nil, refuse(ClassGateReadFailed, "", "007 grant read failed")
 	}

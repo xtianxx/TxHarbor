@@ -184,7 +184,7 @@ func submitFirst(ctx context.Context, deps SubmitDeps, caller Caller, req *Reque
 		return nil, submitRefusal(ctx, tx, deps, rowID, caller.ID, req, class, "", string(class), "binding_class="+bindingClassName(binding))
 	}
 
-	grant, found, err := readGrantForShare(ctx, tx, req.AuthorizationID)
+	grant, scope, found, err := readGrantForShare(ctx, tx, req.AuthorizationID)
 	if err != nil {
 		return nil, submitRefusal(ctx, tx, deps, rowID, caller.ID, req, ClassGateReadFailed, "", "007 grant read failed", "007 grant read failed")
 	}
@@ -204,12 +204,13 @@ func submitFirst(ctx context.Context, deps SubmitDeps, caller Caller, req *Reque
 		return nil, refuse(ClassStorageUnavailable, "", "storage unavailable")
 	}
 
-	// The PB scope/version carrier (PB-01, withdrawal_authorization_scopes) is
-	// not in this tree, so every grant read today is scopeless and fails closed
-	// (gates.md §2 gap (c); research R11). The legal path becomes reachable only
-	// when the PB carrier lands; until then this is the correct green.
-	if class := EvaluateGrantScope(GrantScope{Present: false}); class != "" {
-		return nil, submitRefusal(ctx, tx, deps, rowID, caller.ID, req, class, "authorization_id", string(class), "authorization_id="+req.AuthorizationID+" scope_carrier=absent")
+	// T039 (H4) swaps the hardcoded scopeless value below for the observed
+	// carrier; the scope row is already loaded in the same FOR SHARE sequence
+	// above, so that swap is EvaluateGrantScope(scope, req). Until then this
+	// literal keeps the pre-carrier fail-closed green; the detail records the
+	// carrier as actually observed.
+	if class := EvaluateGrantScope(GrantScope{Present: false}, req); class != "" {
+		return nil, submitRefusal(ctx, tx, deps, rowID, caller.ID, req, class, "authorization_id", string(class), "authorization_id="+req.AuthorizationID+" scope_carrier="+scopeCarrierState(scope))
 	}
 
 	if err := deps.Policy.Check(req); err != nil {
@@ -394,8 +395,15 @@ func readRecoveryGate(ctx context.Context, tx pgx.Tx, chainID int64) (RecoveryGa
 	return g, nil
 }
 
-// readGrantForShare reads the 007 grant FOR SHARE; absence is found=false.
-func readGrantForShare(ctx context.Context, tx pgx.Tx, authorizationID string) (*AuthzGrant, bool, error) {
+// readGrantForShare reads the 007 grant FOR SHARE and, in the same statement
+// sequence of the same transaction, the 1:1 PB carrier row for the same
+// authorization_id FOR SHARE (gates.md §2; PB data-model "grant + scope
+// FOR SHARE in one sequence"). The scope read adds no lock object: it rides
+// the grant-row coordination, so a revoke/re-supply committing before the
+// grant share lock is observed and one racing it waits for this transaction.
+// Grant absence is found=false; scope absence is Present=false (pre-extension
+// stock).
+func readGrantForShare(ctx context.Context, tx pgx.Tx, authorizationID string) (*AuthzGrant, GrantScope, bool, error) {
 	var (
 		g       AuthzGrant
 		amount  string
@@ -404,16 +412,39 @@ func readGrantForShare(ctx context.Context, tx pgx.Tx, authorizationID string) (
 	err := tx.QueryRow(ctx, GrantReadSQL, authorizationID).Scan(
 		&g.CallerID, &g.ChainID, &g.Asset, &g.Recipient, &amount, &g.State, &expires)
 	if errors.Is(err, pgx.ErrNoRows) {
-		return nil, false, nil
+		return nil, GrantScope{}, false, nil
 	}
 	if err != nil {
-		return nil, false, err
+		return nil, GrantScope{}, false, err
 	}
 	if v, ok := new(big.Int).SetString(amount, 10); ok {
 		g.Amount = v
 	}
 	g.ExpiresAt = expires
-	return &g, true, nil
+
+	scope, err := readGrantScopeForShare(ctx, tx, authorizationID)
+	if err != nil {
+		return nil, GrantScope{}, false, err
+	}
+	return &g, scope, true, nil
+}
+
+// readGrantScopeForShare reads the PB carrier row FOR SHARE immediately after
+// the caller's grant read. Absence is Present=false, never an error; the read
+// is pure SELECT.
+func readGrantScopeForShare(ctx context.Context, tx pgx.Tx, authorizationID string) (GrantScope, error) {
+	var s GrantScope
+	err := tx.QueryRow(ctx, GrantScopeReadSQL, authorizationID).Scan(
+		&s.AuthorizationID, &s.IntentID, &s.RequestID, &s.Sender,
+		&s.FeeMaxTotal, &s.FeeMaxPerGas, &s.FeeMaxPriority, &s.AllowsFeeReplacement)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return s, nil
+	}
+	if err != nil {
+		return GrantScope{}, err
+	}
+	s.Present = true
+	return s, nil
 }
 
 // signatureBytes renders the 65-byte [R||S||V] signature the content layer
@@ -472,6 +503,15 @@ func grantState(grant *AuthzGrant, found bool) string {
 		return "absent"
 	}
 	return grant.State
+}
+
+// scopeCarrierState renders the observed PB carrier presence for the audit
+// detail.
+func scopeCarrierState(scope GrantScope) string {
+	if scope.Present {
+		return "present"
+	}
+	return "absent"
 }
 
 // bindingClassName maps a BindingResult to the recorded binding_class.

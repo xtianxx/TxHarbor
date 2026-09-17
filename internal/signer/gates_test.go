@@ -103,18 +103,74 @@ func TestEvaluateGrant(t *testing.T) {
 }
 
 func TestGateSQLShapes(t *testing.T) {
-	for _, q := range []string{GateReadSQL, GrantReadSQL, ScopeShareSQL} {
+	for _, q := range []string{GateReadSQL, GrantReadSQL, GrantScopeReadSQL, ScopeShareSQL} {
 		upper := strings.ToUpper(strings.TrimSpace(q))
 		if !strings.HasPrefix(upper, "SELECT") {
 			t.Fatalf("gate read is not SELECT-only: %.40q", q)
 		}
 	}
-	for _, q := range []string{GrantReadSQL, ScopeShareSQL} {
+	for _, q := range []string{GrantReadSQL, GrantScopeReadSQL, ScopeShareSQL} {
 		if !strings.Contains(strings.ToUpper(q), "FOR SHARE") {
 			t.Fatalf("gate read lacks FOR SHARE: %.40q", q)
 		}
 	}
 	if !strings.Contains(GateLockSQL, "IN SHARE MODE") {
 		t.Fatalf("gate lock is not a SHARE lock")
+	}
+}
+
+func TestEvaluateGrantScope(t *testing.T) {
+	req := mustDecode(t, validBody())
+	legacyBody := strings.Replace(validBody(), `"tx_type": 2`, `"tx_type": 0`, 1)
+	legacyBody = strings.Replace(legacyBody, `"max_fee_per_gas": "1500000000",`, `"gas_price": "1000000000",`, 1)
+	legacyBody = strings.Replace(legacyBody, `"max_priority_fee_per_gas": "1000000000",`, ``, 1)
+	legacy := mustDecode(t, legacyBody)
+
+	// validBody: 65000 gas × 1.5 gwei max fee cap (total 9.75e13), 1 gwei tip.
+	scoped := GrantScope{
+		Present:              true,
+		AuthorizationID:      req.AuthorizationID,
+		IntentID:             req.IntentID,
+		RequestID:            req.SigningRequestID,
+		Sender:               req.Sender,
+		FeeMaxTotal:          97500000000000,
+		FeeMaxPerGas:         1500000000,
+		FeeMaxPriority:       1000000000,
+		AllowsFeeReplacement: true,
+	}
+	with := func(mutate func(*GrantScope)) GrantScope {
+		s := scoped
+		mutate(&s)
+		return s
+	}
+
+	cases := []struct {
+		name  string
+		scope GrantScope
+		req   *Request
+		want  RefusalClass
+	}{
+		{"absent carrier", GrantScope{}, &req, ClassAuthorizationUnverifiable},
+		{"carrier covers the request at the caps", scoped, &req, ""},
+		{"no fee constraint", with(func(s *GrantScope) { s.FeeMaxTotal, s.FeeMaxPerGas, s.FeeMaxPriority = 0, 0, 0 }), &req, ""},
+		{"legacy request on the legacy path", with(func(s *GrantScope) {
+			s.FeeMaxTotal, s.FeeMaxPerGas, s.FeeMaxPriority = 65000000000000, 1000000000, 0
+		}), &legacy, ""},
+		{"authorization_id mismatch", with(func(s *GrantScope) { s.AuthorizationID = "wa-2" }), &req, ClassAuthorizationInvalid},
+		{"sender mismatch", with(func(s *GrantScope) { s.Sender = "0x2222222222222222222222222222222222222222" }), &req, ClassAuthorizationInvalid},
+		{"intent mismatch", with(func(s *GrantScope) { s.IntentID = "pi-other" }), &req, ClassAuthorizationInvalid},
+		{"request_id mismatch", with(func(s *GrantScope) { s.RequestID = "sr-other" }), &req, ClassAuthorizationInvalid},
+		{"total one over the cap", with(func(s *GrantScope) { s.FeeMaxTotal = 97499999999999 }), &req, ClassAuthorizationInvalid},
+		{"per-gas one over the cap", with(func(s *GrantScope) { s.FeeMaxPerGas = 1499999999 }), &req, ClassAuthorizationInvalid},
+		{"priority one over the cap", with(func(s *GrantScope) { s.FeeMaxPriority = 999999999 }), &req, ClassAuthorizationInvalid},
+		{"missing priority cap on a 1559 request", with(func(s *GrantScope) { s.FeeMaxPriority = 0 }), &req, ClassAuthorizationInvalid},
+		{"missing total cap", with(func(s *GrantScope) { s.FeeMaxTotal = 0 }), &req, ClassAuthorizationInvalid},
+		{"missing per-gas cap", with(func(s *GrantScope) { s.FeeMaxPerGas, s.FeeMaxPriority = 0, 0 }), &req, ClassAuthorizationInvalid},
+		{"illegal priority cap above per-gas", with(func(s *GrantScope) { s.FeeMaxPriority = 2000000000 }), &req, ClassAuthorizationInvalid},
+	}
+	for _, tc := range cases {
+		if got := EvaluateGrantScope(tc.scope, tc.req); got != tc.want {
+			t.Fatalf("EvaluateGrantScope(%s) = %q, want %q", tc.name, got, tc.want)
+		}
 	}
 }

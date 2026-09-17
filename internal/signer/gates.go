@@ -51,6 +51,18 @@ const ScopeShareSQL = `SELECT 1 FROM nonce_scope_state WHERE chain_id = $1 AND s
 const GrantReadSQL = `SELECT caller_id, chain_id, asset, recipient, amount::text, state, expires_at
   FROM withdrawal_authorizations WHERE authorization_id = $1 FOR SHARE`
 
+// GrantScopeReadSQL reads the 1:1 PB carrier row for the same authorization_id
+// inside the grant read's FOR SHARE sequence (gates.md §2; PB data-model:
+// "grant + scope FOR SHARE in one sequence"). It introduces no new lock
+// object: the scope read rides the grant-row coordination (PB writers take the
+// grant row FOR UPDATE before touching the scope), so a pause/revoke/re-supply
+// committing before the share lock is observed and one racing it waits for
+// this transaction. Row absence is pre-extension stock, not an error; pure
+// SELECT, never a write.
+const GrantScopeReadSQL = `SELECT authorization_id, intent_id, request_id, sender,
+  fee_max_total, fee_max_per_gas, fee_max_priority, allows_fee_replacement
+  FROM withdrawal_authorization_scopes WHERE authorization_id = $1 FOR SHARE`
+
 // BindingResult is the 009-side binding classification (gates.md §3). Only
 // BindingMatches admits signing; every other class refuses with its mapped
 // refusal class and records the read basis.
@@ -223,22 +235,114 @@ func EvaluateGrant(found bool, grant *AuthzGrant, callerID int64, req *Request, 
 	return ""
 }
 
-// GrantScope is the observed 007-extension scope carrier
-// (withdrawal_authorization_scopes, research R11). The real 007 carrier has
-// no scope row or version column, so every grant readable today is scopeless.
+// GrantScope is the observed PB carrier row
+// (withdrawal_authorization_scopes, 1:1 with the 007 grant; research R11,
+// PB-C2). Present=false means no row: a pre-extension stock grant, refused
+// per request (Q-B ruling). The remaining fields are the consumption basis the
+// 007 grant row cannot express: identity linkage, the sender anchor, the fee
+// bounds, and the fee-replacement purpose token. `attested_by` is deliberately
+// absent — it is issuance-side identity with no 009-comparable principal, so
+// it is never a refusal basis by itself (H1; Q-A ruling).
 type GrantScope struct {
 	// Present reports whether a scope row was found for the grant.
 	Present bool
+	// AuthorizationID is the carrier's grant key; it must equal the
+	// request's authorization_id.
+	AuthorizationID string
+	// IntentID links the carrier to the request's intent_id; RequestID links
+	// it to the request identity (the request's signing_request_id), the only
+	// request id 009 can compare against.
+	IntentID  string
+	RequestID string
+	// Sender is the carrier's mandatory identity anchor (stored lowercase).
+	Sender string
+	// FeeMaxTotal, FeeMaxPerGas and FeeMaxPriority are native-coin
+	// smallest-unit caps (PB-C2). An all-zero triple declares no fee
+	// constraint; any capped dimension requires its applicable caps.
+	FeeMaxTotal    int64
+	FeeMaxPerGas   int64
+	FeeMaxPriority int64
+	// AllowsFeeReplacement is the explicit purpose token the fee-replacement
+	// path is gated on (consumed by H3/T038, carried here).
+	AllowsFeeReplacement bool
 }
 
-// EvaluateGrantScope applies the R11 fail-closed rule once the 007 row checks
-// pass (gates.md §2 carrier gaps; Q-B ruling): a grant without a verifiable
-// scope/version carrier is refused per request as authorization_unverifiable.
-// Scope is never inferred from history, config, or caller claims. "" means
-// the carrier is present and verifiable.
-func EvaluateGrantScope(scope GrantScope) RefusalClass {
+// EvaluateGrantScope applies the R11 fail-closed rule and the PB consumption
+// checks once the 007 row checks pass (gates.md §2; H1; PB-C2). A missing
+// carrier refuses authorization_unverifiable; a carrier that does not cover
+// this request refuses authorization_invalid. Pure comparison: no write, no
+// inference from history or caller claims. "" means the carrier is present and
+// covers the request.
+func EvaluateGrantScope(scope GrantScope, req *Request) RefusalClass {
 	if !scope.Present {
 		return ClassAuthorizationUnverifiable
 	}
+	if scope.AuthorizationID != req.AuthorizationID {
+		return ClassAuthorizationInvalid
+	}
+	if !strings.EqualFold(scope.Sender, req.Sender) {
+		return ClassAuthorizationInvalid
+	}
+	if scope.IntentID != req.IntentID || scope.RequestID != req.SigningRequestID {
+		return ClassAuthorizationInvalid
+	}
+	return feeScopeRefusal(scope, req)
+}
+
+// feeScopeRefusal enforces the PB-C2 fee bounds on the request's fee triple:
+// total = gas_limit × per-gas price, per-gas price (max_fee_per_gas or
+// gas_price), and the EIP-1559 priority tip (legacy has none). An all-zero
+// carrier triple declares no fee constraint; once the carrier caps any
+// dimension, a cap the request's dimension needs must be present — a missing
+// applicable cap is refused, never read as "unlimited" — and every present
+// dimension must stay within its cap with priority <= per-gas.
+func feeScopeRefusal(scope GrantScope, req *Request) RefusalClass {
+	if scope.FeeMaxTotal == 0 && scope.FeeMaxPerGas == 0 && scope.FeeMaxPriority == 0 {
+		return ""
+	}
+	total, perGas, priority, ok := requestFeeTriple(req)
+	if !ok || priority.Cmp(perGas) > 0 || scope.FeeMaxPriority > scope.FeeMaxPerGas {
+		return ClassAuthorizationInvalid
+	}
+	if scope.FeeMaxTotal == 0 || scope.FeeMaxPerGas == 0 {
+		return ClassAuthorizationInvalid
+	}
+	if total.Cmp(big.NewInt(scope.FeeMaxTotal)) > 0 || perGas.Cmp(big.NewInt(scope.FeeMaxPerGas)) > 0 {
+		return ClassAuthorizationInvalid
+	}
+	if priority.Sign() > 0 {
+		if scope.FeeMaxPriority == 0 || priority.Cmp(big.NewInt(scope.FeeMaxPriority)) > 0 {
+			return ClassAuthorizationInvalid
+		}
+	}
 	return ""
+}
+
+// requestFeeTriple renders the PB-C2 request fee triple, failing closed on an
+// unreadable or illegal shape (Validate runs before this on the submit path).
+func requestFeeTriple(req *Request) (*big.Int, *big.Int, *big.Int, bool) {
+	gasLimit, err := decimalBig("gas_limit", req.GasLimit)
+	if err != nil || gasLimit.Sign() <= 0 {
+		return nil, nil, nil, false
+	}
+	switch req.TxType {
+	case 0:
+		price, err := decimalBig("gas_price", req.GasPrice)
+		if err != nil || price.Sign() <= 0 {
+			return nil, nil, nil, false
+		}
+		return new(big.Int).Mul(gasLimit, price), price, big.NewInt(0), true
+	case 2:
+		maxFee, err := decimalBig("max_fee_per_gas", req.MaxFeePerGas)
+		if err != nil || maxFee.Sign() <= 0 {
+			return nil, nil, nil, false
+		}
+		tip, err := decimalBig("max_priority_fee_per_gas", req.MaxPriorityFeePerGas)
+		if err != nil || tip.Sign() <= 0 {
+			return nil, nil, nil, false
+		}
+		return new(big.Int).Mul(gasLimit, maxFee), maxFee, tip, true
+	default:
+		return nil, nil, nil, false
+	}
 }

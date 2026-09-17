@@ -439,13 +439,21 @@ func TestSignerGateV6ReadOnly(t *testing.T) {
 		if got := EvaluateGrant(found, &grant, gateCallerID, &req, time.Now().UTC()); got != "" {
 			t.Fatalf("007 row checks refused a valid grant as %q; the scopeless branch must be what refuses", got)
 		}
-		// The real 007 carrier has no scope row/version: the grant is scopeless.
-		class := EvaluateGrantScope(GrantScope{Present: false})
+		// The PB carrier row is read in the same FOR SHARE sequence as the
+		// grant; this seeded grant has no scope row: scopeless stock.
+		class := EvaluateGrantScope(GrantScope{Present: false}, &req)
 		if class != ClassAuthorizationUnverifiable {
 			t.Fatalf("scopeless grant evaluated %q, want %q", class, ClassAuthorizationUnverifiable)
 		}
-		if got := EvaluateGrantScope(GrantScope{Present: true}); got != "" {
-			t.Fatalf("scope-present grant refused as %q; the refusal must be the absent carrier, not a blanket refuse", got)
+		carrier := GrantScope{
+			Present:         true,
+			AuthorizationID: req.AuthorizationID,
+			IntentID:        req.IntentID,
+			RequestID:       req.SigningRequestID,
+			Sender:          req.Sender,
+		}
+		if got := EvaluateGrantScope(carrier, &req); got != "" {
+			t.Fatalf("present-and-verifiable grant refused as %q; the refusal must be the absent carrier, not a blanket refuse", got)
 		}
 		if RetryabilityOf(class) != RetryNever {
 			t.Fatalf("authorization_unverifiable retryability = %v, want RetryNever (fail closed)", RetryabilityOf(class))
