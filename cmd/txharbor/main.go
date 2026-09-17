@@ -10,6 +10,7 @@
 //	txharbor apikey-auth      manage caller API keys (issue/rotate/revoke)
 //	txharbor nonce-admin      operate 008 nonce holds/registry (mint/release/status)
 //	txharbor withdrawal-exec  operate 011 execution permissions/claims/projection
+//	txharbor withdrawal-worker run the 011 execution worker
 package main
 
 import (
@@ -56,6 +57,8 @@ func run(args []string) int {
 		return app.NonceAdmin(ctx, args[1:], d)
 	case "withdrawal-exec":
 		return app.WithdrawalExec(ctx, args[1:], d)
+	case "withdrawal-worker":
+		return app.WithdrawalWorkerCommand(ctx, args[1:], d)
 	case "help", "-h", "--help":
 		usage(os.Stdout)
 		return 0
@@ -80,6 +83,7 @@ commands:
   signer-auth       manage signer credentials (issue/rotate/revoke/set-can-sign)
   nonce-admin       operate 008 nonce holds/registry (mint/release/status)
   withdrawal-exec   operate 011 execution permissions/claims/projection
+  withdrawal-worker run the 011 execution worker (claim/renew/advance/reconcile)
   help              show this help
 `)
 }
