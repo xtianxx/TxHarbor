@@ -247,18 +247,22 @@ func execSchemaFingerprint(t *testing.T, sqlDB *sql.DB) (string, map[string]bool
 }
 
 // TestWithdrawalExecutionMigrationIsAdditiveOnly builds a real database at
-// 000010, snapshots the upstream schema, applies 000012, and asserts no
-// upstream object changed while the 011 tables are the only new base tables.
+// 000011, snapshots the upstream schema, applies exactly 000012 (subset FS),
+// and asserts no upstream object changed while 000012's tables are the only
+// new base tables. The full embedded set would also carry 010's 000013/000014
+// follow-ups, whose tables are outside this test's additivity claim.
 func TestWithdrawalExecutionMigrationIsAdditiveOnly(t *testing.T) {
 	dsn := startPostgres(t)
 	ctx := context.Background()
-	migrateUpThrough(t, dsn, 10)
+	migrateUpThrough(t, dsn, 11)
 	sqlDB := openTestSQL(t, dsn)
 
 	before, tablesBefore := execSchemaFingerprint(t, sqlDB)
 
+	opts := testMigrateOptions(dsn)
+	opts.FS = migrationSubsetFS(t, 12) // apply exactly 000012
 	var out bytes.Buffer
-	if err := MigrateUp(ctx, testMigrateOptions(dsn), &out); err != nil {
+	if err := MigrateUp(ctx, opts, &out); err != nil {
 		t.Fatalf("MigrateUp() error = %v (output %q)", err, out.String())
 	}
 	after, tablesAfter := execSchemaFingerprint(t, sqlDB)
