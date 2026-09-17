@@ -34,6 +34,17 @@ type StepRequest struct {
 	Action          AdvanceAction
 	AnchorAttemptID string
 	ExpectedTxHash  string
+
+	// ReplacementFeeMaxPerGas / ReplacementFeeMaxPriorityFeePerGas are the
+	// caller-supplied candidate fee dimensions for ActionReplace (exact
+	// decimal strings); 010 validates them against the PB scope caps.
+	ReplacementFeeMaxPerGas            string
+	ReplacementFeeMaxPriorityFeePerGas string
+	// ReplacementAuthorizationID optionally names the replacement's fresh PB
+	// grant ("" = the anchor's grant); ReplacementSigningRequestID optionally
+	// preallocates the replacement signing identity ("" = derived from StepID).
+	ReplacementAuthorizationID  string
+	ReplacementSigningRequestID string
 }
 
 // StepOutcome is the driver's recorded result.
@@ -236,6 +247,10 @@ func (d *StepDriver) advanceLoop(ctx context.Context, req StepRequest, stepID st
 			OwnerID: req.OwnerID, LeaseVersion: req.LeaseVersion, RecoveryVersion: recoveryVersion,
 			StepID: stepID, Action: req.Action,
 			AnchorAttemptID: req.AnchorAttemptID, ExpectedTxHash: req.ExpectedTxHash,
+			ReplacementFeeMaxPerGas:            req.ReplacementFeeMaxPerGas,
+			ReplacementFeeMaxPriorityFeePerGas: req.ReplacementFeeMaxPriorityFeePerGas,
+			ReplacementAuthorizationID:         req.ReplacementAuthorizationID,
+			ReplacementSigningRequestID:        req.ReplacementSigningRequestID,
 		})
 		if err != nil {
 			if errors.Is(err, ErrAdvanceNoSendResult) {
