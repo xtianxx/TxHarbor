@@ -17,9 +17,12 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"io/fs"
 	"os/exec"
+	"strconv"
 	"strings"
 	"testing"
+	"testing/fstest"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgconn"
@@ -126,16 +129,54 @@ func nonceMigrateOptions(dsn string) db.MigrateOptions {
 	return db.MigrateOptions{DSN: dsn, LockTimeout: 5 * time.Second, ConnectTimeout: 5 * time.Second}
 }
 
+// nonceMigrationsThrough returns the lane's embedded migrations capped at
+// maxVersion. 008-era tests pin their baseline meaning (000001-000007 plus
+// 000008) even after later planning numbers (e.g. PB 000010) land in the lane
+// tree; the cap is test scope, not a migration edit.
+func nonceMigrationsThrough(t *testing.T, maxVersion int64) fstest.MapFS {
+	t.Helper()
+	names, err := fs.Glob(migrations.FS, "*.sql")
+	if err != nil {
+		t.Fatalf("glob embedded migrations: %v", err)
+	}
+	out := make(fstest.MapFS, len(names))
+	for _, name := range names {
+		i := strings.IndexByte(name, '_')
+		if i <= 0 {
+			t.Fatalf("migration %q lacks NNNNNN_ prefix", name)
+		}
+		v, err := strconv.ParseInt(name[:i], 10, 64)
+		if err != nil {
+			t.Fatalf("migration %q version: %v", name, err)
+		}
+		if v > maxVersion {
+			continue
+		}
+		data, err := fs.ReadFile(migrations.FS, name)
+		if err != nil {
+			t.Fatalf("read embedded migration %s: %v", name, err)
+		}
+		out[name] = &fstest.MapFile{Data: data}
+	}
+	return out
+}
+
 // nonceNewProvider replicates internal/db's unexported newProvider (same
 // locker, same options, same embedded FS) since that constructor is not
 // importable.
 func nonceNewProvider(t *testing.T, sqlDB *sql.DB) *goose.Provider {
+	return nonceNewProviderFS(t, sqlDB, migrations.FS)
+}
+
+// nonceNewProviderFS is nonceNewProvider over an explicit migrations FS, so a
+// test can pin its FS scope (e.g. through 000008) without touching the lane.
+func nonceNewProviderFS(t *testing.T, sqlDB *sql.DB, fsys fs.FS) *goose.Provider {
 	t.Helper()
 	locker, err := lock.NewPostgresSessionLocker(lock.WithLockTimeout(1, 5))
 	if err != nil {
 		t.Fatalf("create migration session locker: %v", err)
 	}
-	provider, err := goose.NewProvider(goose.DialectPostgres, sqlDB, migrations.FS,
+	provider, err := goose.NewProvider(goose.DialectPostgres, sqlDB, fsys,
 		goose.WithSessionLocker(locker),
 		goose.WithDisableGlobalRegistry(true),
 	)
@@ -219,6 +260,9 @@ func TestNonceMigrationUpStatusDownUp(t *testing.T) {
 	dsn := nonceStartPostgres(t)
 	ctx := context.Background()
 	opts := nonceMigrateOptions(dsn)
+	// Pin the FS through 000008: the lane tree may carry later planning
+	// numbers (PB 000010) that this 008-era baseline test must not absorb.
+	opts.FS = nonceMigrationsThrough(t, 8)
 
 	var out bytes.Buffer
 	if err := db.MigrateUp(ctx, opts, &out); err != nil {
@@ -244,7 +288,7 @@ func TestNonceMigrationUpStatusDownUp(t *testing.T) {
 	}
 
 	// 000008 Down via a provider mirroring internal/db: exactly version 8.
-	provider := nonceNewProvider(t, sqlDB)
+	provider := nonceNewProviderFS(t, sqlDB, opts.FS)
 	results, err := provider.DownTo(ctx, 7)
 	if err != nil {
 		t.Fatalf("DownTo(7): %v", err)

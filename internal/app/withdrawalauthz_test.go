@@ -3,7 +3,10 @@ package app
 import (
 	"bytes"
 	"context"
+	"io"
+	"math"
 	"regexp"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -189,5 +192,39 @@ func TestWithdrawalAuthzChainBindRefused(t *testing.T) {
 	}
 	if !strings.Contains(stderr.String(), "chain_id") || !strings.Contains(stderr.String(), "does not match") {
 		t.Errorf("stderr %q does not report the chain bind refusal", stderr.String())
+	}
+}
+
+// TestWithdrawalAuthzFeeParseNativeIntegerBoundaries pins the fee-cap integer
+// domain at the carrier boundary (PB-C2: native-coin smallest-unit integers):
+// an unset flag is 0, the largest native integer is accepted unchanged, and a
+// cap+1 that overflows int64 is a usage error (exit 2) rather than a silently
+// truncated fee. Pre-pool: withdrawalAuthzFee touches no database.
+func TestWithdrawalAuthzFeeParseNativeIntegerBoundaries(t *testing.T) {
+	maxInt64 := strconv.FormatInt(math.MaxInt64, 10)
+	for _, raw := range []string{"0", "1", "21000", maxInt64} {
+		got, code := withdrawalAuthzFee(io.Discard, "--fee-max-total", raw)
+		if code != 0 {
+			t.Fatalf("withdrawalAuthzFee(%q) code = %d, want 0", raw, code)
+		}
+		want, err := strconv.ParseInt(raw, 10, 64)
+		if err != nil {
+			t.Fatalf("test parse %q: %v", raw, err)
+		}
+		if got != want {
+			t.Fatalf("withdrawalAuthzFee(%q) = %d, want %d", raw, got, want)
+		}
+	}
+	if got, code := withdrawalAuthzFee(io.Discard, "--fee-max-total", ""); code != 0 || got != 0 {
+		t.Fatalf("withdrawalAuthzFee(\"\") = (%d, %d), want (0, 0)", got, code)
+	}
+	for _, raw := range []string{"9223372036854775808", "1.5", "0x10", "twelve"} {
+		var stderr bytes.Buffer
+		if _, code := withdrawalAuthzFee(&stderr, "--fee-max-total", raw); code != 2 {
+			t.Fatalf("withdrawalAuthzFee(%q) code = %d, want 2 (usage error)", raw, code)
+		}
+		if !strings.Contains(stderr.String(), "--fee-max-total") {
+			t.Fatalf("stderr %q does not name the flag", stderr.String())
+		}
 	}
 }
