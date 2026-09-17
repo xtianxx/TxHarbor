@@ -44,7 +44,8 @@ type WithdrawalWorker struct {
 	Heartbeat    time.Duration
 	Stall        time.Duration
 	// Reconciler and Driver are the 010 boundary participants. They are nil in
-	// standalone 011 runs (the real 010 adapters are joint wiring).
+	// standalone 011 runs (the real 010 adapters are joint wiring); joint
+	// deployment builds them through NewJointWithdrawalWorker.
 	Reconciler *execution.Reconciler
 	Driver     *execution.StepDriver
 
