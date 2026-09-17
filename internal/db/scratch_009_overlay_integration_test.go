@@ -44,9 +44,9 @@ import (
 )
 
 const (
-	pb009FileName   = "000009_signer_service.sql"
+	pb009FileName     = "000009_signer_service.sql"
 	pb009PinnedGitSHA = "8f75450"
-	pb009FileSHA256 = "53e6ca6fac0b03de86961175d5471612b54e7dad89dabf9cc45e1567013f04b9"
+	pb009FileSHA256   = "53e6ca6fac0b03de86961175d5471612b54e7dad89dabf9cc45e1567013f04b9"
 )
 
 // pb009Fixture is the pinned 009 migration, embedded from testdata so tests
