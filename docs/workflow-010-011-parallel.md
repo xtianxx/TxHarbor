@@ -108,6 +108,8 @@ PB-C1/C2、010 Q1–Q3、011 M1n/M3）；载体、锁、顺序等机制为 plan 
   `withdrawal_authorizations.authorization_id + withdrawal_authorization_scopes` 版本。
   归属：intent 行归 011，attempt 行归 010；attempt 经 FK 关联 intent 与绑定，不复制事实。
   暂定迁移号仅供规划（未应用，合并时按实际集合核验；已应用迁移不改写）。
+  intent-FK 闭合方案（可执行，G-010-3/011-C12）：`000011` 不含 intent-FK（独立可应用）；
+  011 落地后由 010 后续迁移追加该 FK（同一所有者，不改合并顺序、不跨 owner 写表、不重排号）。
 - **J2 领取/续租/失效/重领/接管载体及版本语义；010 核验 011 资格**：011 新建
   `execution_claims`（011 所有）：`(intent_id UNIQUE)`、worker 身份、单调 `lease_version`、
   到期时间、状态。010 在发送门禁读取中按 `intent_id` 核验 claim 行（版本有效 + 未过期 +
