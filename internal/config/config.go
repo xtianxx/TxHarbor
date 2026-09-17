@@ -75,6 +75,13 @@ const (
 	EnvSignerMaxFeePerGas   = "TXHARBOR_SIGNER_MAX_FEE_PER_GAS"
 	EnvSignerMaxPriorityFee = "TXHARBOR_SIGNER_MAX_PRIORITY_FEE_PER_GAS"
 	EnvSignerMaxGasPrice    = "TXHARBOR_SIGNER_MAX_GAS_PRICE"
+	// 010 transaction-lifecycle caller knobs (T001/R-010-12): the 009 base URL,
+	// the bearer credential (secret, never logged), and the bounded dispatch
+	// timeout. No other timing knob exists — reconcile cadence and RPC timeout
+	// reuse TXHARBOR_INDEX_POLL_INTERVAL / TXHARBOR_INDEX_RPC_TIMEOUT.
+	EnvTxSignerURL        = "TXHARBOR_TX_SIGNER_URL"
+	EnvTxSignerCredential = "TXHARBOR_TX_SIGNER_CREDENTIAL"
+	EnvTxSendTimeout      = "TXHARBOR_TX_SEND_TIMEOUT"
 )
 const (
 	DefaultHTTPAddr           = "127.0.0.1:8080"
@@ -110,6 +117,10 @@ const (
 	DefaultSignerHTTPAddr   = "127.0.0.1:8091"
 	DefaultSignerMode       = "production"
 	DefaultSignerKeyTimeout = 5 * time.Second
+
+	// 010 dispatch timeout (T001): the bounded eth_sendRawTransaction window.
+	// 15s is the frozen default; zero/negative is refused at Load (fail-closed).
+	DefaultTxSendTimeout = 15 * time.Second
 
 	// logConfigVersion prefixes the config identity encoding (clarification
 	// A1). The version is part of the hashed input so future encodings never
@@ -187,6 +198,12 @@ type Config struct {
 	SignerMaxFeePerGas   *big.Int
 	SignerMaxPriorityFee *big.Int
 	SignerMaxGasPrice    *big.Int
+	// 010 transaction-lifecycle caller knobs (T001). SignerURL/Credential are
+	// parsed when present; required-ness is enforced fail-closed at client
+	// construction so serve/migrate stay green without them.
+	TxSignerURL        string
+	TxSignerCredential string
+	TxSendTimeout      time.Duration
 }
 
 // DepositEntry is one normalized `address[:effective]` configuration item: a
@@ -360,6 +377,7 @@ func Load(getenv Getenv) (*Config, error) {
 	}
 
 	c.loadSigner(getenv, &errs)
+	c.loadTxLifecycle(getenv, &errs)
 	// Nonce read API (008 FR-19): the bearer token passes through verbatim
 	// and is never formatted into an error. Unset or empty leaves the read
 	// endpoints fail-closed (the read provider authenticates against it).
@@ -406,8 +424,12 @@ func (c *Config) Summary() string {
 	if c.NonceReadToken != "" {
 		nonceReadToken = logx.Redacted
 	}
+	txSignerCredential := ""
+	if c.TxSignerCredential != "" {
+		txSignerCredential = logx.Redacted
+	}
 	return fmt.Sprintf(
-		"pg=%s rpc=%s chain_id=%d start_height=%d http_addr=%s startup_timeout=%s probe_interval=%s probe_timeout=%s shutdown_timeout=%s migrate_lock_timeout=%s index_rpc_timeout=%s index_poll_interval=%s index_retry_initial=%s index_retry_max=%s log_start_height=%d log_contracts=%d log_config_hash=%s log_batch_blocks=%d deposit_start_height=%d deposit_contracts=%d deposit_watch_addresses=%d deposit_config_hash=%s deposit_batch_blocks=%d confirmation_depth=%d reorg_max_depth=%s reorg_replay_batch=%d nonce_read_token=%s signer_http_addr=%s signer_mode=%s signer_key_timeout=%s signer_chains=%d signer_senders=%d signer_assets=%d signer_recipients=%d signer_max_gas_limit=%d",
+		"pg=%s rpc=%s chain_id=%d start_height=%d http_addr=%s startup_timeout=%s probe_interval=%s probe_timeout=%s shutdown_timeout=%s migrate_lock_timeout=%s index_rpc_timeout=%s index_poll_interval=%s index_retry_initial=%s index_retry_max=%s log_start_height=%d log_contracts=%d log_config_hash=%s log_batch_blocks=%d deposit_start_height=%d deposit_contracts=%d deposit_watch_addresses=%d deposit_config_hash=%s deposit_batch_blocks=%d confirmation_depth=%d reorg_max_depth=%s reorg_replay_batch=%d nonce_read_token=%s signer_http_addr=%s signer_mode=%s signer_key_timeout=%s signer_chains=%d signer_senders=%d signer_assets=%d signer_recipients=%d signer_max_gas_limit=%d tx_signer_url=%s tx_signer_credential=%s tx_send_timeout=%s",
 		logx.Redact(c.PGDSN), logx.Redact(c.RPCURL), c.ChainID, c.StartHeight, c.HTTPAddr,
 		c.StartupTimeout, c.ProbeInterval, c.ProbeTimeout, c.ShutdownTimeout, c.MigrateLockTimeout,
 		c.IndexRPCTimeout, c.IndexPollInterval, c.IndexRetryInitial, c.IndexRetryMax,
@@ -417,6 +439,7 @@ func (c *Config) Summary() string {
 		c.ReorgReplayBatch, nonceReadToken, c.SignerHTTPAddr, c.SignerMode, c.SignerKeyTimeout,
 		len(c.SignerChains), len(c.SignerSenders), len(c.SignerAssets),
 		len(c.SignerRecipients), c.SignerMaxGasLimit,
+		logx.Redact(c.TxSignerURL), txSignerCredential, c.TxSendTimeout,
 	)
 }
 
@@ -710,6 +733,25 @@ func (c *Config) loadSigner(getenv Getenv, errs *[]error) {
 			c.SignerMaxGasLimit = n
 		}
 	}
+}
+
+// loadTxLifecycle parses the 010 caller knobs (T001). The URL is validated as
+// an http(s) endpoint when present; the credential passes through verbatim and
+// is never formatted into an error; the dispatch timeout defaults to 15s and
+// refuses zero/negative values via duration (fail-closed).
+func (c *Config) loadTxLifecycle(getenv Getenv, errs *[]error) {
+	c.TxSendTimeout = DefaultTxSendTimeout
+	if raw, ok := getenv(EnvTxSignerURL); ok && raw != "" {
+		if err := validateHTTPURL(raw); err != nil {
+			*errs = append(*errs, invalid(EnvTxSignerURL, "%v", err))
+		} else {
+			c.TxSignerURL = raw
+		}
+	}
+	if raw, ok := getenv(EnvTxSignerCredential); ok && raw != "" {
+		c.TxSignerCredential = raw
+	}
+	c.TxSendTimeout = duration(getenv, EnvTxSendTimeout, c.TxSendTimeout, errs)
 }
 
 // SignerPolicyConfig enforces required-ness for the signer paths and builds
