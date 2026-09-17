@@ -43,6 +43,10 @@ type WithdrawalWorker struct {
 	BackoffMax   time.Duration
 	Heartbeat    time.Duration
 	Stall        time.Duration
+	// Reconciler and Driver are the 010 boundary participants. They are nil in
+	// standalone 011 runs (the real 010 adapters are joint wiring).
+	Reconciler *execution.Reconciler
+	Driver     *execution.StepDriver
 
 	mu     sync.Mutex
 	active map[string]context.CancelFunc
@@ -79,8 +83,11 @@ func NewWithdrawalWorker(pool *pgxpool.Pool, cfg *config.Config, m *metrics.Metr
 	}, nil
 }
 
-// Run scans claimable intents on the configured cadence until ctx is done.
+// Run reconciles every open step and catches the projection up before entering
+// the scan loop, so a restart rebuilds execution position from PostgreSQL and
+// 010's facts rather than from memory (persistence.md §4/§8).
 func (w *WithdrawalWorker) Run(ctx context.Context) {
+	w.startupCatchUp(ctx)
 	ticker := time.NewTicker(w.ScanInterval)
 	defer ticker.Stop()
 	for {
@@ -153,13 +160,106 @@ func (w *WithdrawalWorker) serveIntent(ctx context.Context, intentID string) {
 	version := res.Version
 	w.advanceIntentToClaimed(ctx, intentID, version)
 
+	hbCtx, hbCancel := context.WithCancel(ctx)
+	var hb sync.WaitGroup
+	hb.Add(1)
+	go func() {
+		defer hb.Done()
+		w.heartbeat(hbCtx, intentID, version)
+	}()
 	defer func() {
+		hbCancel()
+		hb.Wait()
 		if err := w.Claims.Release(context.WithoutCancel(ctx), intentID, w.OwnerID, version); err != nil && !errors.Is(err, execution.ErrClaimLost) {
 			w.log().Warn("claim release failed", "intent_id", intentID, "error", logx.Redact(err.Error()))
 		}
 	}()
 
-	w.heartbeat(ctx, intentID, version)
+	w.workLoop(ctx, intentID, version)
+}
+
+// workLoop reconciles then advances while the qualification stays current,
+// stopping the moment the claim is lost. No external call runs while holding a
+// DB lock (the driver commits the issue before calling 010).
+func (w *WithdrawalWorker) workLoop(ctx context.Context, intentID string, version int64) {
+	for {
+		if err := w.execIntentCycle(ctx, intentID, version); err != nil {
+			if errors.Is(err, execution.ErrClaimLost) {
+				return
+			}
+			w.log().Warn("execution cycle failed", "intent_id", intentID, "error", logx.Redact(err.Error()))
+		}
+		current, err := execution.ClaimIsCurrent(ctx, w.Pool, intentID, w.OwnerID, version)
+		if err != nil || !current {
+			return
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(w.ScanInterval):
+		}
+	}
+}
+
+// execIntentCycle consumes 010 facts (reconcile), refreshes the display
+// projection, and issues a send-class step only for a first/retry state with no
+// open step. A converged "sent" step leaves the intent executing (receipt
+// tracking is 010-owned) and is never re-sent automatically.
+func (w *WithdrawalWorker) execIntentCycle(ctx context.Context, intentID string, version int64) error {
+	intent, found, err := execution.ReadIntent(ctx, w.Pool, intentID)
+	if err != nil || !found {
+		return err
+	}
+	if intent.State == execution.IntentCompleted || intent.State == execution.IntentFailed {
+		return nil
+	}
+	if w.Reconciler != nil {
+		if _, err := w.Reconciler.ReconcileIntent(ctx, intentID, w.OwnerID, version); err != nil {
+			return err
+		}
+		if intent, found, err = execution.ReadIntent(ctx, w.Pool, intentID); err != nil || !found {
+			return err
+		}
+		if err := w.Reconciler.ApplyStateProjection(ctx, intent.RequestID, intent.State, intent.StateVersion); err != nil {
+			return err
+		}
+	}
+	if w.Driver == nil {
+		return nil
+	}
+	if _, open, err := execution.ReadOpenStep(ctx, w.Pool, intentID); err != nil {
+		return err
+	} else if open {
+		return nil
+	}
+	switch intent.State {
+	case execution.IntentClaimed, execution.IntentReconciling, execution.IntentRevised:
+		out, err := w.Driver.IssueAndAdvance(ctx, execution.StepRequest{
+			IntentID: intentID, RequestID: intent.RequestID,
+			OwnerID: w.OwnerID, LeaseVersion: version, Action: execution.ActionFirstBroadcast,
+		})
+		if err != nil {
+			return err
+		}
+		if out.Refusal != "" && w.Metrics != nil {
+			w.Metrics.ObserveWorkerGateRefusal(string(out.Refusal))
+		}
+	}
+	return nil
+}
+
+// startupCatchUp reconciles every open (issued) step first, then runs a
+// version-ordered projection catch-up. Both are no-ops without the 010 wiring.
+func (w *WithdrawalWorker) startupCatchUp(ctx context.Context) {
+	if w.Reconciler == nil {
+		return
+	}
+	if err := w.Reconciler.ReconcileAllOpenSteps(ctx); err != nil {
+		w.log().Warn("startup reconcile failed", "error", logx.Redact(err.Error()))
+	}
+	if err := w.Reconciler.ProjectionCatchUp011(ctx); err != nil {
+		w.log().Warn("startup projection catch-up failed", "error", logx.Redact(err.Error()))
+	}
 }
 
 // heartbeat renews the claim on the heartbeat cadence with ±10% jitter. It

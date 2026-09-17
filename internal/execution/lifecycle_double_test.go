@@ -78,6 +78,12 @@ func (d *lifecycleDouble) classOrDefault() string {
 	return d.resultClass
 }
 
+func (d *lifecycleDouble) totalCalls() int {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return len(d.calls)
+}
+
 func (d *lifecycleDouble) callCount(stepID string) int {
 	d.mu.Lock()
 	defer d.mu.Unlock()

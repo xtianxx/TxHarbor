@@ -142,6 +142,20 @@ func (g *RecoveryGate) Evaluate(requestVersion int64) RefusalClass {
 	return ""
 }
 
+// SendRefusal is the send-path 006 check: any pause row or an active recovery
+// instance refuses. The observed version is recorded as evidence (the
+// step-issue version) rather than compared to admission; a version move
+// between 011's observation and 010's build/send is 010's refused_basis.
+func (g *RecoveryGate) SendRefusal() RefusalClass {
+	if g.IndexerPaused || g.LogPaused || g.DepositPaused {
+		return ClassRecoveryPaused
+	}
+	if g.HasRecovery {
+		return ClassRecoveryActive
+	}
+	return ""
+}
+
 // ReadRecoveryGate reads the one-statement 006 snapshot; the caller holds the
 // gate-table SHARE lock.
 func ReadRecoveryGate(ctx context.Context, tx pgx.Tx, chainID int64) (RecoveryGate, error) {

@@ -126,7 +126,7 @@ func (d *StepDriver) issue(ctx context.Context, req StepRequest) (issueResult, e
 	if err != nil {
 		return issueResult{}, err
 	}
-	if class := recovery.Evaluate(intent.AdmittedRecoveryVersion); class != "" {
+	if class := recovery.SendRefusal(); class != "" {
 		return issueResult{refusal: class, basis: "recovery gate"}, nil
 	}
 
@@ -136,8 +136,11 @@ func (d *StepDriver) issue(ctx context.Context, req StepRequest) (issueResult, e
 	if err != nil {
 		return issueResult{}, err
 	}
-	if !reqFound || request.CallerID != req.CallerID {
-		return issueResult{refusal: ClassGateReadFailed, basis: "007 request row mismatch"}, nil
+	if !reqFound {
+		return issueResult{refusal: ClassGateReadFailed, basis: "007 request row missing"}, nil
+	}
+	if req.CallerID != 0 && request.CallerID != req.CallerID {
+		return issueResult{refusal: ClassGateReadFailed, basis: "007 request caller mismatch"}, nil
 	}
 	grant, grantFound, err := ReadGrant(ctx, tx, intent.AuthorizationID)
 	if err != nil {
