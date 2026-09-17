@@ -60,7 +60,11 @@ func TestJointJ5LockLossDetectablePath(t *testing.T) {
 
 	// The joint loop consumes 010's freeze fact and records 011's own marker;
 	// 011 observes the freeze as an input and claims no detection guarantee.
-	reconciler := &execution.Reconciler{Pool: j.pool, Reader: jointLifecycleReader{pool: j.pool}}
+	reader, err := NewLifecycleLive(j.pool, j.store)
+	if err != nil {
+		t.Fatalf("010 lifecycle adapter: %v", err)
+	}
+	reconciler := &execution.Reconciler{Pool: j.pool, Reader: reader}
 	if _, err := reconciler.ReconcileIntent(ctx, jj.intentID, jj.ownerID, jj.claimVersion); err != nil {
 		t.Fatalf("joint freeze reconcile: %v", err)
 	}
@@ -102,7 +106,7 @@ func TestJointJ5LockLossDetectablePath(t *testing.T) {
 	if releasedAt == nil {
 		t.Fatal("010 freeze cause not released")
 	}
-	facts, err := (&jointLifecycleReader{pool: j.pool}).Read(ctx, jj.intentID)
+	facts, err := reader.Read(ctx, jj.intentID)
 	if err != nil {
 		t.Fatal(err)
 	}

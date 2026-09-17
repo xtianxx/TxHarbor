@@ -30,6 +30,7 @@ import (
 	"github.com/xtianxx/txharbor/internal/config"
 	"github.com/xtianxx/txharbor/internal/eth"
 	"github.com/xtianxx/txharbor/internal/execution"
+	"github.com/xtianxx/txharbor/internal/nonce"
 	"github.com/xtianxx/txharbor/internal/signer"
 	"github.com/xtianxx/txharbor/internal/withdrawal"
 )
@@ -38,7 +39,8 @@ const jointChainID int64 = 31337
 
 // jointEnv is the real joint stack: one 010-to-011 integration workspace with
 // real PostgreSQL, a real Anvil node, the real in-process 009 signer-serve, the
-// real 007/011 HTTP handlers and the real 010 Store.
+// real 007/011 HTTP handlers, the real 010 Store and the real 008 admission
+// core (nonce.Allocator) for binding allocation.
 type jointEnv struct {
 	t         *testing.T
 	ctx       context.Context
@@ -49,6 +51,7 @@ type jointEnv struct {
 	eth       *eth.Client
 	store     *Store
 	signer    *SignerClient
+	alloc     *nonce.Allocator
 	devKey    *ecdsa.PrivateKey
 	sender    string
 	asset     string
@@ -111,6 +114,11 @@ func newJointEnv(t *testing.T) *jointEnv {
 		t.Fatalf("eth dial: %v", err)
 	}
 	t.Cleanup(ethClient.Close)
+	anvilRPC, err := rpc.DialContext(ctx, anvilURL)
+	if err != nil {
+		t.Fatalf("anvil rpc dial: %v", err)
+	}
+	t.Cleanup(anvilRPC.Close)
 
 	key, err := crypto.GenerateKey()
 	if err != nil {
@@ -127,12 +135,19 @@ func newJointEnv(t *testing.T) *jointEnv {
 
 	j := &jointEnv{
 		t: t, ctx: ctx, dsn: dsn, pool: pool, anvilURL: anvilURL,
-		eth: ethClient, devKey: key, sender: sender,
+		anvilRPC: anvilRPC, eth: ethClient, devKey: key, sender: sender,
 		asset:     "0x2222222222222222222222222222222222222222",
 		recipient: "0x3333333333333333333333333333333333333333",
 		amount:    "1000",
 		callerID:  1,
 	}
+	// The real 008 admission core over the real node: the joint path allocates
+	// bindings through the allocator, never through fixture SQL.
+	rebuildGate := nonce.NewRebuildGate()
+	rebuildGate.Open()
+	j.alloc = nonce.NewAllocator(pool, nonce.NewObserver(anvilRPC, nonce.ObserverConfig{
+		RPCTimeout: 5 * time.Second, RetryInitial: 10 * time.Millisecond, RetryMax: 100 * time.Millisecond,
+	}), rebuildGate)
 	j.apiKey = jointIssueKey(t, ctx, pool, j.callerID)
 	cred, err := signer.IssueCredential(ctx, pool, j.callerID, "joint")
 	if err != nil {
@@ -276,28 +291,31 @@ func jointEmitCode(sender, recipient string, amount *big.Int) []byte {
 	return code
 }
 
-// jointIntent is one admitted intent with its real claim and 007 request.
+// jointIntent is one admitted intent with its real claim, real 008 binding and
+// 007 request.
 type jointIntent struct {
 	requestID        string
 	intentID         string
 	authorizationID  string
 	signingRequestID string
 	bindingID        string
+	nonce            string
 	attemptID        string
 	claimVersion     int64
 	ownerID          string
 }
 
-// admit creates the 007 request over real HTTP, the 011 intent over real HTTP,
-// and the real 011 execution claim; then it seeds the 008 binding and persists
-// the 010 attempt (T1). It returns the joint identity.
-func (j *jointEnv) admit() *jointIntent {
+// admitIntent creates the 007 request over real HTTP, the 011 intent over real
+// HTTP, the real 011 execution claim, and the real 008 binding through the
+// admission core. It stops before any 010 attempt (T1), because T1 belongs to
+// whichever 010 path runs next: the direct-store tests persist their own
+// attempt, while the production-wired worker/adapter persists its own.
+func (j *jointEnv) admitIntent() *jointIntent {
 	j.t.Helper()
 	j.seq++
 	n := j.seq
 	authID := fmt.Sprintf("wa-j%d", n)
 	intentID := fmt.Sprintf("intent-j%d", n)
-	bindingID := fmt.Sprintf("bind-j%d", n)
 	attemptID := fmt.Sprintf("att-j%d", n)
 	ownerID := fmt.Sprintf("worker-j%d", n)
 
@@ -374,14 +392,31 @@ func (j *jointEnv) admit() *jointIntent {
 		j.t.Fatalf("claim: %+v %v", claim, err)
 	}
 
-	authAnchor := strings.TrimPrefix(crypto.Keccak256Hash([]byte(authID)).Hex(), "0x")
-	j.mustExec(`INSERT INTO nonce_bindings (binding_id, intent_id, chain_id, sender, nonce, state, authorization_id, authorization_version, registry_seq, allocation_observation_id)
-		VALUES ($1,$2,$3,$4,0,'allocated',$5,$6,1,'obs-joint')`, bindingID, intentID, jointChainID, j.sender, authID, authAnchor)
+	binding, outcome, err := j.alloc.Allocate(j.ctx, nonce.AllocationRequest{
+		IntentID: intentID, ChainID: jointChainID, Sender: j.sender, AuthorizationID: authID,
+	})
+	if err != nil || outcome != nonce.OutcomeAllocated || binding == nil {
+		j.t.Fatalf("008 allocate: outcome=%s err=%v", outcome, err)
+	}
+	bindingID := binding.BindingID
+	bindingNonce := nonce.FormatDecimal(binding.Nonce)
+	return &jointIntent{
+		requestID: created.RequestID, intentID: intentID, authorizationID: authID,
+		signingRequestID: signingRequestID, bindingID: bindingID, nonce: bindingNonce,
+		attemptID: attemptID, claimVersion: claim.Version, ownerID: ownerID,
+	}
+}
 
+// admit is admitIntent plus the caller-side T1 persist that the direct 010
+// send tests drive; the production-wired worker/adapter path uses admitIntent
+// and persists its own attempt through Advance.
+func (j *jointEnv) admit() *jointIntent {
+	j.t.Helper()
+	jj := j.admitIntent()
 	req := &PrepareRequest{
-		AttemptID: attemptID, SigningRequestID: signingRequestID, IntentID: intentID,
-		BindingRef: bindingID, AuthorizationID: authID, AuthorizationVersion: 1,
-		RecoveryVersion: 0, ChainID: uint64(jointChainID), Sender: j.sender, Nonce: "0",
+		AttemptID: jj.attemptID, SigningRequestID: jj.signingRequestID, IntentID: jj.intentID,
+		BindingRef: jj.bindingID, AuthorizationID: jj.authorizationID, AuthorizationVersion: 1,
+		RecoveryVersion: 0, ChainID: uint64(jointChainID), Sender: j.sender, Nonce: jj.nonce,
 		TxType: TxTypeDynamicFee, GasLimit: "100000",
 		MaxFeePerGas: "1000000000", MaxPriorityFeePerGas: "100000000",
 		Asset: j.asset, Recipient: j.recipient, Amount: j.amount,
@@ -389,11 +424,7 @@ func (j *jointEnv) admit() *jointIntent {
 	if _, err := j.store.PrepareAttempt(j.ctx, req); err != nil {
 		j.t.Fatalf("PrepareAttempt: %v", err)
 	}
-	return &jointIntent{
-		requestID: created.RequestID, intentID: intentID, authorizationID: authID,
-		signingRequestID: signingRequestID, bindingID: bindingID, attemptID: attemptID,
-		claimVersion: claim.Version, ownerID: ownerID,
-	}
+	return jj
 }
 
 func (j *jointEnv) claim(jj *jointIntent) ClaimRef {
