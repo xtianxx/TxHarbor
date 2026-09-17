@@ -121,6 +121,7 @@ func (s *stubRPC) dispatchedRaw() [][]byte {
 // env is one migrated scratch database plus its store.
 type env struct {
 	t       *testing.T
+	dsn     string
 	pool    *pgxpool.Pool
 	store   *Store
 	rpc     *stubRPC
@@ -138,7 +139,7 @@ func newEnv(t *testing.T) *env {
 	t.Cleanup(pool.Close)
 	rpc := &stubRPC{head: 100}
 	store := NewStore(pool).WithChain(rpc, 5*time.Second)
-	return &env{t: t, pool: pool, store: store, rpc: rpc, chainID: 31337}
+	return &env{t: t, dsn: dsn, pool: pool, store: store, rpc: rpc, chainID: 31337}
 }
 
 func (e *env) exec(sql string, args ...any) {
@@ -191,10 +192,6 @@ func (e *env) seed() *fixture {
 		asset: fxAsset, recipient: fxRecipient, nonce: "0",
 		workerID: id("worker"), leaseVersion: 1,
 	}
-	e.exec(`CREATE TABLE IF NOT EXISTS execution_claims (
-		intent_id TEXT PRIMARY KEY, worker_id TEXT NOT NULL,
-		lease_version BIGINT NOT NULL, expires_at TIMESTAMPTZ NOT NULL,
-		revoked BOOLEAN NOT NULL DEFAULT FALSE)`)
 	if e.seq == 1 {
 		e.exec(`INSERT INTO chain_blocks (chain_id, number, hash, parent_hash, canonical) VALUES ($1,100,$2,$2,TRUE)`,
 			e.chainID, blockHashHex(100))
@@ -205,18 +202,18 @@ func (e *env) seed() *fixture {
 	e.exec(`INSERT INTO withdrawal_authorizations
 		(authorization_id, caller_id, chain_id, asset, recipient, amount, state)
 		VALUES ($1,1,$2,$3,$4,'1000','active')`, f.authID, e.chainID, fxAsset, fxRecipient)
+	reqID := id("req")
 	e.exec(`INSERT INTO withdrawal_authorization_scopes
 		(authorization_id, intent_id, request_id, sender, fee_max_total, fee_max_per_gas, fee_max_priority, allows_fee_replacement, authorization_version, attested_by)
 		VALUES ($1,$2,$3,$4,100000000000000,1000000000,100000000,TRUE,1,'test')`,
-		f.authID, f.intentID, id("req"), f.sender)
+		f.authID, f.intentID, reqID, f.sender)
 	e.exec(`INSERT INTO nonce_wallet_registry (chain_id, sender, state, registry_seq) VALUES ($1,$2,'active',1)`, e.chainID, f.sender)
 	e.exec(`INSERT INTO nonce_scope_state (chain_id, sender) VALUES ($1,$2)`, e.chainID, f.sender)
 	e.exec(`INSERT INTO nonce_bindings
 		(binding_id, intent_id, chain_id, sender, nonce, state, authorization_id, authorization_version, registry_seq, allocation_observation_id)
 		VALUES ($1,$2,$3,$4,0,'allocated',$5,$6,1,'obs-fixture')`,
 		f.bindingID, f.intentID, e.chainID, f.sender, f.authID, strings.Repeat("0", 64))
-	e.exec(`INSERT INTO execution_claims (intent_id, worker_id, lease_version, expires_at)
-		VALUES ($1,$2,$3,now() + interval '1 hour')`, f.intentID, f.workerID, f.leaseVersion)
+	e.seedClaimFixtures(f, reqID)
 
 	f.request = &PrepareRequest{
 		AttemptID: f.attemptID, SigningRequestID: f.signingRequestID, IntentID: f.intentID,
@@ -229,6 +226,39 @@ func (e *env) seed() *fixture {
 		e.t.Fatalf("PrepareAttempt: %v", err)
 	}
 	return f
+}
+
+// seedClaimFixtures provisions the J2 claim carrier and, when 011's
+// payment_intents exists, the intent identity chain the closed intent FK
+// needs. On the 011-absent lane a test-only execution_claims table with the
+// same column names is created — never a migration, never joint evidence
+// (R-010-11; G-010-4; FR-16).
+func (e *env) seedClaimFixtures(f *fixture, reqID string) {
+	e.exec(`CREATE TABLE IF NOT EXISTS execution_claims (
+		intent_id TEXT PRIMARY KEY, owner_id TEXT NOT NULL,
+		lease_version BIGINT NOT NULL, state TEXT NOT NULL DEFAULT 'active',
+		acquired_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+		expires_at TIMESTAMPTZ NOT NULL, ended_at TIMESTAMPTZ, end_kind TEXT)`)
+	if e.tableExists("payment_intents") {
+		e.exec(`INSERT INTO withdrawal_requests
+			(request_id, caller_id, idempotency_key, authorization_id, chain_id, asset, recipient, amount)
+			VALUES ($1,1,$2,$3,$4,$5,$6,'1000')`,
+			reqID, "idem-"+reqID, f.authID, e.chainID, fxAsset, fxRecipient)
+		e.exec(`INSERT INTO payment_intents
+			(intent_id, request_id, chain_id, sender, authorization_id, authorization_version, state, admitted_recovery_version)
+			VALUES ($1,$2,$3,$4,$5,1,'admitted',0)`,
+			f.intentID, reqID, e.chainID, f.sender, f.authID)
+	}
+	e.exec(`INSERT INTO execution_claims (intent_id, owner_id, lease_version, state, expires_at)
+		VALUES ($1,$2,$3,'active',now() + interval '1 hour')`, f.intentID, f.workerID, f.leaseVersion)
+}
+
+func (e *env) tableExists(name string) bool {
+	var ok bool
+	if err := e.pool.QueryRow(context.Background(), `SELECT to_regclass($1) IS NOT NULL`, name).Scan(&ok); err != nil {
+		e.t.Fatalf("tableExists %s: %v", name, err)
+	}
+	return ok
 }
 
 func (f *fixture) claim() ClaimRef {
