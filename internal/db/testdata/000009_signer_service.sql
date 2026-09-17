@@ -27,7 +27,11 @@
 --       replacement_of self-FK marks fee replacements; the partial unique
 --       index signing_requests_authorization_anchor_uniq enforces one anchor
 --       (non-replacement) request per authorization (OC-5/R7); the fee-shape
---       CHECK pins tx_type to {0, 2} closed shapes.
+--       CHECK pins tx_type to {0, 2} closed shapes; authorization_version is
+--       the PB scope version observed at submit (H2/T037). It is NULL when no
+--       scope row was observed — a deliberate absence marker, never a default
+--       version: a carrier appearing later must NOT compare equal and be
+--       silently adopted. The CHECK mirrors the PB carrier's >= 1 bound.
 --   Table 4 `signature_results` (the only signing artifact ever persisted:
 --       signature value + hash; NEVER raw signed-tx bytes): PK is the request
 --       row (one result per identity) with an explicitly named
@@ -118,6 +122,7 @@ CREATE TABLE signing_requests (
     authorization_id            TEXT          NOT NULL,
     authorization_fingerprint   TEXT          NOT NULL,
     authorization_state         TEXT          NOT NULL,
+    authorization_version       BIGINT,
     policy_version              TEXT          NOT NULL,
     state                       TEXT          NOT NULL DEFAULT 'received',
     refusal_class               TEXT          NOT NULL DEFAULT '',
@@ -156,7 +161,9 @@ CREATE TABLE signing_requests (
     CONSTRAINT signing_requests_access_list_check CHECK (jsonb_array_length(access_list) = 0),
     CONSTRAINT signing_requests_content_hash_check CHECK (content_hash ~ '^0x[0-9a-f]{64}$'),
     CONSTRAINT signing_requests_authorization_fingerprint_check
-        CHECK (authorization_fingerprint ~ '^[0-9a-f]{64}$')
+        CHECK (authorization_fingerprint ~ '^[0-9a-f]{64}$'),
+    CONSTRAINT signing_requests_authorization_version_check
+        CHECK (authorization_version IS NULL OR authorization_version >= 1)
 );
 
 -- OC-5 conditional grant reuse (research R7): one anchor (non-replacement)

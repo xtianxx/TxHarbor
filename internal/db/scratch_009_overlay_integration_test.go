@@ -45,8 +45,9 @@ import (
 
 const (
 	pb009FileName     = "000009_signer_service.sql"
-	pb009PinnedGitSHA = "8f75450"
-	pb009FileSHA256   = "53e6ca6fac0b03de86961175d5471612b54e7dad89dabf9cc45e1567013f04b9"
+	pb009Version      = 9
+	pb009PinnedGitSHA = "9f029ee"
+	pb009FileSHA256   = "cd77bffd2b434f0dcd0bf8bf63e169b1e2db75bcf5beda8edc05f0901b1ae859"
 )
 
 // pb009Fixture is the pinned 009 migration, embedded from testdata so tests
@@ -83,9 +84,11 @@ func laneVersion(t *testing.T, name string) int64 {
 }
 
 // pb009Overlay builds the in-memory migrations FS: the lane's embedded files
-// plus the scratch 009 file when include009 is true. omit drops lane versions
-// (T042 renumber simulation only). The lane tree and the embedded FS are never
-// touched.
+// plus the scratch 009 file when include009 is true. Any embedded 000009 is
+// dropped from the base set — 9 is the signer lane's own number and enters
+// this PB harness only through the pinned fixture — so the base is main's
+// {1..8,10} in either tree. omit drops further lane versions (T042 renumber
+// simulation only). The lane tree and the embedded FS are never touched.
 func pb009Overlay(t *testing.T, include009 bool, omit ...int64) fstest.MapFS {
 	t.Helper()
 	names, err := fs.Glob(Migrations, "*.sql")
@@ -98,7 +101,8 @@ func pb009Overlay(t *testing.T, include009 bool, omit ...int64) fstest.MapFS {
 	}
 	fsys := make(fstest.MapFS, len(names)+1)
 	for _, name := range names {
-		if drop[laneVersion(t, name)] {
+		version := laneVersion(t, name)
+		if drop[version] || version == pb009Version {
 			continue
 		}
 		data, err := fs.ReadFile(Migrations, name)
