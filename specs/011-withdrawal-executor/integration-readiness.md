@@ -165,3 +165,46 @@ merges to main.
 
 V11–V12 additions this batch: `internal/execution/state_machine_integration_test.go` (V11),
 `boundary_test.go` (V12.3), `secrecy_test.go` (V12.4/V12.5).
+
+---
+
+## Joint final acceptance re-verification (2026-09-18, clean tree)
+
+This section supersedes the "J1–J5 NOT executed" state above for the final
+acceptance only; the lane record above stays as the point-in-time handover
+record. Re-verified on the joint worktree at test commit `ad1cd84` (base
+`0946638`), raw logs under `/tmp/opencode/joint-final/`.
+
+**T043 (FK closure)** — re-run and PASS: `TestT043MigrationSetMergeOrder` +
+`TestT044IntentFK` (010-owned probes) and the new
+`TestT043JointClaimsIntentFK`, which closes the 011-owned evidence gap the lane
+record left open: `execution_claims_intent_fkey` is a named, validated
+constraint on `payment_intents(intent_id)` and a missing intent row is refused
+with 23503 on the exact constraint name. Log: `011-t043-t044.log`,
+`010-t043-t044.log`.
+
+**T044 (column parity)** — re-run and PASS: the new
+`TestT044JointClaimsColumnParity` asserts the live `execution_claims` column set
+equals the frozen J2 shape in ordinal order, every column 010's single mapping
+table reads is present, and the intent-unique / `lease_version>=1` / expiry /
+revocation-marker semantics are enforced by the named constraints. Log:
+`011-t043-t044.log`.
+
+**T045 (joint readiness, J participation)** — re-run and PASS: the three
+blocking prerequisites recorded above are resolved in this round — the
+production adapter is `txlifecycle.LifecycleLive` constructed by
+`app.NewJointWithdrawalWorker` (joint wiring unit), real 008 allocation runs
+through `nonce.Allocator`, and the on-chain leg uses a real Anvil node plus a
+test ERC-20 Transfer emitter. All five J scenarios run through
+`worker.Driver.IssueAndAdvance` over that wiring
+(`TestJointDriverJ1`–`TestJointDriverJ5`) plus `TestJointWorkerProductionWiring`,
+proving the 011 participant paths (admission/intent+claim supply, fencing and
+takeover, reconcile loop, projection updater, freeze consumer) operate in real
+joint wiring. Log: `011-t045-readiness.log`, `j1-j5-driver.log`.
+
+**Box state**: T043/T044/T045 were set to `[ ]` before this re-verification and
+restored to `[x]` only after the runs passed on the clean tree. A-13 and T000-P
+remain OPEN; the production process entry point (`WithdrawalWorkerCommand`)
+still constructs the standalone worker, so production adapter assembly stays
+A-13 scope. The deliberate `Advance(ActionReplace)` -> `refused_basis` gap (no
+010 fee policy) is recorded, not faked.
