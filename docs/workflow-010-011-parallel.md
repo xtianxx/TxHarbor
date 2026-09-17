@@ -208,13 +208,19 @@ PB-C1/C2、010 Q1–Q3、011 M1n/M3）；载体、锁、顺序等机制为 plan 
 - 保持 OPEN（按约束不闭合）：A-13 全链 E2E、T000-P 生产 provider。生产端 010↔011
   lifecycle 适配器与 008 分配接线仍属 A-13 范围，本批次由测试侧适配器覆盖联合验收。
 
-### 已知 out-of-lane 失败（按原样报告，未修复）
+### out-of-lane 失败已闭合：000014 intent-FK 修复（joint 分支专属）
 
-- `internal/db/withdrawal_execution_migration_integration_test.go:308`
-  `TestWithdrawalExecutionMigrationNumberIsProvisional` 断言“000011 属于 010 lane，在本分支必须缺席”。
-  联合分支按 010→011 合并顺序刻意包含 `000011`，该断言因此失败（`db_test_exit=1`，
-  日志 `11-db-outoflane.txt`）。此为 010 合入前的 lane-local 假设，属 out-of-lane；
-  本批次不修改它，交由 011 lane 在合并顺序确认后按实际集合更新。
+- `internal/db/withdrawal_execution_migration_integration_test.go` 的两处 stale 断言已在联合分支
+  按 post-repair 集合 `{10 PB, 11 010, 12 011, 13 guarded, 14 repair}` 适配：
+  `TestWithdrawalExecutionMigrationNumberIsProvisional`（3d8556e 记录的“000011 必须缺席”）
+  与 `TestWithdrawalExecutionMigrationDownRemovesOnlyItself`（夹具改为精确停在 000012）。
+  重复版本检测与精确集合断言保留，未删除任何保护。
+- 联合分支 `000013` 字节对齐 010 lane 的 guarded 版本（sha256 `45e4b8a1…`）；新增
+  `000014_intent_fk_repair.sql`：guard no-op 已 recorded 而 `payment_intents` 后到的库在
+  000012 之后补齐 FK；`payment_intents` 缺席时 RAISE（绝不静默跳过），约束存在则不重复添加，
+  Down 仅 `DROP CONSTRAINT IF EXISTS`。
+- **该修复迁移为 joint 分支专属**：000012 落地前禁止 cherry-pick 回 010 独立候选
+  （010 独立契约仍由 guarded `000013` 承担）。
 
 ### 011 侧输入需求（不修改 011 任务框，011 lane 拥有）
 
