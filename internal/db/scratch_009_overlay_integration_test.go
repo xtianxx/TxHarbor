@@ -20,13 +20,17 @@
 //
 // OVERLAY FORMAT consumed by sibling verification (T036, PB-05 sequences):
 //
-//	fsys := pb009Overlay(t, true)                 // lane {1..8,10} + scratch 009 => {1..10}
+//	fsys := pb009HistoricOverlay(t, true, pb009HistoricLane...) // {1..10}
 //	opts := testMigrateOptions(dsn)
 //	opts.FS = fsys
 //	db.MigrateUp(ctx, opts, &out)                 // on an empty DB: applied=10
 //
-// pb009Overlay(t, false) yields the pre-merge state {1..8,10}; omit lets a
-// caller simulate a renumber-at-merge that removes an applied number's file.
+// pb009Overlay(t, ...) is the unpinned overlay built from whatever the
+// embedded lane set currently carries (the joint lane's {1..14}); omit lets a
+// caller simulate a renumber-at-merge that removes an applied number's file
+// (T042's down tests, which exercise the current joint head). PB-history
+// sequences that assert an era-exact applied count pin the historical set
+// through pb009HistoricOverlay instead.
 package db
 
 import (
@@ -83,12 +87,13 @@ func laneVersion(t *testing.T, name string) int64 {
 	return v
 }
 
-// pb009Overlay builds the in-memory migrations FS: the lane's embedded files
-// plus the scratch 009 file when include009 is true. Any embedded 000009 is
-// dropped from the base set — 9 is the signer lane's own number and enters
-// this PB harness only through the pinned fixture — so the base is main's
-// {1..8,10} in either tree. omit drops further lane versions (T042 renumber
-// simulation only). The lane tree and the embedded FS are never touched.
+// pb009Overlay builds the in-memory migrations FS from the embedded lane set:
+// every embedded file minus omit, with any embedded 000009 dropped — 9 is the
+// signer lane's own number and enters this PB harness only through the pinned
+// fixture. On the joint branch the embedded set is {1..14}, so callers that
+// need the PB/009-era set pin it with pb009HistoricOverlay; pb009Overlay is the
+// unpinned set T042's down tests exercise. omit drops further lane versions
+// (renumber simulation). The lane tree and the embedded FS are never touched.
 func pb009Overlay(t *testing.T, include009 bool, omit ...int64) fstest.MapFS {
 	t.Helper()
 	names, err := fs.Glob(Migrations, "*.sql")
@@ -110,6 +115,49 @@ func pb009Overlay(t *testing.T, include009 bool, omit ...int64) fstest.MapFS {
 			t.Fatalf("read lane migration %s: %v", name, err)
 		}
 		fsys[name] = &fstest.MapFile{Data: data}
+	}
+	if include009 {
+		fsys[pb009FileName] = &fstest.MapFile{Data: pb009File(t)}
+	}
+	return fsys
+}
+
+// pb009HistoricLane is the frozen lane set the PB/009-history sequences were
+// written against: main's {1..8,10}. The signer lane's own 9 enters only as
+// the scratch fixture (include009), never from the embedded set.
+var pb009HistoricLane = []int64{1, 2, 3, 4, 5, 6, 7, 8, 10}
+
+// pb009HistoricOverlay builds the overlay FS from exactly the named historical
+// lane versions, never from whatever the embedded joint set currently carries.
+// It is the pin the T036/T040/T041 sequences use: their claims (007-era ->
+// carrier, empty -> full, the 009 gap-fill, overlay-green) are exact over the
+// {1..10} era set, so joint-lane migrations 000011+ must not leak in and shift
+// the applied counts. The scratch 009 fixture still enters only through
+// include009, and a named version missing from the lane FS fails here, loudly.
+func pb009HistoricOverlay(t *testing.T, include009 bool, versions ...int64) fstest.MapFS {
+	t.Helper()
+	files, err := MigrationFiles(Migrations)
+	if err != nil {
+		t.Fatalf("list lane migrations: %v", err)
+	}
+	want := make(map[int64]bool, len(versions))
+	for _, v := range versions {
+		want[v] = true
+	}
+	fsys := make(fstest.MapFS, len(versions)+1)
+	for _, f := range files {
+		if f.Version == pb009Version || !want[f.Version] {
+			continue
+		}
+		data, err := fs.ReadFile(Migrations, f.Name)
+		if err != nil {
+			t.Fatalf("read lane migration %s: %v", f.Name, err)
+		}
+		fsys[f.Name] = &fstest.MapFile{Data: data}
+		delete(want, f.Version)
+	}
+	if len(want) != 0 {
+		t.Fatalf("historically pinned lane versions missing from the embedded FS: %v", want)
 	}
 	if include009 {
 		fsys[pb009FileName] = &fstest.MapFile{Data: pb009File(t)}
@@ -145,14 +193,16 @@ func appliedContains(t *testing.T, applied []int64, want ...int64) {
 }
 
 // TestT040OverlayGreenOnEmptySequence is T040's "green on empty sequence": a
-// fresh scratch PostgreSQL plus the lane {1..8,10} + scratch 009 overlay
-// migrates to 10 and serves (CheckCompatibility green) with both the 007
-// carrier and the 009 signer tables in place. Real container, real runner.
+// fresh scratch PostgreSQL plus the pinned PB/009-era overlay {1..10}
+// (pb009HistoricLane + scratch 009; joint-lane 000011+ postdates this era and
+// is deliberately outside the sequence) migrates to 10 and serves
+// (CheckCompatibility green) with both the 007 carrier and the 009 signer
+// tables in place. Real container, real runner.
 func TestT040OverlayGreenOnEmptySequence(t *testing.T) {
 	dsn := startPostgres(t)
 	ctx := context.Background()
 	opts := testMigrateOptions(dsn)
-	opts.FS = pb009Overlay(t, true)
+	opts.FS = pb009HistoricOverlay(t, true, pb009HistoricLane...) // pinned {1..10}
 
 	files, err := MigrationFiles(opts.FS)
 	if err != nil {
@@ -199,17 +249,19 @@ func TestT040OverlayGreenOnEmptySequence(t *testing.T) {
 	}
 }
 
-// TestT041GapFillSequenceD is PB-05 sequence (d): a PB-only database at
-// {1..8,10} plus an embedded set of {1..10} must, on plain `migrate up`, apply
-// exactly version 9; the serve gate must refuse before that and accept after.
-// Both gate outputs are logged (T041 log pointers live outside the repo).
+// TestT041GapFillSequenceD is PB-05 sequence (d): a PB-only database at the
+// pinned historical {1..8,10} plus the pinned {1..10} must, on plain
+// `migrate up`, apply exactly version 9; the serve gate must refuse before
+// that and accept after. Both gate outputs are logged (T041 log pointers live
+// outside the repo). The historical pin keeps the gap-fill arithmetic exact
+// over the 009 era (joint-lane 000011+ is outside this sequence).
 func TestT041GapFillSequenceD(t *testing.T) {
 	dsn := startPostgres(t)
 	ctx := context.Background()
 	preMerge := testMigrateOptions(dsn)
-	preMerge.FS = pb009Overlay(t, false) // lane {1..8,10}: 9 has not merged
+	preMerge.FS = pb009HistoricOverlay(t, false, pb009HistoricLane...) // lane {1..8,10}: 9 has not merged
 	postMerge := testMigrateOptions(dsn)
-	postMerge.FS = pb009Overlay(t, true) // files {1..10}: 009 has landed
+	postMerge.FS = pb009HistoricOverlay(t, true, pb009HistoricLane...) // files {1..10}: 009 has landed
 
 	// Phase 1: an already-served PB database at {1..8,10}.
 	var out bytes.Buffer
@@ -280,16 +332,16 @@ func TestT041GapFillSequenceD(t *testing.T) {
 }
 
 // TestT042RollbackRevertsTenBeforeNine asserts the applied-descending rollback
-// order from a full {1..10} chain: `down` reverts 10 before 9, dropping the
-// carrier first while the signer tables survive until 9's own down. The
-// 10-down drops withdrawal_authorization_scopes AND its rows — that is the
-// designed-for-scratch limit (T042): carrier rollback is never a production
-// operation.
+// order from the full joint chain {1..14}: `down` walks the joint head
+// 14,13,12,11 first, then reverts 10 before 9, dropping the carrier while the
+// signer tables survive until 9's own down. The 10-down drops
+// withdrawal_authorization_scopes AND its rows — that is the designed-for-
+// scratch limit (T042): carrier rollback is never a production operation.
 func TestT042RollbackRevertsTenBeforeNine(t *testing.T) {
 	dsn := startPostgres(t)
 	ctx := context.Background()
 	opts := testMigrateOptions(dsn)
-	opts.FS = pb009Overlay(t, true)
+	opts.FS = pb009Overlay(t, true) // unpinned joint head {1..14}
 
 	var out bytes.Buffer
 	if err := MigrateUp(ctx, opts, &out); err != nil {
@@ -299,6 +351,18 @@ func TestT042RollbackRevertsTenBeforeNine(t *testing.T) {
 	provider, err := newProvider(sqlDB, opts)
 	if err != nil {
 		t.Fatalf("newProvider: %v", err)
+	}
+
+	// The joint head reverts strictly descending (14 -> 11) before the PB
+	// carrier reaches the 10-before-9 assertion: every applied number, exact.
+	for _, want := range []int64{14, 13, 12, 11} {
+		result, err := provider.Down(ctx)
+		if err != nil {
+			t.Fatalf("Down() of version %d: %v", want, err)
+		}
+		if result.Source.Version != want {
+			t.Fatalf("Down() reverted version %d, want %d (applied-descending)", result.Source.Version, want)
+		}
 	}
 
 	first, err := provider.Down(ctx)
@@ -329,8 +393,8 @@ func TestT042RollbackRevertsTenBeforeNine(t *testing.T) {
 
 // TestT042DownOfAppliedThenRenumberedNumberForbidden pins the renumber rule:
 // migration numbers are immutable once applied. Simulate a merge-time
-// renumber that removes the applied number's file (FS {1..9} while the DB
-// still has 10 applied): `down` must refuse rather than silently roll back a
+// renumber that removes the applied head's file (FS {1..13} while the DB
+// still has 14 applied): `down` must refuse rather than silently roll back a
 // different version, the DB must be untouched, and the serve gate must refuse
 // (unknown/newer applied version).
 func TestT042DownOfAppliedThenRenumberedNumberForbidden(t *testing.T) {
@@ -346,13 +410,13 @@ func TestT042DownOfAppliedThenRenumberedNumberForbidden(t *testing.T) {
 	sqlDB := openTestSQL(t, dsn)
 
 	renumbered := testMigrateOptions(dsn)
-	renumbered.FS = pb009Overlay(t, true, 10) // applied 10's file is gone
+	renumbered.FS = pb009Overlay(t, true, 14) // applied head 14's file is gone
 	files, err := MigrationFiles(renumbered.FS)
 	if err != nil {
 		t.Fatalf("list renumbered migrations: %v", err)
 	}
-	if got := files[len(files)-1].Version; got != 9 {
-		t.Fatalf("renumbered FS target = %d, want 9", got)
+	if got := files[len(files)-1].Version; got != 13 {
+		t.Fatalf("renumbered FS target = %d, want 13", got)
 	}
 
 	provider, err := newProvider(sqlDB, renumbered)
@@ -372,8 +436,8 @@ func TestT042DownOfAppliedThenRenumberedNumberForbidden(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Inspect(applied) error = %v", err)
 	}
-	if state.Current != 10 {
-		t.Fatalf("applied state changed by a forbidden down: current = %d, want 10", state.Current)
+	if state.Current != 14 {
+		t.Fatalf("applied state changed by a forbidden down: current = %d, want 14", state.Current)
 	}
 	if _, err := CheckCompatibility(ctx, renumbered); err == nil {
 		t.Fatal("serve gate must refuse an applied version with no resolvable file")

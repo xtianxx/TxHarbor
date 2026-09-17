@@ -78,6 +78,11 @@ func TestAuthzScopeMigrationDownRemovesOnlyItself(t *testing.T) {
 	dsn := startPostgres(t)
 	ctx := context.Background()
 	opts := testMigrateOptions(dsn)
+	// Build the database at exactly {1..10}: 000010 is the highest version
+	// this test owns. The full embedded set would also carry the joint lane's
+	// 000011..000014, and DownTo(9) would revert those too, which is not
+	// 000010's down-scope assertion (same setup as the 000012 down test).
+	opts.FS = migrationSubsetFS(t, 10)
 
 	var out bytes.Buffer
 	if err := MigrateUp(ctx, opts, &out); err != nil {
@@ -92,10 +97,8 @@ func TestAuthzScopeMigrationDownRemovesOnlyItself(t *testing.T) {
 	if err != nil {
 		t.Fatalf("newProvider: %v", err)
 	}
-	// Target 9 so exactly the carrier rolls back: on the pre-merge PB tree
-	// 000010 was the only applied version above 8, and on the merged tree the
-	// signer lane's 000009 is applied below it, so 9 (not 8) keeps the "000010
-	// down removes only itself" claim exact in both trees.
+	// The fixture stops at 10, so DownTo(9) rolls back exactly the carrier
+	// 000010 and the "000010 down removes only itself" claim stays exact.
 	results, err := provider.DownTo(ctx, 9)
 	if err != nil {
 		t.Fatalf("DownTo(9): %v", err)
