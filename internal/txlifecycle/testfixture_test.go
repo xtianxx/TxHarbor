@@ -69,9 +69,15 @@ type stubRPC struct {
 	txFound    bool
 	receipt    *types.Receipt
 	head       uint64
+	// onDispatch runs at the first line of a dispatch, before any outcome is
+	// recorded, so a test can observe durable pre-dispatch state (V2).
+	onDispatch func()
 }
 
 func (s *stubRPC) SendSignedTransaction(ctx context.Context, raw []byte, expected common.Hash) (common.Hash, error) {
+	if s.onDispatch != nil {
+		s.onDispatch()
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.dispatches++
@@ -127,6 +133,9 @@ type env struct {
 	rpc     *stubRPC
 	chainID int64
 	seq     int
+	// devKey, when set, is the sender key every seeded attempt uses. T021
+	// shares it with the real 009 dev-key file so 009 signs for the attempt.
+	devKey *ecdsa.PrivateKey
 }
 
 func newEnv(t *testing.T) *env {
@@ -180,16 +189,20 @@ func (e *env) seed() *fixture {
 	e.seq++
 	id := func(prefix string) string { return fmt.Sprintf("%s-%d", prefix, e.seq) }
 	ctx := context.Background()
-	key, err := crypto.GenerateKey()
-	if err != nil {
-		e.t.Fatal(err)
+	var err error
+	key := e.devKey
+	if key == nil {
+		key, err = crypto.GenerateKey()
+		if err != nil {
+			e.t.Fatal(err)
+		}
 	}
 	f := &fixture{
 		env: e, key: key,
 		sender:   strings.ToLower(crypto.PubkeyToAddress(key.PublicKey).Hex()),
 		intentID: id("int"), bindingID: id("bind"), authID: id("wa"),
 		attemptID: id("att"), signingRequestID: id("sr"),
-		asset: fxAsset, recipient: fxRecipient, nonce: "0",
+		asset: fxAsset, recipient: fxRecipient, nonce: fmt.Sprintf("%d", e.seq-1),
 		workerID: id("worker"), leaseVersion: 1,
 	}
 	if e.seq == 1 {
@@ -206,13 +219,15 @@ func (e *env) seed() *fixture {
 	e.exec(`INSERT INTO withdrawal_authorization_scopes
 		(authorization_id, intent_id, request_id, sender, fee_max_total, fee_max_per_gas, fee_max_priority, allows_fee_replacement, authorization_version, attested_by)
 		VALUES ($1,$2,$3,$4,100000000000000,1000000000,100000000,TRUE,1,'test')`,
-		f.authID, f.intentID, reqID, f.sender)
-	e.exec(`INSERT INTO nonce_wallet_registry (chain_id, sender, state, registry_seq) VALUES ($1,$2,'active',1)`, e.chainID, f.sender)
-	e.exec(`INSERT INTO nonce_scope_state (chain_id, sender) VALUES ($1,$2)`, e.chainID, f.sender)
+		f.authID, f.intentID, f.signingRequestID, f.sender)
+	e.exec(`INSERT INTO nonce_wallet_registry (chain_id, sender, state, registry_seq) VALUES ($1,$2,'active',1)
+		ON CONFLICT (chain_id, sender) DO UPDATE SET state = 'active'`, e.chainID, f.sender)
+	e.exec(`INSERT INTO nonce_scope_state (chain_id, sender) VALUES ($1,$2)
+		ON CONFLICT (chain_id, sender) DO NOTHING`, e.chainID, f.sender)
 	e.exec(`INSERT INTO nonce_bindings
 		(binding_id, intent_id, chain_id, sender, nonce, state, authorization_id, authorization_version, registry_seq, allocation_observation_id)
-		VALUES ($1,$2,$3,$4,0,'allocated',$5,$6,1,'obs-fixture')`,
-		f.bindingID, f.intentID, e.chainID, f.sender, f.authID, strings.Repeat("0", 64))
+		VALUES ($1,$2,$3,$4,$5,'allocated',$6,$7,1,'obs-fixture')`,
+		f.bindingID, f.intentID, e.chainID, f.sender, f.nonce, f.authID, strings.Repeat("0", 64))
 	e.seedClaimFixtures(f, reqID)
 
 	f.request = &PrepareRequest{
