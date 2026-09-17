@@ -198,10 +198,12 @@ func (d *gateBindingDouble) ReadBinding(_ context.Context, intentID, _ string) (
 	return d.results[intentID], nil
 }
 
-// gateUpstreamTables are every 006/007 relation the gate reads touch.
+// gateUpstreamTables are every 006/007 relation the gate reads touch, the PB
+// carrier included: 009 MUST stay SELECT-only on grant/scope/audit tables.
 var gateUpstreamTables = []string{
 	"indexer_pause", "log_pause", "deposit_pause",
 	"reorg_recovery", "reorg_recovery_events", "withdrawal_authorizations",
+	"withdrawal_authorization_scopes",
 }
 
 // gateUpstreamDigest hashes each upstream table's full row set, so a
@@ -432,16 +434,28 @@ func TestSignerGateV6ReadOnly(t *testing.T) {
 	t.Run("scopeless grant refuses authorization_unverifiable", func(t *testing.T) {
 		gateSeedGrant(t, pool)
 		req := mustDecode(t, validBody())
-		grant, found := gateReadGrant(t, pool, gateAuthID)
+		// H4/T039: the submit path evaluates the observed carrier read (H1),
+		// not a literal. Read the grant + scope through that same FOR SHARE
+		// sequence; this seeded grant has no scope row: scopeless stock.
+		rtx, err := pool.Begin(ctx)
+		if err != nil {
+			t.Fatalf("begin grant+scope read: %v", err)
+		}
+		defer rtx.Rollback(ctx)
+		grant, scope, found, err := readGrantForShare(ctx, rtx, gateAuthID)
+		if err != nil {
+			t.Fatalf("grant+scope read: %v", err)
+		}
 		if !found || grant.State != "active" {
 			t.Fatalf("scopeless fixture: found=%v state=%q, want active", found, grant.State)
 		}
-		if got := EvaluateGrant(found, &grant, gateCallerID, &req, time.Now().UTC()); got != "" {
+		if scope.Present {
+			t.Fatal("scopeless fixture read back a present carrier, want absent")
+		}
+		if got := EvaluateGrant(found, grant, gateCallerID, &req, time.Now().UTC()); got != "" {
 			t.Fatalf("007 row checks refused a valid grant as %q; the scopeless branch must be what refuses", got)
 		}
-		// The PB carrier row is read in the same FOR SHARE sequence as the
-		// grant; this seeded grant has no scope row: scopeless stock.
-		class := EvaluateGrantScope(GrantScope{Present: false}, &req)
+		class := EvaluateGrantScope(scope, &req)
 		if class != ClassAuthorizationUnverifiable {
 			t.Fatalf("scopeless grant evaluated %q, want %q", class, ClassAuthorizationUnverifiable)
 		}

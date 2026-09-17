@@ -18,10 +18,10 @@
 // reuse only when the scope explicitly permits the fee-replacement purpose and
 // the raised fee stays in range (PB-FR-05, R7/R11); otherwise a fresh
 // authorization + PB re-issue is required and the reuse is refused with a
-// recorded refusal. The still-hardcoded scopeless refusal (T039) refuses every
-// submission at this tip, so the permitted branch's sign-off is the joint
-// legal-path case (T040); the admission itself is a persistence fact asserted
-// here. Nothing here is a legal-path sign-off.
+// recorded refusal. The H4/T039 scope gate then evaluates the observed carrier
+// per request, so the permitted branch's sign-off is the joint legal-path case
+// (T040); the admission itself is a persistence fact asserted here. Nothing
+// here is a legal-path sign-off.
 package signer
 
 import (
@@ -306,9 +306,9 @@ func TestSignerReplacementReuseRefusedByPurposeAndFeeGate(t *testing.T) {
 // row under the anchor's grant — a new identity, the anchor partial-unique
 // keeping exactly one non-replacement row, the anchor never rebound, and no
 // reuse-gate ("fresh authorization required") refusal recorded. The outcome
-// past this admission is the joint legal-path case (T040): the still-hardcoded
-// scopeless refusal (T039) governs it at this tip, so no signature is asserted
-// here.
+// past this admission is the joint legal-path case (T040): the H4/T039 scope
+// gate evaluates the carrier for the replacement's new request identity, so no
+// signature is asserted here.
 func TestSignerReplacementPermittedScopeAdmitsReuse(t *testing.T) {
 	pool := signerAuthStartPG(t)
 	ctx := context.Background()

@@ -12,8 +12,9 @@
 // durable outcome — never re-sign, never create a second signature
 // (signature_results_pkey), never a different result row.
 //
-// PB-gate: as in T016/T019, the legal signing path is unreachable until the 007
-// scope/version carrier lands (submit.go refuses at EvaluateGrantScope). The
+// PB-gate: as in T016/T019, the fixtures here seed scopeless stock grants, so
+// submit still refuses authorization_unverifiable — now from the observed
+// carrier read (H4/T039, PB-FR-04) rather than a hardcoded literal. The
 // committed result is therefore produced through the wrapped pool's
 // transaction using submit.go's own durable SQL; the retry still runs the real
 // Submit path. Nothing here is a legal-path sign-off.

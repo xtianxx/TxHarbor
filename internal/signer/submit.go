@@ -229,8 +229,7 @@ func submitFirst(ctx context.Context, deps SubmitDeps, caller Caller, req *Reque
 		if scope.Present {
 			// H2: snapshot the observed PB scope version alongside the
 			// fingerprint. A scope absent at submit stays NULL so a carrier
-			// appearing later is never silently adopted (T039 swaps the
-			// scopeless literal below, not this snapshot).
+			// appearing later is never silently adopted.
 			version := scope.AuthorizationVersion
 			authVersion = &version
 		}
@@ -251,12 +250,12 @@ func submitFirst(ctx context.Context, deps SubmitDeps, caller Caller, req *Reque
 		}
 	}
 
-	// T039 (H4) swaps the hardcoded scopeless value below for the observed
-	// carrier; the scope row is already loaded in the same FOR SHARE sequence
-	// above, so that swap is EvaluateGrantScope(scope, req). Until then this
-	// literal keeps the pre-carrier fail-closed green; the detail records the
-	// carrier as actually observed.
-	if class := EvaluateGrantScope(GrantScope{Present: false}, req); class != "" {
+	// H4 (T039): the decision consumes the carrier read in the same FOR SHARE
+	// sequence above, never a hardcoded literal. A scopeless stock grant is
+	// refused authorization_unverifiable per request (PB-FR-04, R11); only a
+	// present-and-verifiable scope passes. The detail records the carrier as
+	// actually observed.
+	if class := EvaluateGrantScope(scope, req); class != "" {
 		return nil, submitRefusal(ctx, tx, deps, rowID, caller.ID, req, class, "authorization_id", string(class), "authorization_id="+req.AuthorizationID+" scope_carrier="+scopeCarrierState(scope))
 	}
 

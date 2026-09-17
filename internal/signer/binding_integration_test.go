@@ -20,9 +20,9 @@
 // signing_request_id, with the request content bound by the persisted
 // canonical_envelope that the different-envelope branch must mismatch.
 //
-// PB-gate: the legal signing path is unreachable until the 007 scope/version
-// carrier lands (submit.go refuses at EvaluateGrantScope(GrantScope{Present:
-// false})). The post-COMMIT durable state is therefore reached the same way
+// PB-gate: the fixtures here seed scopeless stock grants, so submit refuses
+// authorization_unverifiable from the observed carrier read (H4/T039,
+// PB-FR-04). The post-COMMIT durable state is therefore reached the same way
 // T016's replay surface reaches it — by seeding the committed row + result that
 // the contract's retry determinism is defined against. Nothing here is a
 // legal-path sign-off.

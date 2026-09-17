@@ -6,12 +6,13 @@
 // persistence §§1/3).
 //
 // PB-gate: the legal happy path (compliant request → persisted signature+hash)
-// requires the 007 scope/version carrier owned by the PB lane. Without it no
-// grant is verifiable, so the only runnable V1 branch is the fail-closed one:
-// a fully compliant request with a matching 008 binding and an active 007
-// grant is refused `authorization_unverifiable` (403) — persist-first evidence
-// (row + audit) proves the submit transaction ran its gates before any signing.
-// No legal-path sign-off is claimed here; the replay surface is exercised by
+// requires a present-and-verifiable scope on the 007 grant. The fixture body
+// targets a scopeless stock grant, so the runnable V1 branch here is the
+// fail-closed one: a fully compliant request with a matching 008 binding and an
+// active 007 grant is refused `authorization_unverifiable` (403) by the
+// observed carrier read (H4/T039, PB-FR-04) — persist-first evidence (row +
+// audit) proves the submit transaction ran its gates before any signing. No
+// legal-path sign-off is claimed here; the replay surface is exercised by
 // seeding durable rows directly, which is exactly the state the contract's
 // retry determinism (persistence §3) is defined against.
 package signer
