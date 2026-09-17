@@ -17,9 +17,11 @@
 //   - byte-identical redelivery re-passes current gates: revoked/expired grant
 //     and an 006 pause block even the same bytes; can_sign off does too;
 //   - V7-step-6: missing-marker restart re-gates and redelivers identical
-//     bytes; a committed marker is never re-gated/un-delivered; overlap
-//     accounting records a gate that flipped after the region; audit honesty
-//     (unknown stays unknown, no backfilled "delivered"); and no re-signing.
+//     bytes; a committed marker is retained but never permits an ungated
+//     resend — marker replay re-gates, so a revoked grant blocks it with zero
+//     signature bytes; overlap accounting records a gate that flipped after the
+//     region; audit honesty (unknown stays unknown, no backfilled
+//     "delivered"); and no re-signing.
 //
 // The delivery "bytes write" is an abstract byte sink; 009 never broadcasts,
 // so a source assertion pins that delivery.go reaches no RPC/dial package.
@@ -433,7 +435,7 @@ func TestSignerDeliveryV7(t *testing.T) {
 		dlvAssertUnknown(t, pool, f, res, err)
 	})
 
-	t.Run("missing-marker restart regates and committed marker never regates", func(t *testing.T) {
+	t.Run("missing-marker restart and marker replay both re-gate", func(t *testing.T) {
 		gateReset006(t, pool)
 		f := next()
 		sink := &dlvSink{}
@@ -445,20 +447,28 @@ func TestSignerDeliveryV7(t *testing.T) {
 		if err != nil || res.Verdict != VerdictDelivered {
 			t.Fatalf("missing-marker restart = %+v / %v, want delivered", res, err)
 		}
+		if !dlvDeliveredMarker(t, pool, f.rowID) {
+			t.Fatal("the first delivery did not commit a delivered marker")
+		}
 		first := append([]byte(nil), sink.last()...)
 
-		// Revoke the grant; an already-committed marker is never re-gated, so the
-		// idempotent redelivery stays delivered with byte-identical bytes.
+		// Revoke the grant; the committed marker is not a retransmit permit, so
+		// the replay re-gates and is blocked with zero new signature bytes. The
+		// marker itself is retained and the result is never re-signed.
 		gateExec(t, pool, `UPDATE withdrawal_authorizations SET state = 'revoked' WHERE authorization_id = $1`, f.authzID)
 		res, err = Deliver(ctx, deps, Caller{ID: f.callerID, CanSign: true}, f.requestID, sink)
-		if err != nil || res.Verdict != VerdictDelivered {
-			t.Fatalf("already-delivered redelivery = %+v / %v, want delivered (never re-gated)", res, err)
+		if res == nil || res.Verdict != VerdictBlocked {
+			t.Fatalf("revoked marker replay = %+v / %v, want blocked", res, err)
 		}
-		if sink.count() != 2 || string(sink.last()) != string(first) {
-			t.Fatalf("redelivery bytes differ or sink count %d; want byte-identical re-delivery", sink.count())
+		signerAuthRefusal(t, err, ClassSignatureWithheld)
+		if sink.count() != 1 || string(sink.last()) != string(first) {
+			t.Fatalf("revoked marker replay sink count %d, want only the first payload (zero new bytes)", sink.count())
 		}
-		if got := dlvAdmissionCount(t, pool, f.rowID); got != 1 {
-			t.Fatalf("already-delivered redelivery recorded %d admissions, want the original 1", got)
+		if !dlvDeliveredMarker(t, pool, f.rowID) {
+			t.Fatal("revoked marker replay retracted the committed delivered marker")
+		}
+		if got := dlvAdmissionCount(t, pool, f.rowID); got != 2 {
+			t.Fatalf("revoked marker replay recorded %d admissions, want the first + one blocked", got)
 		}
 		dlvAssertNoResign(t, pool, f)
 	})

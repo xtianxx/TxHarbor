@@ -192,10 +192,15 @@ admission's isolation basis. 006 ordering for this read stays best-effort here a
 `BindingMatches`. Any non-matching class at delivery — `BindingPaused`, `BindingReadFailed`,
 `BindingTerminal`, `BindingAbsent`, `BindingConflict` — blocks delivery (status-only), consistent
 with OC-6 "暂停或对账中 MUST NOT 产生签名" extended to the delivery gate; the blocked attempt is
-recorded in `delivery_admissions`. Exception: rows whose admission is already
-`delivered`/`admitted` stay delivered — an already-cleared delivery is never re-gated (a later
-non-matching read does not un-deliver it; future attempts are still gated). 009 never clears 008
-pauses and never substitutes its own release evidence (008 owns release authority; OC-6/OC-7).
+recorded in `delivery_admissions`. This holds for **every** delivery, including a same-identity, same-content
+retransmit of an already-`delivered` request: a historic `delivered` marker is **not** a retransmit
+permit. A marker replay re-runs the full 006/007/008/`can_sign` gate sequence inside the delivery
+lock window — a blocked replay delivers zero signature bytes (status-only), and an unblocked replay
+hands out the persisted bytes byte-identically without re-signing. The marker records that a
+delivery *did* happen: it is retained and never rewritten, retracted, or backfilled (a later
+non-matching read does not un-deliver the past attempt), but it does not exempt the next
+transmission from the current gates. 009 never clears 008 pauses and never substitutes its own
+release evidence (008 owns release authority; OC-6/OC-7).
 
 ## 4. Gate read matrix (what is read when)
 

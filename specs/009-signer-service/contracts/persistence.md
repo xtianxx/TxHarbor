@@ -137,7 +137,7 @@ Retryability is a property of the class, not of the caller's patience.
 | `key_provider_unavailable` / `key_provider_timeout` | signing backend bounded failure | yes (same identity, bounded) |
 | `storage_unavailable` | pool/tx/commit unavailable | yes (same identity) |
 | `outcome_not_yet_visible` | identity row exists, result not yet durably visible (in-flight/unknown) | yes (same identity; poll/retry) |
-| `signature_withheld` | delivery gate failed after a result exists (authorization expired/revoked/changed, 006/008 pause, 008 binding non-match incl. terminal/absent/conflict, version change) | yes, after the state changes (status-only until then); already-`delivered`/`admitted` rows stay delivered, never re-gated |
+| `signature_withheld` | delivery gate failed after a result exists (authorization expired/revoked/changed, 006/008 pause, 008 binding non-match incl. terminal/absent/conflict, version change) | yes, after the state changes (status-only until then); a committed `delivered` marker is retained (never rewritten/retracted) but is **not** a retransmit permit — every replay re-passes the current gates, so a revoked/expired/paused/`can_sign`-off replay is withheld with zero signature bytes |
 | `outcome_unknown` | cannot determine whether delivery happened (reconcile semantics) | status/reconcile only; never re-sign |
 
 Rules: a refusal class MUST NOT be upgraded to success by any later step; `failed` MUST NOT be

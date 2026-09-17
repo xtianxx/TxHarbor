@@ -33,19 +33,18 @@ import (
 // statement bound.
 const deliverySendGuard = "SET LOCAL statement_timeout = '5s'"
 
-// deliveryRowSQL reads the durable request identity, the persisted result
-// (JOIN: a request without a result has nothing to deliver), and whether a
-// committed `delivered` marker already exists. The marker is the only thing
-// that makes a delivery already-cleared; absence is unknown, never proof of
-// non-delivery (persistence.md §6).
+// deliveryRowSQL reads the durable request identity and the persisted result
+// (JOIN: a request without a result has nothing to deliver). A committed
+// `delivered` marker is deliberately NOT read here: it records that a delivery
+// did happen (never rewritten or retracted), but it is not a retransmit permit
+// — every attempt re-passes the current gates, so replay re-gates from scratch
+// (gates.md §3).
 const deliveryRowSQL = `SELECT
   r.id, r.caller_id, r.signing_request_id, r.attempt_id, r.intent_id, r.binding_ref,
   r.recovery_version, r.chain_id, r.sender, r.authorization_id,
   r.authorization_fingerprint, r.authorization_state, r.authorization_version,
   r.asset, r.recipient, r.amount::text,
-  r.state, s.signature, s.tx_hash,
-  EXISTS (SELECT 1 FROM delivery_admissions d
-          WHERE d.signing_request_row = r.id AND d.verdict = 'delivered')
+  r.state, s.signature, s.tx_hash
 FROM signing_requests r
 JOIN signature_results s ON s.signing_request_row = r.id
 WHERE r.caller_id = $1 AND r.signing_request_id = $2`
@@ -136,7 +135,6 @@ type deliveryRow struct {
 	state            string
 	signature        string
 	txHash           string
-	deliveredMarker  bool
 }
 
 // deliveryPayload is the only success body that carries signing material
@@ -181,17 +179,12 @@ func Deliver(ctx context.Context, deps DeliveryDeps, caller Caller, signingReque
 		return nil, refuse(ClassOutcomeNotYetVisible, "", "no durable result for this identity; retry the same identity")
 	}
 
-	// An already-delivered row stays delivered and is never re-gated (gates.md
-	// §3 exception): re-send the identical bytes idempotently. A transport
-	// failure here does not retract the committed marker.
-	if row.deliveredMarker {
-		payload, perr := renderDeliveryPayload(row)
-		if perr != nil {
-			return nil, refuse(ClassStorageUnavailable, "", "delivery render failed")
-		}
-		_ = sink.WriteDelivery(ctx, payload)
-		return &DeliveryResult{Verdict: VerdictDelivered, Class: "", Bytes: payload}, nil
-	}
+	// Every delivery — first response, same-identity retransmit, or a replay of
+	// an already-`delivered` request — runs the full T-deliver gate sequence. A
+	// historic `delivered` marker is NOT a retransmit permit (gates.md §3): a
+	// blocked replay writes zero signature bytes, an unblocked replay hands out
+	// the persisted bytes byte-identically and never re-signs, and a replay
+	// transport failure maps to `unknown` (never success-from-history).
 	return deliverGated(ctx, deps, caller, row, sink)
 }
 
@@ -375,7 +368,7 @@ func readDeliveryRow(ctx context.Context, db DB, callerID int64, signingRequestI
 		&row.rowID, &row.callerID, &row.signingRequestID, &row.attemptID, &row.intentID, &row.bindingRef,
 		&recoveryVersion, &chainID, &row.sender, &row.authorizationID,
 		&row.fingerprint, &row.authState, &row.authVersion, &row.asset, &row.recipient, &row.amount,
-		&row.state, &row.signature, &row.txHash, &row.deliveredMarker)
+		&row.state, &row.signature, &row.txHash)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil, nil
