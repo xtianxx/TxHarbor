@@ -42,6 +42,12 @@ type Deps struct {
 	Stderr io.Writer
 	// Signals, when non-nil, replaces the OS signal notifier (tests).
 	Signals <-chan os.Signal
+	// JointWiring, when set, assembles the real 010/008 participants for
+	// commands that must not run standalone (withdrawal-worker). The binary
+	// entrypoint supplies it (internal/jointwire); internal/app must not
+	// import internal/txlifecycle (test-build cycle). A nil value makes
+	// those commands refuse startup instead of degrading.
+	JointWiring JointWiringFunc
 }
 
 func (d Deps) stdout() io.Writer {

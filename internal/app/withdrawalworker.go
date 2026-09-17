@@ -327,13 +327,19 @@ func jittered(base time.Duration, percent int64) time.Duration {
 	return base + time.Duration(rand.Int63n(2*delta+1)) - time.Duration(delta)
 }
 
-// WithdrawalWorkerCommand runs the long-running worker until the process
-// context is cancelled.
+// WithdrawalWorkerCommand runs the long-running joint worker until the process
+// context is cancelled. The 010/008 participants are assembled through
+// Deps.JointWiring; a missing assembly or a failed assembly refuses startup so
+// the worker never silently degrades to the claim-scan-only standalone mode.
 func WithdrawalWorkerCommand(ctx context.Context, args []string, d Deps) int {
 	stderr := d.stderr()
 	cfg, err := config.Load(d.getenv())
 	if err != nil {
 		fmt.Fprintf(stderr, "txharbor withdrawal-worker: configuration error: %s\n", logx.Redact(err.Error()))
+		return 1
+	}
+	if d.JointWiring == nil {
+		fmt.Fprintf(stderr, "txharbor withdrawal-worker: 010/008 joint wiring is not linked; refusing a claim-scan-only worker\n")
 		return 1
 	}
 	pool, err := db.OpenPool(ctx, cfg.PGDSN, cfg.ProbeTimeout)
@@ -343,11 +349,17 @@ func WithdrawalWorkerCommand(ctx context.Context, args []string, d Deps) int {
 	}
 	defer pool.Close()
 
-	worker, err := NewWithdrawalWorker(pool, cfg, nil, slog.Default())
+	deps, err := d.JointWiring(ctx, cfg, pool)
+	if err != nil {
+		fmt.Fprintf(stderr, "txharbor withdrawal-worker: joint wiring failed: %s\n", logx.Redact(err.Error()))
+		return 1
+	}
+	worker, err := NewJointWithdrawalWorker(pool, cfg, nil, slog.Default(), deps)
 	if err != nil {
 		fmt.Fprintf(stderr, "txharbor withdrawal-worker: %s\n", logx.Redact(err.Error()))
 		return 1
 	}
+	fmt.Fprintf(d.stdout(), "txharbor withdrawal-worker: joint wiring ready (driver=%T reconciler=%T)\n", worker.Driver, worker.Reconciler)
 	worker.Run(ctx)
 	return 0
 }

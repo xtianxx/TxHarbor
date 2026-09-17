@@ -9,6 +9,7 @@
 package app
 
 import (
+	"context"
 	"fmt"
 	"log/slog"
 
@@ -18,6 +19,12 @@ import (
 	"github.com/xtianxx/txharbor/internal/execution"
 	"github.com/xtianxx/txharbor/internal/metrics"
 )
+
+// JointWiringFunc assembles the joint-deployment participants from the process
+// configuration and pool. The binary entrypoint supplies it through
+// Deps.JointWiring because internal/app must not import internal/txlifecycle
+// (the txlifecycle joint tests import app, closing a test-build cycle).
+type JointWiringFunc func(ctx context.Context, cfg *config.Config, pool *pgxpool.Pool) (JointDeps, error)
 
 // JointDeps carries the joint-deployment boundary participants. All three are
 // required: a nil half would silently degrade the worker to standalone
