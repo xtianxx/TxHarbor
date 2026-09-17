@@ -294,6 +294,22 @@ func EvaluateGrantScope(scope GrantScope, req *Request) RefusalClass {
 	return feeScopeRefusal(scope, req)
 }
 
+// EvaluateGrantReuse applies OC-5's conditional reuse permission to a
+// fee-replacement request that names its anchor's grant (H3/T038; PB-FR-05,
+// research R7/R11, gates.md §2 condition 4). "" admits the reuse under the
+// anchor's grant; otherwise the refusal class, whose instruction is that a
+// fresh authorization (PB re-issue) is required. Admission needs the carrier
+// present, the explicit fee-replacement purpose token, and the replacement's
+// fee triple within the carrier's caps (the same T036 fee rules); an
+// unverifiable or out-of-range reuse never shares the anchor's grant — it must
+// not become a second signable object on it.
+func EvaluateGrantReuse(scope GrantScope, req *Request) RefusalClass {
+	if !scope.Present || !scope.AllowsFeeReplacement {
+		return ClassAuthorizationInvalid
+	}
+	return feeScopeRefusal(scope, req)
+}
+
 // feeScopeRefusal enforces the PB-C2 fee bounds on the request's fee triple:
 // total = gas_limit × per-gas price, per-gas price (max_fee_per_gas or
 // gas_price), and the EIP-1559 priority tip (legacy has none). An all-zero

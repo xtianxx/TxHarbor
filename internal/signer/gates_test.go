@@ -174,3 +174,39 @@ func TestEvaluateGrantScope(t *testing.T) {
 		}
 	}
 }
+
+func TestEvaluateGrantReuse(t *testing.T) {
+	req := mustDecode(t, validBody())
+	// validBody: 65000 gas × 1.5 gwei max fee (total 9.75e13), 1 gwei tip.
+	base := GrantScope{
+		Present:              true,
+		AllowsFeeReplacement: true,
+		FeeMaxTotal:          97500000000000,
+		FeeMaxPerGas:         1500000000,
+		FeeMaxPriority:       1000000000,
+	}
+	with := func(mutate func(*GrantScope)) GrantScope {
+		s := base
+		mutate(&s)
+		return s
+	}
+	cases := []struct {
+		name  string
+		scope GrantScope
+		want  RefusalClass
+	}{
+		{"absent carrier", GrantScope{}, ClassAuthorizationInvalid},
+		{"purpose token off", with(func(s *GrantScope) { s.AllowsFeeReplacement = false }), ClassAuthorizationInvalid},
+		{"permitted at the caps", base, ""},
+		{"permitted with no fee constraint", with(func(s *GrantScope) { s.FeeMaxTotal, s.FeeMaxPerGas, s.FeeMaxPriority = 0, 0, 0 }), ""},
+		{"fee above the per-gas cap", with(func(s *GrantScope) { s.FeeMaxPerGas = 1499999999 }), ClassAuthorizationInvalid},
+		{"fee above the total cap", with(func(s *GrantScope) { s.FeeMaxTotal = 97499999999999 }), ClassAuthorizationInvalid},
+		{"fee above the priority cap", with(func(s *GrantScope) { s.FeeMaxPriority = 999999999 }), ClassAuthorizationInvalid},
+		{"missing applicable cap", with(func(s *GrantScope) { s.FeeMaxPerGas = 0 }), ClassAuthorizationInvalid},
+	}
+	for _, tc := range cases {
+		if got := EvaluateGrantReuse(tc.scope, &req); got != tc.want {
+			t.Fatalf("EvaluateGrantReuse(%s) = %q, want %q", tc.name, got, tc.want)
+		}
+	}
+}
