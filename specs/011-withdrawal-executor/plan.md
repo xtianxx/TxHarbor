@@ -20,9 +20,10 @@ pre-allocated `step_id` for idempotent convergence; 010 owns construction/signin
 returns closed-set outcome classes. Request status is exposed only through a version-monotonic display
 projection that references attempt identity, marks `possibly_stale` when authority cannot be confirmed, and
 is never read by any decision path (Q1/J5). Revision after reorg is an authority-driven, version-guarded
-fact transition that needs no authorization and no claim (M2). Lease/stall/backoff values are proposals with
-a repo-grounded evidence basis, pending user ruling; the plan reports (rather than papers over) the one real
-cross-lane gap it found: the migration-number/FK ordering coupling with 010 (C12).
+fact transition that needs no authorization and no claim (M2). Lease TTL (30s) / heartbeat (10s ±10% jitter)
+/ stall window (300s, independent of TTL) are the approved initial configuration (2026-09-17) with a
+repo-grounded evidence basis; backoff/cadence remain technical values. The plan reports (rather than papers
+over) the one real cross-lane gap it found: the migration-number/FK ordering coupling with 010 (C12).
 
 ## Technical Context
 
@@ -67,8 +68,10 @@ contention is per-intent; fairness is bounded backoff + jitter (proposal).
 the only clock for expiry/validity; **no external call while holding DB locks or inside a transaction**;
 bounded retries with defined retryable classes; no secrets/keys/raw signed bytes in logs; test resources
 workdir-isolated (dedicated DB name + non-default ports, compose coordinated by the main orchestrator);
-migrations additive only, never rewriting applied ones; **all lease/stall/backoff values are proposals
-pending user ruling** and MUST NOT be presented as approved business limits.
+migrations additive only, never rewriting applied ones; **lease TTL 30s / heartbeat 10s (±10% jitter) /
+stall window 300s are the approved initial configuration (2026-09-17)** — `stall_window` is an independent
+value, never auto-derived from the TTL; backoff/cadence remain technical values. These are initial config,
+not blanket business limits, and a config change/restart alone MUST NOT extend an existing qualification.
 
 **Scale/Scope**: Single chain; one claim row per intent; operator-issued permission cardinality (tens); no
 UI; no admin HTTP surface (operator subcommand only); no new infrastructure.
@@ -243,11 +246,12 @@ are recorded evidence, not transitions. Illegal transitions are refused with zer
 ### D6 — Operator paths and threshold proposals (FR-15/C11/C12; research R14)
 
 `withdrawal-exec` provides evidence-required, `operation_id`-deduplicated operations (permission set/revoke,
-claim revoke, projection refresh, read-only inspection). Lease TTL, heartbeat, stall window, backoff, and
-scan cadence are **proposals with an evidence basis** (research R14 table) exposed as `TXHARBOR_WORKER_*`
-knobs with fail-closed validation; they are pending user ruling and MUST NOT be written into acceptance as
-approved business limits. C11 (display-latency business limit) stays unspecified; the plan provides the
-mechanism, not a number.
+claim revoke, projection refresh, read-only inspection). Lease TTL (30s), heartbeat (10s ±10% jitter) and
+stall window (300s, independent of TTL) are the **approved initial configuration** (2026-09-17; research R14)
+exposed as `TXHARBOR_WORKER_*` knobs with fail-closed validation; backoff and scan cadence remain technical
+values. They are initial config, not approved business limits, and MUST NOT be written into acceptance as
+blanket limits; a config change/restart alone MUST NOT extend an existing qualification. C11 (display-latency
+business limit) stays unspecified; the plan provides the mechanism, not a number.
 
 ## Project Structure
 
@@ -380,15 +384,18 @@ ordering resolution at merge or a deferred FK migration.
    [gates.md](contracts/gates.md) §4. If 010's plan establishes only a bare snapshot read, the
    "invalidation-first ⇒ refuse" guarantee does not hold under a concurrent revocation; the minimal open
    question is "what row-lock clause does 010's gate read take?" — reported for ruling, not compensated.
-2. **C12 migration FK ordering** — J1's attempt→intent FK vs provisional numbers (`000011` = 010,
-   `000012` = 011) can invert: 010's migration would reference `payment_intents` before 011 creates it.
-   Resolution options ((a) 010 adds the FK in a later migration, (b) 011's migration precedes 010's,
-   (c) FK omitted with explicit justification) require a merge-time ruling; **no renumbering is
-   pre-decided** and applied migrations are never rewritten.
+2. **C12 migration FK ordering** — resolved by register J1 (`docs/workflow-010-011-parallel.md`
+   J1/G-010-3 closure, executable): `000011` excludes the attempt→intent FK and is independently
+   applicable; after 011 lands, 010 adds `tx_attempts_intent_fkey` in a follow-up migration (same owner,
+   merges into the integration workspace, no renumbering, no cross-owner writes). Encoded by T043 and
+   the 010 counterpart `010:T044` (sibling worktree); the FK MUST NOT be claimed to exist before that
+   closes. No merge-time re-adjudication of the numbering options; applied migrations are never rewritten.
 3. **Display latency business limit (C11)** — unspecified. Mechanism provided (version monotonicity,
    staleness marking, forced refresh); no numeric SLA is approved or implied.
-4. **Thresholds (TTL/heartbeat/stall/backoff/cadence)** — proposals with evidence basis (research R14);
-   pending user ruling; not acceptance criteria.
+4. **Thresholds (TTL/heartbeat/stall/backoff/cadence)** — lease TTL 30s / heartbeat 10s (±10% jitter) /
+   stall window 300s approved as the initial configuration (2026-09-17; `stall_window` independent of TTL,
+   not TTL-derived); backoff/cadence remain technical values. Initial config, not blanket business limits;
+   a config change/restart alone MUST NOT extend an existing qualification (research R14).
 5. **010 concrete interface types** — the consumer-side shapes in lifecycle.md are minimal requirements;
    exact types land with 010's plan and are adapted at wiring (009 D3 precedent).
 
@@ -450,7 +457,7 @@ No Constitution Check violations; no principle is waived. Carriers beyond a bare
 | C11 | Display latency business limit: unspecified; mechanism provided, no number promised | user ruling if needed |
 | C12 | Migration number verification + attempt→intent FK ordering resolution | 010/011 merge-time coordination |
 | J4 | 010 claim-row read ordering clause (row-share semantics) confirmation | 010 plan |
-| Thresholds | TTL/heartbeat/stall/backoff/cadence values pending ruling (research R14) | user ruling |
+| Thresholds | TTL/heartbeat/stall approved as initial config (2026-09-17); backoff/cadence technical (research R14) | approved (initial config; later parameter changes need validation) |
 | 010 interface | Concrete `LifecycleAdvancer`/`LifecycleReader` types + idempotency proof | 010 plan, wiring |
 | A-13 | Joint full-chain E2E execution (requirements defined here) | joint acceptance, later increment |
 | T000-P | Production KMS/HSM provider selection | later production track |

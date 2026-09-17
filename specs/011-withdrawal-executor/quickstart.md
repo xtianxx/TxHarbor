@@ -203,20 +203,22 @@ txharbor withdrawal-exec step-list  --intent-id I     # read-only
 txharbor withdrawal-exec event-list --intent-id I     # read-only
 ```
 
-## Environment knobs (proposals, pending user ruling — research R14; fail-closed validation at startup)
+## Environment knobs (approved initial values 2026-09-17 — research R14; fail-closed validation at startup)
 
 ```text
-TXHARBOR_WORKER_TTL_SECONDS=30            # lease TTL (proposal)
-TXHARBOR_WORKER_HEARTBEAT_SECONDS=10      # TTL/3 with ±10% jitter (proposal)
-TXHARBOR_WORKER_STALL_SECONDS=300         # 10×TTL, stall window (proposal)
-TXHARBOR_WORKER_BACKOFF_BASE_MS=1000      # claim/step retry base (proposal)
-TXHARBOR_WORKER_BACKOFF_MAX_MS=30000      # retry cap (proposal)
-TXHARBOR_WORKER_SCAN_INTERVAL_MS=1000     # worker loop cadence (internal, not a business SLA)
+TXHARBOR_WORKER_TTL_SECONDS=30            # lease TTL (approved initial config)
+TXHARBOR_WORKER_HEARTBEAT_SECONDS=10      # TTL/3 with ±10% jitter (approved initial config)
+TXHARBOR_WORKER_STALL_SECONDS=300         # stall window, independent value NOT derived from TTL (approved initial config)
+TXHARBOR_WORKER_BACKOFF_BASE_MS=1000      # claim/step retry base (technical default)
+TXHARBOR_WORKER_BACKOFF_MAX_MS=30000      # retry cap (technical default)
+TXHARBOR_WORKER_SCAN_INTERVAL_MS=1000     # worker loop cadence (technical default, not a business SLA)
 TXHARBOR_WORKER_LABEL=<free text>         # evidence-only worker label
 ```
 
 Validation: positive values; heartbeat < TTL; stall > TTL; no app-clock expiry anywhere. These defaults are
-**not approved business thresholds**; tasks MUST record them as pending ruling until confirmed.
+the approved **initial configuration** (2026-09-17); `stall_window` is an independent value and is never
+auto-derived from the TTL. They are initial config, not blanket business limits, and a config change/restart
+alone MUST NOT extend an existing qualification (R14 approval condition).
 
 ## Execution record
 

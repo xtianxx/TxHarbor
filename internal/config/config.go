@@ -75,6 +75,18 @@ const (
 	EnvSignerMaxFeePerGas   = "TXHARBOR_SIGNER_MAX_FEE_PER_GAS"
 	EnvSignerMaxPriorityFee = "TXHARBOR_SIGNER_MAX_PRIORITY_FEE_PER_GAS"
 	EnvSignerMaxGasPrice    = "TXHARBOR_SIGNER_MAX_GAS_PRICE"
+	// 011 withdrawal execution worker (T001). Cadence/backoff are technical
+	// values; lease TTL, heartbeat and stall window are the approved initial
+	// configuration (2026-09-17, research R14): heartbeat < TTL < stall
+	// enforced fail-closed at Load. The stall window is an independent value,
+	// never derived from the TTL.
+	EnvWorkerTTLSeconds       = "TXHARBOR_WORKER_TTL_SECONDS"
+	EnvWorkerHeartbeatSeconds = "TXHARBOR_WORKER_HEARTBEAT_SECONDS"
+	EnvWorkerStallSeconds     = "TXHARBOR_WORKER_STALL_SECONDS"
+	EnvWorkerBackoffBaseMS    = "TXHARBOR_WORKER_BACKOFF_BASE_MS"
+	EnvWorkerBackoffMaxMS     = "TXHARBOR_WORKER_BACKOFF_MAX_MS"
+	EnvWorkerScanIntervalMS   = "TXHARBOR_WORKER_SCAN_INTERVAL_MS"
+	EnvWorkerLabel            = "TXHARBOR_WORKER_LABEL"
 )
 const (
 	DefaultHTTPAddr           = "127.0.0.1:8080"
@@ -110,6 +122,17 @@ const (
 	DefaultSignerHTTPAddr   = "127.0.0.1:8091"
 	DefaultSignerMode       = "production"
 	DefaultSignerKeyTimeout = 5 * time.Second
+
+	// 011 worker defaults (T001; approved initial configuration 2026-09-17,
+	// research R14). Heartbeat is TTL/3 with ±10% jitter applied at runtime;
+	// the stall window is independent of the TTL. Backoff and scan cadence are
+	// technical values, never business limits.
+	DefaultWorkerTTL          = 30 * time.Second
+	DefaultWorkerHeartbeat    = 10 * time.Second
+	DefaultWorkerStall        = 300 * time.Second
+	DefaultWorkerBackoffBase  = 1 * time.Second
+	DefaultWorkerBackoffMax   = 30 * time.Second
+	DefaultWorkerScanInterval = 1 * time.Second
 
 	// logConfigVersion prefixes the config identity encoding (clarification
 	// A1). The version is part of the hashed input so future encodings never
@@ -187,6 +210,16 @@ type Config struct {
 	SignerMaxFeePerGas   *big.Int
 	SignerMaxPriorityFee *big.Int
 	SignerMaxGasPrice    *big.Int
+	// 011 withdrawal execution worker (T001). All validity/expiry decisions
+	// use the DB clock; these durations never become an application-clock
+	// expiry. WorkerLabel is evidence-only free text.
+	WorkerTTL          time.Duration
+	WorkerHeartbeat    time.Duration
+	WorkerStall        time.Duration
+	WorkerBackoffBase  time.Duration
+	WorkerBackoffMax   time.Duration
+	WorkerScanInterval time.Duration
+	WorkerLabel        string
 }
 
 // DepositEntry is one normalized `address[:effective]` configuration item: a
@@ -360,6 +393,7 @@ func Load(getenv Getenv) (*Config, error) {
 	}
 
 	c.loadSigner(getenv, &errs)
+	c.loadWorker(getenv, &errs)
 	// Nonce read API (008 FR-19): the bearer token passes through verbatim
 	// and is never formatted into an error. Unset or empty leaves the read
 	// endpoints fail-closed (the read provider authenticates against it).
@@ -407,7 +441,7 @@ func (c *Config) Summary() string {
 		nonceReadToken = logx.Redacted
 	}
 	return fmt.Sprintf(
-		"pg=%s rpc=%s chain_id=%d start_height=%d http_addr=%s startup_timeout=%s probe_interval=%s probe_timeout=%s shutdown_timeout=%s migrate_lock_timeout=%s index_rpc_timeout=%s index_poll_interval=%s index_retry_initial=%s index_retry_max=%s log_start_height=%d log_contracts=%d log_config_hash=%s log_batch_blocks=%d deposit_start_height=%d deposit_contracts=%d deposit_watch_addresses=%d deposit_config_hash=%s deposit_batch_blocks=%d confirmation_depth=%d reorg_max_depth=%s reorg_replay_batch=%d nonce_read_token=%s signer_http_addr=%s signer_mode=%s signer_key_timeout=%s signer_chains=%d signer_senders=%d signer_assets=%d signer_recipients=%d signer_max_gas_limit=%d",
+		"pg=%s rpc=%s chain_id=%d start_height=%d http_addr=%s startup_timeout=%s probe_interval=%s probe_timeout=%s shutdown_timeout=%s migrate_lock_timeout=%s index_rpc_timeout=%s index_poll_interval=%s index_retry_initial=%s index_retry_max=%s log_start_height=%d log_contracts=%d log_config_hash=%s log_batch_blocks=%d deposit_start_height=%d deposit_contracts=%d deposit_watch_addresses=%d deposit_config_hash=%s deposit_batch_blocks=%d confirmation_depth=%d reorg_max_depth=%s reorg_replay_batch=%d nonce_read_token=%s signer_http_addr=%s signer_mode=%s signer_key_timeout=%s signer_chains=%d signer_senders=%d signer_assets=%d signer_recipients=%d signer_max_gas_limit=%d worker_ttl=%s worker_heartbeat=%s worker_stall=%s worker_backoff_base=%s worker_backoff_max=%s worker_scan_interval=%s worker_label=%q",
 		logx.Redact(c.PGDSN), logx.Redact(c.RPCURL), c.ChainID, c.StartHeight, c.HTTPAddr,
 		c.StartupTimeout, c.ProbeInterval, c.ProbeTimeout, c.ShutdownTimeout, c.MigrateLockTimeout,
 		c.IndexRPCTimeout, c.IndexPollInterval, c.IndexRetryInitial, c.IndexRetryMax,
@@ -417,6 +451,8 @@ func (c *Config) Summary() string {
 		c.ReorgReplayBatch, nonceReadToken, c.SignerHTTPAddr, c.SignerMode, c.SignerKeyTimeout,
 		len(c.SignerChains), len(c.SignerSenders), len(c.SignerAssets),
 		len(c.SignerRecipients), c.SignerMaxGasLimit,
+		c.WorkerTTL, c.WorkerHeartbeat, c.WorkerStall, c.WorkerBackoffBase,
+		c.WorkerBackoffMax, c.WorkerScanInterval, c.WorkerLabel,
 	)
 }
 
@@ -709,6 +745,51 @@ func (c *Config) loadSigner(getenv Getenv, errs *[]error) {
 		} else {
 			c.SignerMaxGasLimit = n
 		}
+	}
+}
+
+// loadWorker parses the 011 worker knobs. Every knob is optional with an
+// approved-initial-config default; malformed or non-positive values are Load
+// errors, and the relationship heartbeat < TTL < stall is enforced fail-closed
+// (T001, research R14). The stall window is never derived from the TTL.
+func (c *Config) loadWorker(getenv Getenv, errs *[]error) {
+	c.WorkerTTL = DefaultWorkerTTL
+	c.WorkerHeartbeat = DefaultWorkerHeartbeat
+	c.WorkerStall = DefaultWorkerStall
+	c.WorkerBackoffBase = DefaultWorkerBackoffBase
+	c.WorkerBackoffMax = DefaultWorkerBackoffMax
+	c.WorkerScanInterval = DefaultWorkerScanInterval
+
+	positive := func(name string, def time.Duration, unit time.Duration) time.Duration {
+		raw, ok := getenv(name)
+		if !ok || raw == "" {
+			return def
+		}
+		n, err := strconv.ParseInt(raw, 10, 64)
+		if err != nil || n <= 0 {
+			*errs = append(*errs, invalid(name, "%q is not a positive decimal integer", raw))
+			return def
+		}
+		return time.Duration(n) * unit
+	}
+	c.WorkerTTL = positive(EnvWorkerTTLSeconds, c.WorkerTTL, time.Second)
+	c.WorkerHeartbeat = positive(EnvWorkerHeartbeatSeconds, c.WorkerHeartbeat, time.Second)
+	c.WorkerStall = positive(EnvWorkerStallSeconds, c.WorkerStall, time.Second)
+	c.WorkerBackoffBase = positive(EnvWorkerBackoffBaseMS, c.WorkerBackoffBase, time.Millisecond)
+	c.WorkerBackoffMax = positive(EnvWorkerBackoffMaxMS, c.WorkerBackoffMax, time.Millisecond)
+	c.WorkerScanInterval = positive(EnvWorkerScanIntervalMS, c.WorkerScanInterval, time.Millisecond)
+
+	if raw, ok := getenv(EnvWorkerLabel); ok {
+		c.WorkerLabel = raw
+	}
+
+	if c.WorkerHeartbeat >= c.WorkerTTL {
+		*errs = append(*errs, invalid(EnvWorkerHeartbeatSeconds,
+			"heartbeat %s must be < ttl %s", c.WorkerHeartbeat, c.WorkerTTL))
+	}
+	if c.WorkerStall <= c.WorkerTTL {
+		*errs = append(*errs, invalid(EnvWorkerStallSeconds,
+			"stall window %s must be > ttl %s (independent value)", c.WorkerStall, c.WorkerTTL))
 	}
 }
 

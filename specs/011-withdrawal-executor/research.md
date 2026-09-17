@@ -167,7 +167,7 @@
 - *事件推送/通知（LISTEN/NOTIFY、外部总线）*：章程 XIII 拒绝新基础设施；J5 已选版本消费。
 - *投影里存交易事实副本*：与「引用尝试身份不复制事实」相悖，且制造第二真相源（章程 III）。
 
-**Evidence**: 010 Q1 全文（`specs/010-transaction-lifecycle/spec.md:28`）；011 FR-09；联合合同 J5（`docs/workflow-010-011-parallel.md:124-128`）；`internal/withdrawal/query.go:113-136`（同库「一个只读快照读多源、读不到即 unknown」的显示路径先例）。
+**Evidence**: 010 Q1 全文（同仓库 sibling 工作树 `.slim/worktrees/prep-010-tx/specs/010-transaction-lifecycle/spec.md:28`；010 规格不在本分支）；011 FR-09；联合合同 J5（`docs/workflow-010-011-parallel.md:124-128`）；`internal/withdrawal/query.go:113-136`（同库「一个只读快照读多源、读不到即 unknown」的显示路径先例）。
 
 ---
 
@@ -249,7 +249,7 @@
   - `claim-revoke`（intent_id, expected_lease_version, operation_id, operator, reason, evidence）→ 精确版本条件更新（版本失配即拒绝，不追改），写 `revoked` 事件 + 审计；**证据缺失拒绝**（沿 008 hold release「解除证据不足拒绝解除」）。
   - `projection-refresh`（request_id, operation_id, operator）→ 读权威、版本守卫应用（R9）。
   - 只读 `claim-show` / `step-list` / `event-list`（无写、无审计）。
-- **阈值提案（供用户裁决，未批准；一切数值都是 proposal，不得被当作业务承诺）**：
+- **阈值（2026-09-17 批准：`lease_ttl` 30s / `heartbeat` 10s ±10% / `stall_window` 300s 为初始配置；backoff/cadence 为技术参数；其余未批准数值仍为提案，不得被当作业务承诺）**：
 
 | 参数 | 提案值 | 依据 | 状态 |
 |---|---|---|---|
