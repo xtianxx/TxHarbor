@@ -324,8 +324,8 @@ func TestSignedBytesReconstructionFixedVector(t *testing.T) {
 	}
 	v, r, s := signed.RawSignatureValues()
 	sig := make([]byte, 65)
-	copy(sig[0:32], r.Bytes())
-	copy(sig[32:64], s.Bytes())
+	r.FillBytes(sig[0:32])
+	s.FillBytes(sig[32:64])
 	sig[64] = byte(v.Uint64())
 
 	gotBytes, gotHash, err := reconstructSignedBytes(req, "0x"+hex.EncodeToString(sig))
