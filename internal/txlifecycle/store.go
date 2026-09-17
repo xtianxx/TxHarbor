@@ -142,11 +142,11 @@ type Attempt struct {
 	TxHash               string
 }
 
-const attemptSelectColumns = `attempt_id, signing_request_id, COALESCE(replacement_of, ''), intent_id, binding_ref,
-	authorization_id, authorization_version, recovery_version, chain_id, sender, nonce, tx_type,
-	to_addr, value, data, gas_limit, COALESCE(gas_price, ''), COALESCE(max_fee_per_gas, ''),
-	COALESCE(max_priority_fee_per_gas, ''), asset, recipient, amount, canonical_envelope, content_hash,
-	state, revision_seq, updated_at`
+const attemptSelectColumns = `a.attempt_id, a.signing_request_id, COALESCE(a.replacement_of, ''), a.intent_id, a.binding_ref,
+	a.authorization_id, a.authorization_version, a.recovery_version, a.chain_id, a.sender, a.nonce, a.tx_type,
+	a.to_addr, a.value, a.data, a.gas_limit, COALESCE(a.gas_price::text, ''), COALESCE(a.max_fee_per_gas::text, ''),
+	COALESCE(a.max_priority_fee_per_gas::text, ''), a.asset, a.recipient, a.amount, a.canonical_envelope, a.content_hash,
+	a.state, a.revision_seq, a.updated_at`
 
 const prepareInsertSQL = `INSERT INTO tx_attempts (
 	attempt_id, signing_request_id, replacement_of, intent_id, binding_ref,

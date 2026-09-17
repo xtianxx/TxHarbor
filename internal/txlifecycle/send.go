@@ -109,6 +109,7 @@ func (s *Store) Send(ctx context.Context, req *SendRequest) (SendResult, error) 
 	if ref, err := s.checkIntentFreeze(ctx, a.IntentID); err != nil {
 		return SendResult{}, Refuse(ClassCoordinationUnavailable, "", "freeze read failed")
 	} else if ref != nil {
+		s.recordStandaloneRefusal(ctx, a, ref)
 		return blocked(a, ref)
 	}
 
@@ -156,6 +157,7 @@ func (s *Store) sendRegion(ctx context.Context, a *Attempt, req *SendRequest, an
 		return SendResult{}, Refuse(ClassCoordinationUnavailable, "", "storage unavailable")
 	}
 	if _, err := tx.Exec(ctx, lockGuard); err != nil {
+		_ = tx.Rollback(ctx)
 		return s.recordRegionAbort(ctx, a, err)
 	}
 
@@ -164,6 +166,7 @@ func (s *Store) sendRegion(ctx context.Context, a *Attempt, req *SendRequest, an
 		ExpectedRevision: req.ExpectedRevision, AnchorAuthorizationID: anchorAuth,
 	})
 	if err != nil {
+		_ = tx.Rollback(ctx)
 		return s.recordRegionAbort(ctx, a, err)
 	}
 	if ref != nil {
@@ -172,12 +175,14 @@ func (s *Store) sendRegion(ctx context.Context, a *Attempt, req *SendRequest, an
 
 	hash, raw, err := signingRowTx(ctx, tx, a.AttemptID)
 	if err != nil {
+		_ = tx.Rollback(ctx)
 		return s.recordRegionAbort(ctx, a, err)
 	}
 
 	// G-010-1: re-evaluate expiry as the last read before dispatch entry.
 	expiresAt, now, ref, err := lastMomentExpiry(ctx, tx, a)
 	if err != nil {
+		_ = tx.Rollback(ctx)
 		return s.recordRegionAbort(ctx, a, err)
 	}
 	if ref != nil {
@@ -192,11 +197,13 @@ func (s *Store) sendRegion(ctx context.Context, a *Attempt, req *SendRequest, an
 	// locks; a successful probe proves nothing past its own return.
 	var one int
 	if err := tx.QueryRow(ctx, `SELECT 1`).Scan(&one); err != nil {
+		_ = tx.Rollback(ctx)
 		return s.recordRegionAbort(ctx, a, err)
 	}
 
 	dispatchedAt, err := dbClock(ctx, tx)
 	if err != nil {
+		_ = tx.Rollback(ctx)
 		return s.recordRegionAbort(ctx, a, err)
 	}
 	dispatchCtx, cancel := context.WithTimeout(ctx, s.sendTimeout)
@@ -207,12 +214,14 @@ func (s *Store) sendRegion(ctx context.Context, a *Attempt, req *SendRequest, an
 	res.Snapshot.ObservedNow = dispatchedAt
 
 	if err := recordDispatchTx(ctx, tx, a, res, req.Kind, outcome, rpcClass, dispatchedAt); err != nil {
+		_ = tx.Rollback(ctx)
 		if errors.Is(err, ErrRevisionMoved) {
 			return s.recordRegionAbort(ctx, a, err)
 		}
 		return s.recordRegionWriteFailure(ctx, a, res, req.Kind, hash, rpcClass)
 	}
 	if err := tx.Commit(ctx); err != nil {
+		_ = tx.Rollback(ctx)
 		return s.recordRegionWriteFailure(ctx, a, res, req.Kind, hash, rpcClass)
 	}
 	return SendResult{Outcome: outcome, RPCClass: rpcClass, TxHash: hash, SendSeq: res.SendSeq}, nil
@@ -425,6 +434,27 @@ func dbClock(ctx context.Context, tx pgx.Tx) (time.Time, error) {
 		return time.Time{}, err
 	}
 	return now.UTC(), nil
+}
+
+// recordStandaloneRefusal commits gate-refusal evidence for a refusal decided
+// before the region transaction is open (the intent freeze). Best-effort: the
+// refusal itself is already fail-closed.
+func (s *Store) recordStandaloneRefusal(ctx context.Context, a *Attempt, ref *RefusalError) {
+	tx, err := s.db.Begin(ctx)
+	if err != nil {
+		return
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	if _, err := tx.Exec(ctx, writeGuard); err != nil {
+		return
+	}
+	if _, _, err := lockAttemptRow(ctx, tx, a.AttemptID); err != nil {
+		return
+	}
+	if err := appendEventTx(ctx, tx, a.AttemptID, EventGateRefused, string(ref.Class), recoveryVersionPtr(a.RecoveryVersion), ref.Basis); err != nil {
+		return
+	}
+	_ = tx.Commit(ctx)
 }
 
 // checkIntentFreeze returns a refusal while an intent's freeze cause is

@@ -333,31 +333,42 @@ func (s *Store) detectFreeze(ctx context.Context, tx pgx.Tx, a *Attempt) (bool, 
 	if err != nil {
 		return false, err
 	}
-	defer rows.Close()
+	type evidence struct {
+		sendID        int64
+		observedPause string
+		dispatchedAt  *time.Time
+		earliestPause *time.Time
+	}
+	var found []evidence
 	for rows.Next() {
-		var sendID int64
-		var observedPause string
-		var dispatchedAt *time.Time
-		var earliestPause *time.Time
-		if err := rows.Scan(&sendID, &observedPause, &dispatchedAt, &earliestPause); err != nil {
+		var e evidence
+		if err := rows.Scan(&e.sendID, &e.observedPause, &e.dispatchedAt, &e.earliestPause); err != nil {
+			rows.Close()
 			return false, err
 		}
-		if observedPause != "none" || dispatchedAt == nil || earliestPause == nil {
+		found = append(found, e)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return false, err
+	}
+	for _, e := range found {
+		if e.observedPause != "none" || e.dispatchedAt == nil || e.earliestPause == nil {
 			continue
 		}
-		if earliestPause.Before(*dispatchedAt) {
-			evidence := fmt.Sprintf("send_id=%d recorded pause=none but a pause committed at %s before dispatched_at=%s",
-				sendID, earliestPause.UTC().Format(time.RFC3339Nano), dispatchedAt.UTC().Format(time.RFC3339Nano))
+		if e.earliestPause.Before(*e.dispatchedAt) {
+			detail := fmt.Sprintf("send_id=%d recorded pause=none but a pause committed at %s before dispatched_at=%s",
+				e.sendID, e.earliestPause.UTC().Format(time.RFC3339Nano), e.dispatchedAt.UTC().Format(time.RFC3339Nano))
 			if _, err := tx.Exec(ctx,
 				`INSERT INTO tx_intent_freezes (intent_id, cause, evidence) VALUES ($1, 'protection_loss_residual', $2)
-				 ON CONFLICT (intent_id) DO NOTHING`, a.IntentID, evidence); err != nil {
+				 ON CONFLICT (intent_id) DO NOTHING`, a.IntentID, detail); err != nil {
 				return false, err
 			}
-			if err := appendEventTx(ctx, tx, a.AttemptID, EventFrozen, "protection_loss_residual", recoveryVersionPtr(a.RecoveryVersion), evidence); err != nil {
+			if err := appendEventTx(ctx, tx, a.AttemptID, EventFrozen, "protection_loss_residual", recoveryVersionPtr(a.RecoveryVersion), detail); err != nil {
 				return false, err
 			}
 			return true, nil
 		}
 	}
-	return false, rows.Err()
+	return false, nil
 }

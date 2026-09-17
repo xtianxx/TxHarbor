@@ -82,17 +82,30 @@ func (s *Store) reviseOrphanedReceipts(ctx context.Context, tx pgx.Tx, a *Attemp
 		if err != nil {
 			return false, err
 		}
-		if state == "effective" || state == "confirmed" || state == "orphaned" {
-			if _, err := applyStateTx(ctx, tx, a.AttemptID, revision, []string{state}, "unknown", "orphaned_at = now()"); err != nil {
-				if errors.Is(err, ErrRevisionMoved) {
-					return false, ErrRevisionMoved
-				}
+		if state == "effective" || state == "confirmed" {
+			revision, state, err = markAttemptOrphaned(ctx, tx, a, revision)
+			if err != nil {
 				return false, err
 			}
 		}
+		_ = revision
+		_ = state
 		orphaned = true
 	}
 	return orphaned, nil
+}
+
+// markAttemptOrphaned revises an effective/confirmed attempt to orphaned,
+// preserving the earlier facts as history evidence (data-model state machine).
+func markAttemptOrphaned(ctx context.Context, tx pgx.Tx, a *Attempt, revision int64) (int64, string, error) {
+	newRevision, err := applyStateTx(ctx, tx, a.AttemptID, revision, []string{"effective", "confirmed"}, "orphaned", "orphaned_at = now()")
+	if errors.Is(err, ErrRevisionMoved) {
+		return 0, "", ErrRevisionMoved
+	}
+	if err != nil {
+		return 0, "", err
+	}
+	return newRevision, "orphaned", nil
 }
 
 // markSiblingsReplaced revises every other non-terminal attempt on the same
