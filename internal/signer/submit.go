@@ -91,13 +91,15 @@ const submitAuditSQL = `INSERT INTO signing_request_audit
 	VALUES ($1, $2, $3, $4, $5)`
 
 // SubmitDeps are the submit transaction's collaborators: the pool, the frozen
-// policy, the key provider, and the 008 binding reader (contract-shape until
-// T028 wires the live adapter).
+// policy, the key provider, the 008 binding reader, and the 008 scope-row
+// FOR SHARE locker. ScopeLock is mandatory: a missing locker refuses before
+// BEGIN rather than silently skipping the submit-side lock.
 type SubmitDeps struct {
-	DB       DB
-	Policy   *Policy
-	Provider KeyProvider
-	Binding  BindingReader
+	DB        DB
+	Policy    *Policy
+	Provider  KeyProvider
+	Binding   BindingReader
+	ScopeLock ScopeLocker
 }
 
 // SubmitResponse carries the persisted signing result facts (api.md §2): the
@@ -131,11 +133,11 @@ func Submit(ctx context.Context, deps SubmitDeps, presentedCredential string, bo
 }
 
 // submitFirst owns BEGIN..COMMIT for the first receipt of an identity
-// (persistence.md §1): statement guard → gate-table SHARE lock → plain INSERT
-// (23505 → replay) → own row FOR UPDATE → 006 → 008 → 007 → policy → sign →
-// result → state → audit → COMMIT.
+// (persistence.md §1): statement guard → 008 scope-row SHARE lock → 006
+// gate-table SHARE lock → plain INSERT (23505 → replay) → own row FOR UPDATE →
+// 006 → 008 → 007 → policy → sign → result → state → audit → COMMIT.
 func submitFirst(ctx context.Context, deps SubmitDeps, caller Caller, req *Request) (*SubmitResponse, error) {
-	if deps.DB == nil || deps.Policy == nil || deps.Provider == nil || deps.Binding == nil {
+	if deps.DB == nil || deps.Policy == nil || deps.Provider == nil || deps.Binding == nil || deps.ScopeLock == nil {
 		return nil, refuse(ClassStorageUnavailable, "", "submit dependencies incomplete")
 	}
 	envelope, err := req.CanonicalEnvelope()
@@ -161,11 +163,16 @@ func submitFirst(ctx context.Context, deps SubmitDeps, caller Caller, req *Reque
 		return nil, refuse(ClassStorageUnavailable, "", "storage unavailable")
 	}
 
-	// Lock order (persistence.md §1, R6): the 008 scope-row FOR SHARE comes
-	// first when a live 008 adapter owns one. The phase-2 contract-shape
-	// BindingReader has no scope row (008 is not merged into this tree), so the
-	// submit path starts at the 006 gate-table lock; T028's live adapter adds
-	// the scope lock without changing this order.
+	// Lock order (persistence.md §1, R6; gates.md §3): the 008 scope-row FOR
+	// SHARE comes FIRST, before the 006 gate-table lock and every gate read, and
+	// is held to COMMIT — a racing 008 pause/registry/release writer waits, and
+	// one that committed first is observed by the reads below. The delivery-side
+	// re-check does not substitute for this submit-side lock. The sender is
+	// canonicalized the same way the request row is, so the lock hits the
+	// lowercase nonce_scope_state row.
+	if err := deps.ScopeLock.LockScope(ctx, tx, int64(req.ChainID), lowerAddr(req.Sender)); err != nil {
+		return nil, refuse(ClassGateReadFailed, "", "scope lock failed")
+	}
 	if _, err := tx.Exec(ctx, GateLockSQL); err != nil {
 		return nil, refuse(ClassGateReadFailed, "", "gate lock failed")
 	}

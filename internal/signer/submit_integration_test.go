@@ -48,10 +48,11 @@ func submitTestDeps(t *testing.T, pool *pgxpool.Pool) SubmitDeps {
 		t.Fatalf("NewDevKeyProvider: %v", err)
 	}
 	return SubmitDeps{
-		DB:       pool,
-		Policy:   testPolicy(t),
-		Provider: provider,
-		Binding:  &gateBindingDouble{results: map[string]BindingResult{"pi-1b44": BindingMatches}},
+		DB:        pool,
+		Policy:    testPolicy(t),
+		Provider:  provider,
+		Binding:   &gateBindingDouble{results: map[string]BindingResult{"pi-1b44": BindingMatches}},
+		ScopeLock: &dlvScope{},
 	}
 }
 
