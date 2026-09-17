@@ -69,12 +69,18 @@ func (r *jointReorgRPC) BlockNumber(ctx context.Context) (uint64, error) {
 	return r.real.BlockNumber(ctx)
 }
 
-// TestJointJ4ReorgRevisionAndProjectionOrder is T049/J4: a joint reorg after
-// confirmation revises 010's receipt/revision chain (orphaned then
-// reconfirmed) without rebuilding the payment; 011's projection consumes the
-// lifecycle revision in order (a stale revision never overwrites a newer one;
-// an unconfirmable read is marked possibly stale).
+// TestJointJ4ReorgRevisionAndProjectionOrder is T049/J4 SUPPLEMENTARY
+// shared-state coverage: it drives the real 010 Store directly and validates
+// the revised receipt/revision rows the two lanes share. The worker-Driver J4
+// acceptance is TestJointDriverJ4ReorgRevisionAndProjectionOrder
+// (joint_driver_integration_test.go).
+//
+// The scenario: a joint reorg after confirmation revises 010's receipt/revision
+// chain (orphaned then reconfirmed) without rebuilding the payment; 011's
+// projection consumes the lifecycle revision in order (a stale revision never
+// overwrites a newer one; an unconfirmable read is marked possibly stale).
 func TestJointJ4ReorgRevisionAndProjectionOrder(t *testing.T) {
+	t.Log("supplementary shared-state J4: direct 010 Store drive, not the worker-Driver link")
 	ctx := context.Background()
 	j := newJointEnv(t)
 	jj := j.admit()

@@ -37,11 +37,17 @@ func (d jointDropAfterAccept) BlockNumber(ctx context.Context) (uint64, error) {
 	return d.real.BlockNumber(ctx)
 }
 
-// TestJointJ3UnknownReconciliation is T048/J3: a real dispatch response loss
-// after node acceptance ends 010 `unknown`; the joint reconcile loop (011
-// Reconciler over the real 010 authority reader) honestly persists it and then
-// resolves it once the chain evidence is definite — never repaying.
+// TestJointJ3UnknownReconciliation is T048/J3 SUPPLEMENTARY shared-state
+// coverage: it drives the real 010 Store directly and validates the durable
+// unknown facts the two lanes share. The worker-Driver J3 acceptance is
+// TestJointDriverJ3UnknownReconciliation (joint_driver_integration_test.go).
+//
+// The scenario: a real dispatch response loss after node acceptance ends 010
+// `unknown`; the joint reconcile loop (011 Reconciler over the real 010
+// authority reader) honestly persists it and then resolves it once the chain
+// evidence is definite — never repaying.
 func TestJointJ3UnknownReconciliation(t *testing.T) {
+	t.Log("supplementary shared-state J3: direct 010 Store drive, not the worker-Driver link")
 	ctx := context.Background()
 	j := newJointEnv(t)
 	jj := j.admit()

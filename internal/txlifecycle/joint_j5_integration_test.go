@@ -10,15 +10,21 @@ import (
 	"github.com/xtianxx/txharbor/internal/execution"
 )
 
-// TestJointJ5LockLossDetectablePath is T050/J5, detectable path only: a pause
-// committed before a dispatch that recorded pause=none proves a stale basis, so
-// 010 freezes the intent's further sends (011 observes the freeze), chain
-// observation/reconcile stay available, and a controlled manual release lifts
-// only the freeze cause while a resend still re-verifies every gate.
+// TestJointJ5LockLossDetectablePath is T050/J5 SUPPLEMENTARY shared-state
+// coverage: it drives the real 010 Store directly and validates the freeze
+// rows/events the two lanes share. The worker-Driver J5 acceptance is
+// TestJointDriverJ5LockLossDetectablePath (joint_driver_integration_test.go).
+//
+// Detectable path only: a pause committed before a dispatch that recorded
+// pause=none proves a stale basis, so 010 freezes the intent's further sends
+// (011 observes the freeze), chain observation/reconcile stay available, and a
+// controlled manual release lifts only the freeze cause while a resend still
+// re-verifies every gate.
 //
 // It asserts what is NOT claimed: no "window is tiny/rare" property, no
 // detection guarantee for unobservable faults.
 func TestJointJ5LockLossDetectablePath(t *testing.T) {
+	t.Log("supplementary shared-state J5: direct 010 Store drive, not the worker-Driver link")
 	ctx := context.Background()
 	j := newJointEnv(t)
 	jj := j.admit()

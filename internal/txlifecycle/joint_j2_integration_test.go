@@ -10,11 +10,20 @@ import (
 	"github.com/xtianxx/txharbor/internal/execution"
 )
 
-// TestJointJ2ExpiredWorkerIsolationAndTakeover is T047/J2: an expired/fenced
-// worker's three send kinds are refused by 010's real claim gate (zero
-// dispatch, zero new send rows), then a legitimate taker re-verifies the same
-// intent/claim and resumes on the same intent, nonce and attempt history.
+// TestJointJ2ExpiredWorkerIsolationAndTakeover is T047/J2 SUPPLEMENTARY
+// shared-state coverage: it drives the real 010 Store directly so the 010
+// claim gate is exercised for all three prepared send kinds, including a
+// prepared replacement attempt (which the production adapter cannot construct
+// without a fee policy). The worker-Driver J2 acceptance is
+// TestJointDriverJ2ExpiredWorkerIsolationAndTakeover
+// (joint_driver_integration_test.go).
+//
+// The scenario: an expired/fenced worker's three send kinds are refused by
+// 010's real claim gate (zero dispatch, zero new send rows), then a legitimate
+// taker re-verifies the same intent/claim and resumes on the same intent,
+// nonce and attempt history.
 func TestJointJ2ExpiredWorkerIsolationAndTakeover(t *testing.T) {
+	t.Log("supplementary shared-state J2: direct 010 Store drive, not the worker-Driver link")
 	ctx := context.Background()
 	j := newJointEnv(t)
 	jj := j.admit()

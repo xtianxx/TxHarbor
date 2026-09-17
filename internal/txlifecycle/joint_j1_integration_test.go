@@ -7,11 +7,18 @@ import (
 	"testing"
 )
 
-// TestJointJ1IntentAuthorizationWiring is T046/J1: a real 007 HTTP request
-// creates the withdrawal request, real 011 HTTP admission creates the intent
-// and the real 011 execution claim, and 010 consumes the real claim + grant +
-// scope to send on a real Anvil node and verify the receipt.
+// TestJointJ1IntentAuthorizationWiring is T046/J1 SUPPLEMENTARY shared-state
+// coverage: it drives the real 010 Store directly to validate the durable rows
+// the two lanes share (attempt/receipt/claim/intent). It does NOT by itself
+// prove the worker-Driver link; the production-wired J1 acceptance is
+// TestJointDriverJ1IntentAuthorizationWiring (joint_driver_integration_test.go).
+//
+// The scenario: a real 007 HTTP request creates the withdrawal request, real
+// 011 HTTP admission creates the intent and the real 011 execution claim, and
+// 010 consumes the real claim + grant + scope to send on a real Anvil node and
+// verify the receipt.
 func TestJointJ1IntentAuthorizationWiring(t *testing.T) {
+	t.Log("supplementary shared-state J1: direct 010 Store drive, not the worker-Driver link")
 	ctx := context.Background()
 	j := newJointEnv(t)
 	jj := j.admit()
