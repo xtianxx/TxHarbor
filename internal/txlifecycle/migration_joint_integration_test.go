@@ -35,8 +35,9 @@ func requireJointMigrations(t *testing.T) {
 
 // TestT043MigrationSetMergeOrder re-verifies the applied migration set and the
 // provisional numbers in 010→011 merge order on the joint scratch DB (PLAN-1;
-// T043): 000011 (010) precedes 000012 (011) precedes 000013 (010 follow-up),
-// and no applied version is missing or duplicated.
+// T043): 000011 (010) precedes 000012 (011) precedes 000013 (010 guarded
+// follow-up) precedes 000014 (010 intent-FK repair), and no applied version is
+// missing or duplicated.
 func TestT043MigrationSetMergeOrder(t *testing.T) {
 	requireJointMigrations(t)
 	e := newEnv(t)
@@ -51,6 +52,7 @@ func TestT043MigrationSetMergeOrder(t *testing.T) {
 		11: "000011_tx_lifecycle.sql",
 		12: "000012_withdrawal_execution.sql",
 		13: "000013_tx_lifecycle_intent_fk.sql",
+		14: "000014_intent_fk_repair.sql",
 	}
 	byVersion := make(map[int64]string, len(files))
 	var versions []int64
@@ -63,8 +65,8 @@ func TestT043MigrationSetMergeOrder(t *testing.T) {
 			t.Errorf("version %d = %q, want %q", v, byVersion[v], name)
 		}
 	}
-	if last := versions[len(versions)-1]; last != 13 {
-		t.Errorf("highest migration = %d, want 13", last)
+	if last := versions[len(versions)-1]; last != 14 {
+		t.Errorf("highest migration = %d, want 14", last)
 	}
 
 	opts := db.MigrateOptions{DSN: dsn, LockTimeout: 10 * time.Second, ConnectTimeout: 10 * time.Second}
@@ -75,10 +77,10 @@ func TestT043MigrationSetMergeOrder(t *testing.T) {
 	if len(state.Pending) != 0 {
 		t.Fatalf("pending migrations: %v", state.Pending)
 	}
-	if state.Current != 13 {
-		t.Fatalf("current migration = %d, want 13", state.Current)
+	if state.Current != 14 {
+		t.Fatalf("current migration = %d, want 14", state.Current)
 	}
-	for _, v := range []int64{11, 12, 13} {
+	for _, v := range []int64{11, 12, 13, 14} {
 		found := false
 		for _, a := range state.Applied {
 			if a == v {

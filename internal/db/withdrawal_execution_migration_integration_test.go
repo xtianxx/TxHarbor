@@ -149,10 +149,11 @@ func TestWithdrawalExecutionMigrationDownRemovesOnlyItself(t *testing.T) {
 	ctx := context.Background()
 	opts := testMigrateOptions(dsn)
 
-	var out bytes.Buffer
-	if err := MigrateUp(ctx, opts, &out); err != nil {
-		t.Fatalf("MigrateUp() error = %v (output %q)", err, out.String())
-	}
+	// Build the database at exactly {1..12}: 000012 is the highest version
+	// this test owns. The full embedded set would also carry 010's 000013/
+	// 000014, and DownTo(11) would revert those too, which is not 000012's
+	// down-scope assertion.
+	migrateUpThrough(t, dsn, 12)
 	sqlDB := openTestSQL(t, dsn)
 	for _, rel := range execTables {
 		if !relationExists(t, sqlDB, rel) {
@@ -164,8 +165,7 @@ func TestWithdrawalExecutionMigrationDownRemovesOnlyItself(t *testing.T) {
 	if err != nil {
 		t.Fatalf("newProvider: %v", err)
 	}
-	// 000012 is the highest applied version in this branch (000011 belongs to
-	// the sibling 010 lane), so DownTo(11) rolls back exactly 000012.
+	// The fixture stops at 12, so DownTo(11) rolls back exactly 000012.
 	results, err := provider.DownTo(ctx, 11)
 	if err != nil {
 		t.Fatalf("DownTo(11): %v", err)
@@ -184,7 +184,7 @@ func TestWithdrawalExecutionMigrationDownRemovesOnlyItself(t *testing.T) {
 		}
 	}
 
-	out.Reset()
+	var out bytes.Buffer
 	if err := MigrateUp(ctx, opts, &out); err != nil {
 		t.Fatalf("re-up MigrateUp() error = %v (output %q)", err, out.String())
 	}
@@ -286,9 +286,15 @@ func TestWithdrawalExecutionMigrationIsAdditiveOnly(t *testing.T) {
 	}
 }
 
-// TestWithdrawalExecutionMigrationNumberIsProvisional verifies the provisional
-// number against the actual embedded set: 000010 is PB, 000011 is absent in
-// this branch, 000012 is 011, and no version is duplicated (C12).
+// TestWithdrawalExecutionMigrationNumberIsProvisional verifies the merged
+// version set against the actual embedded set on the joint branch: 000010 is
+// PB, 000011 is 010, 000012 is 011, 000013 is 010's guarded intent-FK
+// follow-up and 000014 is 010's intent-FK repair — no version duplicated and
+// no gap inside 1..14 (C12).
+//
+// The lane-local "000011 must be absent" form was recorded stale at 3d8556e
+// when the joint branch deliberately carries 010's 000011; the 000014 repair
+// unit (fix(010), joint branch only) owns the post-repair set.
 func TestWithdrawalExecutionMigrationNumberIsProvisional(t *testing.T) {
 	files, err := MigrationFiles(Migrations)
 	if err != nil {
@@ -301,13 +307,24 @@ func TestWithdrawalExecutionMigrationNumberIsProvisional(t *testing.T) {
 		}
 		byVersion[f.Version] = f.Name
 	}
-	if _, ok := byVersion[10]; !ok {
-		t.Error("000010 (PB) must be present")
+	want := map[int64]string{
+		10: "000010_withdrawal_authorization_scopes.sql",
+		11: "000011_tx_lifecycle.sql",
+		12: "000012_withdrawal_execution.sql",
+		13: "000013_tx_lifecycle_intent_fk.sql",
+		14: "000014_intent_fk_repair.sql",
 	}
-	if _, ok := byVersion[11]; ok {
-		t.Error("000011 belongs to the sibling 010 lane and must be absent in this branch")
+	for version, name := range want {
+		if got := byVersion[version]; got != name {
+			t.Errorf("version %d = %q, want %q", version, got, name)
+		}
 	}
-	if got := byVersion[12]; got != "000012_withdrawal_execution.sql" {
-		t.Errorf("version 12 = %q, want 000012_withdrawal_execution.sql", got)
+	if len(files) != len(want)+9 {
+		t.Fatalf("embedded migration count = %d, want %d (versions 1..14)", len(files), len(want)+9)
+	}
+	for i, f := range files {
+		if f.Version != int64(i+1) {
+			t.Fatalf("embedded versions %v are not exactly 1..14", files)
+		}
 	}
 }
