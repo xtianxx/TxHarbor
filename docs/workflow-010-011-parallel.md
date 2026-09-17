@@ -232,3 +232,85 @@ PB-C1/C2、010 Q1–Q3、011 M1n/M3）；载体、锁、顺序等机制为 plan 
   010↔011 的 `LifecycleAdvancer/LifecycleReader` 适配器当前为联合测试侧实现（见 `joint_*_integration_test.go`），
   生产端接线仍属 A-13。
 - 011:T046 记录：联合门禁已完成，011 可在评审后推进合并；A-13/T000-P 保持 OPEN，不得据此声称全链 E2E 闭合。
+
+## 最终联合验收记录（2026-09-18，clean tree）
+
+工作区 `.slim/worktrees/joint-010-011`（`joint-010-011-integration`）；基线 `0946638`
+（production wiring unit），测试提交 `ad1cd84`；本轮无推送/PR/合并/部署。日志目录
+`/tmp/opencode/joint-final/`。
+
+### 本轮验收口径（与上一批次记录的差异）
+
+- J1–J5 **一律经生产 worker Driver 路径**执行：`app.NewJointWithdrawalWorker` →
+  `worker.Driver.IssueAndAdvance` → `txlifecycle.NewLifecycleLive`（010 适配器）→
+  真实 010 Store 门禁 → 真实 009 signer-serve → 真实 Anvil + 测试 ERC-20；reconcile 腿经
+  `worker.Reconciler.ReconcileIntent`；binding 由真实 008 Allocator 分配。
+- 原 `joint_j*_integration_test.go`（直接调 Store）保留为**补充性 shared-state 覆盖**，
+  已在测试注释与 `t.Log` 中标注其不单独构成 worker-Driver 证据；其运行仍全绿，作为附加佐证。
+
+### 逐项证据（全部 PASS；`-tags integration -count=1`）
+
+| 项 | 命令 | 日志 | 结果 |
+|---|---|---|---|
+| J1–J5（worker Driver，T046–T050） | `-run TestJointDriverJ ./internal/txlifecycle/` | `j1-j5-driver.log` | 5/5 PASS |
+| J1–J5（补充 shared-state） | `-run 'TestJointJ[1-5]' ./internal/txlifecycle/` | `t046-t050-supplementary.log` | 5/5 PASS |
+| T038 V9b 进程击杀矩阵（V9b） | `-run TestV9bCrashMatrix ./internal/txlifecycle/` | `t038-crash.log` | 8/8 子边界 PASS |
+| 010 T043/T044 | `-run 'TestT043MigrationSetMergeOrder\|TestT044IntentFK' ./internal/txlifecycle/` | `010-t043-t044.log` | PASS |
+| 011 T043/T044 | `-run 'TestT043JointClaimsIntentFK\|TestT044JointClaimsColumnParity' ./internal/txlifecycle/` | `011-t043-t044.log` | PASS（含 4 个语义子探针） |
+| 011 T045 readiness（wiring+J） | `-run 'TestJointWorkerProductionWiring\|TestJointDriverJ' ./internal/txlifecycle/` | `011-t045-readiness.log` | PASS |
+| 回归 txlifecycle 全套 | `./internal/txlifecycle/` | `txlifecycle-full.log` | `ok` 232.5s |
+| 回归 execution 全套 | `./internal/execution/` | `execution-full.log` | 仅预存 V12 失败（见下） |
+| 回归 app 全套 | `./internal/app/` | `app-full.log` | `ok` 173.4s |
+| 回归 db 全套 | `./internal/db/` | `db-full.log` | 9 项预存失败（见下） |
+| 单元全套 | `go test -count=1 ./...` | `unit-all.log` | 仅预存 V12 失败 |
+| lint/build | `gofmt -l .` / `go build ./...` / `go vet`（两 tags） | `lint-build.log` | 全部 exit 0 |
+
+### 011 T043–T045 联合重验（先置 `[ ]`，通过后恢复 `[x]`）
+
+- **T043**：此前 lane 记录只复用了 010 的 `tx_attempts_intent_fkey` 证据（并声明未重跑）；
+  本轮新增 `TestT043JointClaimsIntentFK`，对 011 自有的 `execution_claims_intent_fkey` 做
+  命名 + `convalidated` + 缺 intent 23503 探针，两条 FK 均闭合。
+- **T044**：新增 `TestT044JointClaimsColumnParity`：真实列集逐序等于 frozen J2 形状
+  （`specs/011-withdrawal-executor/data-model.md` Table 2），010 单一映射列
+  （`intent_id/owner_id/lease_version/expires_at/state`）全部存在，intent-unique、
+  `lease_version>=1`、expiry、revocation-marker 语义约束按名命中。
+- **T045**：lane 记录中的三个阻塞前置（生产适配器、真实 008 分配、链上 transfer 合约）本轮均已满足
+  （生产适配器 = `txlifecycle.LifecycleLive` + `app.NewJointWithdrawalWorker`；008 = 真实
+  `nonce.Allocator`；链上 = Anvil + 测试 ERC-20 emitter）；J1–J5 全绿证明 011 participant 路径
+  （准入/intent+claim supply、fencing/takeover、reconcile loop、projection updater、freeze consumer）
+  在真实接线中运行。生产进程入口对适配器的装配（`WithdrawalWorkerCommand` 仍用 standalone
+  构造器）仍属 A-13 范围，见门禁声明。
+
+### 预存失败（非本轮回归，已取证）
+
+1. `internal/execution TestV12NoSecretsIn011Paths`：`internal/config/config.go` 注释含
+   `RawTransaction`/`eth_sendRawTransaction` 令牌（line 133 附近）。
+   `git diff c991680 -- internal/config/config.go` 为空（本轮未触碰）；在
+   `git archive c991680` 的 pristine 树上运行得到**逐字节相同**的失败输出
+   （`v12-pristine-c991680.log`）。不修复、不隐藏，列为跨 lane 遗留发现。
+2. `internal/db` 9 项：`TestT036SequenceA/B/C`、`TestT040OverlayGreenOnEmptySequence`、
+   `TestT041GapFillSequenceD`、`TestT042RollbackRevertsTenBeforeNine`、
+   `TestT042DownOfAppliedThenRenumberedNumberForbidden`、
+   `TestAuthzScopeMigrationDownRemovesOnlyItself`、
+   `TestWithdrawalExecutionMigrationIsAdditiveOnly` —— 均为 009/PB-era 硬编码 `{1..10}`
+   序列或 lane-local 集合断言，在联合迁移集 `{…11,12,13,14}` 下失败。在
+   `git archive 0946638`（本轮改动前的 tip）上运行得到**完全相同的 9 项失败与断言文本**
+   （`db-pristine-0946638.log`；唯一差异为非确定性的 map 遍历顺序），证明先于本轮存在。
+
+### 记录缺口（不修复，供编排裁决）
+
+- `Advance(ActionReplace)` 返回 `refused_basis`（010 无费用构造策略）：J2 替换腿按
+  blocked-with-reason 记录，未伪造 fee policy；010 对已备好 replacement attempt 的
+  claim 围栏由补充性 direct-Store 测试覆盖。
+- 011 issue 阶段对 frozen intent 的拒绝携带 `basis="frozen:<class>"` 而 `Refusal` 为空
+  （零写入、零派发）：本轮如实断言 basis，未改 011 语义。
+
+### 门禁声明
+
+- 真实联合验收（真实 007 HTTP + 011 + 010 + 009 + PG + Anvil 与测试 ERC-20；替身/夹具/
+  010 独立通过均未用作联合证据）已在联合工作区通过；**适用联合门禁已完成，011 可在评审后
+  推进其合并**，010→011 合并顺序不变。
+- A-13（全链 E2E）保持 OPEN（生产进程入口的适配器装配仍属其范围）；T000-P（生产 provider）
+  保持 OPEN。本记录不声称 A-13 闭合。
+- 010 任务框 `T038/T043–T045/T046–T051` 全部由本轮 clean-tree 证据复现通过（`T042` 保持
+  `[ ]`）；011 任务框 `T043/T044/T045` 经重验恢复 `[x]`。

@@ -212,6 +212,19 @@
 > OPEN — this record does not claim A-13 closure. The batch surfaced real
 > cross-lane findings (010 `TransferCalldata`/type-2 envelope; 009 replacement
 > grant-scope preemption) recorded for backflow.
+>
+> **Final joint acceptance (2026-09-18, clean tree at `ad1cd84`)** — the five J
+> scenarios were re-executed through the production worker Driver
+> (`worker.Driver.IssueAndAdvance` over `txlifecycle.NewLifecycleLive` +
+> `app.NewJointWithdrawalWorker`, real 008 Allocator, real 009 and real Anvil +
+> test ERC-20), not through direct 010 Store calls; the direct-Store J tests
+> remain as supplementary shared-state coverage. T038/T043–T045/T046–T051 all
+> reproduced on this round's clean-tree logs (T042 stays `[ ]`). Per-item
+> evidence and the regression/pre-existing-failure record are in
+> `docs/workflow-010-011-parallel.md` (最终联合验收记录, 2026-09-18) with raw
+> logs under `/tmp/opencode/joint-final/`. `Advance(ActionReplace)` remains a
+> deliberate `refused_basis` gap (no 010 fee policy); the J2 replacement leg
+> is recorded blocked-with-reason, never faked. A-13 and T000-P remain OPEN.
 
 ---
 
