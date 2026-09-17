@@ -341,7 +341,7 @@ func (j *jointEnv) admit() *jointIntent {
 	j.mustExec(`INSERT INTO withdrawal_authorization_scopes
 		(authorization_id, intent_id, request_id, sender, fee_max_total, fee_max_per_gas,
 		 fee_max_priority, allows_fee_replacement, authorization_version, attested_by)
-		VALUES ($1,$2,$3,$4,$5,$6,$7,FALSE,1,'joint')`,
+		VALUES ($1,$2,$3,$4,$5,$6,$7,TRUE,1,'joint')`,
 		authID, intentID, signingRequestID, j.sender, int64(1e15), int64(2e9), int64(15e8))
 
 	admitSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
