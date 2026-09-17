@@ -14,6 +14,7 @@ import (
 	"fmt"
 	"io"
 	"strings"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
@@ -21,6 +22,7 @@ import (
 
 	"github.com/xtianxx/txharbor/internal/config"
 	"github.com/xtianxx/txharbor/internal/db"
+	"github.com/xtianxx/txharbor/internal/execution"
 	"github.com/xtianxx/txharbor/internal/logx"
 )
 
@@ -40,6 +42,14 @@ func WithdrawalExec(ctx context.Context, args []string, d Deps) int {
 		return withdrawalExecPermissionSet(ctx, args[1:], d)
 	case "permission-revoke":
 		return withdrawalExecPermissionRevoke(ctx, args[1:], d)
+	case "claim-revoke":
+		return withdrawalExecClaimRevoke(ctx, args[1:], d)
+	case "claim-show":
+		return withdrawalExecClaimShow(ctx, args[1:], d)
+	case "step-list":
+		return withdrawalExecStepList(ctx, args[1:], d)
+	case "event-list":
+		return withdrawalExecEventList(ctx, args[1:], d)
 	default:
 		stderr := d.stderr()
 		fmt.Fprintf(stderr, "txharbor withdrawal-exec: unknown action %q\n", args[0])
@@ -73,14 +83,16 @@ func execOperatorOp(ctx context.Context, pool *pgxpool.Pool, op operatorOp, appl
 	if err != nil {
 		return "", false, fmt.Errorf("begin operator op: %w", err)
 	}
+	canonical := op.Detail
 	outcome, err := apply(ctx, tx)
 	if err != nil {
 		_ = tx.Rollback(ctx)
 		op.Outcome = "refused"
-		op.Detail = "refused=" + sanitizeAuditDetail(err.Error())
+		op.Detail = canonical + "|refused=" + sanitizeAuditDetail(err.Error())
 		_ = insertExecAudit(ctx, pool, op)
 		return "", false, err
 	}
+	op.Detail = canonical
 	if err := insertExecAuditTx(ctx, tx, op, outcome); err != nil {
 		_ = tx.Rollback(ctx)
 		if !isUniqueViolation(err, "execution_ops_audit_operation_id_uniq") {
@@ -164,7 +176,17 @@ func sameOperatorInput(existing execAuditRow, op operatorOp) bool {
 		existing.IntentID == op.IntentID &&
 		ptrEq(existing.CallerID, op.CallerID) &&
 		ptrEq(existing.SubjectVersion, op.SubjectVersion) &&
-		existing.Detail == op.Detail
+		canonicalDecision(existing.Detail) == canonicalDecision(op.Detail)
+}
+
+// canonicalDecision strips the recorded refusal suffix so a retried
+// operation_id with the same input reports the recorded outcome instead of
+// spuriously conflicting.
+func canonicalDecision(detail string) string {
+	if i := strings.Index(detail, "|refused="); i >= 0 {
+		return detail[:i]
+	}
+	return detail
 }
 
 func ptrEq(a, b *int64) bool {
@@ -312,6 +334,215 @@ func withdrawalExecPermissionRevoke(ctx context.Context, args []string, d Deps) 
 	fmt.Fprintf(stdout, "txharbor withdrawal-exec: permission-revoke %s caller_id=%d operation_id=%s recorded=%t\n",
 		outcome, *callerID, *operationID, recorded)
 	return 0
+}
+
+// withdrawalExecClaimRevoke is the evidence-required, expected-version-guarded
+// disqualification escape hatch (M3/FR-15). It never chases a newer version: a
+// mismatch is a refused audit with zero writes.
+func withdrawalExecClaimRevoke(ctx context.Context, args []string, d Deps) int {
+	stdout, stderr := d.stdout(), d.stderr()
+	fs := flag.NewFlagSet("withdrawal-exec claim-revoke", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	intentID := fs.String("intent-id", "", "intent whose claim is revoked (required)")
+	expectedVersion := fs.Int64("expected-lease-version", 0, "claim version the operator observed (required, positive)")
+	operationID := fs.String("operation-id", "", "idempotent operation identity (required)")
+	operator := fs.String("operator", "", "declared operator identity (required)")
+	reason := fs.String("reason", "", "operator reason (required)")
+	evidence := fs.String("evidence", "", "operator evidence (required)")
+	if err := fs.Parse(args); err != nil {
+		return 2
+	}
+	if fs.NArg() > 0 || *intentID == "" || *expectedVersion <= 0 || *operationID == "" || *operator == "" || *reason == "" {
+		withdrawalExecUsage(stderr)
+		return 2
+	}
+
+	pool, code := withdrawalExecOpenPool(ctx, d)
+	if pool == nil {
+		return code
+	}
+	defer pool.Close()
+
+	op := operatorOp{
+		OperationID:    *operationID,
+		Action:         "claim_revoke",
+		IntentID:       *intentID,
+		SubjectVersion: expectedVersion,
+		Operator:       *operator,
+		Reason:         *reason,
+		Evidence:       *evidence,
+		Detail:         fmt.Sprintf("expected_lease_version=%d", *expectedVersion),
+	}
+	outcome, recorded, err := execOperatorOp(ctx, pool, op, func(ctx context.Context, tx pgx.Tx) (string, error) {
+		applied, err := execution.RevokeClaimTx(ctx, tx, *intentID, *expectedVersion, *operator, *evidence)
+		if err != nil {
+			return "", err
+		}
+		if !applied {
+			return "", errors.New("lease version mismatch or no active claim")
+		}
+		return "applied", nil
+	})
+	if err != nil {
+		if errors.Is(err, errOperationConflict) {
+			fmt.Fprintf(stderr, "txharbor withdrawal-exec: operation_conflict operation_id=%s\n", *operationID)
+			return 1
+		}
+		fmt.Fprintf(stderr, "txharbor withdrawal-exec: claim-revoke refused: %s\n", logx.Redact(err.Error()))
+		return 1
+	}
+	fmt.Fprintf(stdout, "txharbor withdrawal-exec: claim-revoke %s intent_id=%s lease_version=%d operation_id=%s recorded=%t\n",
+		outcome, *intentID, *expectedVersion, *operationID, recorded)
+	return 0
+}
+
+// withdrawalExecClaimShow prints one claim row read-only (no audit).
+func withdrawalExecClaimShow(ctx context.Context, args []string, d Deps) int {
+	stdout, stderr := d.stdout(), d.stderr()
+	fs := flag.NewFlagSet("withdrawal-exec claim-show", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	intentID := fs.String("intent-id", "", "intent to inspect (required)")
+	if err := fs.Parse(args); err != nil {
+		return 2
+	}
+	if fs.NArg() > 0 || *intentID == "" {
+		withdrawalExecUsage(stderr)
+		return 2
+	}
+	pool, code := withdrawalExecOpenPool(ctx, d)
+	if pool == nil {
+		return code
+	}
+	defer pool.Close()
+
+	c, found, err := execution.ReadClaim(ctx, pool, *intentID)
+	if err != nil {
+		fmt.Fprintf(stderr, "txharbor withdrawal-exec: claim-show failed: %s\n", logx.Redact(err.Error()))
+		return 1
+	}
+	if !found {
+		fmt.Fprintf(stderr, "txharbor withdrawal-exec: no claim for intent_id=%s\n", *intentID)
+		return 1
+	}
+	fmt.Fprintf(stdout, "claim intent_id=%s owner_id=%s lease_version=%d state=%s expires_at=%s last_heartbeat_at=%s last_progress_at=%s stall_flagged_at=%s ended_at=%s end_kind=%s\n",
+		c.IntentID, c.OwnerID, c.LeaseVersion, c.State, c.ExpiresAt.UTC().Format(time.RFC3339),
+		c.LastHeartbeatAt.UTC().Format(time.RFC3339), c.LastProgressAt.UTC().Format(time.RFC3339),
+		formatTimePtr(c.StallFlaggedAt), formatTimePtr(c.EndedAt), formatStringPtr(c.EndKind))
+	return 0
+}
+
+// withdrawalExecStepList prints the intent's execution steps read-only.
+func withdrawalExecStepList(ctx context.Context, args []string, d Deps) int {
+	stdout, stderr := d.stdout(), d.stderr()
+	fs := flag.NewFlagSet("withdrawal-exec step-list", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	intentID := fs.String("intent-id", "", "intent to inspect (required)")
+	if err := fs.Parse(args); err != nil {
+		return 2
+	}
+	if fs.NArg() > 0 || *intentID == "" {
+		withdrawalExecUsage(stderr)
+		return 2
+	}
+	pool, code := withdrawalExecOpenPool(ctx, d)
+	if pool == nil {
+		return code
+	}
+	defer pool.Close()
+
+	rows, err := pool.Query(ctx, `SELECT step_id, action, state, owner_id, lease_version,
+		COALESCE(attempt_id, ''), COALESCE(tx_hash, ''), COALESCE(outcome_class, ''),
+		COALESCE(revision_version, 0), evidence, issued_at, updated_at
+		FROM execution_steps WHERE intent_id = $1 ORDER BY issued_at, step_id`, *intentID)
+	if err != nil {
+		fmt.Fprintf(stderr, "txharbor withdrawal-exec: step-list failed: %s\n", logx.Redact(err.Error()))
+		return 1
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var (
+			stepID, action, state, owner, attemptID, txHash, outcomeClass, evidence string
+			version, revisionVersion                                                int64
+			issuedAt, updatedAt                                                     time.Time
+		)
+		if err := rows.Scan(&stepID, &action, &state, &owner, &version, &attemptID, &txHash,
+			&outcomeClass, &revisionVersion, &evidence, &issuedAt, &updatedAt); err != nil {
+			fmt.Fprintf(stderr, "txharbor withdrawal-exec: step-list failed: %s\n", logx.Redact(err.Error()))
+			return 1
+		}
+		fmt.Fprintf(stdout, "step step_id=%s action=%s state=%s owner_id=%s lease_version=%d attempt_id=%s tx_hash=%s outcome_class=%s revision_version=%d evidence=%q issued_at=%s updated_at=%s\n",
+			stepID, action, state, owner, version, attemptID, txHash, outcomeClass, revisionVersion,
+			evidence, issuedAt.UTC().Format(time.RFC3339), updatedAt.UTC().Format(time.RFC3339))
+	}
+	if err := rows.Err(); err != nil {
+		fmt.Fprintf(stderr, "txharbor withdrawal-exec: step-list failed: %s\n", logx.Redact(err.Error()))
+		return 1
+	}
+	return 0
+}
+
+// withdrawalExecEventList prints the intent's append-only events read-only.
+func withdrawalExecEventList(ctx context.Context, args []string, d Deps) int {
+	stdout, stderr := d.stdout(), d.stderr()
+	fs := flag.NewFlagSet("withdrawal-exec event-list", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	intentID := fs.String("intent-id", "", "intent to inspect (required)")
+	if err := fs.Parse(args); err != nil {
+		return 2
+	}
+	if fs.NArg() > 0 || *intentID == "" {
+		withdrawalExecUsage(stderr)
+		return 2
+	}
+	pool, code := withdrawalExecOpenPool(ctx, d)
+	if pool == nil {
+		return code
+	}
+	defer pool.Close()
+
+	rows, err := pool.Query(ctx, `SELECT event_id, kind, COALESCE(from_state, ''), COALESCE(to_state, ''),
+		COALESCE(lease_version, 0), COALESCE(step_id, ''), COALESCE(attempt_id, ''),
+		COALESCE(revision_version, 0), detail, at
+		FROM execution_events WHERE intent_id = $1 ORDER BY event_id`, *intentID)
+	if err != nil {
+		fmt.Fprintf(stderr, "txharbor withdrawal-exec: event-list failed: %s\n", logx.Redact(err.Error()))
+		return 1
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var (
+			eventID, leaseVersion, revisionVersion              int64
+			kind, fromState, toState, stepID, attemptID, detail string
+			at                                                  time.Time
+		)
+		if err := rows.Scan(&eventID, &kind, &fromState, &toState, &leaseVersion, &stepID,
+			&attemptID, &revisionVersion, &detail, &at); err != nil {
+			fmt.Fprintf(stderr, "txharbor withdrawal-exec: event-list failed: %s\n", logx.Redact(err.Error()))
+			return 1
+		}
+		fmt.Fprintf(stdout, "event event_id=%d kind=%s from_state=%s to_state=%s lease_version=%d step_id=%s attempt_id=%s revision_version=%d detail=%q at=%s\n",
+			eventID, kind, fromState, toState, leaseVersion, stepID, attemptID, revisionVersion,
+			detail, at.UTC().Format(time.RFC3339))
+	}
+	if err := rows.Err(); err != nil {
+		fmt.Fprintf(stderr, "txharbor withdrawal-exec: event-list failed: %s\n", logx.Redact(err.Error()))
+		return 1
+	}
+	return 0
+}
+
+func formatTimePtr(t *time.Time) string {
+	if t == nil {
+		return ""
+	}
+	return t.UTC().Format(time.RFC3339)
+}
+
+func formatStringPtr(s *string) string {
+	if s == nil {
+		return ""
+	}
+	return *s
 }
 
 // withdrawalExecOpenPool loads the serve config and opens the operator pool.

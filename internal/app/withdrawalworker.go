@@ -95,7 +95,16 @@ func (w *WithdrawalWorker) Run(ctx context.Context) {
 }
 
 // cycle starts one goroutine per claimable intent that is not already served.
+// It first marks stalled-but-not-taken claims (evidence only, no business
+// state change).
 func (w *WithdrawalWorker) cycle(ctx context.Context) {
+	if marked, err := w.Claims.SweepStalls(ctx); err != nil {
+		w.log().Warn("stall sweep failed", "error", logx.Redact(err.Error()))
+	} else if marked > 0 && w.Metrics != nil {
+		for i := 0; i < marked; i++ {
+			w.Metrics.ObserveWorkerStallFlag()
+		}
+	}
 	intents, err := w.scanClaimable(ctx)
 	if err != nil {
 		w.log().Warn("claim scan failed", "error", logx.Redact(err.Error()))
@@ -127,18 +136,22 @@ func (w *WithdrawalWorker) cycle(ctx context.Context) {
 // serveIntent acquires the claim, marks it claimed, and renews it while active.
 // A lost or expired qualification stops the holder immediately.
 func (w *WithdrawalWorker) serveIntent(ctx context.Context, intentID string) {
-	version, ok, err := w.Claims.Acquire(ctx, intentID, w.OwnerID)
+	res, err := w.Claims.Claim(ctx, intentID, w.OwnerID)
 	if err != nil {
 		w.observeAcquisition("error")
 		w.log().Warn("claim acquire failed", "intent_id", intentID, "error", logx.Redact(err.Error()))
 		return
 	}
-	if !ok {
+	if !res.Acquired {
 		w.observeAcquisition("not_claimable")
 		return
 	}
 	w.observeAcquisition("acquired")
-	w.markClaimed(ctx, intentID, version)
+	if res.TakenOver && w.Metrics != nil {
+		w.Metrics.ObserveWorkerClaimTakeover()
+	}
+	version := res.Version
+	w.advanceIntentToClaimed(ctx, intentID, version)
 
 	defer func() {
 		if err := w.Claims.Release(context.WithoutCancel(ctx), intentID, w.OwnerID, version); err != nil && !errors.Is(err, execution.ErrClaimLost) {
@@ -171,21 +184,15 @@ func (w *WithdrawalWorker) heartbeat(ctx context.Context, intentID string, versi
 	}
 }
 
-// markClaimed appends the claimed event and applies admitted->claimed when the
-// intent is still admitted. It is best-effort: a refusal just leaves the
-// intent for the next cycle.
-func (w *WithdrawalWorker) markClaimed(ctx context.Context, intentID string, version int64) {
+// advanceIntentToClaimed applies admitted->claimed when the intent is still
+// admitted. The claim event is written by ClaimStore.Claim in the same
+// generation.
+func (w *WithdrawalWorker) advanceIntentToClaimed(ctx context.Context, intentID string, version int64) {
 	tx, err := w.Pool.Begin(ctx)
 	if err != nil {
 		return
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
-	if err := execution.AppendEvent(ctx, tx, execution.Event{
-		IntentID: intentID, Kind: execution.EventClaimed, LeaseVersion: version,
-		Detail: "owner_id=" + w.OwnerID,
-	}); err != nil {
-		return
-	}
 	if intent, found, err := execution.ReadIntent(ctx, tx, intentID); err == nil && found && intent.State == execution.IntentAdmitted {
 		_ = execution.TransitionIntent(ctx, tx, intentID, execution.IntentAdmitted, intent.StateVersion, execution.IntentClaimed, version)
 	}
