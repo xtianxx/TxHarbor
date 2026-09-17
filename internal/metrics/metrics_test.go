@@ -526,6 +526,64 @@ func TestWithdrawalMetricsCounters(t *testing.T) {
 	}
 }
 
+// TestNonceMetricsContract covers the 008 T020 allocation surface: every
+// admission lands in txharbor_nonce_allocations_total{result} (allocated, the
+// replayed result, and every refusal's machine reason), replays also increment
+// the dedicated txharbor_nonce_replays_total, and each persisted observation
+// lands in txharbor_nonce_observations_total{classification}.
+func TestNonceMetricsContract(t *testing.T) {
+	m := New(func() bool { return true })
+
+	// The full admission-outcome vocabulary (errors.go): allocated/replayed
+	// plus every refusal machine reason.
+	results := []string{
+		"allocated", "replayed",
+		"allocation_conflict", "chain_view_unavailable", "scope_held",
+		"sender_not_registered", "sender_disabled", "authorization_invalid",
+		"rebuild_incomplete", "recovery_active", "temporarily_unavailable",
+	}
+	for _, result := range results {
+		m.ObserveNonceAllocation(result)
+	}
+	counters := gatherCounters(t, m, NonceAllocationsMetricName)
+	for _, result := range results {
+		if got := counters["result="+result]; got != 1 {
+			t.Fatalf("%s{result=%s} = %v, want 1 (all: %v)", NonceAllocationsMetricName, result, got, counters)
+		}
+	}
+
+	m.ObserveNonceReplay()
+	m.ObserveNonceReplay()
+	if got := gatherCounters(t, m, NonceReplaysMetricName)[""]; got != 2 {
+		t.Fatalf("%s = %v, want 2", NonceReplaysMetricName, got)
+	}
+
+	for _, classification := range []string{
+		"consistent", "bootstrap_external_consumed", "unattributed_consumption",
+		"unexplained_gap", "divergence", "unavailable",
+	} {
+		m.ObserveNonceObservation(classification)
+		if got := gatherCounters(t, m, NonceObservationsMetricName)["classification="+classification]; got != 1 {
+			t.Fatalf("%s{classification=%s} = %v, want 1", NonceObservationsMetricName, classification, got)
+		}
+	}
+
+	// The two label-free 008 series: one hold establishment and three
+	// backoff-entering reconcile failures. Both counters carry no labels, so
+	// no sender, cause, or error text can ever become a label value
+	// (FR-21/SC-09 fixed vocabulary).
+	m.ObserveNonceHoldEstablished()
+	if got := gatherCounters(t, m, NonceHoldsMetricName)[""]; got != 1 {
+		t.Fatalf("%s = %v, want 1", NonceHoldsMetricName, got)
+	}
+	m.ObserveNonceReconcileFailure()
+	m.ObserveNonceReconcileFailure()
+	m.ObserveNonceReconcileFailure()
+	if got := gatherCounters(t, m, NonceReconcileFailuresMetricName)[""]; got != 3 {
+		t.Fatalf("%s = %v, want 3", NonceReconcileFailuresMetricName, got)
+	}
+}
+
 // TestWithdrawalMetricsNoSecretLabels freezes the FR-20 zero-secrets rule for
 // T015: the withdrawal outcome counters carry no labels at all, so no caller
 // id, request id, key material, asset or amount can ever become a label value

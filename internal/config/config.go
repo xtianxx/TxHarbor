@@ -54,6 +54,10 @@ const (
 	// (research R5 timing table — no new knob names).
 	EnvReorgMaxDepth    = "TXHARBOR_REORG_MAX_DEPTH"
 	EnvReorgReplayBatch = "TXHARBOR_REORG_REPLAY_BATCH"
+	// Nonce read API (008 FR-19/FR-21): the bearer credential for the read
+	// endpoints mounted by the serve carrier. Reconcile/observation timing
+	// reuses the INDEX knobs above — no 008 timing knob exists.
+	EnvNonceReadToken = "TXHARBOR_NONCE_READ_TOKEN"
 	// Signer service (009 T013): listener, backend mode, key file, signing
 	// deadline, and the policy allowlists/caps. Parsed when present;
 	// required-ness is enforced by SignerPolicyConfig for the signer paths
@@ -72,8 +76,6 @@ const (
 	EnvSignerMaxPriorityFee = "TXHARBOR_SIGNER_MAX_PRIORITY_FEE_PER_GAS"
 	EnvSignerMaxGasPrice    = "TXHARBOR_SIGNER_MAX_GAS_PRICE"
 )
-
-// Defaults from data-model §1. Acceptance runs use these values (FR-013).
 const (
 	DefaultHTTPAddr           = "127.0.0.1:8080"
 	DefaultStartupTimeout     = 30 * time.Second
@@ -166,6 +168,10 @@ type Config struct {
 	// table); poll/retry timing reuses IndexPollInterval/IndexRetryInitial/
 	// IndexRetryMax, so no new timing knobs exist.
 	ReorgReplayBatch uint64
+	// Nonce read API bearer token (008 FR-19). Optional at Load; while unset
+	// the read endpoints stay fail-closed. Never echoed raw: Summary() renders
+	// presence as the redaction placeholder only.
+	NonceReadToken string
 	// Signer service (009 T013): parsed when present; SignerPolicyConfig
 	// enforces required-ness for the signer paths.
 	SignerHTTPAddr       string
@@ -354,6 +360,12 @@ func Load(getenv Getenv) (*Config, error) {
 	}
 
 	c.loadSigner(getenv, &errs)
+	// Nonce read API (008 FR-19): the bearer token passes through verbatim
+	// and is never formatted into an error. Unset or empty leaves the read
+	// endpoints fail-closed (the read provider authenticates against it).
+	if raw, ok := getenv(EnvNonceReadToken); ok && raw != "" {
+		c.NonceReadToken = raw
+	}
 
 	if raw, ok := getenv(EnvHTTPAddr); ok && raw != "" {
 		if err := validateHTTPAddr(raw); err != nil {
@@ -387,17 +399,22 @@ func Load(getenv Getenv) (*Config, error) {
 }
 
 // Summary renders the effective configuration with credentials redacted, for
-// one startup echo line (FR-003).
+// one startup echo line (FR-003). The nonce read token is represented by
+// presence + the redaction placeholder, never by its value.
 func (c *Config) Summary() string {
+	nonceReadToken := ""
+	if c.NonceReadToken != "" {
+		nonceReadToken = logx.Redacted
+	}
 	return fmt.Sprintf(
-		"pg=%s rpc=%s chain_id=%d start_height=%d http_addr=%s startup_timeout=%s probe_interval=%s probe_timeout=%s shutdown_timeout=%s migrate_lock_timeout=%s index_rpc_timeout=%s index_poll_interval=%s index_retry_initial=%s index_retry_max=%s log_start_height=%d log_contracts=%d log_config_hash=%s log_batch_blocks=%d deposit_start_height=%d deposit_contracts=%d deposit_watch_addresses=%d deposit_config_hash=%s deposit_batch_blocks=%d confirmation_depth=%d reorg_max_depth=%s reorg_replay_batch=%d signer_http_addr=%s signer_mode=%s signer_key_timeout=%s signer_chains=%d signer_senders=%d signer_assets=%d signer_recipients=%d signer_max_gas_limit=%d",
+		"pg=%s rpc=%s chain_id=%d start_height=%d http_addr=%s startup_timeout=%s probe_interval=%s probe_timeout=%s shutdown_timeout=%s migrate_lock_timeout=%s index_rpc_timeout=%s index_poll_interval=%s index_retry_initial=%s index_retry_max=%s log_start_height=%d log_contracts=%d log_config_hash=%s log_batch_blocks=%d deposit_start_height=%d deposit_contracts=%d deposit_watch_addresses=%d deposit_config_hash=%s deposit_batch_blocks=%d confirmation_depth=%d reorg_max_depth=%s reorg_replay_batch=%d nonce_read_token=%s signer_http_addr=%s signer_mode=%s signer_key_timeout=%s signer_chains=%d signer_senders=%d signer_assets=%d signer_recipients=%d signer_max_gas_limit=%d",
 		logx.Redact(c.PGDSN), logx.Redact(c.RPCURL), c.ChainID, c.StartHeight, c.HTTPAddr,
 		c.StartupTimeout, c.ProbeInterval, c.ProbeTimeout, c.ShutdownTimeout, c.MigrateLockTimeout,
 		c.IndexRPCTimeout, c.IndexPollInterval, c.IndexRetryInitial, c.IndexRetryMax,
 		c.LogStartHeight, len(c.LogContracts), c.LogConfigHash, c.LogBatchBlocks,
 		c.DepositStartHeight, len(c.DepositContracts), len(c.DepositWatchAddresses),
 		c.DepositConfigHash, c.DepositBatchBlocks, c.ConfirmationDepth, c.ReorgMaxDepthRaw,
-		c.ReorgReplayBatch, c.SignerHTTPAddr, c.SignerMode, c.SignerKeyTimeout,
+		c.ReorgReplayBatch, nonceReadToken, c.SignerHTTPAddr, c.SignerMode, c.SignerKeyTimeout,
 		len(c.SignerChains), len(c.SignerSenders), len(c.SignerAssets),
 		len(c.SignerRecipients), c.SignerMaxGasLimit,
 	)

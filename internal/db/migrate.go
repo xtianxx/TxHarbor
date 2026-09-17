@@ -274,6 +274,15 @@ func newProvider(sqlDB *sql.DB, opts MigrateOptions) (*goose.Provider, error) {
 	return goose.NewProvider(goose.DialectPostgres, sqlDB, opts.fsys(),
 		goose.WithSessionLocker(locker),
 		goose.WithDisableGlobalRegistry(true),
+		// R-PB8 merge order: the carrier merges first as 000010, 009 lands
+		// later as 000009 (the gap at 9 is reserved, no renumbering). A
+		// database already at {1..8,10} must therefore fill 9 with a plain
+		// `migrate up`. goose refuses out-of-order ("missing") migrations by
+		// default, so the gap-fill proof (T041, PB-05 sequence (d)) needs an
+		// allow-missing provider — no special CLI option at the call site.
+		// This never weakens the serve gate: CheckCompatibility still refuses
+		// while any version is pending and refuses unknown/newer versions.
+		goose.WithAllowOutofOrder(true),
 	)
 }
 

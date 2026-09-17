@@ -14,6 +14,9 @@ import (
 	"context"
 	"errors"
 	"io"
+	"sort"
+	"strconv"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -359,6 +362,102 @@ func TestWithdrawalGrantRevokeThenRepeat(t *testing.T) {
 			t.Fatalf("audit actions = %v, want %v", acted, want)
 		}
 	}
+}
+
+// TestWithdrawalGrantScopedRevokeSyncsVersion is T021 (T-revoke-sync) for a
+// scoped grant: a revoke syncs the scope version in the same tx. It pins four
+// contract points — a bare revoke bumps v1→v2; a same-operation retry reports
+// the recorded outcome and bumps nothing; a fresh revoke is the idempotent
+// revoke_nop and bumps nothing; a revoke-then-re-supply cycle bumps again to
+// v3. Every assertion reads the scope row, never an inferred return code.
+func TestWithdrawalGrantScopedRevokeSyncsVersion(t *testing.T) {
+	ctx, pool := grantSetup(t)
+	grantSeedCaller(t, ctx, pool, 7305)
+
+	const authID = "auth-scoped-revoke-sync"
+	op := grantScopedTestOp("71000000000000000000000000000001", authID, 7305)
+	if out, err := SupplyGrant(ctx, pool, op, "op", "seed scoped grant"); err != nil || out.Action != grantOutcomeSupplied {
+		t.Fatalf("seed scoped supply = (%+v, %v), want %s", out, err, grantOutcomeSupplied)
+	}
+	if v := grantScopeVersion(t, ctx, pool, authID); v != 1 {
+		t.Fatalf("seed scope version = %d, want 1", v)
+	}
+
+	const revokeOpID = "71000000000000000000000000000002"
+	if out, err := RevokeGrant(ctx, pool, revokeOpID, authID, "op", "revoke"); err != nil || out.Action != grantOutcomeRevoked {
+		t.Fatalf("bare revoke = (%+v, %v), want %s", out, err, grantOutcomeRevoked)
+	}
+	if v := grantScopeVersion(t, ctx, pool, authID); v != 2 {
+		t.Fatalf("scope version after revoke = %d, want 2 (T-revoke-sync)", v)
+	}
+
+	if out, err := RevokeGrant(ctx, pool, revokeOpID, authID, "op", "same-op retry"); err != nil || out.Action != grantOutcomeRevoked {
+		t.Fatalf("same-op revoke retry = (%+v, %v), want recorded %s", out, err, grantOutcomeRevoked)
+	}
+	if v := grantScopeVersion(t, ctx, pool, authID); v != 2 {
+		t.Fatalf("scope version after same-op retry = %d, want 2 (no double bump)", v)
+	}
+
+	if out, err := RevokeGrant(ctx, pool, "71000000000000000000000000000003", authID, "op", "repeat revoke"); err != nil || out.Action != grantOutcomeRevokeNop {
+		t.Fatalf("repeat revoke = (%+v, %v), want %s", out, err, grantOutcomeRevokeNop)
+	}
+	if v := grantScopeVersion(t, ctx, pool, authID); v != 2 {
+		t.Fatalf("scope version after repeat revoke = %d, want 2 (revoke_nop bumps nothing)", v)
+	}
+
+	reOp := grantScopedTestOp("71000000000000000000000000000004", authID, 7305)
+	if out, err := SupplyGrant(ctx, pool, reOp, "op", "resupply after revoke"); err != nil || out.Action != grantOutcomeResupplied {
+		t.Fatalf("re-supply after revoke = (%+v, %v), want %s", out, err, grantOutcomeResupplied)
+	}
+	if v := grantScopeVersion(t, ctx, pool, authID); v != 3 {
+		t.Fatalf("scope version after revoke-then-re-supply = %d, want 3", v)
+	}
+
+	if acted := grantAuditActions(t, ctx, pool, authID); len(acted) != 4 ||
+		acted[0] != grantOutcomeSupplied || acted[1] != grantOutcomeRevoked ||
+		acted[2] != grantOutcomeRevokeNop || acted[3] != grantOutcomeResupplied {
+		t.Fatalf("audit actions = %v, want [supplied revoked revoke_nop resupplied]", acted)
+	}
+}
+
+// TestWithdrawalGrantScopedResolveRequiresScope is T2: resolveByOperationID
+// must not report a matched scoped attempt as success when the scope row is
+// absent or has drifted. Both cases are conservative retries (temporarily
+// unavailable), never a success built on the audit row alone.
+func TestWithdrawalGrantScopedResolveRequiresScope(t *testing.T) {
+	ctx, pool := grantSetup(t)
+	grantSeedCaller(t, ctx, pool, 7306)
+
+	const authID = "auth-resolve-scope"
+	op := grantScopedTestOp("72000000000000000000000000000001", authID, 7306)
+	if out, err := SupplyGrant(ctx, pool, op, "op", "seed scoped grant"); err != nil || out.Action != grantOutcomeSupplied {
+		t.Fatalf("seed scoped supply = (%+v, %v), want %s", out, err, grantOutcomeSupplied)
+	}
+
+	if out, err := resolveByOperationID(ctx, pool, op); err != nil || out.Action != grantOutcomeSupplied {
+		t.Fatalf("resolve with matching scope = (%+v, %v), want %s", out, err, grantOutcomeSupplied)
+	}
+
+	if _, err := pool.Exec(ctx,
+		`UPDATE withdrawal_authorization_scopes SET sender = $2 WHERE authorization_id = $1`,
+		authID, "0xcccccccccccccccccccccccccccccccccccccccc"); err != nil {
+		t.Fatalf("drift scope content: %v", err)
+	}
+	out, err := resolveByOperationID(ctx, pool, op)
+	if out != nil {
+		t.Fatalf("resolve with drifted scope = (%+v, %v), want nil outcome", out, err)
+	}
+	grantWantCode(t, err, CodeTemporarilyUnavailable)
+
+	if _, err := pool.Exec(ctx,
+		`DELETE FROM withdrawal_authorization_scopes WHERE authorization_id = $1`, authID); err != nil {
+		t.Fatalf("delete scope row: %v", err)
+	}
+	out, err = resolveByOperationID(ctx, pool, op)
+	if out != nil {
+		t.Fatalf("resolve with absent scope = (%+v, %v), want nil outcome", out, err)
+	}
+	grantWantCode(t, err, CodeTemporarilyUnavailable)
 }
 
 // TestWithdrawalGrantConcurrentFirstSupplyTwins covers the two first-supply
@@ -863,4 +962,759 @@ func TestWithdrawalGrantPKRaceDifferentOperationDifferentInput(t *testing.T) {
 	if loserDetail != opInputDetail(loser) {
 		t.Fatalf("loser refusal detail = %q, want %q (loser's attempted params)", loserDetail, opInputDetail(loser))
 	}
+}
+
+// ---------------------------------------------------------------------------
+// T010 [US1] legal scoped-supply round-trip (fail-first).
+//
+// A legal supply writes grant + scope + audit in the SAME transaction: the
+// scope row is 1:1 with the grant with authorization_version 1, every scope
+// column equals the op-input payload (row equality, sender lowercased), and
+// the recorded audit attempt agrees with grant↔scope↔principal (same
+// authorization_id, same principal in the snapshot). This test is RED until
+// T012 writes the scope row inside runSupplyTx; T010 does not implement it.
+// Deterministic single round-trip, no sleeps-as-proof.
+// ---------------------------------------------------------------------------
+
+// grantScopedTestOp is a fully-populated legal scoped supply op-input: the
+// eight Table 6 fields plus every PB scope field and the server-resolved
+// attested_by, matching the contract's extended supply entry.
+func grantScopedTestOp(operationID, authorizationID string, callerID int64) OpInput {
+	op := grantTestOp(operationID, authorizationID, callerID, "100")
+	op.IntentID = "intent-" + authorizationID
+	op.RequestID = "request-" + authorizationID
+	op.Sender = "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+	op.FeeMaxTotal = 21000
+	op.FeeMaxPerGas = 2
+	op.FeeMaxPriority = 1
+	op.AllowsFeeReplacement = true
+	op.AttestedBy = "principal-issuer"
+	return op
+}
+
+// grantScopeRow is one withdrawal_authorization_scopes row read back verbatim.
+type grantScopeRow struct {
+	authorizationID      string
+	intentID             string
+	requestID            string
+	sender               string
+	feeMaxTotal          int64
+	feeMaxPerGas         int64
+	feeMaxPriority       int64
+	allowsFeeReplacement bool
+	authorizationVersion int64
+	attestedBy           string
+}
+
+// grantReadScopeRow reads the single scope row for a grant, failing when it is
+// absent — which is exactly the T012 gap this fail-first test pins down. It
+// reads persistent state, never an inferred return code.
+func grantReadScopeRow(t *testing.T, ctx context.Context, pool *pgxpool.Pool, authorizationID string) grantScopeRow {
+	t.Helper()
+	var r grantScopeRow
+	err := pool.QueryRow(ctx, `
+SELECT authorization_id, intent_id, request_id, sender, fee_max_total,
+       fee_max_per_gas, fee_max_priority, allows_fee_replacement,
+       authorization_version, attested_by
+FROM withdrawal_authorization_scopes
+WHERE authorization_id = $1`, authorizationID).
+		Scan(&r.authorizationID, &r.intentID, &r.requestID, &r.sender, &r.feeMaxTotal,
+			&r.feeMaxPerGas, &r.feeMaxPriority, &r.allowsFeeReplacement,
+			&r.authorizationVersion, &r.attestedBy)
+	if err != nil {
+		t.Fatalf("scope row for grant %q missing/unreadable (T012 must write it in the supply tx): %v",
+			authorizationID, err)
+	}
+	return r
+}
+
+// grantCallerIDByID reads the stored caller_id of a grant row.
+func grantCallerIDByID(t *testing.T, ctx context.Context, pool *pgxpool.Pool, authorizationID string) int64 {
+	t.Helper()
+	var callerID int64
+	if err := pool.QueryRow(ctx,
+		`SELECT caller_id FROM withdrawal_authorizations WHERE authorization_id = $1`, authorizationID).
+		Scan(&callerID); err != nil {
+		t.Fatalf("read grant caller for %q: %v", authorizationID, err)
+	}
+	return callerID
+}
+
+// TestWithdrawalGrantScopedSupplyWritesScopeRow is T010: a legal supply must
+// write grant + scope + audit atomically with matching payloads.
+func TestWithdrawalGrantScopedSupplyWritesScopeRow(t *testing.T) {
+	ctx, pool := grantSetup(t)
+	grantSeedCaller(t, ctx, pool, 7301)
+
+	const (
+		authID = "auth-scoped"
+		opID   = "50000000000000000000000000000001"
+	)
+	op := grantScopedTestOp(opID, authID, 7301)
+
+	out, err := SupplyGrant(ctx, pool, op, "operator-scoped", "legal scoped supply")
+	if err != nil {
+		t.Fatalf("scoped SupplyGrant: %v", err)
+	}
+	if out.Action != grantOutcomeSupplied || out.AuthorizationID != authID {
+		t.Fatalf("outcome = %+v, want {%s %s}", out, grantOutcomeSupplied, authID)
+	}
+	if n := grantCount(t, ctx, pool, authID); n != 1 {
+		t.Fatalf("grant rows = %d, want 1", n)
+	}
+
+	// Scope row: 1:1 with the grant, every column equal to the op-input scope
+	// payload (sender normalized to lowercase), version 1 on first supply.
+	scope := grantReadScopeRow(t, ctx, pool, authID)
+	if scope.authorizationID != authID || scope.authorizationID != op.AuthorizationID {
+		t.Fatalf("scope authorization_id = %q, want the grant/op id %q", scope.authorizationID, authID)
+	}
+	if scope.intentID != op.IntentID || scope.requestID != op.RequestID {
+		t.Fatalf("scope identity = (%q, %q), want (%q, %q)",
+			scope.intentID, scope.requestID, op.IntentID, op.RequestID)
+	}
+	if wantSender := strings.ToLower(op.Sender); scope.sender != wantSender {
+		t.Fatalf("scope sender = %q, want lowercased %q", scope.sender, wantSender)
+	}
+	if scope.feeMaxTotal != op.FeeMaxTotal || scope.feeMaxPerGas != op.FeeMaxPerGas ||
+		scope.feeMaxPriority != op.FeeMaxPriority || scope.allowsFeeReplacement != op.AllowsFeeReplacement {
+		t.Fatalf("scope fee/purpose = (%d, %d, %d, %t), want (%d, %d, %d, %t)",
+			scope.feeMaxTotal, scope.feeMaxPerGas, scope.feeMaxPriority, scope.allowsFeeReplacement,
+			op.FeeMaxTotal, op.FeeMaxPerGas, op.FeeMaxPriority, op.AllowsFeeReplacement)
+	}
+	if scope.attestedBy != op.AttestedBy {
+		t.Fatalf("scope attested_by = %q, want %q (server-resolved principal)", scope.attestedBy, op.AttestedBy)
+	}
+	if scope.authorizationVersion != 1 {
+		t.Fatalf("authorization_version = %d, want 1 on first scoped supply", scope.authorizationVersion)
+	}
+
+	// Audit agreement grant↔scope↔principal: the recorded attempt names the
+	// same grant/scope row, binds the same scope snapshot (so the stored scope
+	// payload is what the attempt recorded), attributes the same caller, and
+	// carries the scope's principal in attested_by.
+	action, detail := grantAuditRowByOp(t, ctx, pool, opID)
+	if action != grantOutcomeSupplied {
+		t.Fatalf("audit action = %q, want %s", action, grantOutcomeSupplied)
+	}
+	if detail != opInputDetail(op) {
+		t.Fatalf("audit detail = %q, want the scoped op-input snapshot %q", detail, opInputDetail(op))
+	}
+	if callerID := grantAuditCallerByOp(t, ctx, pool, opID); callerID != op.CallerID {
+		t.Fatalf("audit caller_id = %d, want %d", callerID, op.CallerID)
+	}
+	if callerID := grantCallerIDByID(t, ctx, pool, authID); callerID != op.CallerID {
+		t.Fatalf("grant caller_id = %d, want %d", callerID, op.CallerID)
+	}
+	if wantPrincipal := "attested_by=" + strconv.Quote(scope.attestedBy); !strings.Contains(detail, wantPrincipal) {
+		t.Fatalf("audit detail %q must agree with scope principal %q", detail, scope.attestedBy)
+	}
+}
+
+// TestWithdrawalGrantScopedSupplyFeeTripleBoundaries is T016 against a real
+// PostgreSQL: every PB-C2 fee boundary is exercised on both sides. A fee triple
+// exactly at the priority<=per-gas cap, and the legacy gas_price path
+// (priority 0), write the scope row with the supplied values; a triple one unit
+// over the cap or missing an applicable cap is refused with zero grant, scope
+// and audit rows. Deterministic, one row census per case.
+func TestWithdrawalGrantScopedSupplyFeeTripleBoundaries(t *testing.T) {
+	ctx, pool := grantSetup(t)
+	grantSeedCaller(t, ctx, pool, 7302)
+
+	type greenCase struct {
+		name                    string
+		total, perGas, priority int64
+	}
+	greens := []greenCase{
+		{"priority at per-gas cap", 10, 10, 10},
+		{"legacy gas_price path (priority zero)", 21000, 2, 0},
+	}
+	for i, tc := range greens {
+		t.Run(tc.name, func(t *testing.T) {
+			authID := "auth-fee-green-" + strconv.Itoa(i)
+			opID := "6000000000000000000000000000000" + strconv.Itoa(i)
+			op := grantScopedTestOp(opID, authID, 7302)
+			op.FeeMaxTotal, op.FeeMaxPerGas, op.FeeMaxPriority = tc.total, tc.perGas, tc.priority
+
+			out, err := SupplyGrant(ctx, pool, op, "op-fee", "fee boundary green")
+			if err != nil {
+				t.Fatalf("SupplyGrant() error = %v, want supplied", err)
+			}
+			if out.Action != grantOutcomeSupplied {
+				t.Fatalf("outcome = %+v, want %s", out, grantOutcomeSupplied)
+			}
+			if n := grantCount(t, ctx, pool, authID); n != 1 {
+				t.Fatalf("grant rows = %d, want 1", n)
+			}
+			scope := grantReadScopeRow(t, ctx, pool, authID)
+			if scope.feeMaxTotal != tc.total || scope.feeMaxPerGas != tc.perGas || scope.feeMaxPriority != tc.priority {
+				t.Fatalf("scope fee triple = (%d, %d, %d), want (%d, %d, %d)",
+					scope.feeMaxTotal, scope.feeMaxPerGas, scope.feeMaxPriority,
+					tc.total, tc.perGas, tc.priority)
+			}
+		})
+	}
+
+	reds := []struct {
+		name                    string
+		total, perGas, priority int64
+		wantField               string
+	}{
+		{"priority one above per-gas cap", 10, 10, 11, "fee_max_priority"},
+		{"missing total cap", 0, 10, 0, "fee_max_total"},
+		{"missing per-gas cap", 100, 0, 0, "fee_max_per_gas"},
+	}
+	for i, tc := range reds {
+		t.Run(tc.name+" refused with zero rows", func(t *testing.T) {
+			authID := "auth-fee-red-" + strconv.Itoa(i)
+			opID := "6100000000000000000000000000000" + strconv.Itoa(i)
+			op := grantScopedTestOp(opID, authID, 7302)
+			op.FeeMaxTotal, op.FeeMaxPerGas, op.FeeMaxPriority = tc.total, tc.perGas, tc.priority
+
+			out, err := SupplyGrant(ctx, pool, op, "op-fee", "fee boundary refused")
+			if out != nil {
+				t.Fatalf("outcome = %+v, want nil", out)
+			}
+			e := grantWantCode(t, err, CodeValidationFailed)
+			if e.Field != tc.wantField {
+				t.Fatalf("error field = %q, want %q", e.Field, tc.wantField)
+			}
+			if n := grantCount(t, ctx, pool, authID); n != 0 {
+				t.Fatalf("grant rows after refusal = %d, want 0", n)
+			}
+			if n := grantAuthorityScopeCount(t, ctx, pool, authID); n != 0 {
+				t.Fatalf("scope rows after refusal = %d, want 0", n)
+			}
+			if n := grantAuditCountByOp(t, ctx, pool, opID); n != 0 {
+				t.Fatalf("audit rows after refusal = %d, want 0", n)
+			}
+		})
+	}
+}
+
+// ---------------------------------------------------------------------------
+// T022 [US2] revoke-vs-supply race on one grant (V-PB6 second half).
+//
+// A scoped grant is revoked and re-supplied concurrently. Both transactions
+// take the SAME grant row FOR UPDATE, so their commit order is the winner
+// order; the loser observes the winner's state. The observable proof of which
+// order happened is the two audit rows' audit_id sequence plus the monotonic
+// scope version:
+//
+//   - revoke committed first  ⇒ the revoke bumps to 2, then the loser re-supply
+//     observes state=revoked and bumps again (revoke-then-re-supply cycle) → 3;
+//   - re-supply committed first ⇒ it saw state=active and did not bump, and the
+//     later revoke bumps (T-revoke-sync) → version 2.
+//
+// Either order is legal; what may never happen is a partial write, an order
+// that disagrees with the version, or drift of the immutable scope content.
+// Deterministic locked sub-cases pin BOTH orders; the barrier sub-case proves
+// the concurrent interleaving satisfies the same invariant with no sleeps.
+// ---------------------------------------------------------------------------
+
+// grantScopeVersion reads the scope row's monotonic authorization_version — the
+// order-encoding fact, read from the table and never inferred from a response.
+func grantScopeVersion(t *testing.T, ctx context.Context, pool *pgxpool.Pool, authorizationID string) int64 {
+	t.Helper()
+	var v int64
+	if err := pool.QueryRow(ctx,
+		`SELECT authorization_version FROM withdrawal_authorization_scopes WHERE authorization_id = $1`,
+		authorizationID).Scan(&v); err != nil {
+		t.Fatalf("read scope version for %q: %v", authorizationID, err)
+	}
+	return v
+}
+
+// grantRaceRevokeSupply releases one revoke and one re-supply of the SAME grant
+// from a single start barrier after proving both connections are genuine (the
+// T021 discipline: ready→park→close(start), no sleeps, no chance-based pacing).
+// It returns each attempt's outcome and error; both are order-independent.
+func grantRaceRevokeSupply(t *testing.T, ctx context.Context, pool *pgxpool.Pool,
+	revokeOpID string, supplyOp OpInput) (*GrantOutcome, error, *GrantOutcome, error) {
+	t.Helper()
+	idempotencyProvePoolCapacity(t, ctx, pool, 2)
+	var (
+		revokeOut *GrantOutcome
+		revokeErr error
+		supplyOut *GrantOutcome
+		supplyErr error
+		ready     sync.WaitGroup
+		done      sync.WaitGroup
+	)
+	start := make(chan struct{})
+	ready.Add(2)
+	done.Add(2)
+	go func() {
+		defer done.Done()
+		ready.Done()
+		<-start
+		revokeOut, revokeErr = RevokeGrant(ctx, pool, revokeOpID, supplyOp.AuthorizationID, "op", "race revoke")
+	}()
+	go func() {
+		defer done.Done()
+		ready.Done()
+		<-start
+		supplyOut, supplyErr = SupplyGrant(ctx, pool, supplyOp, "op", "race supply")
+	}()
+	ready.Wait()
+	close(start)
+	done.Wait()
+	return revokeOut, revokeErr, supplyOut, supplyErr
+}
+
+// grantWantRevokedScopeConsistent asserts the shared T022 post-condition: the
+// grant is revoked; the scope row still exists with content byte-equal to the
+// supplied scope payload (applied content is immutable); and its version equals
+// wantVersion, the order proof derived from the audit sequence by the caller.
+// The scope content check deliberately excludes authorization_version, which is
+// the one field the revoke/re-supply cycle is allowed to move.
+func grantWantRevokedScopeConsistent(t *testing.T, ctx context.Context, pool *pgxpool.Pool,
+	authorizationID string, want OpInput, wantVersion int64) {
+	t.Helper()
+	if state, _ := grantStateAndAmount(t, ctx, pool, authorizationID); state != "revoked" {
+		t.Fatalf("grant state = %q, want revoked (revoke is terminal)", state)
+	}
+	scope := grantReadScopeRow(t, ctx, pool, authorizationID)
+	if scope.intentID != want.IntentID || scope.requestID != want.RequestID ||
+		scope.sender != strings.ToLower(want.Sender) ||
+		scope.feeMaxTotal != want.FeeMaxTotal || scope.feeMaxPerGas != want.FeeMaxPerGas ||
+		scope.feeMaxPriority != want.FeeMaxPriority ||
+		scope.allowsFeeReplacement != want.AllowsFeeReplacement ||
+		scope.attestedBy != want.AttestedBy {
+		t.Fatalf("scope content drifted across revoke/re-supply: %+v", scope)
+	}
+	if scope.authorizationVersion != wantVersion {
+		t.Fatalf("scope version = %d, want %d", scope.authorizationVersion, wantVersion)
+	}
+}
+
+// TestWithdrawalGrantRevokeSupplyRace is T022: concurrent revoke + supply on
+// one scoped grant. The deterministic sub-cases lock each commit order in turn;
+// the barrier sub-case runs them together and derives the expected version from
+// the recorded audit sequence, so neither order can make the test pass for the
+// wrong reason. Every case reads persistent state (grant row, scope row, audit
+// rows), never a return code alone.
+func TestWithdrawalGrantRevokeSupplyRace(t *testing.T) {
+	const callerID = int64(7401)
+
+	// seedScoped supplies one legal scoped grant and returns its op-input (the
+	// immutable scope content the race must preserve).
+	seedScoped := func(t *testing.T, ctx context.Context, pool *pgxpool.Pool, authID, opID string) OpInput {
+		t.Helper()
+		grantSeedCaller(t, ctx, pool, callerID)
+		op := grantScopedTestOp(opID, authID, callerID)
+		if out, err := SupplyGrant(ctx, pool, op, "op", "seed scoped grant"); err != nil || out.Action != grantOutcomeSupplied {
+			t.Fatalf("seed scoped supply = (%+v, %v), want %s", out, err, grantOutcomeSupplied)
+		}
+		if v := grantScopeVersion(t, ctx, pool, authID); v != 1 {
+			t.Fatalf("seed scope version = %d, want 1", v)
+		}
+		return op
+	}
+
+	t.Run("revoke commits first: revoke bumps, loser supply observes revoked and bumps again", func(t *testing.T) {
+		ctx, pool := grantSetup(t)
+		const authID = "auth-race-revoke-first"
+		op := seedScoped(t, ctx, pool, authID, "70000000000000000000000000000001")
+
+		if out, err := RevokeGrant(ctx, pool, "70000000000000000000000000000002", authID, "op", "revoke"); err != nil || out.Action != grantOutcomeRevoked {
+			t.Fatalf("revoke = (%+v, %v), want %s", out, err, grantOutcomeRevoked)
+		}
+		reOp := grantScopedTestOp("70000000000000000000000000000003", authID, callerID)
+		out, err := SupplyGrant(ctx, pool, reOp, "op", "resupply after revoke")
+		if err != nil || out.Action != grantOutcomeResupplied {
+			t.Fatalf("re-supply after revoke = (%+v, %v), want %s", out, err, grantOutcomeResupplied)
+		}
+
+		if acted := grantAuditActions(t, ctx, pool, authID); len(acted) != 3 ||
+			acted[0] != grantOutcomeSupplied || acted[1] != grantOutcomeRevoked || acted[2] != grantOutcomeResupplied {
+			t.Fatalf("audit actions = %v, want [supplied revoked resupplied]", acted)
+		}
+		grantWantRevokedScopeConsistent(t, ctx, pool, authID, op, 3)
+	})
+
+	t.Run("supply commits first: revoke observes the live grant and bumps the version", func(t *testing.T) {
+		ctx, pool := grantSetup(t)
+		const authID = "auth-race-supply-first"
+		op := seedScoped(t, ctx, pool, authID, "70000000000000000000000000000004")
+
+		reOp := grantScopedTestOp("70000000000000000000000000000005", authID, callerID)
+		if out, err := SupplyGrant(ctx, pool, reOp, "op", "resupply while active"); err != nil || out.Action != grantOutcomeResupplied {
+			t.Fatalf("re-supply while active = (%+v, %v), want %s", out, err, grantOutcomeResupplied)
+		}
+		if out, err := RevokeGrant(ctx, pool, "70000000000000000000000000000006", authID, "op", "revoke after resupply"); err != nil || out.Action != grantOutcomeRevoked {
+			t.Fatalf("revoke after resupply = (%+v, %v), want %s", out, err, grantOutcomeRevoked)
+		}
+
+		if acted := grantAuditActions(t, ctx, pool, authID); len(acted) != 3 ||
+			acted[0] != grantOutcomeSupplied || acted[1] != grantOutcomeResupplied || acted[2] != grantOutcomeRevoked {
+			t.Fatalf("audit actions = %v, want [supplied resupplied revoked]", acted)
+		}
+		grantWantRevokedScopeConsistent(t, ctx, pool, authID, op, 2)
+	})
+
+	t.Run("concurrent barrier: loser observes the winner and the version matches the audit order", func(t *testing.T) {
+		ctx, pool := grantSetup(t)
+		const authID = "auth-race-concurrent"
+		op := seedScoped(t, ctx, pool, authID, "70000000000000000000000000000007")
+		reOp := grantScopedTestOp("70000000000000000000000000000008", authID, callerID)
+
+		revOut, revErr, supOut, supErr := grantRaceRevokeSupply(t, ctx, pool, "70000000000000000000000000000009", reOp)
+		if revErr != nil || revOut == nil || revOut.Action != grantOutcomeRevoked {
+			t.Fatalf("concurrent revoke = (%+v, %v), want %s", revOut, revErr, grantOutcomeRevoked)
+		}
+		if supErr != nil || supOut == nil || supOut.Action != grantOutcomeResupplied {
+			t.Fatalf("concurrent re-supply = (%+v, %v), want %s", supOut, supErr, grantOutcomeResupplied)
+		}
+
+		acted := grantAuditActions(t, ctx, pool, authID)
+		if len(acted) != 3 || acted[0] != grantOutcomeSupplied {
+			t.Fatalf("audit actions = %v, want the seed supplied plus one revoked and one resupplied", acted)
+		}
+		revokedIdx, resuppliedIdx := -1, -1
+		for i, a := range acted {
+			switch a {
+			case grantOutcomeRevoked:
+				revokedIdx = i
+			case grantOutcomeResupplied:
+				resuppliedIdx = i
+			}
+		}
+		if revokedIdx < 0 || resuppliedIdx < 0 {
+			t.Fatalf("audit actions = %v, want both revoked and resupplied present exactly once", acted)
+		}
+		// audit_id order is the commit order (both ways serialize on the grant
+		// row FOR UPDATE): revoke-before-resupply bumps twice (the revoke, then
+		// the re-supply cycle); resupply-before-revoke bumps once (the revoke).
+		wantVersion := int64(2)
+		if revokedIdx < resuppliedIdx {
+			wantVersion = 3
+		}
+		grantWantRevokedScopeConsistent(t, ctx, pool, authID, op, wantVersion)
+	})
+}
+
+// ---------------------------------------------------------------------------
+// T030 [US3] T-reissue: a NEW grant id + NEW scope in one supply tx, with an
+// audit detail linking the old grant/request ids. The OLD rows are read and
+// never written. Side-effect proof is a FULL-CONTENT snapshot compare
+// (row_to_json, ordered): an in-place UPDATE or an equal-size replacement is
+// caught exactly like an insert or delete, not merely a count.
+//
+// Row-count reconciliation against data-model.md: a first legal scoped supply
+// is also +1 grant/+1 scope/+1 audit (T-supply+scope; verified by
+// TestWithdrawalGrantScopedSupplyWritesScopeRow). Re-issue is therefore not
+// special in its counts — what makes it T-reissue is the NEW identity plus the
+// old-id audit link, and that the OLD grant/scope rows are never rewritten.
+//
+// Intent scope: a re-issue MUST leave the distinct intent_id set unchanged (it
+// reuses the same business intent); a first legal supply MAY introduce a new
+// linkage and is never failed for it. No independent intent table exists in this
+// tree — 009/011 re-check intent and signing-request linkage under H5, so this
+// procedure deliberately invents no such table.
+// ---------------------------------------------------------------------------
+
+// reissueNonceTables are the seven 008 tables T-reissue must not touch at all.
+var reissueNonceTables = []string{
+	"nonce_wallet_registry",
+	"nonce_scope_state",
+	"nonce_bindings",
+	"nonce_binding_events",
+	"nonce_observations",
+	"nonce_scope_holds",
+	"nonce_ops_audit",
+}
+
+// reissuePBTables are every 007/PB table, snapshotted so the census proves the
+// per-operation allowlist: exactly +1 grant/+1 scope/+1 audit, rest identical.
+var reissuePBTables = []string{
+	"caller",
+	"api_key",
+	"withdrawal_requests",
+	"withdrawal_request_audit",
+	"withdrawal_authorizations",
+	"withdrawal_authorization_scopes",
+	"withdrawal_grant_audit",
+}
+
+// reissueSnapshot reads the FULL content of every named table as sorted
+// row-JSON, so the compare is a content compare, never a count.
+func reissueSnapshot(t *testing.T, ctx context.Context, pool *pgxpool.Pool, tables []string) map[string][]string {
+	t.Helper()
+	snap := make(map[string][]string, len(tables))
+	for _, table := range tables {
+		rows, err := pool.Query(ctx, `SELECT row_to_json(t)::text FROM `+table+` t ORDER BY 1`)
+		if err != nil {
+			t.Fatalf("snapshot %s: %v", table, err)
+		}
+		var out []string
+		for rows.Next() {
+			var line string
+			if err := rows.Scan(&line); err != nil {
+				rows.Close()
+				t.Fatalf("scan %s row: %v", table, err)
+			}
+			out = append(out, line)
+		}
+		if err := rows.Err(); err != nil {
+			rows.Close()
+			t.Fatalf("iterate %s: %v", table, err)
+		}
+		rows.Close()
+		snap[table] = out
+	}
+	return snap
+}
+
+// reissueDiff returns the multiset difference after\before and before\after.
+func reissueDiff(before, after []string) (added, removed []string) {
+	counts := make(map[string]int, len(before))
+	for _, r := range before {
+		counts[r]++
+	}
+	for _, r := range after {
+		if counts[r] > 0 {
+			counts[r]--
+			continue
+		}
+		added = append(added, r)
+	}
+	for r, n := range counts {
+		for i := 0; i < n; i++ {
+			removed = append(removed, r)
+		}
+	}
+	sort.Strings(added)
+	sort.Strings(removed)
+	return added, removed
+}
+
+// reissueWantCensus asserts a per-table allowlist: no table may lose or change a
+// row, and each table may add exactly wantAdded rows. An in-place UPDATE of an
+// old row surfaces as a removal and fails here.
+func reissueWantCensus(t *testing.T, before, after map[string][]string, wantAdded map[string]int) {
+	t.Helper()
+	for _, table := range reissuePBTables {
+		added, removed := reissueDiff(before[table], after[table])
+		if len(removed) != 0 {
+			t.Fatalf("%s changed or lost rows: %v", table, removed)
+		}
+		if len(added) != wantAdded[table] {
+			t.Fatalf("%s added %d rows, want %d: %v", table, len(added), wantAdded[table], added)
+		}
+	}
+}
+
+// reissueRowIdentity reads (ctid, xmin) for one row: a direct, content-free
+// proof that the row was neither UPDATEd (new ctid/xmin) nor delete+reinserted.
+func reissueRowIdentity(t *testing.T, ctx context.Context, pool *pgxpool.Pool, table, idColumn, id string) string {
+	t.Helper()
+	var ident string
+	if err := pool.QueryRow(ctx,
+		`SELECT ctid::text || '/' || xmin::text FROM `+table+` WHERE `+idColumn+` = $1`, id).Scan(&ident); err != nil {
+		t.Fatalf("read %s identity for %q: %v", table, id, err)
+	}
+	return ident
+}
+
+// reissueDistinctIntents reads the distinct intent_id set carried by the scope
+// table — the tree's only intent record (there is no intent table).
+func reissueDistinctIntents(t *testing.T, ctx context.Context, pool *pgxpool.Pool) []string {
+	t.Helper()
+	rows, err := pool.Query(ctx,
+		`SELECT DISTINCT intent_id FROM withdrawal_authorization_scopes ORDER BY intent_id`)
+	if err != nil {
+		t.Fatalf("select distinct intent_id: %v", err)
+	}
+	defer rows.Close()
+	var out []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			t.Fatalf("scan distinct intent_id: %v", err)
+		}
+		out = append(out, id)
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("iterate distinct intent_id: %v", err)
+	}
+	return out
+}
+
+// reissueSeedNonceFixture writes one representative row into each 008 nonce_*
+// table so the "untouched" snapshot is a real content compare, not an empty set.
+func reissueSeedNonceFixture(t *testing.T, ctx context.Context, pool *pgxpool.Pool, sender string) {
+	t.Helper()
+	const chainID = int64(31337)
+	stmts := []struct {
+		name string
+		sql  string
+		args []any
+	}{
+		{"nonce_wallet_registry", `INSERT INTO nonce_wallet_registry (chain_id, sender, state, registry_seq) VALUES ($1, $2, 'active', 1)`, []any{chainID, sender}},
+		{"nonce_scope_state", `INSERT INTO nonce_scope_state (chain_id, sender, reconciled_floor, last_latest, last_pending, last_observation_id) VALUES ($1, $2, 0, 0, 0, 'obs-init')`, []any{chainID, sender}},
+		{"nonce_bindings", `INSERT INTO nonce_bindings (binding_id, intent_id, chain_id, sender, nonce, state, authorization_id, authorization_version, registry_seq, allocation_observation_id) VALUES ('bind-1', 'intent-nonce-1', $1, $2, 5, 'allocated', 'auth-nonce-1', repeat('a', 64), 1, 'obs-init')`, []any{chainID, sender}},
+		{"nonce_binding_events", `INSERT INTO nonce_binding_events (binding_id, from_state, to_state, observation_id, operation_id, detail) VALUES ('bind-1', NULL, 'allocated', 'obs-init', 'op-init', 'seed')`, nil},
+		{"nonce_observations", `INSERT INTO nonce_observations (observation_id, chain_id, sender, kind, classification, latest_count, pending_count, head_number, head_hash, error_class, rpc_ref) VALUES ('obs-init', $1, $2, 'allocation', 'consistent', 1, 0, 1, '0x' || repeat('b', 64), '', 'rpc-init')`, []any{chainID, sender}},
+		{"nonce_scope_holds", `INSERT INTO nonce_scope_holds (hold_id, chain_id, sender, cause, status, evidence_observation_id) VALUES ('hold-1', $1, $2, 'unexplained_gap', 'active', 'obs-init')`, []any{chainID, sender}},
+		{"nonce_ops_audit", `INSERT INTO nonce_ops_audit (operation_id, action, chain_id, sender, subject_id, outcome, operator, reason) VALUES ('op-nonce-seed', 'binding_release', $1, $2, 'bind-1', 'applied', 'op-seed', 'seed')`, []any{chainID, sender}},
+	}
+	for _, s := range stmts {
+		if _, err := pool.Exec(ctx, s.sql, s.args...); err != nil {
+			t.Fatalf("seed %s: %v", s.name, err)
+		}
+	}
+}
+
+// TestWithdrawalReissueMintsNewIdentityWithSideEffectProof is T030. An existing
+// scoped grant is re-issued as a NEW grant id + NEW scope in one tx; the audit
+// detail links the old grant/request ids; the seven 008 tables are byte-identical
+// and the 007/PB census allows exactly +1 grant/+1 scope/+1 audit.
+func TestWithdrawalReissueMintsNewIdentityWithSideEffectProof(t *testing.T) {
+	ctx, pool := grantSetup(t)
+	const callerID = int64(7501)
+	grantSeedCaller(t, ctx, pool, callerID)
+
+	const (
+		oldAuthID = "auth-reissue-old"
+		oldReqID  = "req-reissue-old"
+		newAuthID = "auth-reissue-new"
+		newReqID  = "req-reissue-new"
+	)
+
+	// Given an existing scoped grant (the old identity) plus its 007 request
+	// row, and a representative 008 nonce fixture.
+	oldOp := grantScopedTestOp("80000000000000000000000000000001", oldAuthID, callerID)
+	oldOp.RequestID = oldReqID
+	if out, err := SupplyGrant(ctx, pool, oldOp, "op", "old scoped grant"); err != nil || out.Action != grantOutcomeSupplied {
+		t.Fatalf("seed old scoped grant = (%+v, %v), want %s", out, err, grantOutcomeSupplied)
+	}
+	if _, err := pool.Exec(ctx, `
+INSERT INTO withdrawal_requests
+    (request_id, caller_id, idempotency_key, authorization_id, chain_id, asset, recipient, amount)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8::numeric)`,
+		oldReqID, callerID, "idem-"+oldReqID, oldAuthID, 31337, oldOp.Asset, oldOp.Recipient, oldOp.Amount); err != nil {
+		t.Fatalf("seed old request: %v", err)
+	}
+	if _, err := pool.Exec(ctx,
+		`INSERT INTO withdrawal_request_audit (request_id, caller_id, action) VALUES ($1, $2, 'created')`,
+		oldReqID, callerID); err != nil {
+		t.Fatalf("seed old request audit: %v", err)
+	}
+	reissueSeedNonceFixture(t, ctx, pool, oldOp.Sender)
+
+	beforePB := reissueSnapshot(t, ctx, pool, reissuePBTables)
+	beforeNonce := reissueSnapshot(t, ctx, pool, reissueNonceTables)
+	for _, table := range reissueNonceTables {
+		if len(beforeNonce[table]) == 0 {
+			t.Fatalf("fixture %s is empty: the no-side-effect proof would be vacuous", table)
+		}
+	}
+	beforeIntents := reissueDistinctIntents(t, ctx, pool)
+	oldGrantIdent := reissueRowIdentity(t, ctx, pool, "withdrawal_authorizations", "authorization_id", oldAuthID)
+	oldScopeIdent := reissueRowIdentity(t, ctx, pool, "withdrawal_authorization_scopes", "authorization_id", oldAuthID)
+
+	// When an authorized operator re-issues the same business intent under a NEW
+	// grant id, linking the old grant/request ids.
+	newOp := grantScopedTestOp("80000000000000000000000000000002", newAuthID, callerID)
+	newOp.IntentID = oldOp.IntentID // same business intent reused
+	newOp.RequestID = newReqID
+	out, err := ReissueGrant(ctx, pool,
+		ReissueInput{Op: newOp, OldAuthorizationID: oldAuthID, OldRequestID: oldReqID},
+		"op", "re-issue")
+	if err != nil {
+		t.Fatalf("reissue: %v", err)
+	}
+	if out.Action != grantOutcomeSupplied || out.AuthorizationID != newAuthID {
+		t.Fatalf("reissue outcome = %+v, want {%s %s}", out, grantOutcomeSupplied, newAuthID)
+	}
+
+	// Then the new identity exists and carries the new scope at version 1.
+	if n := grantCount(t, ctx, pool, newAuthID); n != 1 {
+		t.Fatalf("new grant rows = %d, want 1", n)
+	}
+	if state, amount := grantStateAndAmount(t, ctx, pool, newAuthID); state != "active" || amount != "100" {
+		t.Fatalf("new grant = (%s, %s), want (active, 100)", state, amount)
+	}
+	if caller := grantCallerIDByID(t, ctx, pool, newAuthID); caller != callerID {
+		t.Fatalf("new grant caller_id = %d, want %d", caller, callerID)
+	}
+	newScope := grantReadScopeRow(t, ctx, pool, newAuthID)
+	if newScope.authorizationVersion != 1 {
+		t.Fatalf("new scope version = %d, want 1 (a NEW grant restarts the counter)", newScope.authorizationVersion)
+	}
+	if newScope.intentID != oldOp.IntentID {
+		t.Fatalf("new scope intent_id = %q, want the reused business intent %q", newScope.intentID, oldOp.IntentID)
+	}
+	if newScope.requestID != newReqID {
+		t.Fatalf("new scope request_id = %q, want the new request %q", newScope.requestID, newReqID)
+	}
+
+	// And the audit detail links the old grant/request ids.
+	action, detail := grantAuditRowByOp(t, ctx, pool, newOp.OperationID)
+	if action != grantOutcomeSupplied {
+		t.Fatalf("reissue audit action = %q, want %s", action, grantOutcomeSupplied)
+	}
+	if detail != reissueDetail(newOp, oldAuthID, oldReqID) {
+		t.Fatalf("reissue audit detail = %q, want %q", detail, reissueDetail(newOp, oldAuthID, oldReqID))
+	}
+	if !strings.Contains(detail, oldAuthID) || !strings.Contains(detail, oldReqID) {
+		t.Fatalf("reissue audit detail %q must name both old ids", detail)
+	}
+
+	// And the old rows are untouched: content-identical AND same physical tuple
+	// identity (no UPDATE, no delete+reinsert).
+	if got := reissueRowIdentity(t, ctx, pool, "withdrawal_authorizations", "authorization_id", oldAuthID); got != oldGrantIdent {
+		t.Fatalf("old grant tuple identity changed: %s -> %s (an UPDATE is forbidden)", oldGrantIdent, got)
+	}
+	if got := reissueRowIdentity(t, ctx, pool, "withdrawal_authorization_scopes", "authorization_id", oldAuthID); got != oldScopeIdent {
+		t.Fatalf("old scope tuple identity changed: %s -> %s (an UPDATE is forbidden)", oldScopeIdent, got)
+	}
+	if v := grantScopeVersion(t, ctx, pool, oldAuthID); v != 1 {
+		t.Fatalf("old scope version = %d, want 1 (never rewritten)", v)
+	}
+
+	// And the distinct intent set is UNCHANGED (re-issue reuses the intent).
+	afterIntents := reissueDistinctIntents(t, ctx, pool)
+	if len(afterIntents) != len(beforeIntents) {
+		t.Fatalf("distinct intent_id set changed across re-issue: %v -> %v", beforeIntents, afterIntents)
+	}
+
+	// And the census allowlist holds: +1 grant, +1 scope, +1 audit, rest byte-identical.
+	reissueWantCensus(t, beforePB, reissueSnapshot(t, ctx, pool, reissuePBTables), map[string]int{
+		"withdrawal_authorizations":       1,
+		"withdrawal_authorization_scopes": 1,
+		"withdrawal_grant_audit":          1,
+	})
+
+	// And no 008 nonce_* table changed in any way.
+	afterNonce := reissueSnapshot(t, ctx, pool, reissueNonceTables)
+	for _, table := range reissueNonceTables {
+		added, removed := reissueDiff(beforeNonce[table], afterNonce[table])
+		if len(added) != 0 || len(removed) != 0 {
+			t.Fatalf("%s drifted across re-issue: added=%v removed=%v", table, added, removed)
+		}
+	}
+
+	// Finally, a FIRST legal supply MAY introduce new linkage and is never
+	// failed for it: a brand-new scoped grant with a brand-new intent_id
+	// supplies green and grows the distinct intent set.
+	introOp := grantScopedTestOp("80000000000000000000000000000003", "auth-intent-new", callerID)
+	introOp.IntentID = "intent-brand-new"
+	if out, err := SupplyGrant(ctx, pool, introOp, "op", "first supply, new intent"); err != nil || out.Action != grantOutcomeSupplied {
+		t.Fatalf("first supply with a new intent = (%+v, %v), want %s (must not be failed)", out, err, grantOutcomeSupplied)
+	}
+	grown := reissueDistinctIntents(t, ctx, pool)
+	if len(grown) != len(afterIntents)+1 || !containsString(grown, introOp.IntentID) {
+		t.Fatalf("distinct intent_id set = %v, want %v plus %q", grown, afterIntents, introOp.IntentID)
+	}
+}
+
+func containsString(xs []string, want string) bool {
+	for _, x := range xs {
+		if x == want {
+			return true
+		}
+	}
+	return false
 }

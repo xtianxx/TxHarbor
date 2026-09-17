@@ -477,7 +477,10 @@ func TestWithdrawalRecoveryPeriodNoExecutionArtefacts(t *testing.T) {
 	// recovery leaves every above-007 table exactly as it was, and creates
 	// no new table. The lane schema is legitimately deployed (so an
 	// absence assertion on the full chain would be false); the guarantee
-	// under test is no execution side effect during recovery.
+	// under test is no execution side effect during recovery. Scoped to
+	// THIS path only, not a universal zero-side-effect proof (see
+	// TestWithdrawalRecoveryPeriodZeroSideEffectsOutsideScope for the
+	// 002–006 snapshot + recovery phase/seq + event count).
 	ctx, pool := grantSetup(t)
 	const (
 		callerID = int64(7404)
