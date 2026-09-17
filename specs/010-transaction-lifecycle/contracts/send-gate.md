@@ -81,11 +81,19 @@ authorization and claim expiry with `clock_timestamp()` (statement wall-clock, n
 `now()`) as the last read before dispatch and records
 `observed_expires_at`/`observed_now`. A natural expiry taking effect in the residual interval between that read and entering dispatch is recorded as a "post-final-check natural-expiry send residual" and reconciled; it MUST NOT be described as legally in-flight before invalidation. This exception covers natural expiry ONLY — not explicit revocation, pause, execution-version replacement, DB lock/connection failure, or any other residual — and approves no configurable grace period. Queueing, backoff, reconnects, auto-retries, or resumed execution MUST NOT reuse a prior check as permission and MUST re-evaluate gates; the plan constrains those paths and the thread-stall limits instead of assuming a fixed or tiny window. Preserve the final-evaluation time, authorization expiry, lease expiry, execution version, and observable send evidence; unobservable instants MUST NOT be fabricated as precise facts. Definitive send results are kept; only indeterminate outcomes are recorded `unknown` and reconciled. G-010-1 closure does not pass any other residual or the overall send-protection design.
 
-**(d) database/network independent failure (G-010-2).** If the region's transaction/connection dies after
-dispatch began, the dispatch may have happened with no committed record. The attempt is treated as
-`unknown` and resolved by probing `tx_hash`; the system never infers "not sent". A crashed region is
-indistinguishable from "never dispatched" at the storage layer, so the next operation performs a reconcile
-probe before dispatching (R-010-06).
+**(d) database/network independent failure (G-010-2).** Three classes with different handling:
+(a) dispatch entered with protection verifiably held → legal in-flight; a later commit failure leaves a
+possibly-unrecorded send → send-`unknown`, resolved by probing `tx_hash`; the system never infers "not sent".
+(b) loss detected before dispatch is invoked (lock wait/deadlock; connection error from steps 2–9) → zero
+dispatch is certain in-process → record `region_aborted_no_dispatch`; the attempt's business effect stays
+`unknown` pending reconcile; committed refusals and definitive verdicts are never rewritten into `unknown`.
+(c) lock protection lost without sender perception before dispatch (session dies silently after the gate reads;
+writers proceed; the network send starts afterwards) → irreducible window: mitigated by a `SELECT 1`
+liveness probe immediately before dispatch, exactly one dispatch attempt, and minimal entry latency; detected
+best-effort by version comparison at reconcile, and a proven-stale basis escalates to operator review (no
+auto-resend, no relabeling). Class (c) is a new residual pending adjudication — authorized by nothing in
+this contract. A crashed region is otherwise indistinguishable from "never dispatched" at the storage layer,
+so the next operation performs a reconcile probe before dispatching (R-010-06).
 
 **(e) known results are not rewritten.** `accepted`/`rejected` rows are immutable. Reconciliation appends
 observations and revisions; it never edits a send row and never converts a known send result into `unknown`
