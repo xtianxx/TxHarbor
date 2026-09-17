@@ -52,10 +52,10 @@ func TestV6GateRefusals(t *testing.T) {
 			e.exec(`DELETE FROM execution_claims WHERE intent_id = $1`, f.intentID)
 		}, nil, ClassClaimAbsent},
 		{"claim_expired", func(f *fixture) {
-			e.exec(`UPDATE execution_claims SET expires_at = now() - interval '1 hour' WHERE intent_id = $1`, f.intentID)
+			e.exec(`UPDATE execution_claims SET acquired_at = now() - interval '2 hours', expires_at = now() - interval '1 hour' WHERE intent_id = $1`, f.intentID)
 		}, nil, ClassClaimExpired},
 		{"claim_revoked", func(f *fixture) {
-			e.exec(`UPDATE execution_claims SET revoked = TRUE WHERE intent_id = $1`, f.intentID)
+			e.exec(`UPDATE execution_claims SET state = 'revoked', ended_at = now(), end_kind = 'revoked' WHERE intent_id = $1`, f.intentID)
 		}, nil, ClassClaimRevoked},
 		{"claim_version_mismatch", func(f *fixture) {
 			e.exec(`UPDATE execution_claims SET lease_version = 99 WHERE intent_id = $1`, f.intentID)
