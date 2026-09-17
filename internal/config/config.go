@@ -130,7 +130,7 @@ const (
 	DefaultSignerMode       = "production"
 	DefaultSignerKeyTimeout = 5 * time.Second
 
-	// 010 dispatch timeout (T001): the bounded eth_sendRawTransaction window.
+	// 010 dispatch timeout (T001): the bounded raw-transaction broadcast window.
 	// 15s is the frozen default; zero/negative is refused at Load (fail-closed).
 	DefaultTxSendTimeout = 15 * time.Second
 	// 011 worker defaults (T001; approved initial configuration 2026-09-17,
