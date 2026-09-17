@@ -1,4 +1,4 @@
-# TxHarbor 项目背景（2026-09-15 快照）
+# TxHarbor 项目背景（2026-09-17 快照）
 
 生产级 EVM 钱包与交易基础设施，monorepo：API / Indexer / Worker / Signer /
 PostgreSQL / Redis / Kafka / EVM RPC。详见 `agent.md` 与
@@ -8,11 +8,10 @@ PostgreSQL / Redis / Kafka / EVM RPC。详见 `agent.md` 与
 
 | 阶段 | 状态 |
 | --- | --- |
-| 001–006 | 已合并至 main |
-| 007 withdrawal-creation | 已合并（`19fa11e`，main CI 四项全绿）；`requirements` 21/22 真实状态；T000-P 独立 open |
-| 008 nonce-manager | 待 specify；本地分支 `008-nonce-management` 存在但无新提交；无 `specs/008*` |
-| 009 signer-service | 待 specify；无分支；无 `specs/009*` |
-| 010、011 | 不在本次并行例外内，仍严格串行，等待后续指令 |
+| 001–009 及 PB（012-007-authorization-carrier） | 已合并至 main（009 PR#12 `295c49d`，main CI `35192040030` 四项全绿） |
+| 010 transaction-lifecycle | specify（`7d2022b`）与 clarify（`bd59754`，三项业务澄清已闭合）已完成；plan 尚未执行；分支 `010-transaction-lifecycle` |
+| 011 | 尚未启动；无规格、无分支 |
+| 010/011 并行 | 限定例外见 `docs/workflow-010-011-parallel.md`（2026-09-17 用户决定）；008/009 例外保持不变 |
 
 ## 实际协作文件索引
 
@@ -30,4 +29,6 @@ PostgreSQL / Redis / Kafka / EVM RPC。详见 `agent.md` 与
 ## 并行开发规则
 
 008/009 并行开发的例外、约束与待定事项见
-`docs/workflow-008-009-parallel.md`。本文件只记录状态，不裁决业务问题。
+`docs/workflow-008-009-parallel.md`（历史记录，保持不变）。
+010/011 限定并行规则与共同契约登记见
+`docs/workflow-010-011-parallel.md`。本文件只记录状态，不裁决业务问题。
