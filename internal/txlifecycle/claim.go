@@ -25,13 +25,13 @@ type ClaimBasis struct {
 	WorkerID     string
 	LeaseVersion int64
 	ExpiresAt    time.Time
-	Revoked      bool
 	Now          time.Time
 	Basis        string
 }
 
 // claimColumns absorbs 011's concrete execution_claims column names in ONE
-// place (T012; T045 swaps these for the real columns). The frozen J2 semantics
+// place (T012; T045 swapped these for the real 011 columns in
+// migrations/000012_withdrawal_execution.sql:58-82). The frozen J2 semantics
 // are fixed by contract; only the names are 011-owned.
 type claimColumns struct {
 	Table        string
@@ -39,16 +39,21 @@ type claimColumns struct {
 	WorkerID     string
 	LeaseVersion string
 	ExpiresAt    string
-	RevokedExpr  string
+	State        string
 }
 
+// j2Columns is the real 011 mapping (T045): the claim owner is `owner_id`,
+// and "revoked/ended" is carried by `state` ('active'|'released'|'revoked')
+// under CONSTRAINT execution_claims_state_consistency. The contract-shaped
+// fixture for the 010-independent suite is provisioned test-only with the
+// same column names (testfixture_test.go), never as a migration.
 var j2Columns = claimColumns{
 	Table:        "execution_claims",
 	IntentID:     "intent_id",
-	WorkerID:     "worker_id",
+	WorkerID:     "owner_id",
 	LeaseVersion: "lease_version",
 	ExpiresAt:    "expires_at",
-	RevokedExpr:  "revoked",
+	State:        "state",
 }
 
 // ClaimAdapter reads the J2 claim row. Pre-011 the table does not exist: the
@@ -68,15 +73,16 @@ func NewClaimAdapter() *ClaimAdapter { return &ClaimAdapter{cols: j2Columns} }
 // strings but identical refusal effect (no grace, no TTL).
 func (a *ClaimAdapter) Read(ctx context.Context, tx pgx.Tx, ref ClaimRef) (ClaimBasis, *RefusalError) {
 	var b ClaimBasis
+	var state string
 	b.IntentID = ref.IntentID
 	query := fmt.Sprintf(
 		`SELECT %s, %s, %s, %s, clock_timestamp() FROM %s WHERE %s = $1 FOR SHARE`,
-		a.cols.WorkerID, a.cols.LeaseVersion, a.cols.ExpiresAt, a.cols.RevokedExpr,
+		a.cols.WorkerID, a.cols.LeaseVersion, a.cols.ExpiresAt, a.cols.State,
 		a.cols.Table, a.cols.IntentID)
 	err := tx.QueryRow(ctx, query, ref.IntentID).
-		Scan(&b.WorkerID, &b.LeaseVersion, &b.ExpiresAt, &b.Revoked, &b.Now)
+		Scan(&b.WorkerID, &b.LeaseVersion, &b.ExpiresAt, &state, &b.Now)
 	if err != nil {
-		if isUndefinedTable(err) {
+		if isUndefinedTable(err) || isUndefinedColumn(err) {
 			return b, &RefusalError{Class: ClassClaimAbsent, Basis: "execution_claims table absent"}
 		}
 		if err == pgx.ErrNoRows {
@@ -89,9 +95,9 @@ func (a *ClaimAdapter) Read(ctx context.Context, tx pgx.Tx, ref ClaimRef) (Claim
 	b.Now = b.Now.UTC()
 
 	switch {
-	case b.Revoked:
-		b.Basis = "revoked"
-		return b, &RefusalError{Class: ClassClaimRevoked, Basis: "claim revoked"}
+	case state != "active":
+		b.Basis = "state=" + state
+		return b, &RefusalError{Class: ClassClaimRevoked, Basis: "claim state=" + state}
 	case !b.ExpiresAt.After(b.Now):
 		b.Basis = "expired"
 		return b, &RefusalError{Class: ClassClaimExpired, Basis: "claim expired on the database clock"}
@@ -110,4 +116,12 @@ func (a *ClaimAdapter) Read(ctx context.Context, tx pgx.Tx, ref ClaimRef) (Claim
 func isUndefinedTable(err error) bool {
 	var pgErr *pgconn.PgError
 	return errors.As(err, &pgErr) && pgErr.Code == "42P01"
+}
+
+// isUndefinedColumn reports SQLSTATE 42703 (column does not exist): the
+// contract-shaped fixture on the 011-absent lane fails closed as claim_absent
+// rather than degrading into an unqualified send (G-010-4).
+func isUndefinedColumn(err error) bool {
+	var pgErr *pgconn.PgError
+	return errors.As(err, &pgErr) && pgErr.Code == "42703"
 }
