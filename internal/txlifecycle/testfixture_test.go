@@ -140,7 +140,13 @@ type env struct {
 
 func newEnv(t *testing.T) *env {
 	t.Helper()
-	dsn := startPG(t)
+	return newEnvWithDSN(t, startPG(t))
+}
+
+// newEnvWithDSN opens an env on an already-migrated scratch database (the
+// crash-matrix helper subprocess receives the parent's DSN this way).
+func newEnvWithDSN(t *testing.T, dsn string) *env {
+	t.Helper()
 	pool, err := pgxpool.New(context.Background(), dsn)
 	if err != nil {
 		t.Fatalf("pool: %v", err)
@@ -183,12 +189,11 @@ const (
 	fxRecipient = "0x3333333333333333333333333333333333333333"
 )
 
-// seed writes the whole upstream fixture and persists the attempt (T1).
-func (e *env) seed() *fixture {
+// seedUpstream writes the whole upstream fixture and builds the request (no T1).
+func (e *env) seedUpstream() *fixture {
 	e.t.Helper()
 	e.seq++
 	id := func(prefix string) string { return fmt.Sprintf("%s-%d", prefix, e.seq) }
-	ctx := context.Background()
 	var err error
 	key := e.devKey
 	if key == nil {
@@ -237,10 +242,41 @@ func (e *env) seed() *fixture {
 		TxType: TxTypeDynamicFee, GasLimit: "21000", MaxFeePerGas: "1000000000", MaxPriorityFeePerGas: "100000000",
 		Asset: fxAsset, Recipient: fxRecipient, Amount: "1000",
 	}
-	if _, err := e.store.PrepareAttempt(ctx, f.request); err != nil {
+	return f
+}
+
+// seed persists the T1 attempt over the upstream fixture.
+func (e *env) seed() *fixture {
+	f := e.seedUpstream()
+	if _, err := e.store.PrepareAttempt(context.Background(), f.request); err != nil {
 		e.t.Fatalf("PrepareAttempt: %v", err)
 	}
 	return f
+}
+
+// signOnly computes the signed result for an attempt without persisting T2:
+// the "009 result received but T2 not committed" crash boundary.
+func (f *fixture) signOnly() SigningResult {
+	f.env.t.Helper()
+	unsigned, err := f.request.Transaction()
+	if err != nil {
+		f.env.t.Fatal(err)
+	}
+	signer := types.LatestSignerForChainID(new(big.Int).SetUint64(f.request.ChainID))
+	signed, err := types.SignTx(unsigned, signer, f.key)
+	if err != nil {
+		f.env.t.Fatal(err)
+	}
+	raw, err := signed.MarshalBinary()
+	if err != nil {
+		f.env.t.Fatal(err)
+	}
+	v, r, s := signed.RawSignatureValues()
+	sig := make([]byte, 65)
+	r.FillBytes(sig[0:32])
+	s.FillBytes(sig[32:64])
+	sig[64] = byte(v.Uint64())
+	return SigningResult{Signature: "0x" + hex.EncodeToString(sig), TxHash: crypto.Keccak256Hash(raw).Hex()}
 }
 
 // seedClaimFixtures provisions the J2 claim carrier and, when 011's
