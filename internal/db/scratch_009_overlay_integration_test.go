@@ -16,7 +16,7 @@
 // file is read from the scratch dir and copied into an in-memory migrations
 // FS overlay (fstest.MapFS) — migrate.go's fs.FS seam (MigrateOptions.FS) is
 // what makes that possible. The lane's embedded FS is asserted 009-free by
-// TestLaneMigrationsExclude009 (runs without Docker).
+// TestLaneMigrationsCarryReal009 (runs without Docker).
 //
 // OVERLAY FORMAT consumed by sibling verification (T036, PB-05 sequences):
 //

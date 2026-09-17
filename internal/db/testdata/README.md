@@ -20,7 +20,7 @@ Rules:
   The tests assert the hash, so drift fails loudly.
 - NEVER move this file into `migrations/` or any production embed. Production
   migration discovery (`migrations/embed.go`) must stay 009-free; guarded by
-  `TestLaneMigrationsExclude009`.
+  `TestLaneMigrationsCarryReal009` (retargeted 2026-09-17 for the 009 lane; main-side exclusion restored at 009 merge).
 - This file replaced the `/tmp/pb-009ref` scratch dependency that broke remote
   CI (PR #11, run 35169843720): a clean checkout now runs with no outside-tree
   fixture.
