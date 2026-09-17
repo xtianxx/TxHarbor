@@ -74,6 +74,7 @@ func (s *Store) reviseOrphanedReceipts(ctx context.Context, tx pgx.Tx, a *Attemp
 			  WHERE receipt_id = $1 AND canonicality <> 'orphaned'`, c.id); err != nil {
 			return false, err
 		}
+		s.observeRevision()
 		if err := appendEventTx(ctx, tx, a.AttemptID, EventOrphaned, "", recoveryVersionPtr(a.RecoveryVersion),
 			"receipt_id="+itoa(c.id)+" block="+itoa(c.number)+" hash="+c.hash); err != nil {
 			return false, err

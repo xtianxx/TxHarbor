@@ -58,6 +58,7 @@ func (s *Store) applyReceipt(ctx context.Context, tx pgx.Tx, a *Attempt, hash st
 	}
 	expected := ExpectedTransfer{Asset: asset, Sender: sender, Recipient: recipient, Amount: amount}
 	effect, detail := receiptEffect(int(receipt.Status), receipt.Logs, expected)
+	s.observeReceiptEffect(effect)
 
 	var canonical bool
 	if err := tx.QueryRow(ctx,

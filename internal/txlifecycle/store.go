@@ -96,6 +96,7 @@ type Store struct {
 	signer       *SignerClient
 	sendTimeout  time.Duration
 	releaseToken string
+	metrics      TxMetrics
 }
 
 // NewStore returns a store over db.

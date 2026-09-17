@@ -125,3 +125,11 @@ func isUndefinedColumn(err error) bool {
 	var pgErr *pgconn.PgError
 	return errors.As(err, &pgErr) && pgErr.Code == "42703"
 }
+
+// isInFailedTransaction reports SQLSTATE 25P02: a failed statement (e.g. the
+// undefined-table claim read) poisoned the region transaction, so the refusal
+// evidence must be recorded in a fresh transaction.
+func isInFailedTransaction(err error) bool {
+	var pgErr *pgconn.PgError
+	return errors.As(err, &pgErr) && pgErr.Code == "25P02"
+}

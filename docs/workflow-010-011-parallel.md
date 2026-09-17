@@ -211,3 +211,38 @@ PB-C1/C2、010 Q1–Q3、011 M1n/M3）；载体、锁、顺序等机制为 plan 
 - 011:T045 联合测试：需要 011 提供 `execution.LifecycleAdvancer/LifecycleReader` 的真实 010 适配器
   （或确认由 010 侧提供），J1–J5 方可执行。
 - 011:T046 记录：在联合门禁完成前不得声明联合验收通过。
+
+## W6 polish 回填与登记（2026-09-17，010 单写者）
+
+回填：联合批次证明的 010 提交已回填到 010 交付分支 `010-transaction-lifecycle`
+（`35225d9/3340fb3/f919fa7/dd40a47/a8e2333/59039d8/3d8556e`，均为无冲突挑选）。回填后对
+011 缺席做保持车道解析（提交 `94c62f4`），记录如下。
+
+### 迁移编号核验记录（PLAN-1；T043/T058）
+
+- 010 lane 生产 `migrations/` 实际集合：`000011_tx_lifecycle.sql`（010）、
+  `000013_tx_lifecycle_intent_fk.sql`（010 追加）；`000012_withdrawal_execution.sql`（011）
+  不在本 lane，只在联合集成工作区合入。已应用迁移不重排、不改写。
+- `000011` 字节未改写（sha256 与 lane 提交一致；见上表 T043 行）。
+- `000013` 回填时加车道护栏（lane guard）：仅当 `public.payment_intents` 存在时添加命名 FK
+  `tx_attempts_intent_fkey`，否则该迁移记为 no-op 而非使整个 goose 运行失败（010 合同要求本 lane
+  在无 011 表时可独立迁移/启动/验收）。护栏版 sha256 = `45e4b8a165e244e089dc568c5d2ca0e77ff1989b3c2365058d997c1c8a35d645`；
+  联合分支原版 = `fcd58484b564da4d11962ddcf0b547333d8255b1081a073d47898cbc1d511439`。
+  在联合工作区（`payment_intents` 存在）行为与联合证明一致：validated FK，非 NOT VALID。
+
+### intent-FK 后续闭合记录（G-010-3；T044/T058）
+
+- 010 lane 独立可迁移/启动/验收，不依赖 011 表：`000013` 在 `payment_intents` 缺席时 no-op。
+- 联合集成工作区中 `000011 → 000012 → 000013` 依序应用，命名 FK 真实施加（T043/T044 联合证据）。
+- **010 lane 不声明 G-010-3 已闭合**。若主线上 `000013` 先于 `000012` 以 no-op 应用，FK 的最终
+  闭合须在 011 落地后另行跟进；此为登记的后续跟进项，不是已闭合事实。
+
+### 联合门禁记录（FR-16；T051/T058）
+
+- J1–J5（T046–T050）**未执行**：011 侧的 `execution.LifecycleAdvancer/LifecycleReader` 生产适配器
+  在两条 lane 中均不存在，且缺真实 008 绑定分配与链上 transfer 合约；本交付分支不是联合验收通过依据。
+- **适用联合门禁未完成前，011 MUST NOT 合并到 main。**
+- 010 `tasks.md` 的 T051 框保持未勾选；T046–T050 保持未勾选；A-13、T000-P 保持 OPEN。
+- 迁移编号 000013 的车道护栏属 010 lane 保持车道的解析，不改变 G-010-3 裁决语义。
+- 010 lane 全量 txlifecycle 集成套件在其上通过（含 T052–T055）；`internal/db` 的 PB overlay 断言为
+  基线既存 out-of-lane 失败（见上节），按原样报告，未修复。

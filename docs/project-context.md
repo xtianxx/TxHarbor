@@ -9,7 +9,7 @@ PostgreSQL / Redis / Kafka / EVM RPC。详见 `agent.md` 与
 | 阶段 | 状态 |
 | --- | --- |
 | 001–009 及 PB（012-007-authorization-carrier） | 已合并至 main（009 PR#12 `295c49d`，main CI `35192040030` 四项全绿） |
-| 010 transaction-lifecycle | specify（`7d2022b`）与 clarify（`bd59754`，三项业务澄清已闭合）已完成；plan 尚未执行；分支 `010-transaction-lifecycle` |
+| 010 transaction-lifecycle | W0–W4 已实现并由 010 独立矩阵验证（V1–V9、T019/T041、T052–T055）；W5 联合批次部分执行（T043/T044 迁移接缝、T045 claim 适配、T021 真实 009 V2、T026 faultproxy，证据在 `joint-010-011-integration`）；W6 polish（T056–T058）完成；分支 `010-transaction-lifecycle` 为交付候选。J1–J5 未执行、T051 未勾选（缺 010↔011 生产 `LifecycleAdvancer/Reader` 适配器 + 真实 008 绑定分配 + 链上 transfer 合约）；T000-P、A-13 保持 OPEN。详见 `docs/workflow-010-011-parallel.md` |
 | 011 | 尚未启动；无规格、无分支 |
 | 010/011 并行 | 限定例外见 `docs/workflow-010-011-parallel.md`（2026-09-17 用户决定）；008/009 例外保持不变 |
 

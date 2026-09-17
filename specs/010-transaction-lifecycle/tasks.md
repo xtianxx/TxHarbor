@@ -220,13 +220,30 @@
 
 **Purpose**: matrix-closing verification and documentation sync.
 
-- [ ] T052 [P] Execute V10 in `internal/txlifecycle/readonly_integration_test.go`: read-only diff over `indexer_pause`/`log_pause`/`deposit_pause`/`reorg_recovery`/`reorg_recovery_events`/`chain_blocks`/`withdrawal_authorizations`/`withdrawal_authorization_scopes`/`nonce_bindings`/`nonce_scope_state`/`nonce_scope_holds`/`nonce_wallet_registry`/`confirmation_policy_history`/`execution_claims` after the full V-matrix; `revision_seq` monotonicity (+1 per mutation); `Status` never triggers a send (FR-12/FR-13; persistence.md §6).
-- [ ] T053 [P] Execute the V10 claim_absent fail-closed independent acceptance in `internal/txlifecycle/claim_failclosed_integration_test.go`: with the fixture table/row absent, every send entry point refuses `claim_absent` with zero dispatch and committed evidence — executable pre-011 (FR-14; G-010-4; R-010-11).
-- [ ] T054 [P] Execute V11 in `internal/txlifecycle/boundary_test.go`: `internal/txlifecycle` imports no key/provider package; exactly one dispatch call site; logs/metrics contain no signature, signed bytes or credentials (static/import + log/metric scan) (FR-10; constitution VIII/XII).
-- [ ] T055 [P] Execute V11 observability in `internal/txlifecycle/metrics_integration_test.go`: send-outcome counters, gate-refusal-by-class counter, unknown gauge, reconcile-class counters, receipt-effect counters and revision counter exist and are recorded on the V-scenarios (constitution XII; R-010-13).
-- [ ] T056 Doc-sync (Q3 reference consistency; no new rulings): add the second limited Q3 exception (unperceived lock-loss, G-010-2 class (c), adjudicated 2026-09-17) reference to `specs/010-transaction-lifecycle/spec.md` (Clarifications/FR-15) and `specs/010-transaction-lifecycle/contracts/send-api.md` §5 by copying the already-recorded text from `specs/010-transaction-lifecycle/plan.md` (Adjudication addendum 2), `specs/010-transaction-lifecycle/research.md` R-010-14 G-010-2, `specs/010-transaction-lifecycle/contracts/send-gate.md` §4(d)(c), `specs/010-transaction-lifecycle/quickstart.md` J5 and `docs/workflow-010-011-parallel.md` J4 — reference sync only, never invent business text.
-- [ ] T057 Doc-sync (mandatory wording; no new rulings): align the joint-acceptance wording in `specs/010-transaction-lifecycle/plan.md`, `specs/010-transaction-lifecycle/research.md` and `specs/010-transaction-lifecycle/quickstart.md` to: integrate 011's real implementation + migrations into the integration workspace, then execute real joint acceptance; applicable joint gates complete BEFORE 011 merges to main. Remove/replace any phrasing that implies acceptance after merging to main.
-- [ ] T058 Update the joint register `docs/workflow-010-011-parallel.md` (migration-number verification record; intent-FK follow-through record; joint-acceptance gating record) and the 010 status row in `docs/project-context.md`; single-writer (010 lane); counterpart `011:T046`.
+- [x] T052 [P] Execute V10 in `internal/txlifecycle/readonly_integration_test.go`: read-only diff over `indexer_pause`/`log_pause`/`deposit_pause`/`reorg_recovery`/`reorg_recovery_events`/`chain_blocks`/`withdrawal_authorizations`/`withdrawal_authorization_scopes`/`nonce_bindings`/`nonce_scope_state`/`nonce_scope_holds`/`nonce_wallet_registry`/`confirmation_policy_history`/`execution_claims` after the full V-matrix; `revision_seq` monotonicity (+1 per mutation); `Status` never triggers a send (FR-12/FR-13; persistence.md §6).
+- [x] T053 [P] Execute the V10 claim_absent fail-closed independent acceptance in `internal/txlifecycle/claim_failclosed_integration_test.go`: with the fixture table/row absent, every send entry point refuses `claim_absent` with zero dispatch and committed evidence — executable pre-011 (FR-14; G-010-4; R-010-11).
+- [x] T054 [P] Execute V11 in `internal/txlifecycle/boundary_test.go`: `internal/txlifecycle` imports no key/provider package; exactly one dispatch call site; logs/metrics contain no signature, signed bytes or credentials (static/import + log/metric scan) (FR-10; constitution VIII/XII).
+- [x] T055 [P] Execute V11 observability in `internal/txlifecycle/metrics_integration_test.go`: send-outcome counters, gate-refusal-by-class counter, unknown gauge, reconcile-class counters, receipt-effect counters and revision counter exist and are recorded on the V-scenarios (constitution XII; R-010-13).
+- [x] T056 Doc-sync (Q3 reference consistency; no new rulings): add the second limited Q3 exception (unperceived lock-loss, G-010-2 class (c), adjudicated 2026-09-17) reference to `specs/010-transaction-lifecycle/spec.md` (Clarifications/FR-15) and `specs/010-transaction-lifecycle/contracts/send-api.md` §5 by copying the already-recorded text from `specs/010-transaction-lifecycle/plan.md` (Adjudication addendum 2), `specs/010-transaction-lifecycle/research.md` R-010-14 G-010-2, `specs/010-transaction-lifecycle/contracts/send-gate.md` §4(d)(c), `specs/010-transaction-lifecycle/quickstart.md` J5 and `docs/workflow-010-011-parallel.md` J4 — reference sync only, never invent business text.
+- [x] T057 Doc-sync (mandatory wording; no new rulings): align the joint-acceptance wording in `specs/010-transaction-lifecycle/plan.md`, `specs/010-transaction-lifecycle/research.md` and `specs/010-transaction-lifecycle/quickstart.md` to: integrate 011's real implementation + migrations into the integration workspace, then execute real joint acceptance; applicable joint gates complete BEFORE 011 merges to main. Remove/replace any phrasing that implies acceptance after merging to main.
+- [x] T058 Update the joint register `docs/workflow-010-011-parallel.md` (migration-number verification record; intent-FK follow-through record; joint-acceptance gating record) and the 010 status row in `docs/project-context.md`; single-writer (010 lane); counterpart `011:T046`.
+
+> **Polish status (W6, 2026-09-17, 010 lane)** — T052–T058 executed and checked off.
+> Backflow resolution: the joint-proven 010 commits landed on
+> `010-transaction-lifecycle`; the T044 migration got a lane guard (000013 adds
+> the FK only when `payment_intents` exists) so the 010 lane stays independently
+> migratable, and T043/T044 skip on this lane (joint evidence stays on
+> `joint-010-011-integration`). Evidence: `go build ./...` (exit 0); `go vet` +
+> `go vet -tags integration` (exit 0); `go test ./...` (exit 0); `go test -tags
+> integration ./internal/txlifecycle` (exit 0, 95.1s) including T052/T053/T055 and
+> the static T054. T053 surfaced and fixed a real defect (an undefined-table claim
+> read poisoned the region transaction; the refusal is now recorded in a fresh
+> transaction, preserving `claim_absent`). T046–T051 stay unchecked: J1–J5 were
+> not executed (missing 010↔011 production `LifecycleAdvancer/Reader` adapter,
+> real 008 binding allocation and an on-chain transfer contract); **joint gates
+> incomplete ⇒ 011 MUST NOT merge to main.** A-13 and T000-P remain OPEN.
+> `internal/db` PB overlay tests carry a pre-existing out-of-lane failure (000011
+> in their exact-count overlay set), reported as-is and not fixed.
 
 ---
 
