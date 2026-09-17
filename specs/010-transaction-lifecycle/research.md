@@ -185,9 +185,9 @@ When any attempt on a binding reaches `effective`/`confirmed`, sibling attempts 
 **Decision**: All new bounds are technical, documented and configurable, or deliberately fixed at repo-common values:
 
 - per-statement DB bound: the repo's shared `SET LOCAL statement_timeout='5s'` literal, plus `lock_timeout='5s'` on the send region (mirrors `internal/nonce/coord.go:45-48`, `internal/nonce/readapi.go:86`);
-- dispatch bound: new `TXHARBOR_TX_SEND_TIMEOUT` (no default invented in the spec; plan fixes a conservative default and validates > 0 at startup, fail-closed like existing knobs);
+- dispatch bound: new `TXHARBOR_TX_SEND_TIMEOUT`, plan-fixed conservative default 15s (technical, not business: bounds lock-hold across dispatch; comfortably exceeds worst-case single RPC round trip under the 5s statement guards; far below lease/stall timescales; validated > 0 at startup, fail-closed like existing knobs);
 - reconcile cadence / RPC timeout: reuse the existing `TXHARBOR_INDEX_POLL_INTERVAL` / `TXHARBOR_INDEX_RPC_TIMEOUT` knobs (006/008 precedent: no new timing knob names, `internal/config/config.go:39-41,54-58`);
-- clocks: every validity comparison uses PostgreSQL `now()`/`clock_timestamp()` (`internal/signer/submit.go:30-32` precedent); the application clock is never used for gate decisions;
+- clocks: row defaults/audit timestamps may use `now()`; every gate-validity comparison uses `clock_timestamp()` (statement wall-clock; `now()` is transaction-start and MUST NOT gate the last pre-dispatch evaluation — `internal/signer/submit.go:30-32` precedent); the application clock is never used for gate decisions;
 - classification: RPC failure classes follow the existing `eth.Kind` vocabulary (`internal/eth/client.go:28-44`), with send-specific error classes added alongside, never replacing.
 
 No business threshold (confirmation depth, fee caps, lease TTL, retry counts as policy) is introduced by 010: caps come from the PB scope row, confirmation depth from 005's policy, lease/claim semantics from 011's frozen contract. Bounded retries are the caller's/loop's concern; 010 never uses unbounded retry loops (constitution IX).

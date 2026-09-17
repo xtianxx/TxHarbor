@@ -68,6 +68,8 @@ Pre-Phase-0 (2026-09-17, against Constitution 1.1.0):
 
 Post-Phase-1 re-check (2026-09-17): no new violations introduced. The only deliberately non-minimal carriers are justified in Complexity Tracking below: the separate `tx_attempt_signings` table (FR-02 bytes-before-send as a discrete durable fact), the `tx_attempt_events` append-only log (FR-09 revision chain + refusal evidence), and the lock-held-across-dispatch region (R-010-04; required by Q3 and impossible to satisfy with a check-then-send shape). G-010-1 and G-010-2 are recorded residuals, not waived guarantees: no principle is weakened by them, and no grace/TTL/wider in-flight scope is introduced.
 
+Verification-round addendum (2026-09-17): gate-expiry evaluation pinned to `clock_timestamp()` (send-gate matrix; 009 `submitClockSQL` precedent); `TXHARBOR_TX_SEND_TIMEOUT` default fixed at 15s (technical). Status split: plan documents delivered; design closed except G-010-1 residual handling and G-010-3 FK closure now specified (010 follow-up migration) pending merge-time execution; joint acceptance not executed.
+
 ## Project Structure
 
 ### Documentation (this feature)

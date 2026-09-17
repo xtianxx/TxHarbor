@@ -51,10 +51,10 @@ with zero dispatch and is retryable with the same identity.
 
 | Gate | Source of truth | Condition to send | Refusal class | Recorded basis |
 |---|---|---|---|---|
-| Execution qualification | 011 claim row | claim exists, active, not revoked, `expires_at > now()` (DB clock), `lease_version == presented` | `claim_absent` / `claim_revoked` / `claim_expired` / `claim_version_mismatch` | claim id/worker/version, expiry, DB `now()` |
+| Execution qualification | 011 claim row | claim exists, active, not revoked, `expires_at > clock_timestamp()` (DB wall-clock per statement; `now()` is region-start and MUST NOT be used here — 009 `submitClockSQL` precedent), `lease_version == presented` | `claim_absent` / `claim_revoked` / `claim_expired` / `claim_version_mismatch` | claim id/worker/version, expiry, evaluated wall-clock |
 | 006 pause | 3 pause tables | zero rows for the deployment chain | `pause_present` | which table(s) hit (multi-cause visible) |
 | 006 recovery | `reorg_recovery` + events | no active row, `current_version == attempt.recovery_version` (active seq else events MAX else 0) | `recovery_active` / `recovery_version_changed` | phase/recovery id, observed vs built version |
-| Authorization | `withdrawal_authorizations` + PB scope | row exists; `state='active'`; not expired on DB clock; chain/asset/recipient/amount/sender equal; scope `intent_id` equal | `authorization_*` | grant id/state/expiry, scope version |
+| Authorization | `withdrawal_authorizations` + PB scope | row exists; `state='active'`; not expired on `clock_timestamp()`; chain/asset/recipient/amount/sender equal; scope `intent_id` equal | `authorization_*` | grant id/state/expiry, scope version |
 | Replacement reuse | PB scope row | `allows_fee_replacement`; `gas_limit×max_fee_per_gas ≤ fee_max_total`; `max_fee_per_gas ≤ fee_max_per_gas`; `max_priority_fee_per_gas ≤ fee_max_priority`; `authorization_version` equal | `scope_reuse_forbidden` / `fee_scope_exceeded` | per-dimension observed vs cap, version equality |
 | 008 binding | `nonce_bindings` + registry + holds + scope row | intent/chain/sender/nonce equal; state ∈ (`allocated`,`in_flight`); registry `active`; zero active holds | `binding_absent` / `binding_conflict` / `binding_paused` / `binding_terminal` / `binding_read_failed` | binding state, hold causes, registry state |
 | Attempt | `tx_attempts` | row exists; sendability per state matrix; declared kind consistent; optional `revision_seq` guard | `attempt_not_found` / `attempt_not_sendable` / `already_accepted` / `send_mode_mismatch` / `send_stale` | state, revision, prior dispatch outcome |
@@ -77,7 +77,8 @@ governs later replays/replacements only. The evidence is the committed send row'
 `dispatched_at`, and the invalidation writer's own commit order.
 
 **(c) time-based expiry (G-010-1).** Expiry has no writer and therefore no lock. The region re-evaluates
-authorization and claim expiry on the DB clock as the last read before dispatch and records
+authorization and claim expiry with `clock_timestamp()` (statement wall-clock, never transaction-start
+`now()`) as the last read before dispatch and records
 `observed_expires_at`/`observed_now`. The residual interval between that read and entering dispatch is
 irreducible inside PostgreSQL; it is reported, not hidden. No grace period, no TTL, no widened in-flight
 definition is introduced.
