@@ -146,6 +146,8 @@ sources and mapped to its 011 design carrier.
 | 011 M1n | "选择 A：原执行者失格后可与其他 worker 按同等条件重新竞争同一请求，不增加进程身份禁令。安全性由新资格和旧版本隔离保证…重领 MUST 取得新的、可与旧资格区分的执行版本并重验全部适用门禁；MUST NOT 恢复、续用或复活已失效的旧租约和旧版本；新资格 MUST NOT 使该进程中尚存的旧任务自动获得新许可…" | 011 Clarifications 2026-09-17 | same-CAS re-competition; `lease_version+1`; all-gates re-verification; old-version fencing |
 | 011 M2 | "无需提问，既定契约覆盖：链事实观察、状态/投影修订与对账记账不是新的资产执行，不需要新授权；任何后续签名、广播、重播与费用替换适用 Q3…"发生重组" MUST NOT 自动等同于"必须重新签发授权"，历史授权 MUST NOT 当作当前发送许可。" | 011 Clarifications 2026-09-17 | authority-driven fact transitions without claim/authorization; physical separation from send-enabling transitions |
 | 011 M3 | "选择 A：采用自动接管政策，不因单纯租约失效或暂时无进展一律增加人工审批关卡。但区分"无进展"与"已失格"：无进展 MUST NOT 直接证明租约失效，也 MUST NOT 让两个 worker 同时持有有效执行资格；租约已到期或执行资格已被有效撤销后，请求可自动开放重新领取；旧资格仍有效时 MUST 先依照明确的停滞判定与资格失效规则使旧资格失效，再允许新版本接管…" | 011 Clarifications 2026-09-17 | progress watermark + stall predicate under row lock + atomic invalidate/bump/assign (R6) |
+| G-010-1 | "有限例外（2026-09-17 新批准，仅自然到期）：最终检查后自然到期的发送残差允许记录并对账，不描述为合法在途，不覆盖其他残差，不批准可配置宽限期；排队/退避/重连/重试后 MUST 重估门禁；结果明确保留真实结果，仅不确定记 unknown。" | register J4；010 plan/research | every retry re-evaluates the full gate set; known results kept, only uncertainty → `unknown`; no grace/TTL |
+| G-010-2 class (c) | "有限例外之二（2026-09-17 新批准，仅失锁未感知窗口）：探针 MUST 用持有保护锁的同一会话/同一事务，仅为缓解；检出失效 MUST 阻止尚可取消的发送；仅限当次发送，禁用绕过重估的透明重试；进入延迟为优化目标，不宣称窗口极短/极罕见；对账比较记录版本与变更证据，无法判定保序时保留不确定性；确认保护丢失且存在门禁失效后发送证据（或无法排除）时冻结该意图后续发送并转人工复核（链观察/查询/对账照常；正常接管非违规证据）；人工复核仅解除本残差的独立冻结原因（受控权限+证据+审计），不覆盖任何门禁；恢复发送前重验全部门禁，对账永不直接许可重发。此批准不覆盖其他残差，不代表实际验证通过。" | register J4；010 plan/research | freeze consumer + operator read-only paths (T039); reconcile never permits resend; full gate re-verification before resend |
 
 **Joint contract v1 (J1–J6) → 011 carriers**:
 
@@ -212,6 +214,13 @@ in [persistence.md](contracts/persistence.md) §8. Every send-enabling step re-v
 current authorization, no blocking pause, valid recovery basis, current qualification (Q3) — with the
 authority of the send decision resting in 010's gate transaction, never in a prior check.
 
+**Three facts stay distinct (mandatory)**: (i) confirmed-not-sent this attempt — the advance returned no
+send result (010-side `region_aborted_no_dispatch`-style abort); record it as no-send while the intent's
+business effect stays `unknown` pending reconcile; (ii) a previously-`unknown` business effect stays
+persisted pending reconcile; (iii) known RPC/on-chain results (`sent`/`refused_gate`/`refused_basis`,
+verified receipts) are preserved and never rewritten. A failed COMMIT MUST NOT mechanically rewrite
+everything to `unknown`. Recovery bases are persistable evidence only — never inference.
+
 ### D4 — Scheduling vs projection, freshness, revision (FR-09/FR-10)
 
 Two separate planes:
@@ -234,6 +243,12 @@ Two separate planes:
   and the exemption grants **no relief from normal authentication or operator permissions**: admission,
   claiming, send-enabling transitions, and every operator mutation keep exactly the gates defined in this
   plan, and fact transitions grant no send authority.
+
+  **Three-fact recording on the projection (mandatory, same as D3)**: a no-send-result advance keeps the
+  projection's business effect `unknown` pending reconcile; a previously-`unknown` effect stays unknown
+  pending reconcile; known RPC/on-chain results are preserved and never rewritten by a later display
+  update. Projection versioning applies only newer inputs; it never converts an unknown into a definitive
+  result, and recovery bases are persistable evidence only.
 
 ### D5 — Lifecycle state machine (FR-12)
 
@@ -371,10 +386,13 @@ ordering resolution at merge or a deferred FK migration.
   PostgreSQL, real migration `000012`, contract-shape doubles only for the 010 boundary; scenarios V1–V12's
   011-side assertions, including fencing of 011 writes, claim races, takeover timelines, projection
   monotonicity/staleness, state guards, taxonomy, boundary/import and secrecy assertions.
-- **Joint (real HTTP/PG/Anvil; after 010 merges + upstream sync; 010→011 merge order)**: V13 (and the joint
-  half of V1/V3/V7/V8/V10) with real 010/009/008: intent→attempt ordering, claim verification inside 010's
-  send gate under both lock orders, step-idempotent retries after response loss, unknown reconciliation,
-  replay/replacement identity + PB conditional reuse, revision/projection propagation, no-second-intent.
+- **Joint (real HTTP/PG/Anvil)**: integrate 011's real implementation + migrations into the integration
+  workspace, then execute real joint acceptance (V13 and the joint half of V1/V3/V7/V8/V10) with real
+  010/009/008: intent→attempt ordering, claim verification inside 010's send gate under both lock orders,
+  step-idempotent retries after response loss, unknown reconciliation, replay/replacement identity + PB
+  conditional reuse, revision/projection propagation, no-second-intent.
+- **Gating**: applicable joint gates complete BEFORE 011 merges to main. Any phrasing that places joint
+  acceptance after 011's mainline merge MUST NOT be used.
 - **Non-substitution rule**: no double, fake, or old-mechanism test may be reported as joint acceptance;
   010's independent acceptance is not joint acceptance (C10; FR-14). The joint run is deferred (A-13 OPEN).
 
@@ -397,7 +415,10 @@ ordering resolution at merge or a deferred FK migration.
    not TTL-derived); backoff/cadence remain technical values. Initial config, not blanket business limits;
    a config change/restart alone MUST NOT extend an existing qualification (research R14).
 5. **010 concrete interface types** — the consumer-side shapes in lifecycle.md are minimal requirements;
-   exact types land with 010's plan and are adapted at wiring (009 D3 precedent).
+   exact types land with 010's plan and are adapted at wiring (009 D3 precedent). The production
+   `LifecycleAdvancer`/`LifecycleReader` adapter is one of the prerequisites the joint wave (J1–J5) is
+   gated on: integrate 011's real implementation + migrations into the integration workspace, then execute
+   real joint acceptance; applicable joint gates complete BEFORE 011 merges to main.
 
 ## Complexity Tracking
 

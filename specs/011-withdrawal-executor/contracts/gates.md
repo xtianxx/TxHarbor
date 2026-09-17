@@ -153,6 +153,11 @@ imposes. If 010's plan cannot provide the row-share read, the resulting gap MUST
 **011's own reads of its claim** (for its writes) are `SELECT … FOR UPDATE` in the same transaction as the
 guarded update; there is no cached qualification, no in-memory permit, and no "renewed recently" shortcut.
 
+**继承的 010 两项有限例外（register J4 原文；逐字承接，不重新裁决）**：
+
+- G-010-1（自然到期残差）：有限例外（2026-09-17 新批准，仅自然到期）：最终检查后自然到期的发送残差允许记录并对账，不描述为合法在途，不覆盖其他残差，不批准可配置宽限期；排队/退避/重连/重试后 MUST 重估门禁；结果明确保留真实结果，仅不确定记 unknown。
+- G-010-2 class (c)（失锁未感知窗口）：有限例外之二（2026-09-17 新批准，仅失锁未感知窗口）：探针 MUST 用持有保护锁的同一会话/同一事务，仅为缓解；检出失效 MUST 阻止尚可取消的发送；仅限当次发送，禁用绕过重估的透明重试；进入延迟为优化目标，不宣称窗口极短/极罕见；对账比较记录版本与变更证据，无法判定保序时保留不确定性；确认保护丢失且存在门禁失效后发送证据（或无法排除）时冻结该意图后续发送并转人工复核（链观察/查询/对账照常；正常接管非违规证据）；人工复核仅解除本残差的独立冻结原因（受控权限+证据+审计），不覆盖任何门禁；恢复发送前重验全部门禁，对账永不直接许可重发。此批准不覆盖其他残差，不代表实际验证通过。
+
 ## 5. Gate read matrix (what is read when)
 
 | Phase | 006 gate tables | 007 grant `FOR SHARE` | 007 scope `FOR SHARE` | 008 registry | 008 binding/holds | claim fence | Locks held |

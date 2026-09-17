@@ -101,6 +101,10 @@ Classes are recorded on the step/event/audit row with identity + versions as evi
    silently converted to "not sent" or "failed" (Q3).
 4. Reorg revision (fact-only): applied by version-monotonic consumption; no authorization consumed; no claim
    needed; the original intent and history are preserved (M2).
+5. Three facts stay distinct (mandatory): (i) confirmed-not-sent this attempt (no send result; business
+   effect `unknown` pending reconcile); (ii) a previously-`unknown` business effect persisted pending
+   reconcile; (iii) known RPC/on-chain results preserved and never rewritten. A failed COMMIT MUST NOT
+   mechanically rewrite everything to `unknown`; recovery bases are persistable evidence only.
 
 ## 7. Projection & revision ordering (FR-09/FR-10, J5)
 
@@ -127,6 +131,11 @@ Classes are recorded on the step/event/audit row with identity + versions as evi
 | after converge | terminal step | continue next step under current claim |
 | worker death (no crash handling) | lease expires (DB clock) | new claimant takes over; open steps reconciled |
 | DB session loss with network progress | unknown | reconcile; never success/failure fabricated |
+
+Three facts stay distinct across every crash point (mandatory): a no-send-result abort is recorded as
+no-send with the business effect `unknown` pending reconcile; a prior `unknown` stays persisted pending
+reconcile; known RPC/on-chain results are preserved and never rewritten. Recovery bases are persistable
+evidence only — never inference.
 
 ## 9. Logging, metrics, secrecy (FR-13; constitution XII)
 

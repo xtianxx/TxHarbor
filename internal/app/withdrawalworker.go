@@ -270,7 +270,7 @@ func (w *WithdrawalWorker) heartbeat(ctx context.Context, intentID string, versi
 		select {
 		case <-ctx.Done():
 			return
-		case <-time.After(jittered(w.Heartbeat, 0.10)):
+		case <-time.After(jittered(w.Heartbeat, 10)):
 		}
 		if err := w.Claims.Renew(ctx, intentID, w.OwnerID, version); err != nil {
 			if errors.Is(err, execution.ErrClaimLost) {
@@ -312,13 +312,18 @@ func (w *WithdrawalWorker) log() *slog.Logger {
 	return slog.Default()
 }
 
-// jittered returns base +/- frac (fraction of base), always positive.
-func jittered(base time.Duration, frac float64) time.Duration {
-	if base <= 0 {
+// jittered returns base +/- percent% using integer arithmetic only, always
+// positive. No float is used anywhere in a 011 value path (constitution I/XII);
+// the approved heartbeat jitter (10%) is expressed as an integer fraction.
+func jittered(base time.Duration, percent int64) time.Duration {
+	if base <= 0 || percent <= 0 {
 		return base
 	}
-	delta := float64(base) * frac
-	return base + time.Duration((rand.Float64()*2-1)*delta)
+	delta := int64(base) * percent / 100
+	if delta <= 0 {
+		return base
+	}
+	return base + time.Duration(rand.Int63n(2*delta+1)) - time.Duration(delta)
 }
 
 // WithdrawalWorkerCommand runs the long-running worker until the process
