@@ -194,6 +194,14 @@ PB-C1/C2、010 Q1–Q3、011 M1n/M3）；载体、锁、顺序等机制为 plan 
   Anvil 上 ERC-20 事件合约与资金）与 010↔011 生命周期适配器；未在本批次构建。
 - T051 的完整内容（“真实联合验收已执行”）未成立，故 010 `tasks.md` 的 T051 框不勾选。
 
+### 已知 out-of-lane 失败（按原样报告，未修复）
+
+- `internal/db/withdrawal_execution_migration_integration_test.go:308`
+  `TestWithdrawalExecutionMigrationNumberIsProvisional` 断言“000011 属于 010 lane，在本分支必须缺席”。
+  联合分支按 010→011 合并顺序刻意包含 `000011`，该断言因此失败（`db_test_exit=1`，
+  日志 `11-db-outoflane.txt`）。此为 010 合入前的 lane-local 假设，属 out-of-lane；
+  本批次不修改它，交由 011 lane 在合并顺序确认后按实际集合更新。
+
 ### 011 侧输入需求（不修改 011 任务框，011 lane 拥有）
 
 - 011:T041 工作区：已由 010 建立并纳入 011 真实实现 + `000012`（本分支 `f03e825`）。
