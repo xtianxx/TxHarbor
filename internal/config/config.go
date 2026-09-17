@@ -8,6 +8,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"math/big"
 	"net"
 	"net/url"
 	"sort"
@@ -17,6 +18,7 @@ import (
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/jackc/pgx/v5"
+	"github.com/xtianxx/txharbor/internal/signer"
 
 	"github.com/xtianxx/txharbor/internal/logx"
 )
@@ -56,9 +58,24 @@ const (
 	// endpoints mounted by the serve carrier. Reconcile/observation timing
 	// reuses the INDEX knobs above — no 008 timing knob exists.
 	EnvNonceReadToken = "TXHARBOR_NONCE_READ_TOKEN"
+	// Signer service (009 T013): listener, backend mode, key file, signing
+	// deadline, and the policy allowlists/caps. Parsed when present;
+	// required-ness is enforced by SignerPolicyConfig for the signer paths
+	// only, so the shared Load stays green for serve/migrate flows.
+	EnvSignerHTTPAddr       = "TXHARBOR_SIGNER_HTTP_ADDR"
+	EnvSignerMode           = "TXHARBOR_SIGNER_MODE"
+	EnvSignerKeyFile        = "TXHARBOR_SIGNER_KEY_FILE"
+	EnvSignerKeyTimeout     = "TXHARBOR_SIGNER_KEY_TIMEOUT"
+	EnvSignerChains         = "TXHARBOR_SIGNER_CHAINS"
+	EnvSignerSenders        = "TXHARBOR_SIGNER_SENDERS"
+	EnvSignerAssets         = "TXHARBOR_SIGNER_ASSETS"
+	EnvSignerRecipients     = "TXHARBOR_SIGNER_RECIPIENTS"
+	EnvSignerMaxAmount      = "TXHARBOR_SIGNER_MAX_AMOUNT"
+	EnvSignerMaxGasLimit    = "TXHARBOR_SIGNER_MAX_GAS_LIMIT"
+	EnvSignerMaxFeePerGas   = "TXHARBOR_SIGNER_MAX_FEE_PER_GAS"
+	EnvSignerMaxPriorityFee = "TXHARBOR_SIGNER_MAX_PRIORITY_FEE_PER_GAS"
+	EnvSignerMaxGasPrice    = "TXHARBOR_SIGNER_MAX_GAS_PRICE"
 )
-
-// Defaults from data-model §1. Acceptance runs use these values (FR-013).
 const (
 	DefaultHTTPAddr           = "127.0.0.1:8080"
 	DefaultStartupTimeout     = 30 * time.Second
@@ -86,6 +103,13 @@ const (
 	// the executor's internal default so an unset knob behaves identically
 	// to a directly constructed executor.
 	DefaultReorgReplayBatch = uint64(500)
+
+	// Signer defaults (009): loopback-only listener, fail-closed production
+	// mode (a local test key is never constructed in production), and the
+	// 5s signing deadline (research R2).
+	DefaultSignerHTTPAddr   = "127.0.0.1:8091"
+	DefaultSignerMode       = "production"
+	DefaultSignerKeyTimeout = 5 * time.Second
 
 	// logConfigVersion prefixes the config identity encoding (clarification
 	// A1). The version is part of the hashed input so future encodings never
@@ -148,6 +172,21 @@ type Config struct {
 	// the read endpoints stay fail-closed. Never echoed raw: Summary() renders
 	// presence as the redaction placeholder only.
 	NonceReadToken string
+	// Signer service (009 T013): parsed when present; SignerPolicyConfig
+	// enforces required-ness for the signer paths.
+	SignerHTTPAddr       string
+	SignerMode           string
+	SignerKeyFile        string
+	SignerKeyTimeout     time.Duration
+	SignerChains         []int64
+	SignerSenders        []string
+	SignerAssets         []string
+	SignerRecipients     []string
+	SignerMaxAmount      *big.Int
+	SignerMaxGasLimit    uint64
+	SignerMaxFeePerGas   *big.Int
+	SignerMaxPriorityFee *big.Int
+	SignerMaxGasPrice    *big.Int
 }
 
 // DepositEntry is one normalized `address[:effective]` configuration item: a
@@ -320,6 +359,7 @@ func Load(getenv Getenv) (*Config, error) {
 		}
 	}
 
+	c.loadSigner(getenv, &errs)
 	// Nonce read API (008 FR-19): the bearer token passes through verbatim
 	// and is never formatted into an error. Unset or empty leaves the read
 	// endpoints fail-closed (the read provider authenticates against it).
@@ -367,14 +407,16 @@ func (c *Config) Summary() string {
 		nonceReadToken = logx.Redacted
 	}
 	return fmt.Sprintf(
-		"pg=%s rpc=%s chain_id=%d start_height=%d http_addr=%s startup_timeout=%s probe_interval=%s probe_timeout=%s shutdown_timeout=%s migrate_lock_timeout=%s index_rpc_timeout=%s index_poll_interval=%s index_retry_initial=%s index_retry_max=%s log_start_height=%d log_contracts=%d log_config_hash=%s log_batch_blocks=%d deposit_start_height=%d deposit_contracts=%d deposit_watch_addresses=%d deposit_config_hash=%s deposit_batch_blocks=%d confirmation_depth=%d reorg_max_depth=%s reorg_replay_batch=%d nonce_read_token=%s",
+		"pg=%s rpc=%s chain_id=%d start_height=%d http_addr=%s startup_timeout=%s probe_interval=%s probe_timeout=%s shutdown_timeout=%s migrate_lock_timeout=%s index_rpc_timeout=%s index_poll_interval=%s index_retry_initial=%s index_retry_max=%s log_start_height=%d log_contracts=%d log_config_hash=%s log_batch_blocks=%d deposit_start_height=%d deposit_contracts=%d deposit_watch_addresses=%d deposit_config_hash=%s deposit_batch_blocks=%d confirmation_depth=%d reorg_max_depth=%s reorg_replay_batch=%d nonce_read_token=%s signer_http_addr=%s signer_mode=%s signer_key_timeout=%s signer_chains=%d signer_senders=%d signer_assets=%d signer_recipients=%d signer_max_gas_limit=%d",
 		logx.Redact(c.PGDSN), logx.Redact(c.RPCURL), c.ChainID, c.StartHeight, c.HTTPAddr,
 		c.StartupTimeout, c.ProbeInterval, c.ProbeTimeout, c.ShutdownTimeout, c.MigrateLockTimeout,
 		c.IndexRPCTimeout, c.IndexPollInterval, c.IndexRetryInitial, c.IndexRetryMax,
 		c.LogStartHeight, len(c.LogContracts), c.LogConfigHash, c.LogBatchBlocks,
 		c.DepositStartHeight, len(c.DepositContracts), len(c.DepositWatchAddresses),
 		c.DepositConfigHash, c.DepositBatchBlocks, c.ConfirmationDepth, c.ReorgMaxDepthRaw,
-		c.ReorgReplayBatch, nonceReadToken,
+		c.ReorgReplayBatch, nonceReadToken, c.SignerHTTPAddr, c.SignerMode, c.SignerKeyTimeout,
+		len(c.SignerChains), len(c.SignerSenders), len(c.SignerAssets),
+		len(c.SignerRecipients), c.SignerMaxGasLimit,
 	)
 }
 
@@ -586,4 +628,134 @@ func validateHTTPAddr(addr string) error {
 		return fmt.Errorf("port %q is not in 0..65535", port)
 	}
 	return nil
+}
+
+// loadSigner parses the 009 signer knobs when present. Malformed present
+// values are Load errors; absent values stay unset and SignerPolicyConfig
+// refuses the signer paths until they are provided.
+func (c *Config) loadSigner(getenv Getenv, errs *[]error) {
+	c.SignerHTTPAddr = DefaultSignerHTTPAddr
+	if raw, ok := getenv(EnvSignerHTTPAddr); ok && raw != "" {
+		if err := validateHTTPAddr(raw); err != nil {
+			*errs = append(*errs, invalid(EnvSignerHTTPAddr, "%v", err))
+		} else {
+			c.SignerHTTPAddr = raw
+		}
+	}
+
+	c.SignerMode = DefaultSignerMode
+	if raw, ok := getenv(EnvSignerMode); ok && raw != "" {
+		if raw != "development" && raw != "production" {
+			*errs = append(*errs, invalid(EnvSignerMode, "%q must be development or production", raw))
+		} else {
+			c.SignerMode = raw
+		}
+	}
+
+	if raw, ok := getenv(EnvSignerKeyFile); ok {
+		c.SignerKeyFile = raw
+	}
+	c.SignerKeyTimeout = duration(getenv, EnvSignerKeyTimeout, DefaultSignerKeyTimeout, errs)
+
+	splitList := func(name string) []string {
+		raw, ok := getenv(name)
+		if !ok || strings.TrimSpace(raw) == "" {
+			return nil
+		}
+		var out []string
+		for _, part := range strings.Split(raw, ",") {
+			if trimmed := strings.TrimSpace(part); trimmed != "" {
+				out = append(out, trimmed)
+			}
+		}
+		return out
+	}
+	if raw, ok := getenv(EnvSignerChains); ok && strings.TrimSpace(raw) != "" {
+		for _, part := range strings.Split(raw, ",") {
+			part = strings.TrimSpace(part)
+			n, err := strconv.ParseUint(part, 10, 64)
+			if err != nil || n == 0 || n > 1<<63-1 {
+				*errs = append(*errs, invalid(EnvSignerChains, "%q is not a positive chain id", part))
+				continue
+			}
+			c.SignerChains = append(c.SignerChains, int64(n))
+		}
+	}
+	c.SignerSenders = splitList(EnvSignerSenders)
+	c.SignerAssets = splitList(EnvSignerAssets)
+	c.SignerRecipients = splitList(EnvSignerRecipients)
+
+	positiveBig := func(name string) *big.Int {
+		raw, ok := getenv(name)
+		if !ok || strings.TrimSpace(raw) == "" {
+			return nil
+		}
+		raw = strings.TrimSpace(raw)
+		v, ok := new(big.Int).SetString(raw, 10)
+		if !ok || v.Sign() <= 0 {
+			*errs = append(*errs, invalid(name, "%q is not a positive decimal integer", raw))
+			return nil
+		}
+		return v
+	}
+	c.SignerMaxAmount = positiveBig(EnvSignerMaxAmount)
+	c.SignerMaxFeePerGas = positiveBig(EnvSignerMaxFeePerGas)
+	c.SignerMaxPriorityFee = positiveBig(EnvSignerMaxPriorityFee)
+	c.SignerMaxGasPrice = positiveBig(EnvSignerMaxGasPrice)
+	if raw, ok := getenv(EnvSignerMaxGasLimit); ok && strings.TrimSpace(raw) != "" {
+		n, err := strconv.ParseUint(strings.TrimSpace(raw), 10, 64)
+		if err != nil || n == 0 {
+			*errs = append(*errs, invalid(EnvSignerMaxGasLimit, "%q is not a positive decimal integer", raw))
+		} else {
+			c.SignerMaxGasLimit = n
+		}
+	}
+}
+
+// SignerPolicyConfig enforces required-ness for the signer paths and builds
+// the versioned policy input. Serve/migrate flows never call it, so their
+// environments stay valid without signer knobs.
+func (c *Config) SignerPolicyConfig() (signer.PolicyConfig, error) {
+	var zero signer.PolicyConfig
+	missing := func(name string) (signer.PolicyConfig, error) {
+		return zero, fmt.Errorf("%s is required for the signer paths", name)
+	}
+	if len(c.SignerChains) == 0 {
+		return missing(EnvSignerChains)
+	}
+	if len(c.SignerSenders) == 0 {
+		return missing(EnvSignerSenders)
+	}
+	if len(c.SignerAssets) == 0 {
+		return missing(EnvSignerAssets)
+	}
+	if len(c.SignerRecipients) == 0 {
+		return missing(EnvSignerRecipients)
+	}
+	if c.SignerMaxAmount == nil {
+		return missing(EnvSignerMaxAmount)
+	}
+	if c.SignerMaxGasLimit == 0 {
+		return missing(EnvSignerMaxGasLimit)
+	}
+	if c.SignerMaxFeePerGas == nil {
+		return missing(EnvSignerMaxFeePerGas)
+	}
+	if c.SignerMaxPriorityFee == nil {
+		return missing(EnvSignerMaxPriorityFee)
+	}
+	if c.SignerMaxGasPrice == nil {
+		return missing(EnvSignerMaxGasPrice)
+	}
+	return signer.PolicyConfig{
+		ChainIDs:             append([]int64(nil), c.SignerChains...),
+		Senders:              append([]string(nil), c.SignerSenders...),
+		Assets:               append([]string(nil), c.SignerAssets...),
+		Recipients:           append([]string(nil), c.SignerRecipients...),
+		MaxAmount:            new(big.Int).Set(c.SignerMaxAmount),
+		MaxGasLimit:          c.SignerMaxGasLimit,
+		MaxFeePerGas:         new(big.Int).Set(c.SignerMaxFeePerGas),
+		MaxPriorityFeePerGas: new(big.Int).Set(c.SignerMaxPriorityFee),
+		MaxGasPrice:          new(big.Int).Set(c.SignerMaxGasPrice),
+	}, nil
 }

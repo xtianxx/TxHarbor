@@ -92,13 +92,16 @@ func TestAuthzScopeMigrationDownRemovesOnlyItself(t *testing.T) {
 	if err != nil {
 		t.Fatalf("newProvider: %v", err)
 	}
-	// Only 000010 sits above 000008 in this lane (000009 is a separate lane).
-	results, err := provider.DownTo(ctx, 8)
+	// Target 9 so exactly the carrier rolls back: on the pre-merge PB tree
+	// 000010 was the only applied version above 8, and on the merged tree the
+	// signer lane's 000009 is applied below it, so 9 (not 8) keeps the "000010
+	// down removes only itself" claim exact in both trees.
+	results, err := provider.DownTo(ctx, 9)
 	if err != nil {
-		t.Fatalf("DownTo(8): %v", err)
+		t.Fatalf("DownTo(9): %v", err)
 	}
 	if len(results) != 1 || results[0].Source.Version != 10 {
-		t.Fatalf("DownTo(8) rolled back %d migration(s), want exactly version 10", len(results))
+		t.Fatalf("DownTo(9) rolled back %d migration(s), want exactly version 10", len(results))
 	}
 
 	if relationExists(t, sqlDB, "withdrawal_authorization_scopes") {

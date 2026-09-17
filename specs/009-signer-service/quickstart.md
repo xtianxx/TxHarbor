@@ -1,0 +1,266 @@
+# Quickstart Validation — 009 Signer Service
+
+**Branch**: `009-signer-service` | **Date**: 2026-09-16 | **Spec**: [spec.md](spec.md) | **Contracts**: [contracts/api.md](contracts/api.md), [contracts/gates.md](contracts/gates.md), [contracts/persistence.md](contracts/persistence.md)
+
+Design-only validation guide (Phase 1 output). Scenarios below are the acceptance matrix the
+future implementation/tasks MUST execute; **this step starts no service and writes no code**.
+Commands are illustrative sketches of the validation flow, not implementation artifacts.
+
+## Isolation scheme (mandatory for every V-scenario)
+
+008 and 009 run in parallel worktrees over one machine; shared test resources are not isolation
+(`docs/workflow-008-009-parallel.md` R4; research R10):
+
+- **Workdir-local database**: run 009 validation against a dedicated PostgreSQL database name
+  (e.g. `TXHARBOR_PG_DSN=postgres://…/txharbor_009`), never the shared `txharbor` database.
+  Integration tests use per-test testcontainers (container-local DB, random published port) as
+  the repo already does — no fixed host port.
+- **Non-default ports**: `TXHARBOR_SIGNER_HTTP_ADDR=127.0.0.1:8091` (never 8080, never 008's
+  listeners). If a shared compose PostgreSQL is used for a manual walkthrough, map a non-default
+  host port (e.g. `5433`) via a local override; never touch the shared `pgdata` volume.
+- **No Anvil / no RPC**: 009 has no RPC client; none of these scenarios needs a chain. This is a
+  structural property to assert (V8), not an environment choice.
+
+Concrete 009 values (T003; pinned by `internal/signer/isolation_test.go`, which fails on any
+collision with the 008 or default values below):
+
+| Resource | 009 value | Must never collide with |
+|---|---|---|
+| PostgreSQL database | `txharbor_009` | shared `txharbor`, 008 `txharbor_008` |
+| PG host port (explicit compose override only) | `5433` | default `5432`, 008 `55432` |
+| Signer HTTP listener | `127.0.0.1:8091` | `8080`, 008 listener `58545`, RPC `8545` |
+| PG data volume (explicit override only) | `txharbor_009_pgdata` | shared `pgdata`, 008 volume |
+
+The override is explicit, never auto-merged:
+`docker compose -f compose.yaml -f compose.009.yaml up -d postgres` (starts no anvil), with
+`TXHARBOR_PG_DSN=postgres://txharbor:txharbor@127.0.0.1:5433/txharbor_009`. Automated tests stay
+on per-test testcontainers (container-local DB, random published port) and share nothing.
+
+## V1 — Structured signing happy path (US1/FR-01–FR-03, FR-16; SC-01)
+
+1. Seed a caller + credential (`txharbor signer-auth issue …`), a 006-clean database (no pause
+   rows, no active recovery), an 008 binding fixture (`matches`, no 008 contract yet → interface
+   double per D3), and an active 007 grant whose fields equal the planned request.
+2. Submit a complete ERC-20 transfer request (`POST /signer/v1/signing-requests`, api.md §2).
+3. Assert: `200 signed` with `signature` + `tx_hash`; `delivery: delivered`; an admission row
+   `delivered`; state `signed`.
+4. **Independently verify**: reconstruct `types.Transaction` from the request fields, recover the
+   sender from `signature` + `types.LatestSignerForChainID(chain_id)`, assert recovered address =
+   `sender` and recomputed `tx.Hash()` = returned `tx_hash`.
+5. Assert zero broadcast/RPC activity (009 has no RPC path; the test harness installs no chain).
+
+## V2 — Arbitrary digest / incomplete content refusal (US1/FR-02; SC-01)
+
+1. Submit a body with `digest`, `message`, or `hash` fields (or with `data` only and no full
+   transaction fields) → assert `422 arbitrary_digest_rejected`, no signature, no result row.
+2. Submit bodies missing one required field each (`chain_id`, `sender`, `nonce`, `to`, `data`,
+   `gas_limit`, fee shape, `asset`/`recipient`/`amount`) → assert `422 validation_failed` with the
+   field named; no result rows created.
+3. Assert no endpoint or field accepts a raw digest anywhere (route list review + negative probe).
+
+## V3 — Authentication, permission, ownership (US2/FR-04–FR-05; SC-02)
+
+1. Missing credential → `401`; invalid credential → identical `401`; revoked credential → `401`.
+2. Valid credential with `can_sign=false` → `403 signing_not_permitted`, zero signatures.
+3. Body claims another `sender`/caller → service uses the credential-derived caller; the
+   request's `sender` is validated against policy/registry, never trusted as identity.
+4. Caller A queries caller B's `signing_request_id` → **identical** `404` to a nonexistent id
+   (byte-equal code/message); no ownership or existence leak.
+5. Scan responses/errors/logs for credential material → 0 occurrences.
+
+## V4 — Identity ↔ content binding, conflict, determinism (US3/FR-13–FR-15; SC-03)
+
+1. Submit identity K/content C twice (sequentially) → second returns the **same** `signature` and
+   `tx_hash`; exactly one `signature_results` row; audit shows `replayed`.
+2. Submit K again with one bound field changed (chain, sender, nonce, `to`, `data`, `value`,
+   `asset`, `recipient`, `amount`, fee fields, `intent_id`, `binding_ref`, `attempt_id`,
+   `authorization_id`, `recovery_version`) → `409 request_conflict`; original result unchanged;
+   zero new signatures.
+3. Concurrency: N (N≥2, plan defines N=8) parallel identical submissions → one result row, all
+   successful responses carry the same bytes; losers observe either the result or
+   `outcome_not_yet_visible` (same-identity retry converges).
+4. Restart the signer process between attempts → same result from persistence (no memory
+   dependence).
+5. Fee replacement = new `attempt_id` + new `signing_request_id` + same intent/binding, per OC-5
+   **conditional** rule: reuse the original grant only if it explicitly permits fee replacement
+   and the new fee is in scope (structurally possible via `replacement_of` + the partial anchor
+   index), else a **new** `authorization_id` with the new identity → accepted path; a reuse that
+   cannot be verified, or an anchor-index collision → `403 authorization_invalid`. Never rebind an
+   existing request row to another grant.
+
+## V5 — Validation matrix (US4/FR-06–FR-12; SC-04)
+
+One negative case each (all: refused before signing, signature count 0, class recorded):
+`chain_id` not the deployment chain; sender absent/disabled from the registry; sender–key
+mismatch; `asset != to`; asset/contract not allowlisted; calldata selector ≠
+`transfer(address,uint256)`; calldata recipient/amount ≠ declared/authorized values;
+recipient outside policy; zero/negative/decimal/non-integer/over-uint256 `amount`; native
+`value != 0`; `gas_limit`/fee values outside policy caps; `max_priority_fee_per_gas >
+max_fee_per_gas`; non-empty `access_list`. Positive controls pass. No float arithmetic appears in
+any code path (static check + integer-typed validators).
+
+## V6 — Gate consumption, read-only (US6/FR-17–FR-19; SC-06)
+
+1. Insert an 006 `indexer_pause` (then `log_pause`, `deposit_pause`) row → submit → refused
+   `recovery_paused`, basis names the observed table(s); no signature; no queue-for-later.
+2. Insert an active `reorg_recovery` row (any phase) → refused `recovery_active`.
+3. Recovery version changes between content construction and submit → refused
+   `recovery_version_changed`; re-submitting the same content also refused at delivery.
+4. 008 binding classes: `matches` signs; `absent`/`conflict`/`paused`/`read_failed` each refuse
+   with its class, audited; no call to any 008 writer.
+5. 007 grant: absent/inactive/expired/revoked/field-mismatch → refused with the class; a
+   concurrent revoke during submit serializes on the grant row (share vs update lock); one grant
+   never backs two request identities.
+6. Read-only assertion: run the whole scenario set, then diff upstream tables (006 pause/recovery,
+   007 grants) — byte-identical except the test-fixture rows the harness itself inserted.
+7. 007 Accepted does not trigger anything: creating a 007 withdrawal request produces zero 009
+   activity (no signing by receive status).
+
+## V7 — Delivery admission, withholding, unknown (US6/FR-17/FR-23; SC-06/SC-08)
+
+1. Sign successfully, then revoke the 007 grant (or let it expire) → same-identity retry returns
+   `409 signature_withheld`, status-only (no signature, no `tx_hash`); audit records
+   authorization id + observed state; result/binding/history retained.
+2. Enter an 006 pause (or 008 binding pause) after signing → retry withheld with the pause basis;
+   multiple independent pauses: releasing one does not bypass the other; 009 clears none.
+3. Gate passes → admission, bytes write, and `delivered` marker commit atomically inside the
+   held locks; simulate a crash between the write and `COMMIT` → retry reports
+   `unknown_reconcile`/`outcome_unknown`, re-delivers the same bytes after a pass
+   (identical-bytes only, never re-signed), or withholds after a failure; admission rows tell
+   the story. Assert **no split**: no admitted-then-write-later path exists — a write failure
+   rolls back the admission itself; the two R6 timelines (pause/revoke committed before the
+   region → status-only; region first → pause/revoke waits for its `COMMIT`, bytes in-flight
+   approved with a committed marker)
+   and the `can_sign` disable-between-sign-and-delivery case are both exercised.
+4. Force an indeterminate delivery outcome → response is `outcome_unknown` status-only; the
+   reconcile path (persistence.md §6) uses audit + admission rows; no new identity, no new intent.
+5. Injection points: after gate check, during signing, after result commit, at admission, at
+   response — each asserts no ungated delivery and a recorded basis.
+6. Guarantee-scope acceptance (fault-model limitation, user ruling 2026-09-16): kill the DB
+   session mid-region → locks released server-side; sender-side outcome MUST be `unknown`
+   (never "nothing delivered"), retry re-gates with a pre-write liveness check; partial
+   write then RST → `unknown` + overlap audit, never zero-delivery claim; restart with a
+   `signature_results` row and no `delivered` marker → identified as unknown via durable rows
+   only (no rolled-back marker consulted), recovery = same-identity re-gate; revoke/expire
+   the grant (or activate a pause) then retry the same bytes → `blocked`/`signature_withheld`
+   status-only even for byte-identical redelivery; audit rows contain no backfilled
+   unconfirmed-as-confirmed facts.
+
+## V8 — Failure paths, secrecy, isolation (FR-20–FR-25; SC-05/SC-07/SC-08)
+
+1. Key provider unavailable/timeout → bounded failure, class recorded, **never** `signed`; retry
+   with the same identity succeeds once the provider returns; no partial result rows.
+2. Storage unavailable after signing path starts → no success response; when storage returns, the
+   persisted result (if any) is retrievable; no data loss.
+3. Restart/crash at each point in persistence.md §2/§5 → no second observable signature; retries
+   converge; infinite-retry occurrences: 0.
+4. Test/deployment key isolation: `production` mode without a production provider refuses to
+   start; `production` mode never loads the test key; `development` mode refuses when the key
+   file is missing (no fallback).
+5. Secrecy scan: logs, errors, responses, metrics, and repository for key material, credentials,
+   signature bytes on refusal paths, raw signed-transaction bytes → 0 occurrences (incl. startup
+   echo). Import boundary: business `serve` wires no `KeyProvider` (test asserts the dependency
+   direction).
+6. Never broadcasts: static check that `internal/signer` imports no RPC/dial package; runtime
+   harness has no chain endpoint.
+7. Isolation: run the full suite with `txharbor_009` + non-default ports while a dummy 008-like
+   listener occupies other ports; assert no cross-talk and no writes to the shared database.
+
+## Exit criteria (design mapping)
+
+SC-01→V1/V2, SC-02→V3, SC-03→V4, SC-04→V5, SC-05→V3/V8, SC-06→V6/V7, SC-07→V3/V8, SC-08→V7/V8.
+T000-P remains open; local Anvil-free green does not imply production readiness.
+
+---
+
+# Operator runbook & execution record (T032)
+
+Appended 2026-09-16 at lane HEAD `56cb9ea7b4a0994e5cfafacf9f33df8607c8c85b`
+(branch `009-signer-service`, baseline `4ebfe86`). This is an operator-facing record of what the
+lane actually wires, not a legal-path or delivery-completeness claim.
+
+## Commands
+
+`signer-serve` (the standalone signer process; the only path that constructs a `KeyProvider`):
+
+```
+TXHARBOR_PG_DSN=postgres://txharbor:txharbor@127.0.0.1:5433/txharbor_009 \
+TXHARBOR_SIGNER_MODE=development \
+TXHARBOR_SIGNER_KEY_FILE=/run/secrets/signer-test.key \
+txharbor signer-serve
+```
+
+Takes no arguments. Startup order: full config validation + signer required-ness → pool → metrics →
+policy → provider → listener. Exit 0 on clean shutdown after SIGINT/SIGTERM; 1 on startup/config
+failure (redacted reason); 2 on unexpected arguments. Startup refuses `production` mode without a
+production provider and never silently falls back to a test key.
+
+`signer-auth` (credential lifecycle carrier; DSN possession is the trust root):
+
+```
+txharbor signer-auth issue        --caller-id C --label L --operator OP --reason R
+txharbor signer-auth rotate       --caller-id C --credential-id K --operator OP --reason R
+txharbor signer-auth revoke       --credential-id K --operator OP --reason R
+txharbor signer-auth set-can-sign --caller-id C --can-sign true|false --operator OP --reason R
+```
+
+Secrets are generated from `crypto/rand`, stored as SHA-256 only, and printed exactly once on the
+stdout success line. Rotation is immediate (successor insert + predecessor revoke in one
+transaction); there is no grace window. Operator and reason are echoed on stdout as the paper trail
+and never reach the database. All four flags are required; exit codes are 0 committed, 1 failed, 2
+usage. Errors are redacted through `logx.Redact`.
+
+## Environment knobs (`TXHARBOR_SIGNER_*`)
+
+| Knob | Default | Notes |
+|---|---|---|
+| `TXHARBOR_SIGNER_HTTP_ADDR` | `127.0.0.1:8091` | loopback-only listener; never 8080 |
+| `TXHARBOR_SIGNER_MODE` | `production` | `development` is required to load a local test key |
+| `TXHARBOR_SIGNER_KEY_FILE` | (none) | required in `development`; no fallback |
+| `TXHARBOR_SIGNER_KEY_TIMEOUT` | `5s` | signing deadline bound |
+| `TXHARBOR_SIGNER_CHAINS` | (none) | policy allowlist |
+| `TXHARBOR_SIGNER_SENDERS` | (none) | policy allowlist |
+| `TXHARBOR_SIGNER_ASSETS` | (none) | policy allowlist |
+| `TXHARBOR_SIGNER_RECIPIENTS` | (none) | policy allowlist |
+| `TXHARBOR_SIGNER_MAX_AMOUNT` | (none) | integer-only cap |
+| `TXHARBOR_SIGNER_MAX_GAS_LIMIT` | (none) | integer-only cap |
+| `TXHARBOR_SIGNER_MAX_FEE_PER_GAS` | (none) | integer-only cap |
+| `TXHARBOR_SIGNER_MAX_PRIORITY_FEE_PER_GAS` | (none) | integer-only cap |
+| `TXHARBOR_SIGNER_MAX_GAS_PRICE` | (none) | integer-only cap |
+
+Knobs are parsed when present; signer-path required-ness is enforced by `SignerPolicyConfig`, so the
+shared `Load` stays green for `serve`/`migrate`. `TXHARBOR_PG_DSN` is the usual upstream DSN knob.
+
+## Isolated resources (pinned by `internal/signer/isolation_test.go`)
+
+| Resource | 009 value | Never collide with |
+|---|---|---|
+| PostgreSQL database | `txharbor_009` | shared `txharbor`, 008 `txharbor_008` |
+| PG host port (explicit compose override only) | `5433` | default `5432`, 008 `55432` |
+| Signer HTTP listener | `127.0.0.1:8091` | `8080`, 008 listener `58545`, RPC `8545` |
+| PG data volume (explicit override only) | `txharbor_009_pgdata` | shared `pgdata`, 008 volume |
+
+Automated integration tests use per-test testcontainers (container-local DB, random published
+port) and share nothing; the explicit compose override
+(`docker compose -f compose.yaml -f compose.009.yaml up -d postgres`) is for manual walkthroughs
+only and never auto-merges.
+
+## V1–V8 execution record (as of HEAD `56cb9ea`)
+
+Recorded for tasks that are `[X]` on disk at this HEAD. "Retained" means the scenario is
+PB-gated or its driving task is still `[ ]`, so no result is claimed here.
+
+| Scenario | Driving task(s) | State at `56cb9ea` | Notes |
+|---|---|---|---|
+| V1 happy path | T014 | `[X]` fail-closed branch only | PB-gated: without the scopes carrier (PB-01) no grant is verifiable, so only `authorization_unverifiable` runs; **no legal-path sign-off claimed** |
+| V2 digest/incomplete refusal | T015 | `[X]` | refusal vectors green, zero signatures |
+| V3 auth/permission/ownership | T017, T018 | `[X]` | matrix + credential lifecycle round-trip |
+| V4 binding/conflict/determinism | T019, T020, T021 | `[X]` | binding/restart green with `-race`; T021 covers the fresh-authorization + fail-closed branches. The grant-reuse branch is **retained** until the PB carrier lands |
+| V5 validation matrix | T022 | `[X]` | pre-sign refusals, zero signatures |
+| V6 gate consumption (read-only) | T026 | `[X]` | 006/008/007 classes incl. scopeless-grant behaviour assertion |
+| V7 delivery/unknown | T027 | `[ ]` | **retained**: needs T034 (`delivery.go`, `[ ]`); no V7 result claimed |
+| V8 failure/secrecy/isolation | T023, T024, T025 (+ T003 isolation) | `[X]` | import boundary, key separation, secrecy scan, isolation pin |
+
+Not exercised in this record: PB-01…PB-05 (`[ ]`, owned by the 007-extension batch), T027/T028/T034,
+T030/T031, T035. `T000-P` remains open. This lane's green is a fail-closed subset; merge still waits
+for the PB batch plus full legal-path acceptance (plan Merge order).

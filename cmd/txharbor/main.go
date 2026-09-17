@@ -47,6 +47,10 @@ func run(args []string) int {
 		return app.WithdrawalAuthz(ctx, args[1:], d)
 	case "apikey-auth":
 		return app.APIKeyAuth(ctx, args[1:], d)
+	case "signer-serve":
+		return app.SignerServe(ctx, args[1:], d)
+	case "signer-auth":
+		return app.SignerAuth(ctx, args[1:], d)
 	case "nonce-admin":
 		return app.NonceAdmin(ctx, args[1:], d)
 	case "help", "-h", "--help":
@@ -69,6 +73,8 @@ commands:
   confirm-auth      run one guarded confirmation-policy switch
   withdrawal-authz  supply an upstream grant (or mint/revoke)
   apikey-auth       manage caller API keys (issue/rotate/revoke)
+  signer-serve      run the signer HTTP service (009, standalone listener)
+  signer-auth       manage signer credentials (issue/rotate/revoke/set-can-sign)
   nonce-admin       operate 008 nonce holds/registry (mint/release/status)
   help              show this help
 `)

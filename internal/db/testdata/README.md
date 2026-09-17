@@ -6,11 +6,11 @@ carrier chain composes with 009's file. It is NOT a production migration.
 
 Provenance (verified 2026-09-17):
 
-- Source lane: 009-signer-service @ `8f7545023e531eb0bc95cb20f19eb39ec284256a`
-  (worktree clean at copy time)
+- Source lane: 009-signer-service @ `9f029eed63a11177963e24180efa16a0c6e617a0`
+  (T037 `authorization_version` revision; supersedes the `8f75450` pin)
 - Source path: `migrations/000009_signer_service.sql` in that lane
-- SHA256: `53e6ca6fac0b03de86961175d5471612b54e7dad89dabf9cc45e1567013f04b9`
-  (identical to the former `/tmp/pb-009ref` scratch pin; `cmp` clean)
+- SHA256: `cd77bffd2b434f0dcd0bf8bf63e169b1e2db75bcf5beda8edc05f0901b1ae859`
+  (re-pinned by 009-lane T041; prior pin `53e6ca6f…` = pre-T037 bytes)
 
 Rules:
 
@@ -20,7 +20,7 @@ Rules:
   The tests assert the hash, so drift fails loudly.
 - NEVER move this file into `migrations/` or any production embed. Production
   migration discovery (`migrations/embed.go`) must stay 009-free; guarded by
-  `TestLaneMigrationsExclude009`.
+  `TestLaneMigrationsCarryReal009` (retargeted 2026-09-17 for the 009 lane; main-side exclusion restored at 009 merge).
 - This file replaced the `/tmp/pb-009ref` scratch dependency that broke remote
   CI (PR #11, run 35169843720): a clean checkout now runs with no outside-tree
   fixture.

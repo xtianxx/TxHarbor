@@ -152,6 +152,13 @@ type Metrics struct {
 	nonceObservations      *prometheus.CounterVec
 	nonceHolds             *prometheus.CounterVec
 	nonceReconcileFailures *prometheus.CounterVec
+	// 009 signer surface (internal/metrics/signer.go; T012).
+	signerRequests     *prometheus.CounterVec
+	signerSigned       *prometheus.CounterVec
+	signerRefusals     *prometheus.CounterVec
+	signerGateRefusals *prometheus.CounterVec
+	signerAdmissions   *prometheus.CounterVec
+	signerCommits      *prometheus.CounterVec
 
 	handler http.Handler
 }
@@ -407,7 +414,7 @@ func New(ready func() bool) *Metrics {
 		Help: "008 per-scope reconcile-tick failures that entered the bounded backoff.",
 	}, nil)
 	registry.MustRegister(nonceAllocations, nonceReplays, nonceObservations, nonceHolds, nonceReconcileFailures)
-	return &Metrics{
+	m := &Metrics{
 		registry:                     registry,
 		probeTotal:                   probeTotal,
 		indexerHeight:                indexerHeight,
@@ -454,6 +461,8 @@ func New(ready func() bool) *Metrics {
 		nonceReconcileFailures:       nonceReconcileFailures,
 		handler:                      promhttp.HandlerFor(registry, promhttp.HandlerOpts{}),
 	}
+	m.registerSigner(registry)
+	return m
 }
 
 // Handler serves the Prometheus exposition format.

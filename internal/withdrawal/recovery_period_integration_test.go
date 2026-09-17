@@ -473,9 +473,14 @@ func TestWithdrawalRecoveryPeriodNoExecutionArtefacts(t *testing.T) {
 	recoveryPeriodAssertNoExecutionArtifactTables(t, context.Background(), poolA)
 	range007 := recoveryPeriodPublicBaseTables(t, context.Background(), poolA)
 
-	// Phase B: scoped to THIS path only — no new rows / no new tables in the above-007
-	// set; NOT a universal zero-side-effect proof. The 002–006 snapshot + recovery phase/recovery_seq
-	// + event count live in TestWithdrawalRecoveryPeriodZeroSideEffectsOutsideScope; 007 writes here = intake.go:84/:89.
+	// Phase B: full embedded chain — a compliant create during an active
+	// recovery leaves every above-007 table exactly as it was, and creates
+	// no new table. The lane schema is legitimately deployed (so an
+	// absence assertion on the full chain would be false); the guarantee
+	// under test is no execution side effect during recovery. Scoped to
+	// THIS path only, not a universal zero-side-effect proof (see
+	// TestWithdrawalRecoveryPeriodZeroSideEffectsOutsideScope for the
+	// 002–006 snapshot + recovery phase/seq + event count).
 	ctx, pool := grantSetup(t)
 	const (
 		callerID = int64(7404)
