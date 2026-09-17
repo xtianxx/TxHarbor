@@ -225,6 +225,18 @@
 > logs under `/tmp/opencode/joint-final/`. `Advance(ActionReplace)` remains a
 > deliberate `refused_basis` gap (no 010 fee policy); the J2 replacement leg
 > is recorded blocked-with-reason, never faked. A-13 and T000-P remain OPEN.
+>
+> **Round-2 fee replacement (2026-09-18, clean tree at `e9fb9ff`)** — the
+> caller-supplied replacement path is implemented and proven (`T059`/`T060`).
+> `Advance(ActionReplace)` without caller-supplied fee dimensions still refuses
+> `refused_basis` naming the missing 010 fee policy, so the J2 replacement leg
+> passes unmodified; with the candidate supplied it constructs the new attempt
+> via `PrepareAttempt{ReplacementOf: anchor}` and the full gates. Same-grant
+> reuse remains subject to the recorded 009 grant-scope preemption
+> (`request_id == signing_request_id`), so the successful real-Anvil proof runs
+> under a fresh PB grant whose scope carries the replacement signing identity.
+> Raw logs: `/home/dream/product_env/TxHarbor/.evidence/joint-round2/replace/`.
+> A-13 and T000-P remain OPEN.
 
 ---
 
@@ -257,6 +269,11 @@
 > `internal/db` PB overlay tests carry a pre-existing out-of-lane failure (000011
 > in their exact-count overlay set), reported as-is and not fixed.
 
+### Round-2 fee replacement (2026-09-18, owner 010)
+
+- [x] T059 [US4] Implement the caller-supplied fee replacement path: `internal/execution/advance.go` + `internal/execution/lifecycle.go` carry the ActionReplace candidate (fee dimensions as exact decimal strings, optional fresh PB grant, preallocated replacement signing identity) through `StepRequest` → `AdvanceRequest` → `txlifecycle.LifecycleLive.replace`; the adapter constructs via `Store.PrepareAttempt{ReplacementOf: anchor}` + `Send`, reusing `validateReplacementAnchor`, the shared PB fee-scope arithmetic (`checkFeeTriple`) and the `allows_fee_replacement`/scope-cap checks; 010 never derives or invents a fee rate (FR-05/FR-06; send-api §2.1; send-gate §3 replacement-reuse row; persistence.md G-010-5). The V12 boundary scan sanctions exactly the four candidate fields and stays closed otherwise. Evidence: `e9fb9ff` (`joint-round2/replace/build|lint|unit`).
+- [x] T060 [US4] Execute the real-Anvil replacement acceptance in `internal/txlifecycle/joint_replace_integration_test.go` through the production worker Driver (`app.NewJointWithdrawalWorker` → `worker.Driver.IssueAndAdvance` → `LifecycleLive`) with automine off: a pending anchor is superseded on the same intent/binding/nonce by a higher-fee replacement under a fresh PB grant (new attempt + signing identity, anchor history retained, same-step retry converges idempotently); identical fees refuse `replacement_no_fee_change`, over-cap fees refuse `fee_scope_exceeded`, the disabled purpose token refuses `scope_reuse_forbidden`, all with zero dispatch; the sibling attempt moves to `replaced` only after the replacement is included on chain (FR-05/FR-06; send-gate §3; persistence.md §3/§4.6 G-010-5). Evidence: `e9fb9ff` (`joint-round2/replace/replace-*.log`, `joint-regression-*.log`, `txlifecycle-full-*.log`).
+
 ---
 
 ## Traceability
@@ -269,8 +286,8 @@
 | FR-02 (bytes + local hash durable before send) | local reconstruction + hash/sender cross-check + T2 (R-010-03; data-model Table 2; `signing.go`; signer-call §4) | OC-4/D9 | T008, T011, T021 | V2 |
 | FR-03 (unknown ≠ success/failure/unpaid; reconcile path; no auto new payment) | fail-safe dispatch classification + claim-free reconcile + unknown recovery interface (R-010-05/06; `reconcile.go`; send-api §2.3/§5) | Q1/C9; OC-6/OC-7 | T017, T023, T024, T025, T026 | V4, V5 |
 | FR-04 (same-bytes replay; same attempt/identity; current gates) | replay re-uses persisted bytes + full gate sequence (R-010-04; `send.go`) | Q3 (no replay exception/TTL) | T028, T029 | V3, V6 |
-| FR-05 (replacement: new attempt + identity, same intent/binding/semantics) | `replacement_of` + immutable anchor + `tx_hash` UNIQUE (R-010-07; data-model Table 1) | OC-4/D6 | T030, T032 | V7 |
-| FR-06 (PB conditional reuse + explicit authorization identity/version) | gate step 8 reuse/fresh branch + attempt stores `authorization_id`+version (R-010-07; send-gate §3) | PB-C1/C2; OC-5 | T031, T032 | V7 |
+| FR-05 (replacement: new attempt + identity, same intent/binding/semantics) | `replacement_of` + immutable anchor + `tx_hash` UNIQUE (R-010-07; data-model Table 1) | OC-4/D6 | T030, T032, T059, T060 | V7, round-2 replace |
+| FR-06 (PB conditional reuse + explicit authorization identity/version) | gate step 8 reuse/fresh branch + attempt stores `authorization_id`+version (R-010-07; send-gate §3) | PB-C1/C2; OC-5 | T031, T032, T059, T060 | V7, round-2 replace |
 | FR-07 (006 pause/recovery inheritance; multi-pause; read-only) | gate steps 2–5 + `SHARE` locks; zero writes to 006 tables (R-010-04; send-gate §2/§3) | OC-6; Q3 (G-010-1 natural expiry) | T016, T022 | V6 |
 | FR-08 (receipt + expected Transfer verification) | receipt verify over canonical `chain_blocks` + pinned Transfer semantics (R-010-08; `verify.go`) | OC-7/D1 | T033, T036 | V8 |
 | FR-09 (confirmation + reorg revision chain; no compensating rebuild) | confirmation basis + append-only revision events + `replaced` marking (R-010-09; `confirm.go`) | 011 M2 inherited; Q1 revision bookkeeping | T034, T035, T037, T038 | V8, V9, J4 |
