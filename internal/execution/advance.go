@@ -209,7 +209,10 @@ func (d *StepDriver) issue(ctx context.Context, req StepRequest) (issueResult, e
 	}); err != nil {
 		return issueResult{}, err
 	}
-	if intent.State == IntentClaimed {
+	// claimed->executing and revised->executing are both send-enabling edges:
+	// the claim and the full gate set above were re-verified in this
+	// transaction, so a revision grants no send authority by itself (M2/Q3).
+	if intent.State == IntentClaimed || intent.State == IntentRevised {
 		if err := TransitionIntent(ctx, tx, req.IntentID, intent.State, intent.StateVersion, IntentExecuting, req.LeaseVersion); err != nil && !errors.Is(err, ErrTransitionRefused) {
 			return issueResult{}, err
 		}
@@ -424,5 +427,8 @@ func IsFrozen(ctx context.Context, q Queryer, intentID string) (bool, string, er
 		return false, "", fmt.Errorf("read freeze marker: %w", err)
 	}
 	class := strings.TrimPrefix(detail, "freeze:")
+	if i := strings.IndexAny(class, " \t"); i >= 0 {
+		class = class[:i]
+	}
 	return true, class, nil
 }

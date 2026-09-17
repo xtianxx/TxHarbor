@@ -44,6 +44,8 @@ func WithdrawalExec(ctx context.Context, args []string, d Deps) int {
 		return withdrawalExecPermissionRevoke(ctx, args[1:], d)
 	case "claim-revoke":
 		return withdrawalExecClaimRevoke(ctx, args[1:], d)
+	case "projection-refresh":
+		return withdrawalExecProjectionRefresh(ctx, args[1:], d)
 	case "claim-show":
 		return withdrawalExecClaimShow(ctx, args[1:], d)
 	case "step-list":
@@ -132,7 +134,7 @@ func insertExecAudit(ctx context.Context, pool *pgxpool.Pool, op operatorOp) err
 
 const insertExecAuditSQL = `INSERT INTO execution_ops_audit
   (operation_id, action, intent_id, caller_id, subject_version, outcome, operator, reason, evidence, detail)
-  VALUES ($1, $2, NULLIF($3, ''), $4, $5, $6, $7, $8, $9, $10)`
+  VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`
 
 func insertExecAuditTx(ctx context.Context, tx pgx.Tx, op operatorOp, outcome string) error {
 	_, err := tx.Exec(ctx, insertExecAuditSQL, op.OperationID, op.Action, op.IntentID,
@@ -396,6 +398,62 @@ func withdrawalExecClaimRevoke(ctx context.Context, args []string, d Deps) int {
 	return 0
 }
 
+// withdrawalExecProjectionRefresh applies the version-guarded display update
+// from 010 authority (contracts/api.md §3). It is deduplicated by operation_id
+// and audited; an unavailable authority records refused and marks the row
+// possibly_stale with zero business-state writes. No display SLA is promised or
+// implied (C11); the real 010 reader is joint wiring, so an independent 011 run
+// takes the unavailable branch and never fabricates an applied outcome.
+func withdrawalExecProjectionRefresh(ctx context.Context, args []string, d Deps) int {
+	stdout, stderr := d.stdout(), d.stderr()
+	fs := flag.NewFlagSet("withdrawal-exec projection-refresh", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	requestID := fs.String("request-id", "", "request whose display projection is refreshed (required)")
+	operationID := fs.String("operation-id", "", "idempotent operation identity (required)")
+	operator := fs.String("operator", "", "declared operator identity (required)")
+	if err := fs.Parse(args); err != nil {
+		return 2
+	}
+	if fs.NArg() > 0 || *requestID == "" || *operationID == "" || *operator == "" {
+		withdrawalExecUsage(stderr)
+		return 2
+	}
+
+	pool, code := withdrawalExecOpenPool(ctx, d)
+	if pool == nil {
+		return code
+	}
+	defer pool.Close()
+
+	op := operatorOp{
+		OperationID: *operationID,
+		Action:      "projection_refresh",
+		Operator:    *operator,
+		Detail:      "request_id=" + *requestID,
+	}
+	outcome, recorded, err := execOperatorOp(ctx, pool, op, func(ctx context.Context, tx pgx.Tx) (string, error) {
+		res, err := execution.RefreshProjection(ctx, tx, nil, *requestID)
+		if err != nil {
+			return "", err
+		}
+		if !res.Found {
+			return "", errors.New("no execution intent for request")
+		}
+		return res.Outcome, nil
+	})
+	if err != nil {
+		if errors.Is(err, errOperationConflict) {
+			fmt.Fprintf(stderr, "txharbor withdrawal-exec: operation_conflict operation_id=%s\n", *operationID)
+			return 1
+		}
+		fmt.Fprintf(stderr, "txharbor withdrawal-exec: projection-refresh refused: %s\n", logx.Redact(err.Error()))
+		return 1
+	}
+	fmt.Fprintf(stdout, "txharbor withdrawal-exec: projection-refresh %s request_id=%s operation_id=%s recorded=%t\n",
+		outcome, *requestID, *operationID, recorded)
+	return 0
+}
+
 // withdrawalExecClaimShow prints one claim row read-only (no audit).
 func withdrawalExecClaimShow(ctx context.Context, args []string, d Deps) int {
 	stdout, stderr := d.stdout(), d.stderr()
@@ -424,10 +482,16 @@ func withdrawalExecClaimShow(ctx context.Context, args []string, d Deps) int {
 		fmt.Fprintf(stderr, "txharbor withdrawal-exec: no claim for intent_id=%s\n", *intentID)
 		return 1
 	}
-	fmt.Fprintf(stdout, "claim intent_id=%s owner_id=%s lease_version=%d state=%s expires_at=%s last_heartbeat_at=%s last_progress_at=%s stall_flagged_at=%s ended_at=%s end_kind=%s\n",
+	frozen, freezeClass, err := execution.IsFrozen(ctx, pool, *intentID)
+	if err != nil {
+		fmt.Fprintf(stderr, "txharbor withdrawal-exec: claim-show failed: %s\n", logx.Redact(err.Error()))
+		return 1
+	}
+	fmt.Fprintf(stdout, "claim intent_id=%s owner_id=%s lease_version=%d state=%s expires_at=%s last_heartbeat_at=%s last_progress_at=%s stall_flagged_at=%s ended_at=%s end_kind=%s frozen=%t freeze_class=%s\n",
 		c.IntentID, c.OwnerID, c.LeaseVersion, c.State, c.ExpiresAt.UTC().Format(time.RFC3339),
 		c.LastHeartbeatAt.UTC().Format(time.RFC3339), c.LastProgressAt.UTC().Format(time.RFC3339),
-		formatTimePtr(c.StallFlaggedAt), formatTimePtr(c.EndedAt), formatStringPtr(c.EndKind))
+		formatTimePtr(c.StallFlaggedAt), formatTimePtr(c.EndedAt), formatStringPtr(c.EndKind),
+		frozen, freezeClass)
 	return 0
 }
 

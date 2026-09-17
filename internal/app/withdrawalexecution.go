@@ -5,12 +5,15 @@
 package app
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"io"
 	"net/http"
 	"strings"
+	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/xtianxx/txharbor/internal/execution"
@@ -39,8 +42,10 @@ func (h *WithdrawalExecutionHandler) ServeHTTP(w http.ResponseWriter, r *http.Re
 	switch r.Method {
 	case http.MethodPost:
 		h.servePOST(w, r)
+	case http.MethodGet:
+		h.serveGET(w, r)
 	default:
-		w.Header().Set("Allow", http.MethodPost)
+		w.Header().Set("Allow", http.MethodGet+", "+http.MethodPost)
 		withdrawalWriteError(w, http.StatusMethodNotAllowed, codeMethodNotAllowed, "method not allowed", "", "", newWithdrawalTraceID())
 	}
 }
@@ -149,6 +154,161 @@ func emptyOrJSONBody(body io.Reader) bool {
 		return true
 	}
 	return json.Valid(raw)
+}
+
+// executionViewResponse is the GET /withdrawals/{request_id}/execution body
+// (contracts/api.md §2). The execution block is 011's authoritative rows; the
+// lifecycle block is the display projection reference. No credentials, keys,
+// raw bytes, or amounts.
+type executionViewResponse struct {
+	RequestID string              `json:"request_id"`
+	IntentID  string              `json:"intent_id,omitempty"`
+	Execution *executionViewBlock `json:"execution,omitempty"`
+	Lifecycle *lifecycleViewBlock `json:"lifecycle,omitempty"`
+	Note      string              `json:"note,omitempty"`
+}
+
+type executionViewBlock struct {
+	State        string              `json:"state"`
+	StateVersion int64               `json:"state_version"`
+	Owner        string              `json:"owner,omitempty"`
+	LeaseVersion int64               `json:"lease_version,omitempty"`
+	ExpiresAt    string              `json:"expires_at,omitempty"`
+	Steps        []executionStepView `json:"steps"`
+}
+
+type executionStepView struct {
+	StepID    string `json:"step_id"`
+	Action    string `json:"action"`
+	State     string `json:"state"`
+	AttemptID string `json:"attempt_id,omitempty"`
+}
+
+// lifecycleViewBlock always carries the four required references; a possibly
+// stale reference is explicitly labelled and never presented as a verified
+// current result.
+type lifecycleViewBlock struct {
+	AttemptID        string `json:"attempt_id"`
+	LifecycleVersion int64  `json:"lifecycle_version"`
+	ObservedAt       string `json:"observed_at"`
+	Freshness        string `json:"freshness"`
+}
+
+const staleReferenceNote = "the lifecycle reference may be out of date; it is not a verified current result"
+
+// serveGET renders the ownership-enforced execution view. It authenticates the
+// Bearer credential (401), resolves the caller from the key row, and renders
+// the same 404 for a missing and a foreign request. The endpoint is display
+// only: its output is never an admission/qualification/send/reconcile permit.
+func (h *WithdrawalExecutionHandler) serveGET(w http.ResponseWriter, r *http.Request) {
+	token, ok := withdrawalBearerToken(r)
+	if !ok {
+		withdrawalWriteError(w, http.StatusUnauthorized, string(withdrawal.CodeUnauthenticated), "missing or invalid API key", "", "", newWithdrawalTraceID())
+		return
+	}
+	auth, err := withdrawal.Authenticate(r.Context(), h.Pool, token)
+	if err != nil {
+		writeExecutionAuthError(w, err)
+		return
+	}
+	requestID := executionRequestID(r)
+	if requestID == "" {
+		withdrawalWriteError(w, http.StatusBadRequest, string(withdrawal.CodeValidationFailed), "request_id is required", "", "", newWithdrawalTraceID())
+		return
+	}
+	view, found, err := readExecutionView(r.Context(), h.Pool, auth.Caller.ID, requestID)
+	if err != nil {
+		withdrawalWriteError(w, http.StatusServiceUnavailable, string(withdrawal.CodeTemporarilyUnavailable), withdrawalUnavailableMessage, "", "", newWithdrawalTraceID())
+		return
+	}
+	if !found {
+		withdrawalWriteError(w, http.StatusNotFound, string(withdrawal.CodeNotFound), "withdrawal not found", "", "", newWithdrawalTraceID())
+		return
+	}
+	withdrawalWriteJSON(w, http.StatusOK, newWithdrawalTraceID(), view)
+}
+
+// readExecutionView joins the 007 request row (ownership) to 011's
+// authoritative execution rows and the display projection. found=false covers
+// both a missing and a foreign request so the caller renders an identical 404.
+func readExecutionView(ctx context.Context, pool *pgxpool.Pool, callerID int64, requestID string) (executionViewResponse, bool, error) {
+	var (
+		gotRequest string
+		intentID   *string
+		state      *string
+		stateVers  *int64
+	)
+	err := pool.QueryRow(ctx, `SELECT r.request_id, i.intent_id, i.state, i.state_version
+		FROM withdrawal_requests r
+		LEFT JOIN payment_intents i ON i.request_id = r.request_id
+		WHERE r.request_id = $1 AND r.caller_id = $2`, requestID, callerID).
+		Scan(&gotRequest, &intentID, &state, &stateVers)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return executionViewResponse{}, false, nil
+	}
+	if err != nil {
+		return executionViewResponse{}, false, err
+	}
+	view := executionViewResponse{RequestID: gotRequest}
+	if intentID == nil {
+		return view, true, nil
+	}
+	view.IntentID = *intentID
+
+	block := &executionViewBlock{State: *state, StateVersion: *stateVers}
+	var (
+		owner     string
+		leaseVers int64
+		expiresAt time.Time
+	)
+	err = pool.QueryRow(ctx, `SELECT owner_id, lease_version, expires_at FROM execution_claims WHERE intent_id = $1`, *intentID).
+		Scan(&owner, &leaseVers, &expiresAt)
+	switch {
+	case errors.Is(err, pgx.ErrNoRows):
+	case err != nil:
+		return executionViewResponse{}, false, err
+	default:
+		block.Owner = owner
+		block.LeaseVersion = leaseVers
+		block.ExpiresAt = expiresAt.UTC().Format(time.RFC3339)
+	}
+
+	rows, err := pool.Query(ctx, `SELECT step_id, action, state, COALESCE(attempt_id, '')
+		FROM execution_steps WHERE intent_id = $1 ORDER BY issued_at, step_id`, *intentID)
+	if err != nil {
+		return executionViewResponse{}, false, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var s executionStepView
+		if err := rows.Scan(&s.StepID, &s.Action, &s.State, &s.AttemptID); err != nil {
+			return executionViewResponse{}, false, err
+		}
+		block.Steps = append(block.Steps, s)
+	}
+	if err := rows.Err(); err != nil {
+		return executionViewResponse{}, false, err
+	}
+	view.Execution = block
+
+	projection, found, err := execution.ReadProjection(ctx, pool, gotRequest)
+	if err != nil {
+		return executionViewResponse{}, false, err
+	}
+	if found {
+		life := &lifecycleViewBlock{LifecycleVersion: projection.LifecycleVersion, Freshness: projection.Freshness}
+		if projection.LifecycleAttemptID != nil {
+			life.AttemptID = *projection.LifecycleAttemptID
+		}
+		if projection.LifecycleObservedAt != nil {
+			life.ObservedAt = projection.LifecycleObservedAt.UTC().Format(time.RFC3339)
+		}
+		view.Lifecycle = life
+		if projection.Freshness == execution.FreshnessPossiblyStale {
+			view.Note = staleReferenceNote
+		}
+	}
+	return view, true, nil
 }
 
 // writeExecutionAuthError maps a credential failure: unauthenticated is 401,

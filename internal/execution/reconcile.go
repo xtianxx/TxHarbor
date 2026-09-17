@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -59,6 +60,21 @@ func (r *Reconciler) ReconcileIntent(ctx context.Context, intentID, ownerID stri
 		// business state; the caller retries boundedly.
 		_ = markProjectionStale(ctx, r.Pool, intent.RequestID)
 		return ReconcileResult{IntentID: intentID, Retryable: true, Basis: "lifecycle reader unavailable"}, nil
+	}
+
+	// Automatic display consumption: a successful authority read refreshes the
+	// lifecycle stream (write-only; no decision reads it back).
+	if _, err := applyLifecycleProjection(ctx, r.Pool, intent.RequestID, facts.CurrentAttemptID, facts.RevisionVersion); err != nil {
+		return ReconcileResult{}, err
+	}
+
+	if frozen, freezeClass, err := r.frozen(ctx, intentID, facts); err != nil {
+		return ReconcileResult{}, err
+	} else if frozen {
+		if err := r.recordFreeze(ctx, intent, facts, freezeClass); err != nil {
+			return ReconcileResult{}, err
+		}
+		return r.reconcileFrozen(ctx, intent, open, hasOpen, facts, ownerID, leaseVersion, freezeClass)
 	}
 
 	if !hasOpen {
@@ -120,6 +136,96 @@ func (r *Reconciler) ReconcileIntent(ctx context.Context, intentID, ownerID stri
 		return ReconcileResult{}, err
 	}
 	return ReconcileResult{IntentID: intentID, Reconciling: true, Retryable: true, Basis: "observation recorded"}, nil
+}
+
+// FreezeLockLoss is the G-010-2 class (c) unperceived lock-loss freeze. 011
+// consumes the class as input and refuses sends while frozen; it claims no
+// detection guarantee and no "window is tiny/rare" property.
+const FreezeLockLoss = "lock_loss"
+
+// FreezeClass reports the freeze class the unknown-recovery condition carries.
+// The exact 010-side token is joint wiring (010:T039); an explicit "freeze:"
+// prefix and the lock-loss condition names are both recognised.
+func FreezeClass(facts LifecycleFacts) (string, bool) {
+	if facts.Unknown == nil {
+		return "", false
+	}
+	cond := strings.ToLower(facts.Unknown.RecoveryCondition)
+	if cond == "" {
+		return "", false
+	}
+	if i := strings.Index(cond, "freeze:"); i >= 0 {
+		if rest := strings.TrimSpace(cond[i+len("freeze:"):]); rest != "" {
+			return rest, true
+		}
+		return FreezeLockLoss, true
+	}
+	if strings.Contains(cond, "lock_loss") || strings.Contains(cond, "lock-loss") ||
+		strings.Contains(cond, "lockloss") || strings.Contains(cond, "freeze") {
+		return FreezeLockLoss, true
+	}
+	return "", false
+}
+
+// frozen reports the freeze state from the authority facts or an already
+// recorded marker. A recorded marker is never cleared here: only the 010-side
+// controlled manual release (010:T040) can end the freeze.
+func (r *Reconciler) frozen(ctx context.Context, intentID string, facts LifecycleFacts) (bool, string, error) {
+	if class, ok := FreezeClass(facts); ok {
+		return true, class, nil
+	}
+	marked, class, err := IsFrozen(ctx, r.Pool, intentID)
+	if err != nil {
+		return false, "", err
+	}
+	return marked, class, nil
+}
+
+// recordFreeze appends the freeze class as durable evidence exactly once.
+func (r *Reconciler) recordFreeze(ctx context.Context, intent Intent, facts LifecycleFacts, class string) error {
+	already, _, err := IsFrozen(ctx, r.Pool, intent.IntentID)
+	if err != nil {
+		return err
+	}
+	if already {
+		return nil
+	}
+	tx, err := r.Pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("begin freeze evidence: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	detail := "freeze:" + class
+	if facts.Unknown != nil {
+		detail += " condition=" + facts.Unknown.RecoveryCondition
+	}
+	if err := AppendEvent(ctx, tx, Event{
+		IntentID: intent.IntentID, Kind: EventReconcileObserved,
+		AttemptID: facts.CurrentAttemptID, RevisionVersion: facts.RevisionVersion, Detail: detail,
+	}); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
+}
+
+// reconcileFrozen observes a frozen intent without resolving it: the open step
+// stays unknown/reconciling and no terminal or executing transition is applied.
+func (r *Reconciler) reconcileFrozen(ctx context.Context, intent Intent, open Step, hasOpen bool, facts LifecycleFacts, ownerID string, leaseVersion int64, class string) (ReconcileResult, error) {
+	basis := "frozen:" + class + "; reconcile observes only"
+	if !hasOpen {
+		return ReconcileResult{IntentID: intent.IntentID, Reconciling: true, Retryable: true, Basis: basis}, nil
+	}
+	if err := r.convergeOpenStep(ctx, intent, open, StepUnknown, OutcomeReconcileRequired,
+		facts.CurrentAttemptID, "", facts.RevisionVersion, "frozen "+class); err != nil {
+		return ReconcileResult{}, err
+	}
+	if err := r.ensureReconciling(ctx, intent, ownerID, leaseVersion); err != nil {
+		return ReconcileResult{}, err
+	}
+	return ReconcileResult{
+		IntentID: intent.IntentID, Converged: true, FinalStepState: StepUnknown,
+		OutcomeClass: OutcomeReconcileRequired, Reconciling: true, Retryable: true, Basis: basis,
+	}, nil
 }
 
 func (r *Reconciler) readFacts(ctx context.Context, intentID string) (LifecycleFacts, error) {
@@ -295,65 +401,5 @@ func (r *Reconciler) ReconcileAllOpenSteps(ctx context.Context) error {
 	return nil
 }
 
-// ProjectionCatchUp011 applies the 011 state stream to every projection row in
-// version order (the display plane; never read by decisions).
-func (r *Reconciler) ProjectionCatchUp011(ctx context.Context) error {
-	rows, err := r.Pool.Query(ctx, `SELECT request_id, state, state_version FROM payment_intents ORDER BY state_version ASC`)
-	if err != nil {
-		return err
-	}
-	defer rows.Close()
-	type row struct {
-		requestID string
-		state     string
-		version   int64
-	}
-	var all []row
-	for rows.Next() {
-		var rr row
-		if err := rows.Scan(&rr.requestID, &rr.state, &rr.version); err != nil {
-			return err
-		}
-		all = append(all, rr)
-	}
-	if err := rows.Err(); err != nil {
-		return err
-	}
-	for _, rr := range all {
-		if _, err := applyStateProjection(ctx, r.Pool, rr.requestID, rr.state, rr.version); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
-// ApplyStateProjection exposes the version-guarded 011 state apply to the
-// worker cycle.
-func (r *Reconciler) ApplyStateProjection(ctx context.Context, requestID, state string, version int64) error {
-	_, err := applyStateProjection(ctx, r.Pool, requestID, state, version)
-	return err
-}
-
-// applyStateProjection applies the 011-side state stream only when the incoming
-// version is greater; an older arrival affects zero rows and never overwrites a
-// newer one (data-model Table 5).
-func applyStateProjection(ctx context.Context, q Queryer, requestID, state string, version int64) (bool, error) {
-	tag, err := q.Exec(ctx, `UPDATE request_status_projection
-		SET execution_state = $2, state_version = $3, updated_at = now()
-		WHERE request_id = $1 AND state_version < $3`, requestID, state, version)
-	if err != nil {
-		return false, fmt.Errorf("apply state projection: %w", err)
-	}
-	return tag.RowsAffected() == 1, nil
-}
-
-// markProjectionStale records a possibly-stale freshness without rewriting any
-// stored version or converting a known result.
-func markProjectionStale(ctx context.Context, q Queryer, requestID string) error {
-	if _, err := q.Exec(ctx, `UPDATE request_status_projection
-		SET freshness = 'possibly_stale', stale_since = coalesce(stale_since, now()), updated_at = now()
-		WHERE request_id = $1 AND freshness = 'confirmed'`, requestID); err != nil {
-		return fmt.Errorf("mark projection stale: %w", err)
-	}
-	return nil
-}
+// The projection SQL and its version-guarded applies live in projection.go
+// (the single writer of the display-only projection).
