@@ -10,10 +10,13 @@ import (
 	"math/big"
 	"net"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 
 	"github.com/ethereum/go-ethereum"
+	"github.com/ethereum/go-ethereum/common"
+	"github.com/ethereum/go-ethereum/common/hexutil"
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/ethereum/go-ethereum/ethclient"
@@ -41,6 +44,18 @@ const (
 	// or unfinished pagination. Callers must shrink the interval and retry
 	// from the same height, never treat it as an empty result (003 FR-12).
 	KindIncomplete Kind = "incomplete"
+
+	// Send-specific classes (010 T002/R-010-05; added alongside, never
+	// replacing, the read-side vocabulary above). These are dispatch-evidence
+	// classes, never payment verdicts.
+	KindAlreadyKnown           Kind = "already-known"
+	KindNonceTooLow            Kind = "nonce-too-low"
+	KindReplacementUnderpriced Kind = "replacement-underpriced"
+	KindInsufficientFunds      Kind = "insufficient-funds"
+	KindIntrinsicGasTooLow     Kind = "intrinsic-gas-too-low"
+	// KindHashMismatch means eth_sendRawTransaction returned a hash different
+	// from the persisted tx_hash: a fail-safe unknown, never accepted.
+	KindHashMismatch Kind = "hash-mismatch"
 )
 
 // TransferSig is keccak256("Transfer(address,address,uint256)"), the
@@ -151,6 +166,79 @@ func (c *Client) FilterLogs(ctx context.Context, q ethereum.FilterQuery) ([]type
 		return nil, &Error{Kind: classifyLogFilter(err, ctx), Op: "eth_getLogs", Err: err}
 	}
 	return logs, nil
+}
+
+// SendSignedTransaction submits raw signed bytes via eth_sendRawTransaction and
+// requires the node to return the persisted hash. A different hash is
+// KindHashMismatch (fail-safe unknown); transport/timeout/rate-limit and the
+// allowlisted deterministic refusals are classified for the caller (010 T002).
+func (c *Client) SendSignedTransaction(ctx context.Context, raw []byte, expected common.Hash) (common.Hash, error) {
+	var returned common.Hash
+	if err := c.client.Client().CallContext(ctx, &returned, "eth_sendRawTransaction", hexutil.Encode(raw)); err != nil {
+		return common.Hash{}, &Error{Kind: classifySend(err, ctx), Op: "eth_sendRawTransaction", Err: err}
+	}
+	if returned != expected {
+		return returned, &Error{
+			Kind: KindHashMismatch,
+			Op:   "eth_sendRawTransaction",
+			Err:  fmt.Errorf("returned hash %s differs from persisted %s", returned.Hex(), expected.Hex()),
+		}
+	}
+	return returned, nil
+}
+
+// TransactionByHash probes eth_getTransactionByHash. isPending is true when
+// the node knows the tx but has not included it; ethereum.NotFound is
+// KindNotFound (a wait polarity, never a failure verdict).
+func (c *Client) TransactionByHash(ctx context.Context, hash common.Hash) (*types.Transaction, bool, error) {
+	tx, isPending, err := c.client.TransactionByHash(ctx, hash)
+	if err != nil {
+		return nil, false, &Error{Kind: classify(err, ctx), Op: "eth_getTransactionByHash", Err: err}
+	}
+	return tx, isPending, nil
+}
+
+// TransactionReceipt fetches eth_getTransactionReceipt; a missing receipt is
+// KindNotFound (the caller records not_found_yet and stays unknown).
+func (c *Client) TransactionReceipt(ctx context.Context, hash common.Hash) (*types.Receipt, error) {
+	receipt, err := c.client.TransactionReceipt(ctx, hash)
+	if err != nil {
+		return nil, &Error{Kind: classify(err, ctx), Op: "eth_getTransactionReceipt", Err: err}
+	}
+	if receipt == nil {
+		return nil, &Error{Kind: KindNotFound, Op: "eth_getTransactionReceipt", Err: ethereum.NotFound}
+	}
+	return receipt, nil
+}
+
+// BlockNumber returns the current head number via eth_blockNumber.
+func (c *Client) BlockNumber(ctx context.Context) (uint64, error) {
+	n, err := c.client.BlockNumber(ctx)
+	if err != nil {
+		return 0, &Error{Kind: classify(err, ctx), Op: "eth_blockNumber", Err: err}
+	}
+	return n, nil
+}
+
+// classifySend maps eth_sendRawTransaction rejections onto the send-specific
+// classes before falling back to the read-side classifier. The allowlist is
+// message-based (go-ethereum wraps node errors as rpc.Error); an unrecognized
+// error stays a generic transport/invalid-response class, never a verdict.
+func classifySend(err error, ctx context.Context) Kind {
+	msg := strings.ToLower(err.Error())
+	switch {
+	case strings.Contains(msg, "already known"):
+		return KindAlreadyKnown
+	case strings.Contains(msg, "nonce too low"):
+		return KindNonceTooLow
+	case strings.Contains(msg, "replacement transaction underpriced"):
+		return KindReplacementUnderpriced
+	case strings.Contains(msg, "insufficient funds"):
+		return KindInsufficientFunds
+	case strings.Contains(msg, "intrinsic gas too low"):
+		return KindIntrinsicGasTooLow
+	}
+	return classify(err, ctx)
 }
 
 // limitExceededCode is the de-facto JSON-RPC "limit exceeded" code returned by

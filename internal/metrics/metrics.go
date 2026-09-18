@@ -84,6 +84,17 @@ const (
 	// entered the bounded backoff. Label-free for the same reason; the
 	// failing scope and error ride the redacted log line only.
 	NonceReconcileFailuresMetricName = "txharbor_nonce_reconcile_failures_total"
+
+	// 010 transaction-lifecycle observability surface (T003; R-010-13;
+	// constitution XII; asserted by V11). Every label is a fixed vocabulary
+	// (send outcome, refusal class, reconcile classification, receipt effect),
+	// so no tx_hash, signature, signed byte or credential can become a label.
+	TxDispatchMetricName      = "txharbor_tx_dispatch_total"
+	TxGateRefusalMetricName   = "txharbor_tx_gate_refusal_total"
+	TxUnknownMetricName       = "txharbor_tx_unknown"
+	TxReconcileMetricName     = "txharbor_tx_reconcile_total"
+	TxReceiptEffectMetricName = "txharbor_tx_receipt_effect_total"
+	TxRevisionMetricName      = "txharbor_tx_revision_total"
 )
 
 // Metrics owns a private registry so multiple instances (tests, restarts of
@@ -159,6 +170,14 @@ type Metrics struct {
 	signerGateRefusals *prometheus.CounterVec
 	signerAdmissions   *prometheus.CounterVec
 	signerCommits      *prometheus.CounterVec
+
+	// 010 transaction-lifecycle surface (T003); fixed-vocabulary labels only.
+	txDispatch      *prometheus.CounterVec
+	txGateRefusal   *prometheus.CounterVec
+	txUnknown       *prometheus.GaugeVec
+	txReconcile     *prometheus.CounterVec
+	txReceiptEffect *prometheus.CounterVec
+	txRevision      *prometheus.CounterVec
 
 	handler http.Handler
 }
@@ -414,6 +433,33 @@ func New(ready func() bool) *Metrics {
 		Help: "008 per-scope reconcile-tick failures that entered the bounded backoff.",
 	}, nil)
 	registry.MustRegister(nonceAllocations, nonceReplays, nonceObservations, nonceHolds, nonceReconcileFailures)
+
+	txDispatch := prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: TxDispatchMetricName,
+		Help: "010 dispatch outcomes by outcome (accepted/rejected/unknown); a send fact, never a payment verdict.",
+	}, []string{"outcome"})
+	txGateRefusal := prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: TxGateRefusalMetricName,
+		Help: "010 zero-dispatch gate/send refusals by refusal class (fixed vocabulary from errors.go).",
+	}, []string{"class"})
+	txUnknown := prometheus.NewGaugeVec(prometheus.GaugeOpts{
+		Name: TxUnknownMetricName,
+		Help: "010 attempts whose business effect is currently unknown: 1 while any attempt is unknown, else 0.",
+	}, nil)
+	txReconcile := prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: TxReconcileMetricName,
+		Help: "010 reconcile observations by classification (found_pending/included/not_found_yet/unavailable).",
+	}, []string{"classification"})
+	txReceiptEffect := prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: TxReceiptEffectMetricName,
+		Help: "010 receipt effect verdicts by effect (effective/ineffective_*); mismatch never counts as paid.",
+	}, []string{"effect"})
+	txRevision := prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: TxRevisionMetricName,
+		Help: "010 reorg revisions applied (append-only revision chain); monotonic counter.",
+	}, nil)
+	registry.MustRegister(txDispatch, txGateRefusal, txUnknown, txReconcile, txReceiptEffect, txRevision)
+
 	m := &Metrics{
 		registry:                     registry,
 		probeTotal:                   probeTotal,
@@ -459,6 +505,12 @@ func New(ready func() bool) *Metrics {
 		nonceObservations:            nonceObservations,
 		nonceHolds:                   nonceHolds,
 		nonceReconcileFailures:       nonceReconcileFailures,
+		txDispatch:                   txDispatch,
+		txGateRefusal:                txGateRefusal,
+		txUnknown:                    txUnknown,
+		txReconcile:                  txReconcile,
+		txReceiptEffect:              txReceiptEffect,
+		txRevision:                   txRevision,
 		handler:                      promhttp.HandlerFor(registry, promhttp.HandlerOpts{}),
 	}
 	m.registerSigner(registry)
@@ -808,4 +860,40 @@ func (m *Metrics) ObserveNonceHoldEstablished() {
 // that entered the bounded backoff.
 func (m *Metrics) ObserveNonceReconcileFailure() {
 	m.nonceReconcileFailures.WithLabelValues().Inc()
+}
+
+// ObserveTxDispatch counts one 010 dispatch action by outcome
+// (accepted/rejected/unknown); the outcome is a send fact, not a verdict.
+func (m *Metrics) ObserveTxDispatch(outcome string) {
+	m.txDispatch.WithLabelValues(outcome).Inc()
+}
+
+// ObserveTxGateRefusal counts one 010 zero-dispatch refusal by refusal class.
+func (m *Metrics) ObserveTxGateRefusal(class string) {
+	m.txGateRefusal.WithLabelValues(class).Inc()
+}
+
+// ObserveTxUnknown records whether any attempt currently has an unknown
+// business effect: 1 while true, else 0.
+func (m *Metrics) ObserveTxUnknown(unknown bool) {
+	if unknown {
+		m.txUnknown.WithLabelValues().Set(1)
+		return
+	}
+	m.txUnknown.WithLabelValues().Set(0)
+}
+
+// ObserveTxReconcile counts one reconcile observation by classification.
+func (m *Metrics) ObserveTxReconcile(classification string) {
+	m.txReconcile.WithLabelValues(classification).Inc()
+}
+
+// ObserveTxReceiptEffect counts one receipt effect verdict by effect.
+func (m *Metrics) ObserveTxReceiptEffect(effect string) {
+	m.txReceiptEffect.WithLabelValues(effect).Inc()
+}
+
+// ObserveTxRevision counts one reorg revision applied to the revision chain.
+func (m *Metrics) ObserveTxRevision() {
+	m.txRevision.WithLabelValues().Inc()
 }
