@@ -10,6 +10,8 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
+
+	"github.com/xtianxx/txharbor/internal/metrics"
 )
 
 // DB is the minimal pgx surface the store needs; *pgxpool.Pool satisfies it.
@@ -96,6 +98,7 @@ type Store struct {
 	signer       *SignerClient
 	sendTimeout  time.Duration
 	releaseToken string
+	metrics      *metrics.Metrics
 }
 
 // NewStore returns a store over db.

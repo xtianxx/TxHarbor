@@ -65,8 +65,11 @@ import (
 )
 
 // fhProbeTimeout is the server WriteTimeout for the failure harness: long
-// enough that a clean delivery completes well inside it, short enough that a
-// held region reliably writes past it.
+// enough that a clean delivery completes well inside it, and the injection's
+// release point anchors on it (fhHoldDelivery releases the caller lock at
+// sendTime + fhProbeTimeout + fhFlushMargin), so a held region always flushes
+// strictly past the expired deadline while its blocked `can_sign FOR SHARE`
+// stays well inside the region's 5s statement guard.
 const fhProbeTimeout = 2 * time.Second
 
 // ---------------------------------------------------------------------------
@@ -241,13 +244,32 @@ func fhWaitRegionBlocked(t *testing.T, ctx context.Context, pool *pgxpool.Pool) 
 	}
 }
 
-// fhHoldDelivery holds the caller row so the delivery region waits, then
-// releases it only after hold — by which point the request's server-side write
-// deadline has expired, so the region's flush is a real, detectable transport
-// failure. Returns the client-side outcome (an error or a non-200 response).
-func fhHoldDelivery(t *testing.T, h *shHarness, id *shIdentity, body []byte, hold time.Duration) (int, []byte, error) {
+// fhFlushMargin is how long past the request's server-side write deadline the
+// caller-lock release is scheduled. The release therefore happens strictly
+// after the deadline, so the region's first real socket write (the flush) is
+// provably past it — while the blocked `can_sign FOR SHARE` waits only
+// ~2s+differential, comfortably inside the region's 5s statement guard
+// (delivery.go deliverySendGuard). A blind fixed sleep is not safe here: it
+// must land inside the (WriteTimeout, statement_timeout) window, and a
+// scheduler stall can push it out (observed: a 3s sleep landing at +5.4s, which
+// let the 5s statement timeout fire first and turned the attempt into a clean
+// pre-sink `storage_unavailable` — no `delivery_unknown`, and the strict audit
+// assertion failed without the injection ever firing).
+const fhFlushMargin = 250 * time.Millisecond
+
+// fhHoldDelivery holds the caller row so the delivery region waits on its
+// `can_sign ... FOR SHARE` read, then releases the lock at a computed point:
+// sendTime + WriteTimeout + fhFlushMargin (or immediately when that point is
+// already past). The release is therefore always strictly after the request's
+// server-side write deadline, so the region's flush is provably a real,
+// detectable transport failure — never an untriggered injection counted as a
+// pass. Returns the client-side outcome (an error or a non-200 response); on
+// subtest failure it dumps the client outcome, the request's audit rows, and
+// the signer stderr as the timeout diagnostic.
+func fhHoldDelivery(t *testing.T, h *shHarness, stderr *fhSyncBuffer, id *shIdentity, body []byte) (int, []byte, error) {
 	t.Helper()
 	ctx := h.ctx
+	sendAt := time.Now()
 	tx, err := h.pool.Begin(ctx)
 	if err != nil {
 		t.Fatalf("begin caller lock: %v", err)
@@ -272,12 +294,38 @@ func fhHoldDelivery(t *testing.T, h *shHarness, id *shIdentity, body []byte, hol
 	}()
 
 	fhWaitRegionBlocked(t, ctx, h.pool)
-	time.Sleep(hold)
+	blockedAt := time.Now()
+	// Release strictly after the write deadline: sleep only the bounded
+	// remainder to the computed point (zero when already past).
+	if rest := fhProbeTimeout + fhFlushMargin - time.Since(sendAt); rest > 0 {
+		time.Sleep(rest)
+	}
+	releasedAt := time.Now()
+	var resp wireResp
+	t.Cleanup(func() {
+		if t.Failed() {
+			t.Logf("DIAG %s hold: sent=%s blocked=%s released=%s write-deadline=%s+%s; client status=%d err=%v raw=%q",
+				id.requestID, sendAt.Format("15:04:05.000"), blockedAt.Format("15:04:05.000"),
+				releasedAt.Format("15:04:05.000"), sendAt.Format("15:04:05.000"), fhProbeTimeout,
+				resp.status, resp.err, resp.body)
+			rows, qerr := h.pool.Query(ctx, `SELECT action, reason_class, detail FROM signing_request_audit
+				WHERE signing_request_id = $1 ORDER BY audit_id`, id.requestID)
+			if qerr == nil {
+				for rows.Next() {
+					var a, c, d string
+					_ = rows.Scan(&a, &c, &d)
+					t.Logf("DIAG %s audit: action=%s class=%q detail=%q", id.requestID, a, c, d)
+				}
+				rows.Close()
+			}
+			t.Logf("DIAG %s stderr tail:\n%s", id.requestID, stderr.String())
+		}
+	})
 	if err := tx.Commit(ctx); err != nil {
 		t.Fatalf("commit caller lock: %v", err)
 	}
-	res := <-ch
-	return res.status, res.body, res.err
+	resp = <-ch
+	return resp.status, resp.body, resp.err
 }
 
 // fhAuditDetails returns the recorded `detail` values for one audit action.
@@ -365,7 +413,7 @@ func TestSignerHTTPWriteFailureUnknown(t *testing.T) {
 	t.Run("deadline write failure maps to unknown", func(t *testing.T) {
 		id := h.identity(t, "deadline", false)
 		body := h.body(t, id)
-		status, raw, err := fhHoldDelivery(t, h, id, body, fhProbeTimeout+time.Second)
+		status, raw, err := fhHoldDelivery(t, h, stderr, id, body)
 		if err == nil && status == http.StatusOK {
 			t.Fatalf("deadline-failed delivery = %d/%s, want no 200 success", status, raw)
 		}
@@ -407,7 +455,7 @@ func TestSignerHTTPWriteFailureUnknown(t *testing.T) {
 		shWaitAdmission(t, ctx, h.pool, rowID, "delivered", 1)
 		sig, hash := shResult(t, ctx, h.pool, rowID)
 
-		status, raw, err := fhHoldDelivery(t, h, id, body, fhProbeTimeout+time.Second)
+		status, raw, err := fhHoldDelivery(t, h, stderr, id, body)
 		if err == nil && status == http.StatusOK {
 			t.Fatalf("failed replay = %d/%s, want no 200 success-from-history", status, raw)
 		}

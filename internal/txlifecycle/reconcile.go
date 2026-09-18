@@ -130,6 +130,9 @@ func (s *Store) Reconcile(ctx context.Context, attemptID, txHash string) (Reconc
 	if err := tx.Commit(ctx); err != nil {
 		return ReconcileResult{}, Refuse(ClassCoordinationUnavailable, "", "storage unavailable")
 	}
+	if s.metrics != nil {
+		s.metrics.ObserveTxReconcile(classification)
+	}
 	if refreshed, err := s.AttemptByID(ctx, attemptID); err == nil {
 		result.AttemptState = refreshed.State
 	} else {

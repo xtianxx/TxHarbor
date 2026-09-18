@@ -78,6 +78,9 @@ func (s *Store) reviseOrphanedReceipts(ctx context.Context, tx pgx.Tx, a *Attemp
 			"receipt_id="+itoa(c.id)+" block="+itoa(c.number)+" hash="+c.hash); err != nil {
 			return false, err
 		}
+		if s.metrics != nil {
+			s.metrics.ObserveTxRevision()
+		}
 		revision, state, err := lockAttemptRow(ctx, tx, a.AttemptID)
 		if err != nil {
 			return false, err

@@ -72,8 +72,16 @@ func (s *Store) WithReleaseToken(token string) *Store {
 
 // Send runs the send region: T2 first when the attempt is unsigned, then the
 // gate-verified T3 dispatch. A zero-dispatch refusal is returned with
-// Outcome=blocked and a committed gate_refused event (T017).
+// Outcome=blocked and a committed gate_refused event (T017). The completed
+// result is observed on the fixed-vocabulary 010 metric series
+// (metrics.go); observation never alters the outcome.
 func (s *Store) Send(ctx context.Context, req *SendRequest) (SendResult, error) {
+	res, err := s.send(ctx, req)
+	s.observeSend(res, err)
+	return res, err
+}
+
+func (s *Store) send(ctx context.Context, req *SendRequest) (SendResult, error) {
 	if s == nil || s.db == nil {
 		return SendResult{}, Refuse(ClassCoordinationUnavailable, "", "store has no database")
 	}
@@ -228,10 +236,16 @@ func (s *Store) sendRegion(ctx context.Context, a *Attempt, req *SendRequest, an
 }
 
 // commitRefusal commits zero-dispatch evidence in the region transaction.
+// When the refusal read itself poisoned the region transaction (a claim read
+// failing on SQLSTATE 42P01/42703 becomes claim_absent), the evidence is
+// re-committed in a standalone transaction and the EXACT refusal class is
+// returned — fail closed is never degraded into a coordination class
+// (G-010-4; R-010-11).
 func (s *Store) commitRefusal(ctx context.Context, tx pgx.Tx, a *Attempt, ref *RefusalError) (SendResult, error) {
 	if err := appendEventTx(ctx, tx, a.AttemptID, EventGateRefused, string(ref.Class), recoveryVersionPtr(a.RecoveryVersion), ref.Basis); err != nil {
 		_ = tx.Rollback(ctx)
-		return s.recordRegionAbort(ctx, a, err)
+		s.recordStandaloneRefusal(ctx, a, ref)
+		return blocked(a, ref)
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return blocked(a, ref)
