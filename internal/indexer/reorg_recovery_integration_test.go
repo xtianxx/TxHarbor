@@ -1111,7 +1111,15 @@ func TestReorgRecoveryUS1CrashResume(t *testing.T) {
 	// Lost-commit-response triage on the ancestor confirm: the COMMIT lands
 	// server-side while the worker observes an error; the outcome is decided
 	// by re-reading durable state, never by memory.
-	dropPool, dropCtl := logscanOpenCommitDropPool(t, s.dsn)
+	//
+	// Lane-I: this leg switches to the read-side completion-drop injector
+	// EXPLICITLY. Its fault semantics are identical to T028 triage (b)
+	// (committed + lost + re-read decides), and on the Lane-I branch's first
+	// full indexer run this exact leg reproduced the same race signature the
+	// legacy write-side injector showed on main's CI ("phase detected
+	// ancestor <nil>"): the legacy injector does not guarantee server-side
+	// commit completion before the re-read. Assertions below are unchanged.
+	dropPool, dropCtl := logscanOpenCompletionDropPool(t, s.dsn)
 	dropCtl.arm.Store(true)
 	// The drop pool runs the commit under the carried-over lease
 	// credentials (same owner+token the verdict expects); only the COMMIT
@@ -3424,13 +3432,25 @@ func TestT028CrashDrillAndRefork(t *testing.T) {
 	// Triage (b) committed: the COMMIT lands server-side while the worker
 	// observes the lost response; re-read decides ancestor_confirmed, and the
 	// immediate retry refuses instead of duplicating the event.
-	dropPool, dropCtl := logscanOpenCommitDropPool(t, s.dsn)
+	//
+	// Lane-I: this leg uses the read-side completion-drop injector, which
+	// withholds the backend reply until CommandComplete(COMMIT) +
+	// ReadyForQuery(idle) have been observed on the wire and only then closes
+	// the connection. The legacy write-side injector did not guarantee that
+	// server-side completion before the worker's error observation. The
+	// assertions below are unchanged.
+	dropPool, dropCtl := logscanOpenCompletionDropPool(t, s.dsn)
 	dropCtl.arm.Store(true)
 	lostErr := ConfirmRecoveryAncestor(ctx, dropPool, s.lease, s.chainID, cap,
 		int64(s.hA), s.aHashes[s.hA], "t028 triage lost-response evidence")
 	if lostErr == nil {
 		t.Fatal("ConfirmRecoveryAncestor through the commit-drop pool = nil, want the lost-response error")
 	}
+	if dropCtl.dropped.Load() != 1 || dropCtl.achieved.Load() != 1 {
+		t.Fatalf("commit-drop leg = dropped %d achieved %d, want 1/1 (completion pair must be wire-confirmed)", dropCtl.dropped.Load(), dropCtl.achieved.Load())
+	}
+	t.Logf("t028 triage(b): loss injected with wire-confirmed server completion (dropped=%d achieved=%d lostErrClass=%T)",
+		dropCtl.dropped.Load(), dropCtl.achieved.Load(), lostErr)
 	triRow, triErr := LoadRecoveryState(ctx, pool, s.chainID)
 	if triErr != nil || triRow == nil {
 		t.Fatalf("triage re-read = (%+v, %v), want the row", triRow, triErr)
@@ -3469,10 +3489,17 @@ func TestT028CrashDrillAndRefork(t *testing.T) {
 	// + phase invalidated + exactly one event means committed, so the drill
 	// continues with the REMAINING steps only (never re-runs the committed
 	// blocks step).
+	//
+	// Lane-I: same read-side completion-drop injector as triage (b) — the
+	// wire-confirmed completion keeps the "committed, response lost" premise
+	// deterministic across the restart leg.
 	exDrop := rrecExecutorBatch(t, dropPool, s.lease, s, 2)
 	dropCtl.arm.Store(true)
 	if err := exDrop.tickInvalidate(ctx, row, cap); err == nil {
 		t.Fatal("tickInvalidate through the commit-drop pool = nil, want the lost-response error")
+	}
+	if dropCtl.dropped.Load() != 2 || dropCtl.achieved.Load() != 2 {
+		t.Fatalf("invalidate leg = dropped %d achieved %d, want 2/2 (second arm, wire-confirmed completion)", dropCtl.dropped.Load(), dropCtl.achieved.Load())
 	}
 	pool, ex = resume(t)
 	row, cap = rrecRow(t, ctx, pool, s.chainID)

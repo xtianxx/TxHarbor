@@ -822,6 +822,15 @@ func logscanEmitCode(topics [3]common.Hash, amount *big.Int) []byte {
 // armed, forwards the next COMMIT to PostgreSQL and then closes the client
 // side before the reply can be read: the transaction commits, the worker
 // observes an error. Exactly the uncertain-commit state FR-16/OQ2 describes.
+//
+// Lane-I note: this write-side injector does NOT guarantee that the server
+// completed the commit — it closes immediately after handing the COMMIT bytes
+// to the kernel, so a test-side re-read can precede the server-side commit
+// completion (the fsync-vs-reread race diagnosed on the T028 CI failure).
+// The read-side counterpart (logscanCompletionDrop) guarantees the committed
+// state wire-side; callers choose explicitly, and no call site was changed
+// silently. (No claim is made here that the original CI root cause was
+// reproduced.)
 type logscanCommitDrop struct {
 	arm     atomic.Bool
 	dropped atomic.Int32
@@ -847,6 +856,240 @@ func (c *logscanCommitDropConn) Write(b []byte) (int, error) {
 		_ = c.Conn.Close() // reply lost; the forwarded COMMIT still lands
 	}
 	return n, err
+}
+
+// --- deterministic committed-response loss (Lane-I) --------------------------
+
+// logscanCompletionDrop is the read-side counterpart of logscanCommitDrop for
+// the legs that must prove the committed state: it forwards every request
+// untouched (including the complete COMMIT), then, on the SAME connection's
+// read side, withholds the backend's reply from pgx until the completion pair
+// has been fully observed on the wire — CommandComplete with tag COMMIT
+// followed by ReadyForQuery with the idle status byte 'I' — and only then
+// closes the connection and hands pgx a connection error (the withheld bytes
+// are never delivered). The independent-connection re-read in the owning test
+// then observes the truly committed state deterministically; the wire pair is
+// the server-side completion evidence the write-side injector could never
+// obtain. Success responses never leak early; when completion cannot be
+// confirmed (ErrorResponse, EOF, deadline) the real bytes or the real error
+// reach the client and the injector reports itself as not achieved.
+//
+// Payload discipline: only frame type bytes, declared lengths and tag/status
+// values are inspected inside the wrapper; no reply or request payload bytes
+// are logged or retained beyond the withholding window.
+type logscanCompletionDrop struct {
+	arm      atomic.Bool
+	dropped  atomic.Int32
+	achieved atomic.Int32
+	nextConn atomic.Int64
+	// bound bounds the withholding wait for the completion pair; a genuine
+	// backend that never confirms resolves as not-achieved, never as a fake
+	// loss.
+	bound time.Duration
+}
+
+// logscanCompletionDropTag is the CommandComplete tag that proves the armed
+// COMMIT executed server-side.
+const logscanCompletionDropTag = "COMMIT"
+
+// logscanCompletionDropMaxBuf caps the withheld stream: beyond it the wrapper
+// resolves as not-achieved instead of buffering unboundedly.
+const logscanCompletionDropMaxBuf = 1 << 20
+
+func (d *logscanCompletionDrop) dial(ctx context.Context, network, addr string) (net.Conn, error) {
+	c, err := (&net.Dialer{}).DialContext(ctx, network, addr)
+	if err != nil {
+		return nil, err
+	}
+	return &logscanCompletionDropConn{Conn: c, d: d, id: int(d.nextConn.Add(1)), bound: d.bound}, nil
+}
+
+func (d *logscanCompletionDrop) openPool(t *testing.T, dsn string) *pgxpool.Pool {
+	t.Helper()
+	cfg, err := pgxpool.ParseConfig(dsn)
+	if err != nil {
+		t.Fatalf("parse dsn for completion drop pool: %v", err)
+	}
+	cfg.MaxConns = 8
+	cfg.MinConns = 1
+	cfg.MaxConnLifetime = time.Hour
+	cfg.MaxConnIdleTime = 30 * time.Minute
+	if d.bound == 0 {
+		d.bound = 30 * time.Second
+	}
+	cfg.ConnConfig.DialFunc = d.dial
+	pool, err := pgxpool.NewWithConfig(context.Background(), cfg)
+	if err != nil {
+		t.Fatalf("create completion drop pool: %v", err)
+	}
+	t.Cleanup(pool.Close)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := pool.Ping(ctx); err != nil {
+		t.Fatalf("ping completion drop pool: %v", err)
+	}
+	return pool
+}
+
+// logscanOpenCompletionDropPool is the pool constructor for the legs that must
+// guarantee "server committed, only the worker's response lost" (the
+// completion pair is observed before the connection dies). The legacy
+// write-side logscanOpenCommitDropPool stays available for callers whose
+// fault semantics do not require that guarantee.
+func logscanOpenCompletionDropPool(t *testing.T, dsn string) (*pgxpool.Pool, *logscanCompletionDrop) {
+	t.Helper()
+	drop := &logscanCompletionDrop{}
+	return drop.openPool(t, dsn), drop
+}
+
+type logscanCompletionDropConn struct {
+	net.Conn
+	d  *logscanCompletionDrop
+	id int
+
+	armed atomic.Bool // this conn fully forwarded the armed COMMIT request
+	// resolved: true once the window ended. achieved records the resolution:
+	// true = completion pair observed (loss achieved, conn dead); false = not
+	// achieved (real reply/error delivered, passthrough resumed).
+	achieved atomic.Bool
+	done     atomic.Bool
+	// deliver buffers real reply bytes that must still reach pgx on the
+	// not-achieved path (success responses are never buffered here).
+	mu      sync.Mutex
+	buf     []byte // withheld bytes during the interception window
+	deliver []byte // resolved deliverable bytes (not-achieved only)
+	bound   time.Duration
+}
+
+// logscanCompletionDropConn.SetReadDeadline/SetWriteDeadline/SetDeadline: the
+// bounded wait is the wrapper's own read deadline inside the interception
+// window; callers' deadlines are honored on every passthrough path.
+func (c *logscanCompletionDropConn) Write(b []byte) (int, error) {
+	n, err := c.Conn.Write(b)
+	if err == nil && bytes.Contains(b, []byte("commit")) && c.d.arm.CompareAndSwap(true, false) {
+		c.d.dropped.Add(1)
+		c.armed.Store(true)
+		_ = c.Conn.SetReadDeadline(time.Now().Add(c.bound)) // bounded withholding wait
+	}
+	return n, err
+}
+
+// logscanCommitCompletionScan walks complete PostgreSQL frames in buf and
+// reports the armed-commit resolution:
+//
+//	done   — CommandComplete(tag COMMIT) followed by ReadyForQuery(idle 'I'):
+//	         server-side completion confirmed on the wire
+//	failed — ErrorResponse, an anomalous ReadyForQuery, or any unexpected
+//	         frame: server-side completion NOT confirmed (injection not
+//	         achieved; the real bytes are delivered instead of being faked)
+//
+// Incomplete heads/tails simply ask for more bytes (fragmentation handled;
+// nothing is delivered early). sawCommit reports whether a CommandComplete
+// with the COMMIT tag was seen, for the anomalous-ReadyForQuery classification.
+func logscanCommitCompletionScan(buf []byte) (done, failed bool, sawCommit bool) {
+	off := 0
+	for {
+		if len(buf)-off < 5 {
+			return false, false, sawCommit // wait for the frame head
+		}
+		typ := buf[off]
+		declared := int(uint32(buf[off+1])<<24 | uint32(buf[off+2])<<16 | uint32(buf[off+3])<<8 | uint32(buf[off+4]))
+		if declared < 4 {
+			return false, true, sawCommit // malformed length: not a complete frame
+		}
+		total := 1 + declared
+		if len(buf)-off < total {
+			return false, false, sawCommit // frame split across reads: keep withholding
+		}
+		payload := buf[off+5 : off+total]
+		switch typ {
+		case 'C': // CommandComplete
+			if strings.TrimRight(string(payload), "\x00") == logscanCompletionDropTag {
+				sawCommit = true
+			}
+		case 'Z': // ReadyForQuery
+			if len(payload) == 1 && payload[0] == 'I' && sawCommit {
+				return true, false, sawCommit
+			}
+			return false, true, sawCommit // anomalous idle state before the COMMIT tag
+		case 'E': // ErrorResponse: the backend refused the COMMIT
+			return false, true, sawCommit
+		case 'N': // NoticeResponse: async notice inside the reply, keep withholding
+		default:
+			return false, true, sawCommit // unexpected pre-completion message
+		}
+		off += total
+	}
+}
+
+func (c *logscanCompletionDropConn) resolveNotAchieved(reason string) {
+	c.achieved.Store(false)
+	c.done.Store(true)
+	c.armed.Store(false)
+	_ = c.Conn.SetReadDeadline(time.Time{}) // restore caller-managed deadlines
+	_ = reason                              // resolution is observable via achieved/done counters
+}
+
+func (c *logscanCompletionDropConn) Read(p []byte) (int, error) {
+	if c.done.Load() {
+		if !c.achieved.Load() {
+			return c.Conn.Read(p) // passthrough: the window ended, conn still alive
+		}
+		return 0, io.EOF // closed after the confirmed completion pair
+	}
+	if !c.armed.Load() {
+		return c.Conn.Read(p)
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	if len(c.deliver) > 0 { // buffered real bytes from a resolved not-achieved window
+		n := copy(p, c.deliver)
+		c.deliver = c.deliver[n:]
+		return n, nil
+	}
+	if c.done.Load() {
+		return c.Conn.Read(p) // window already resolved to passthrough
+	}
+
+	for {
+		done, failed, _ := logscanCommitCompletionScan(c.buf)
+		if done {
+			_ = c.Conn.Close()
+			c.achieved.Store(true)
+			c.done.Store(true)
+			c.d.achieved.Add(1)
+			return 0, io.EOF // connection error to pgx; success never leaks
+		}
+		if failed {
+			c.resolveNotAchieved("incomplete-or-error reply before the completion pair")
+			if len(c.buf) > 0 {
+				n := copy(p, c.buf)
+				c.deliver = append([]byte(nil), c.buf[n:]...)
+				c.buf = nil
+				return n, nil
+			}
+			return c.Conn.Read(p)
+		}
+		if len(c.buf) > logscanCompletionDropMaxBuf {
+			c.resolveNotAchieved("withheld reply exceeded the bounded buffer")
+			return 0, io.EOF
+		}
+		tmp := make([]byte, 8192)
+		n, err := c.Conn.Read(tmp)
+		c.buf = append(c.buf, tmp[:n]...)
+		if err != nil {
+			// EOF / reset / deadline before the completion pair: server-side
+			// completion unconfirmed — report the real error, never fake the
+			// loss. Any already-buffered bytes stay deliverable first.
+			c.resolveNotAchieved("window ended before the completion pair")
+			if len(c.buf) > 0 {
+				c.deliver = c.buf
+				c.buf = nil
+			}
+			return 0, err
+		}
+	}
 }
 
 func logscanOpenCommitDropPool(t *testing.T, dsn string) (*pgxpool.Pool, *logscanCommitDrop) {
