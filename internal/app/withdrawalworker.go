@@ -29,6 +29,149 @@ import (
 // claimScanLimit bounds one scan batch; the loop repeats on its cadence.
 const claimScanLimit = 32
 
+// trackingScanLimit bounds one tracking-scan batch; the loop repeats on its
+// cadence and rotates through the pending set with a keyset cursor (a scanned
+// intent stays a candidate until it converges, so the claimable scan's
+// head-only batch would starve the tail here).
+const trackingScanLimit = 32
+
+// scanTrackingSQL lists the intents whose receipt/confirmation/reorg-revision
+// tracking must keep running (Lane-F2): terminal **completed** intents whose
+// latest sendable attempt is not yet durably confirmed against the current
+// chain truth. The completed state is deliberate: `completed` means the
+// execution steps converged (a `sent` fact can trigger it), NOT the payment
+// verdict, so tracking MUST continue. Failed intents are excluded (terminal
+// without tracking); the scan never grants any send permission and never
+// re-allocates.
+//
+// A completed intent stays a candidate while any of these holds:
+//  1. its attempt is still in flight (sent/effective/unknown/orphaned);
+//  2. no canonical receipt has reached its policy threshold yet (this also
+//     covers an attempt whose only receipt was orphaned);
+//  3. a canonical receipt's block is no longer canonical in chain_blocks
+//     while the chain truth has reached that height — a reorg revision the
+//     010 tracker must re-verify (the head guard keeps a lagging indexer
+//     from being mistaken for a reorg; `completed` + a confirmed attempt
+//     whose receipt is still canonical is genuinely converged and drops
+//     out of the set).
+//
+// The keyset (admitted_at, intent_id) cursor (see trackingCursor) walks the
+// pending set across cycles so a batch smaller than the whole set cannot
+// starve the tail; unlike the claimable scan, being scanned does not remove
+// an intent from this set.
+const scanTrackingSQL = `SELECT i.intent_id, i.admitted_at
+  FROM payment_intents i
+  JOIN LATERAL (
+    SELECT a.attempt_id, a.state FROM tx_attempts a
+    WHERE a.intent_id = i.intent_id
+      AND a.state NOT IN ('prepared', 'signed')
+    ORDER BY a.created_at DESC, a.attempt_id DESC LIMIT 1
+  ) a ON TRUE
+  WHERE i.state = 'completed'
+    AND (a.state IN ('sent','effective','unknown','orphaned')
+         OR NOT EXISTS (SELECT 1 FROM tx_receipts r
+                        WHERE r.attempt_id = a.attempt_id
+                          AND r.canonicality = 'canonical'
+                          AND r.confirmations >= r.confirm_threshold)
+         OR EXISTS (SELECT 1 FROM tx_receipts r
+                    WHERE r.attempt_id = a.attempt_id
+                      AND r.canonicality = 'canonical'
+                      AND NOT EXISTS (SELECT 1 FROM chain_blocks b
+                                      WHERE b.chain_id = i.chain_id
+                                        AND b.number = r.block_number
+                                        AND b.hash = r.block_hash
+                                        AND b.canonical)
+                      AND EXISTS (SELECT 1 FROM chain_blocks h
+                                  WHERE h.chain_id = i.chain_id
+                                    AND h.canonical
+                                    AND h.number >= r.block_number)))
+    AND (i.admitted_at, i.intent_id) > ($2::timestamptz, $3::text)
+  ORDER BY i.admitted_at, i.intent_id
+  LIMIT $1`
+
+// trackingCandidate is one row of the tracking scan: the intent and the
+// keyset position it was read at.
+type trackingCandidate struct {
+	intentID   string
+	admittedAt time.Time
+}
+
+// trackingCursor is the keyset position (admitted_at, intent_id) the next
+// tracking scan resumes from. It is only touched by the Run goroutine
+// (startupCatchUp and cycle are sequential) and is deliberately in-memory: a
+// restart re-reads the head of the set.
+type trackingCursor struct {
+	admittedAt time.Time
+	intentID   string
+}
+
+// scanTracking lists one page of the to-be-tracked completed intents (see
+// scanTrackingSQL) and advances the rotation cursor: a full page resumes after
+// its last row next cycle, a short page means the tail was reached and the
+// next cycle wraps to the head.
+func (w *WithdrawalWorker) scanTracking(ctx context.Context) ([]trackingCandidate, error) {
+	rows, err := w.Pool.Query(ctx, scanTrackingSQL, trackingScanLimit, w.trackCursor.admittedAt, w.trackCursor.intentID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []trackingCandidate
+	for rows.Next() {
+		var cand trackingCandidate
+		if err := rows.Scan(&cand.intentID, &cand.admittedAt); err != nil {
+			return nil, err
+		}
+		out = append(out, cand)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	if len(out) < trackingScanLimit {
+		w.trackCursor = trackingCursor{}
+	} else {
+		last := out[len(out)-1]
+		w.trackCursor = trackingCursor{admittedAt: last.admittedAt, intentID: last.intentID}
+	}
+	return out, nil
+}
+
+// runTrackingPass advances 010's receipt/confirmation/reorg-revision tracking
+// for the to-be-tracked completed intents. It is separated from the
+// claimable/execution pass: it never allocates, never claims, and never
+// issues a send — one intent's failure is logged and never blocks the others
+// (and is retried on the next rotation). Intents currently served by their own
+// claim loop are skipped: that loop already scans them each cycle.
+func (w *WithdrawalWorker) runTrackingPass(ctx context.Context) {
+	if w.ConfirmAttempt == nil {
+		return
+	}
+	candidates, err := w.scanTracking(ctx)
+	if err != nil {
+		w.log().Warn("tracking scan failed", "error", logx.Redact(err.Error()))
+		return
+	}
+	for _, cand := range candidates {
+		if ctx.Err() != nil {
+			return
+		}
+		// An intent currently served by its own claim loop is already scanned
+		// there every cycle; skipping it keeps the two paths disjoint (010's
+		// Reconcile locks the attempt row and appends receipt/revision rows,
+		// and two concurrent scans of one attempt can deadlock). The claim
+		// loop owns the intent until its claim is lost; the tracking pass
+		// picks it up then.
+		w.mu.Lock()
+		_, busy := w.active[cand.intentID]
+		w.mu.Unlock()
+		if busy {
+			continue
+		}
+		if err := w.ConfirmAttempt(ctx, cand.intentID); err != nil {
+			w.log().Warn("confirmation tracking failed", "intent_id", cand.intentID, "error", logx.Redact(err.Error()))
+		}
+	}
+}
+
 // WithdrawalWorker is the 011 execution worker. All durable state lives in
 // PostgreSQL; the struct holds only configuration and the live goroutine set.
 type WithdrawalWorker struct {
@@ -59,6 +202,10 @@ type WithdrawalWorker struct {
 	mu     sync.Mutex
 	active map[string]context.CancelFunc
 	wg     sync.WaitGroup
+
+	// trackCursor is the tracking scan's keyset rotation position; only the
+	// Run goroutine touches it (startupCatchUp and cycle are sequential).
+	trackCursor trackingCursor
 }
 
 // NewWithdrawalWorker validates the worker timings and mints a fresh instance
@@ -113,6 +260,10 @@ func (w *WithdrawalWorker) Run(ctx context.Context) {
 // It first marks stalled-but-not-taken claims (evidence only, no business
 // state change).
 func (w *WithdrawalWorker) cycle(ctx context.Context) {
+	// Lane-F2: the receipt/confirmation/reorg-revision tracking pass runs
+	// separately from the claimable/execution pass (it never allocates,
+	// claims or issues a send; one intent's failure never blocks the others).
+	w.runTrackingPass(ctx)
 	if marked, err := w.Claims.SweepStalls(ctx); err != nil {
 		w.log().Warn("stall sweep failed", "error", logx.Redact(err.Error()))
 	} else if marked > 0 && w.Metrics != nil {
@@ -213,12 +364,22 @@ func (w *WithdrawalWorker) workLoop(ctx context.Context, intentID string, versio
 // projection, and issues a send-class step only for a first/retry state with no
 // open step. A converged "sent" step leaves the intent executing (receipt
 // tracking is 010-owned) and is never re-sent automatically.
+//
+// Terminal completed intents KEEP running the 010 receipt/confirmation scan
+// (Lane-F2): `completed` means the execution steps have converged (a `sent`
+// fact can trigger it), which is not the payment verdict — the receipt,
+// Transfer/canonicality evidence, the confirmation depth and the reorg
+// revision tracking MUST continue after completion. Tracking is separated
+// from sending: it never re-allocates the intent's binding, never grants any
+// send permission (a lost receipt, a reorg or a reconciliation result grant
+// nothing), and the retry/re-scan cadence is the pre-existing one. `failed`
+// stays terminal-without-tracking.
 func (w *WithdrawalWorker) execIntentCycle(ctx context.Context, intentID string, version int64) error {
 	intent, found, err := execution.ReadIntent(ctx, w.Pool, intentID)
 	if err != nil || !found {
 		return err
 	}
-	if intent.State == execution.IntentCompleted || intent.State == execution.IntentFailed {
+	if intent.State == execution.IntentFailed {
 		return nil
 	}
 	if w.ConfirmAttempt != nil {
@@ -226,10 +387,19 @@ func (w *WithdrawalWorker) execIntentCycle(ctx context.Context, intentID string,
 		// facts it consumes are the scanned ones (V13-1: receipt/confirmation
 		// precede completed; FR-16 covers confirmation tracking). A scan
 		// failure is retried on the next cycle; the reconciler never sees a
-		// fabricated fact.
+		// fabricated fact. For terminal completed intents the scan keeps
+		// running (receipt/canonicality/confirmations/reorg-revision
+		// tracking).
 		if err := w.ConfirmAttempt(ctx, intentID); err != nil {
 			return err
 		}
+	}
+	if intent.State == execution.IntentCompleted {
+		// Tracking only: nothing below this point (reconciler projection
+		// refresh and the driver) touches a terminal intent — the durable
+		// completed state is never re-decided here, and the tracking path
+		// never allocates or grants a send.
+		return nil
 	}
 	if w.Reconciler != nil {
 		if _, err := w.Reconciler.ReconcileIntent(ctx, intentID, w.OwnerID, version); err != nil {
@@ -280,6 +450,9 @@ func (w *WithdrawalWorker) execIntentCycle(ctx context.Context, intentID string,
 // startupCatchUp reconciles every open (issued) step first, then runs a
 // version-ordered projection catch-up. Both are no-ops without the 010 wiring.
 func (w *WithdrawalWorker) startupCatchUp(ctx context.Context) {
+	// Lane-F2: startup recovery includes the to-be-tracked completed intents
+	// (a restart must not drop receipt/confirmation/reorg-revision tracking).
+	w.runTrackingPass(ctx)
 	if w.Reconciler == nil {
 		return
 	}

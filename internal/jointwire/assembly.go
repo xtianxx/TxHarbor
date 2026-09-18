@@ -98,11 +98,17 @@ func Worker(ctx context.Context, cfg *config.Config, pool *pgxpool.Pool) (app.Jo
 				}
 				return fmt.Errorf("010 confirmation scan: read current attempt: %w", err)
 			}
-			switch state {
-			case "sent", "unknown":
-			default:
+			if state == "prepared" || state == "signed" {
+				// Nothing sendable persisted yet: no chain probe exists for
+				// this attempt (the scan's contract starts at sent).
 				return nil
 			}
+			// Every other state is scannable, and the scan never grants a
+			// send permission: sent/effective advance the confirmation
+			// depth, confirmed keeps the receipt/canonicality/reorg-revision
+			// facts fresh after `completed`, unknown/orphaned probe for
+			// loss/reorg evidence, and ineffective/replaced re-observe a
+			// receipt revision without resurrecting a dispatch.
 			if _, err := store.Reconcile(ctx, attemptID, ""); err != nil {
 				return fmt.Errorf("010 confirmation scan: %w", err)
 			}
