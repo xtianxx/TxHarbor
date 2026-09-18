@@ -164,3 +164,8 @@ tests use a contract-shaped fixture labeled test-only (R-010-11/G-010-4).
   recovery, and never touches key material (FR-10, OC-3, OC-6).
 - A send that entered dispatch under a valid gate set is legally in-flight; the invalidation that lost the
   lock race governs later replays/replacements (R-010-04; G-010-1 covers the time-based residue).
+- G-010-2 class (c) is closed as a second explicit limited Q3 exception (unperceived lock-loss window only;
+  adjudicated 2026-09-17; same-session probe mitigation; freeze-plus-manual-review on proof; reconcile never
+  permits resend); classes (a)/(b) stand as specified (plan.md Adjudication addendum 2; send-gate.md §4(d)(c);
+  research.md R-010-14; quickstart.md J5). This exception covers this residual only — not other residuals and
+  not actual verification.

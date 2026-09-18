@@ -10,7 +10,8 @@ are executed in tasks/implement. Two layers, per FR-16:
   not exist on this branch, so these tests provision a **contract-shaped fixture** in the scratch database
   (columns exactly per the frozen J2 shape) — labeled test-only, never joint evidence, never a migration.
 - **J1–J4 — joint requirements**: real 007 HTTP + 011 executor + 010 + 009 + PG + Anvil. Defined here,
-  executed after the 011 implementation and the 010→011 merge order. Mocks, fixtures and 010-independent
+  executed only after 011's real implementation and migrations are integrated into the integration workspace
+  (010→011 merge order); applicable joint gates complete BEFORE 011 merges to main. Mocks, fixtures and 010-independent
   results never count as joint acceptance.
 
 ## Prerequisites

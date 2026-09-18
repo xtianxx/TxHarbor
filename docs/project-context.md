@@ -9,7 +9,7 @@ PostgreSQL / Redis / Kafka / EVM RPC。详见 `agent.md` 与
 | 阶段 | 状态 |
 | --- | --- |
 | 001–009 及 PB（012-007-authorization-carrier） | 已合并至 main（009 PR#12 `295c49d`，main CI `35192040030` 四项全绿） |
-| 010 transaction-lifecycle | specify（`7d2022b`）与 clarify（`bd59754`，三项业务澄清已闭合）已完成；plan 尚未执行；分支 `010-transaction-lifecycle` |
+| 010 transaction-lifecycle | specify（`7d2022b`）与 clarify（`bd59754`，三项业务澄清已闭合）已完成；plan 已执行；实现与真实联合验收于联合工作区 `.slim/worktrees/joint-010-011`（分支 `joint-010-011-integration`）完成——J1–J5 全部执行且全绿（记录见 `docs/workflow-010-011-parallel.md` 联合批次执行记录）；010 任务仅剩 T052–T058（Phase 10 polish：V10/V11 验收与文档同步）未执行；分支 `010-transaction-lifecycle` |
 | 011 withdrawal-executor | spec/plan/research/data-model/contracts/quickstart/tasks 已完成；实现 T001–T040 于分支 `011-withdrawal-executor`（基线 `beba5e9`），T041–T053（集成就绪记录 + 打磨）为后续提交。迁移 `migrations/000012_withdrawal_execution.sql`（sha256 `29613714…`）为暂定号，联合集成工作区按 000011→000012→000013 合并顺序核验；`execution_claims` 列与 data-model Table 2 一致；intent-FK `tx_attempts_intent_fkey` 由 010 追加迁移持有。联合验收 J1–J5 **未执行**（缺 010↔011 生产 `LifecycleAdvancer`/`LifecycleReader` 适配器、真实 008 绑定分配、链上转账合约）。A-13 与 T000-P 保持 **OPEN** |
 | 010/011 并行 | 限定例外见 `docs/workflow-010-011-parallel.md`（2026-09-17 用户决定）；008/009 例外保持不变 |
 

@@ -175,7 +175,7 @@ Upstream consumed read-only: 006 FR-26 matrix + pause/recovery tables; 007 recei
 ## Task-input: parallelizable vs dependent (for the later tasks step)
 
 - **Parallel after design approval**: migration DDL vs `internal/eth` send/read extension vs `internal/txlifecycle` unit-level pieces (attempt/calldata/envelope/classification) — disjoint files. Data-model carrier names must freeze before SQL and tests start.
-- **Strictly dependent (do not start before their inputs land)**: send region (needs gate read sequence + migration), reconcile (needs chain read extension), confirmation/reorg (needs canonical view reads + V8/V9 chain scenarios), joint J-matrix (needs 011 implementation and 010→011 merge order; upstream sync precedes dependent acceptance).
+- **Strictly dependent (do not start before their inputs land)**: send region (needs gate read sequence + migration), reconcile (needs chain read extension), confirmation/reorg (needs canonical view reads + V8/V9 chain scenarios), joint J-matrix (needs 011's real implementation and migrations integrated into the integration workspace first, then real joint acceptance; 010→011 merge order; applicable joint gates complete BEFORE 011 merges to main; upstream sync precedes dependent acceptance).
 - **Contract-freeze dependencies**: the claim adapter mapping (011 plan column names) and the intent FK closure (G-010-3) are joint items; neither blocks 010-independent work because both are fail-closed/absorbed in one adapter.
 - **Real dependencies vs parallel cosmetics**: V1–V11 are 010-independent; J1–J4 require real 011 + real HTTP 007 path; mocks or the contract-shaped fixture must never be presented as J evidence (FR-16, R-010-11).
 
