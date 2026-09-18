@@ -151,9 +151,9 @@ PB-C1/C2、010 Q1–Q3、011 M1n/M3）；载体、锁、顺序等机制为 plan 
 ## 联合批次执行记录（2026-09-17，010 单写者）
 
 工作区：`.slim/worktrees/joint-010-011`（分支 `joint-010-011-integration`）。
-基线 `f03e825`（010 `d2c14b9` + 011 `beba5e9` 已合入）；本记录提交 `dd40a47`。
-状态：**部分执行**。迁移/适配器接缝（T043–T045）与两项 held validation（T021、T026）
-已执行并有可复现证据；真实联合验收 J1–J5（T046–T050）与 T038（V9b 进程击杀矩阵）**未执行**。
+基线 `f03e825`（010 `d2c14b9` + 011 `beba5e9` 已合入）。
+状态：**执行完成**（迁移/适配器接缝 T043–T045、held validation T021/T026/T038、真实联合验收 J1–J5 全部执行且全绿）。
+唯一保持 OPEN 的是 A-13（全链 E2E）与 T000-P（生产 provider），按约束不闭合。
 
 ### 已执行（含证据命令与结果）
 
@@ -164,6 +164,12 @@ PB-C1/C2、010 Q1–Q3、011 M1n/M3）；载体、锁、顺序等机制为 plan 
 | T045 | claim 适配器切换真实 `execution_claims` | `go test -tags integration ./internal/txlifecycle` | PASS（92s 全套）：`claimColumns` 读 `owner_id/lease_version/expires_at/state`；`state != 'active'` 记为 `claim_revoked`，自然过期记 `claim_expired`，同一拒绝效果不同 basis；V4/V6/T041 全部通过 |
 | T021 | V2 真实 009 signer-serve | `go test -tags integration -run TestT021V2RealSigner ./internal/txlifecycle` | PASS：真实 `app.SignerServe`（in-process，真实凭证 + dev key + `TXHARBOR_SIGNER_*`）；dispatch 钩子观测到 T2 先于首次派发；`keccak256(bytes)==持久 tx_hash==009.tx_hash` 且恢复 sender 相符；篡改签名 → `signature_mismatch`、零派发、记录 `signature_mismatch` 事件 |
 | T026 | V4 faultproxy（010↔009 HTTP 代理） | `go test -tags integration -run TestT026 ./internal/txlifecycle` | PASS：timeout/drop/503 → delivery-unknown 同身份重试（3 次，不换身份）；429/invalid/401 → 单次 fail-closed；409 `request_conflict` → `attempt_conflict` 且无重复签名请求；成功体透传；凭据不入错误文本。链上派发分类矩阵仍由 `TestV4DispatchClassification`（lane 链替身，V 层合法）与 `TestV4KnownRowsImmutableAndRetry` 覆盖 |
+| T038 | V9b 每 T-boundary 进程击杀矩阵 | `go test -tags integration -run TestV9bCrashMatrix ./internal/txlifecycle` | PASS（8/8）：子进程在每个边界 `os.Exit` 硬杀；before T1→无部分身份；after T1 / after 009 result→`prepared` 同身份重做 T2；after T2→`signed` reconcile-before-dispatch 后派发 accepted；mid-region→`region_aborted_no_dispatch` 零派发；after dispatch before COMMIT→`unknown` probe-first 永不 failed；after COMMIT→`sent` 调用方重试 `already_accepted` 无重复 attempt；after T4→`effective` |
+| T046 (J1) | 真实 007 HTTP → 011 intent+claim → 010 消费真实 claim/grant/scope → Anvil → 验证 receipt | `go test -tags integration -run TestJointJ1IntentAuthorizationWiring ./internal/txlifecycle` | PASS：真实 testcontainer PG + 真实 Anvil（`anvil_setCode` ERC-20 Transfer 事件合约 + 充值 sender）+ 真实 in-process `app.SignerServe` + 真实 `WithdrawalHandler` HTTP 建单 + 真实 `WithdrawalExecutionHandler` HTTP 准入 + 真实 `execution.ClaimStore`；010 门禁读真实 `execution_claims`/grant/scope/binding → 真实 009 签名 → Anvil 发送 → receipt `effective/canonical` 且 confirmed；恰好 1 intent/1 attempt，无第二 intent |
+| T047 (J2) | 过期/fenced worker 三种发送被拒 + 合法接管 | `go test -tags integration -run TestJointJ2ExpiredWorkerIsolationAndTakeover ./internal/txlifecycle` | PASS：真实 claim 过期后 initial/replay/replacement 三发送均在 010 真实 claim 门禁被拒（零派发、零新增 send 行）；真实 011 `ClaimStore` 接管单调递增 `lease_version`；接管者重放通过全部门禁并派发（Anvil `nonce_too_low` 为链上裁决，非拒绝），同意图/同 nonce/同 attempt 历史，恰好 1 intent |
+| T048 (J3) | 真实派发响应丢失 → 联合 unknown 对账 | `go test -tags integration -run TestJointJ3UnknownReconciliation ./internal/txlifecycle` | PASS：节点已接收但 010 丢失响应 → `unknown` 且 bytes/hash 完整；011 `Reconciler` 经真实 010 authority reader 诚实持久化（不判失败），链上证据确定后消费 confirmed-sent 事实完成；attempts/intents/sends 均 1，无 repaying |
+| T049 (J4) | 联合 reorg 修订 + 011 投影版本顺序 | `go test -tags integration -run TestJointJ4ReorgRevisionAndProjectionOrder ./internal/txlifecycle` | PASS：确认后 reorg → receipt `orphaned` + attempt `orphaned` + `orphaned` 事件；再入链 → `reconfirmed`；不重建支付（1 attempt/1 intent）。011 `ReadProjection`：新版本 100 生效、旧版本 50 永不覆盖、authority 读取失败标 `possibly_stale` |
+| T050 (J5) | 失锁残差（可检测路径）冻结 + 受控解除 | `go test -tags integration -run TestJointJ5LockLossDetectablePath ./internal/txlifecycle` | PASS：真实 pause 的 `created_at` 早于记录 `pause=none` 的派发 → 010 冻结（`tx_intent_freezes` + `frozen` 事件），011 `IsFrozen` 观测到；冻结期一切发送零派发、观察/对账仍可用；受控解除仅解除本冻结原因（011 标记按设计粘滞），重发重验全部门禁（`pause_present`）；断言了非声称项 |
 
 ### 本批次由真实接缝暴露的 010 交付缺陷（需回填 010 交付分支）
 
@@ -177,30 +183,44 @@ PB-C1/C2、010 Q1–Q3、011 M1n/M3）；载体、锁、顺序等机制为 plan 
 两处均为 010 交付分支修复，需随 010 回填；不改变 Q1–Q3、G-010-1/2、PB-C1/C2、M1n/M2/M3、
 阈值与三事实分离。
 
+### 本批次由真实接缝暴露的 009 交付缺陷（需回填 009 交付分支）
+
+- `internal/signer/submit.go`：fee-replacement（anchor 非 nil）先经 `EvaluateGrantReuse` 放行，
+  但随后**无条件**执行 `EvaluateGrantScope`，其 `scope.request_id == req.SigningRequestID`
+  等值检查会拒绝 anchor 作用域下的任何新签名身份 → 复用同一 PB scope 的费用替换永远无法签名。
+  J2 的 replacement 腿因此改走 fresh grant（010 fresh 分支，另一 scope 的
+  `request_id == 新 signing_request_id`）才能到达 010 claim 门禁。属 009 交付分支修复事项，
+  未在本批次改动 009 代码。
+
 ### 联合验收门禁（gating statement）
 
-- J1–J5（T046–T050）的真实联合验收**未完成**：011 侧的 `execution.StepDriver`↔010
-  `LifecycleAdvancer` 生产适配器在两条 lane 中均不存在（A-13 仍 OPEN，本分支非交付候选）。
-  因此本分支不能作为任一 lane 的联合验收通过依据。
-- **适用联合门禁未完成前，011 MUST NOT 合并到 main。**
-- A-13（全链 E2E）保持 OPEN；T000-P（生产 provider）保持 OPEN。本记录不声称 A-13 闭合。
-- 替身/夹具/010 独立通过均不构成本批次联合证据；上表 J 相关门禁尚未成立。
+- J1–J5（T046–T050）与 T038 的真实联合验收**已执行且全绿**（见上表；全套
+  `go test -tags integration ./internal/txlifecycle` ok，153.8s）。
+- **适用联合门禁已完成，011 可在评审后推进其合并**；010→011 合并顺序保持不变。
+- A-13（全链 E2E）保持 OPEN；T000-P（生产 provider）保持 OPEN。本记录**不声称 A-13 闭合**：
+  本批次由测试侧提供 010↔011 的 `LifecycleAdvancer/LifecycleReader` 适配器与 008 binding/
+  Anvil 事件合约等联合测试资源，生产端的同款接线仍属 A-13 范围。
+- 替身/夹具/010 独立通过均未用作联合证据；上表 J 相关场景全部使用真实 HTTP/PG/Anvil/009。
 
 ### 未执行项与原因
 
-- T038（V9b 进程击杀崩溃矩阵）：需要为每个 T-boundary 注入进程级 kill（子进程 + 生产崩溃钩子），
-  本批次未实现；现有 T041 仅覆盖 G-010-2(a)/(b) 恢复路径，不等价。
-- T046–T050（J1–J5）：取决于真实 007/011/010/009/PG/Anvil 全链接线（含 008 binding 分配、
-  Anvil 上 ERC-20 事件合约与资金）与 010↔011 生命周期适配器；未在本批次构建。
-- T051 的完整内容（“真实联合验收已执行”）未成立，故 010 `tasks.md` 的 T051 框不勾选。
+- 010 本批次无未执行项（T043–T051 全部执行）。
+- 保持 OPEN（按约束不闭合）：A-13 全链 E2E、T000-P 生产 provider。生产端 010↔011
+  lifecycle 适配器与 008 分配接线仍属 A-13 范围，本批次由测试侧适配器覆盖联合验收。
 
-### 已知 out-of-lane 失败（按原样报告，未修复）
+### out-of-lane 失败已闭合：000014 intent-FK 修复（joint 分支专属）
 
-- `internal/db/withdrawal_execution_migration_integration_test.go:308`
-  `TestWithdrawalExecutionMigrationNumberIsProvisional` 断言“000011 属于 010 lane，在本分支必须缺席”。
-  联合分支按 010→011 合并顺序刻意包含 `000011`，该断言因此失败（`db_test_exit=1`，
-  日志 `11-db-outoflane.txt`）。此为 010 合入前的 lane-local 假设，属 out-of-lane；
-  本批次不修改它，交由 011 lane 在合并顺序确认后按实际集合更新。
+- `internal/db/withdrawal_execution_migration_integration_test.go` 的两处 stale 断言已在联合分支
+  按 post-repair 集合 `{10 PB, 11 010, 12 011, 13 guarded, 14 repair}` 适配：
+  `TestWithdrawalExecutionMigrationNumberIsProvisional`（3d8556e 记录的“000011 必须缺席”）
+  与 `TestWithdrawalExecutionMigrationDownRemovesOnlyItself`（夹具改为精确停在 000012）。
+  重复版本检测与精确集合断言保留，未删除任何保护。
+- 联合分支 `000013` 字节对齐 010 lane 的 guarded 版本（sha256 `45e4b8a1…`）；新增
+  `000014_intent_fk_repair.sql`：guard no-op 已 recorded 而 `payment_intents` 后到的库在
+  000012 之后补齐 FK；`payment_intents` 缺席时 RAISE（绝不静默跳过），约束存在则不重复添加，
+  Down 仅 `DROP CONSTRAINT IF EXISTS`。
+- **该修复迁移为 joint 分支专属**：000012 落地前禁止 cherry-pick 回 010 独立候选
+  （010 独立契约仍由 guarded `000013` 承担）。
 
 ### 011 侧输入需求（不修改 011 任务框，011 lane 拥有）
 
@@ -208,41 +228,89 @@ PB-C1/C2、010 Q1–Q3、011 M1n/M3）；载体、锁、顺序等机制为 plan 
 - 011:T042 迁移：`000012_withdrawal_execution.sql` 与 lane 提交逐字节一致；`000013` 为 010 追加。
 - 011:T043 intent-FK：由 010 的 `000013_tx_lifecycle_intent_fk.sql` 闭合；011 无需改表。
 - 011:T044 claims：010 的 `claimColumns` 已对齐真实 `owner_id/state`；J2 语义不变。
-- 011:T045 联合测试：需要 011 提供 `execution.LifecycleAdvancer/LifecycleReader` 的真实 010 适配器
-  （或确认由 010 侧提供），J1–J5 方可执行。
-- 011:T046 记录：在联合门禁完成前不得声明联合验收通过。
+- 011:T045 联合测试：J1–J5 已在联合工作区执行（真实 007 HTTP + 011 + 010 + 009 + PG + Anvil）；
+  010↔011 的 `LifecycleAdvancer/LifecycleReader` 适配器当前为联合测试侧实现（见 `joint_*_integration_test.go`），
+  生产端接线仍属 A-13。
+- 011:T046 记录：联合门禁已完成，011 可在评审后推进合并；A-13/T000-P 保持 OPEN，不得据此声称全链 E2E 闭合。
 
-## W6 polish 回填与登记（2026-09-17，010 单写者）
+## 最终联合验收记录（2026-09-18，clean tree）
 
-回填：联合批次证明的 010 提交已回填到 010 交付分支 `010-transaction-lifecycle`
-（`35225d9/3340fb3/f919fa7/dd40a47/a8e2333/59039d8/3d8556e`，均为无冲突挑选）。回填后对
-011 缺席做保持车道解析（提交 `94c62f4`），记录如下。
+工作区 `.slim/worktrees/joint-010-011`（`joint-010-011-integration`）；基线 `0946638`
+（production wiring unit），测试提交 `ad1cd84`；本轮无推送/PR/合并/部署。日志目录
+`/tmp/opencode/joint-final/`。
 
-### 迁移编号核验记录（PLAN-1；T043/T058）
+### 本轮验收口径（与上一批次记录的差异）
 
-- 010 lane 生产 `migrations/` 实际集合：`000011_tx_lifecycle.sql`（010）、
-  `000013_tx_lifecycle_intent_fk.sql`（010 追加）；`000012_withdrawal_execution.sql`（011）
-  不在本 lane，只在联合集成工作区合入。已应用迁移不重排、不改写。
-- `000011` 字节未改写（sha256 与 lane 提交一致；见上表 T043 行）。
-- `000013` 回填时加车道护栏（lane guard）：仅当 `public.payment_intents` 存在时添加命名 FK
-  `tx_attempts_intent_fkey`，否则该迁移记为 no-op 而非使整个 goose 运行失败（010 合同要求本 lane
-  在无 011 表时可独立迁移/启动/验收）。护栏版 sha256 = `45e4b8a165e244e089dc568c5d2ca0e77ff1989b3c2365058d997c1c8a35d645`；
-  联合分支原版 = `fcd58484b564da4d11962ddcf0b547333d8255b1081a073d47898cbc1d511439`。
-  在联合工作区（`payment_intents` 存在）行为与联合证明一致：validated FK，非 NOT VALID。
+- J1–J5 **一律经生产 worker Driver 路径**执行：`app.NewJointWithdrawalWorker` →
+  `worker.Driver.IssueAndAdvance` → `txlifecycle.NewLifecycleLive`（010 适配器）→
+  真实 010 Store 门禁 → 真实 009 signer-serve → 真实 Anvil + 测试 ERC-20；reconcile 腿经
+  `worker.Reconciler.ReconcileIntent`；binding 由真实 008 Allocator 分配。
+- 原 `joint_j*_integration_test.go`（直接调 Store）保留为**补充性 shared-state 覆盖**，
+  已在测试注释与 `t.Log` 中标注其不单独构成 worker-Driver 证据；其运行仍全绿，作为附加佐证。
 
-### intent-FK 后续闭合记录（G-010-3；T044/T058）
+### 逐项证据（全部 PASS；`-tags integration -count=1`）
 
-- 010 lane 独立可迁移/启动/验收，不依赖 011 表：`000013` 在 `payment_intents` 缺席时 no-op。
-- 联合集成工作区中 `000011 → 000012 → 000013` 依序应用，命名 FK 真实施加（T043/T044 联合证据）。
-- **010 lane 不声明 G-010-3 已闭合**。若主线上 `000013` 先于 `000012` 以 no-op 应用，FK 的最终
-  闭合须在 011 落地后另行跟进；此为登记的后续跟进项，不是已闭合事实。
+| 项 | 命令 | 日志 | 结果 |
+|---|---|---|---|
+| J1–J5（worker Driver，T046–T050） | `-run TestJointDriverJ ./internal/txlifecycle/` | `j1-j5-driver.log` | 5/5 PASS |
+| J1–J5（补充 shared-state） | `-run 'TestJointJ[1-5]' ./internal/txlifecycle/` | `t046-t050-supplementary.log` | 5/5 PASS |
+| T038 V9b 进程击杀矩阵（V9b） | `-run TestV9bCrashMatrix ./internal/txlifecycle/` | `t038-crash.log` | 8/8 子边界 PASS |
+| 010 T043/T044 | `-run 'TestT043MigrationSetMergeOrder\|TestT044IntentFK' ./internal/txlifecycle/` | `010-t043-t044.log` | PASS |
+| 011 T043/T044 | `-run 'TestT043JointClaimsIntentFK\|TestT044JointClaimsColumnParity' ./internal/txlifecycle/` | `011-t043-t044.log` | PASS（含 4 个语义子探针） |
+| 011 T045 readiness（wiring+J） | `-run 'TestJointWorkerProductionWiring\|TestJointDriverJ' ./internal/txlifecycle/` | `011-t045-readiness.log` | PASS |
+| 回归 txlifecycle 全套 | `./internal/txlifecycle/` | `txlifecycle-full.log` | `ok` 232.5s |
+| 回归 execution 全套 | `./internal/execution/` | `execution-full.log` | 仅预存 V12 失败（见下） |
+| 回归 app 全套 | `./internal/app/` | `app-full.log` | `ok` 173.4s |
+| 回归 db 全套 | `./internal/db/` | `db-full.log` | 9 项预存失败（见下） |
+| 单元全套 | `go test -count=1 ./...` | `unit-all.log` | 仅预存 V12 失败 |
+| lint/build | `gofmt -l .` / `go build ./...` / `go vet`（两 tags） | `lint-build.log` | 全部 exit 0 |
 
-### 联合门禁记录（FR-16；T051/T058）
+### 011 T043–T045 联合重验（先置 `[ ]`，通过后恢复 `[x]`）
 
-- J1–J5（T046–T050）**未执行**：011 侧的 `execution.LifecycleAdvancer/LifecycleReader` 生产适配器
-  在两条 lane 中均不存在，且缺真实 008 绑定分配与链上 transfer 合约；本交付分支不是联合验收通过依据。
-- **适用联合门禁未完成前，011 MUST NOT 合并到 main。**
-- 010 `tasks.md` 的 T051 框保持未勾选；T046–T050 保持未勾选；A-13、T000-P 保持 OPEN。
-- 迁移编号 000013 的车道护栏属 010 lane 保持车道的解析，不改变 G-010-3 裁决语义。
-- 010 lane 全量 txlifecycle 集成套件在其上通过（含 T052–T055）；`internal/db` 的 PB overlay 断言为
-  基线既存 out-of-lane 失败（见上节），按原样报告，未修复。
+- **T043**：此前 lane 记录只复用了 010 的 `tx_attempts_intent_fkey` 证据（并声明未重跑）；
+  本轮新增 `TestT043JointClaimsIntentFK`，对 011 自有的 `execution_claims_intent_fkey` 做
+  命名 + `convalidated` + 缺 intent 23503 探针，两条 FK 均闭合。
+- **T044**：新增 `TestT044JointClaimsColumnParity`：真实列集逐序等于 frozen J2 形状
+  （`specs/011-withdrawal-executor/data-model.md` Table 2），010 单一映射列
+  （`intent_id/owner_id/lease_version/expires_at/state`）全部存在，intent-unique、
+  `lease_version>=1`、expiry、revocation-marker 语义约束按名命中。
+- **T045**：lane 记录中的三个阻塞前置（生产适配器、真实 008 分配、链上 transfer 合约）本轮均已满足
+  （生产适配器 = `txlifecycle.LifecycleLive` + `app.NewJointWithdrawalWorker`；008 = 真实
+  `nonce.Allocator`；链上 = Anvil + 测试 ERC-20 emitter）；J1–J5 全绿证明 011 participant 路径
+  （准入/intent+claim supply、fencing/takeover、reconcile loop、projection updater、freeze consumer）
+  在真实接线中运行。生产进程入口对适配器的装配（`WithdrawalWorkerCommand` 仍用 standalone
+  构造器）仍属 A-13 范围，见门禁声明。
+
+### 预存失败（非本轮回归，已取证）
+
+1. `internal/execution TestV12NoSecretsIn011Paths`：`internal/config/config.go` 注释含
+   `RawTransaction`/`eth_sendRawTransaction` 令牌（line 133 附近）。
+   `git diff c991680 -- internal/config/config.go` 为空（本轮未触碰）；在
+   `git archive c991680` 的 pristine 树上运行得到**逐字节相同**的失败输出
+   （`v12-pristine-c991680.log`）。不修复、不隐藏，列为跨 lane 遗留发现。
+2. `internal/db` 9 项：`TestT036SequenceA/B/C`、`TestT040OverlayGreenOnEmptySequence`、
+   `TestT041GapFillSequenceD`、`TestT042RollbackRevertsTenBeforeNine`、
+   `TestT042DownOfAppliedThenRenumberedNumberForbidden`、
+   `TestAuthzScopeMigrationDownRemovesOnlyItself`、
+   `TestWithdrawalExecutionMigrationIsAdditiveOnly` —— 均为 009/PB-era 硬编码 `{1..10}`
+   序列或 lane-local 集合断言，在联合迁移集 `{…11,12,13,14}` 下失败。在
+   `git archive 0946638`（本轮改动前的 tip）上运行得到**完全相同的 9 项失败与断言文本**
+   （`db-pristine-0946638.log`；唯一差异为非确定性的 map 遍历顺序），证明先于本轮存在。
+
+### 记录缺口（不修复，供编排裁决）
+
+- `Advance(ActionReplace)` 返回 `refused_basis`（010 无费用构造策略）：J2 替换腿按
+  blocked-with-reason 记录，未伪造 fee policy；010 对已备好 replacement attempt 的
+  claim 围栏由补充性 direct-Store 测试覆盖。
+- 011 issue 阶段对 frozen intent 的拒绝携带 `basis="frozen:<class>"` 而 `Refusal` 为空
+  （零写入、零派发）：本轮如实断言 basis，未改 011 语义。
+
+### 门禁声明
+
+- 真实联合验收（真实 007 HTTP + 011 + 010 + 009 + PG + Anvil 与测试 ERC-20；替身/夹具/
+  010 独立通过均未用作联合证据）已在联合工作区通过；**适用联合门禁已完成，011 可在评审后
+  推进其合并**，010→011 合并顺序不变。
+- A-13（全链 E2E）保持 OPEN（生产进程入口的适配器装配仍属其范围）；T000-P（生产 provider）
+  保持 OPEN。本记录不声称 A-13 闭合。
+- 010 任务框 `T038/T043–T045/T046–T051` 全部由本轮 clean-tree 证据复现通过（`T042` 保持
+  `[ ]`）；011 任务框 `T043/T044/T045` 经重验恢复 `[x]`。

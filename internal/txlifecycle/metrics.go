@@ -1,67 +1,41 @@
 package txlifecycle
 
-import "context"
+import (
+	"github.com/xtianxx/txharbor/internal/metrics"
+)
 
-// TxMetrics is 010's observability sink (R-010-13; constitution XII).
-// internal/metrics.Metrics satisfies it; every label is a fixed vocabulary, so
-// no tx_hash, signature, signed byte or credential can become a label.
-type TxMetrics interface {
-	ObserveTxDispatch(outcome string)
-	ObserveTxGateRefusal(class string)
-	ObserveTxUnknown(unknown bool)
-	ObserveTxReconcile(classification string)
-	ObserveTxReceiptEffect(effect string)
-	ObserveTxRevision()
-}
+// metrics.go wires the 010 transaction-lifecycle observability surface
+// (T003/R-010-13; constitution XII) onto the Store. Every ObserveTx* call
+// passes a fixed-vocabulary value only (send outcome, refusal class,
+// reconcile classification, receipt effect): no tx_hash, signature, signed
+// byte or credential can ever become a metric label. Observability is
+// best-effort and never alters an outcome; a nil Metrics records nothing.
 
-// WithMetrics wires the observability sink; nil disables emission.
-func (s *Store) WithMetrics(m TxMetrics) *Store {
+// WithMetrics wires the shared observability surface into the store.
+func (s *Store) WithMetrics(m *metrics.Metrics) *Store {
 	s.metrics = m
 	return s
 }
 
-// refuse funnels every zero-dispatch refusal through the gate-refusal counter
-// and returns the blocked result.
-func (s *Store) refuse(a *Attempt, ref *RefusalError) (SendResult, error) {
-	if s != nil && s.metrics != nil {
-		s.metrics.ObserveTxGateRefusal(string(ref.Class))
-	}
-	return blocked(a, ref)
-}
-
-func (s *Store) observeDispatch(outcome string) {
-	if s != nil && s.metrics != nil {
-		s.metrics.ObserveTxDispatch(outcome)
-	}
-}
-
-func (s *Store) observeReconcile(classification string) {
-	if s != nil && s.metrics != nil {
-		s.metrics.ObserveTxReconcile(classification)
-	}
-}
-
-func (s *Store) observeReceiptEffect(effect string) {
-	if s != nil && s.metrics != nil {
-		s.metrics.ObserveTxReceiptEffect(effect)
-	}
-}
-
-func (s *Store) observeRevision() {
-	if s != nil && s.metrics != nil {
-		s.metrics.ObserveTxRevision()
-	}
-}
-
-// observeUnknown refreshes the global unknown gauge: 1 while any attempt's
-// business effect is unknown, else 0.
-func (s *Store) observeUnknown(ctx context.Context) {
+// observeSend records one completed send-region result on the fixed-vocabulary
+// series: dispatch counters carry accepted/rejected/unknown send facts, the
+// unknown gauge marks an attempt whose business effect is undetermined, and a
+// blocked result counts exactly one zero-dispatch gate refusal by class
+// (FR-08; FR-21). Errors that carry no outcome (e.g. a 009 boundary refusal)
+// are not dispatches and add no counter here.
+func (s *Store) observeSend(res SendResult, err error) {
 	if s == nil || s.metrics == nil {
 		return
 	}
-	var unknown bool
-	if err := s.db.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM tx_attempts WHERE state = 'unknown')`).Scan(&unknown); err != nil {
-		return
+	switch res.Outcome {
+	case "blocked":
+		if err != nil && res.RefusalClass != "" {
+			s.metrics.ObserveTxGateRefusal(res.RefusalClass)
+		}
+	case "unknown":
+		s.metrics.ObserveTxDispatch("unknown")
+		s.metrics.ObserveTxUnknown(true)
+	case "accepted", "rejected":
+		s.metrics.ObserveTxDispatch(res.Outcome)
 	}
-	s.metrics.ObserveTxUnknown(unknown)
 }

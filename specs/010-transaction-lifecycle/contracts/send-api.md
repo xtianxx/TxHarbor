@@ -164,17 +164,8 @@ tests use a contract-shaped fixture labeled test-only (R-010-11/G-010-4).
   recovery, and never touches key material (FR-10, OC-3, OC-6).
 - A send that entered dispatch under a valid gate set is legally in-flight; the invalidation that lost the
   lock race governs later replays/replacements (R-010-04; G-010-1 covers the time-based residue).
-- G-010-2 class (c) (unperceived lock-loss, second limited Q3 exception, 2026-09-17): an irreducible window —
-  the sender cannot prove its locks still hold at dispatch time. Mitigated only by a same-session/transaction
-  `SELECT 1` probe (never a reconnect; a successful probe proves nothing past its own return) and exactly one
-  dispatch attempt with no transparent retries bypassing re-evaluation; minimal entry latency is an
-  optimization goal, not a proven bound, and the window MUST NOT be described as fixed, tiny or rare by
-  default. Detected best-effort by comparing recorded authorization/recovery/execution versions plus change
-  evidence at reconcile (post-hoc version equality proves nothing; unresolvable ordering stays indeterminate);
-  a proven-stale basis or an unexcludable post-invalidation send freezes that intent's further sends pending
-  manual review (chain observation/query/reconcile remain allowed; normal takeover/version updates are not
-  violation evidence). Manual review lifts only this residual's independent freeze cause under controlled
-  permission with evidence and audit, never overrides revoke/expiry/pause/eligibility gates; full
-  re-verification precedes any resend and reconcile never directly permits resend. This exception covers this
-  residual only — not other residuals and not actual verification. (Reference sync only; recorded text from
-  `contracts/send-gate.md` §4(d)(c), research R-010-14, plan Adjudication addendum 2.)
+- G-010-2 class (c) is closed as a second explicit limited Q3 exception (unperceived lock-loss window only;
+  adjudicated 2026-09-17; same-session probe mitigation; freeze-plus-manual-review on proof; reconcile never
+  permits resend); classes (a)/(b) stand as specified (plan.md Adjudication addendum 2; send-gate.md §4(d)(c);
+  research.md R-010-14; quickstart.md J5). This exception covers this residual only — not other residuals and
+  not actual verification.

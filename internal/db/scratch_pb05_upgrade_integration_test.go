@@ -12,10 +12,10 @@
 //
 // Scratch PostgreSQL only (testcontainers), one container per sequence. The
 // T040 harness helpers are reused verbatim — startPostgres, testMigrateOptions,
-// pb009HistoricOverlay, appliedContains, CheckCompatibility — so the overlay
-// logic lives in exactly one place. The lane tree never carries 009's file: it
-// enters only through pb009HistoricOverlay's in-memory FS. Every claim below
-// is a real runner run; code reading is not evidence.
+// pb009Overlay, appliedContains, CheckCompatibility — so the overlay logic
+// lives in exactly one place. The lane tree never carries 009's file: it enters
+// only through pb009Overlay's in-memory FS. Every claim below is a real runner
+// run; code reading is not evidence.
 package db
 
 import (
@@ -63,8 +63,8 @@ func t036AssertGrantIntact(t *testing.T, dsn, authorizationID string) {
 
 // TestT036SequenceAEmptyToFull: a fresh scratch database plus the pinned
 // PB/009-era chain {000001..000010} (carrier 000010 + the scratch 009 file;
-// the 010 lane's 000011/000013 postdate this era and are pinned out) migrates
-// from empty, serves, and a repeat `migrate up` is a no-op — applied numbers
+// joint-lane 000011+ postdates this era and is pinned out) migrates from
+// empty, serves, and a repeat `migrate up` is a no-op — applied numbers
 // untouched.
 func TestT036SequenceAEmptyToFull(t *testing.T) {
 	dsn := startPostgres(t)
@@ -124,18 +124,16 @@ func TestT036SequenceAEmptyToFull(t *testing.T) {
 	t.Logf("T036 sequence (a) applied numbers untouched: %v", state.Applied)
 }
 
-// TestT036SequenceB007EraToCarrier: a scratch database at the 007-era schema
-// {000001..000007} upgrades to the PB carrier. 009 is absent from the target
-// set, proving PB merges and serves without 009 (R-PB8 independence); the
-// pre-existing 007 grant survives byte-for-row and no scope is backfilled.
+// TestT036SequenceB007EraToCarrier: a scratch database at the pinned 007-era
+// schema {000001..000007} upgrades to the PB carrier. 009 is absent from the
+// target set, proving PB merges and serves without 009 (R-PB8 independence);
+// the pre-existing 007 grant survives byte-for-row and no scope is backfilled.
 func TestT036SequenceB007EraToCarrier(t *testing.T) {
 	dsn := startPostgres(t)
 	ctx := context.Background()
 
 	// Build the 007-era schema from exactly lane files {1..7}: pinned, so
-	// the 010 lane's 000011/000013 can never leak in and assert on a
-	// non-era schema (an unpinned overlay would even fail the build: 000011
-	// needs nonce_bindings, which is 000008's table).
+	// joint-lane 000011+ can never leak in and assert on a non-era schema.
 	era := testMigrateOptions(dsn)
 	era.FS = pb009HistoricOverlay(t, false, 1, 2, 3, 4, 5, 6, 7)
 	var out bytes.Buffer
@@ -167,8 +165,8 @@ func TestT036SequenceB007EraToCarrier(t *testing.T) {
 	}
 
 	// Upgrade to the pinned lane head {1..8,10}: applies 000008 and the carrier
-	// 000010. 000009 is still unmerged (009 absent); the 010 lane's
-	// 000011/000013 stay outside this era sequence.
+	// 000010. 000009 is still unmerged (009 absent); joint-lane 000011+ stays
+	// outside this era sequence.
 	carrier := testMigrateOptions(dsn)
 	carrier.FS = pb009HistoricOverlay(t, false, pb009HistoricLane...)
 	out.Reset()
@@ -217,8 +215,7 @@ func TestT036SequenceB007EraToCarrier(t *testing.T) {
 // `down` reverts the carrier 000010 before 000009 (applied-descending), then a
 // plain `migrate up` re-applies exactly 000010 without rewriting any applied
 // number. The 007 grant survives; 009 tables are untouched by the carrier's
-// down. The 010 lane's 000011/000013 are pinned out: this sequence owns the
-// era chain.
+// down. Joint-lane 000011+ is pinned out: this sequence owns the era chain.
 func TestT036SequenceCDownThenReUp(t *testing.T) {
 	dsn := startPostgres(t)
 	ctx := context.Background()

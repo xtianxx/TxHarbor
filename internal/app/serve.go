@@ -42,6 +42,12 @@ type Deps struct {
 	Stderr io.Writer
 	// Signals, when non-nil, replaces the OS signal notifier (tests).
 	Signals <-chan os.Signal
+	// JointWiring, when set, assembles the real 010/008 participants for
+	// commands that must not run standalone (withdrawal-worker). The binary
+	// entrypoint supplies it (internal/jointwire); internal/app must not
+	// import internal/txlifecycle (test-build cycle). A nil value makes
+	// those commands refuse startup instead of degrading.
+	JointWiring JointWiringFunc
 }
 
 func (d Deps) stdout() io.Writer {
@@ -316,6 +322,12 @@ func Serve(ctx context.Context, d Deps) int {
 	mux := http.NewServeMux()
 	mux.Handle("/withdrawals", withdrawH)
 	mux.Handle("/withdrawals/", withdrawH)
+	// 011 execution routes mount on the same listener: the method+pattern
+	// registrations are more specific than the /withdrawals/ subtree and win
+	// without touching 007's handler (contracts/api.md §1-§2).
+	executionH := &WithdrawalExecutionHandler{Pool: pool, ChainID: chainID, Metrics: m}
+	mux.Handle("POST /withdrawals/{request_id}/execution", executionH)
+	mux.Handle("GET /withdrawals/{request_id}/execution", executionH)
 	// 008 read endpoints mount on the same listener next to /withdrawals: no
 	// new listener or address. The bearer credential comes from config and is
 	// never logged; an unconfigured token admits nothing (fail closed).

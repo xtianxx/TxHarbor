@@ -80,7 +80,6 @@ func (s *Store) Reconcile(ctx context.Context, attemptID, txHash string) (Reconc
 	}
 
 	classification, blockNumber, blockHash, rpcClass := s.probe(ctx, hash)
-	s.observeReconcile(classification)
 
 	tx, err := s.db.Begin(ctx)
 	if err != nil {
@@ -131,7 +130,9 @@ func (s *Store) Reconcile(ctx context.Context, attemptID, txHash string) (Reconc
 	if err := tx.Commit(ctx); err != nil {
 		return ReconcileResult{}, Refuse(ClassCoordinationUnavailable, "", "storage unavailable")
 	}
-	s.observeUnknown(ctx)
+	if s.metrics != nil {
+		s.metrics.ObserveTxReconcile(classification)
+	}
 	if refreshed, err := s.AttemptByID(ctx, attemptID); err == nil {
 		result.AttemptState = refreshed.State
 	} else {

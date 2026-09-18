@@ -72,8 +72,16 @@ func (s *Store) WithReleaseToken(token string) *Store {
 
 // Send runs the send region: T2 first when the attempt is unsigned, then the
 // gate-verified T3 dispatch. A zero-dispatch refusal is returned with
-// Outcome=blocked and a committed gate_refused event (T017).
+// Outcome=blocked and a committed gate_refused event (T017). The completed
+// result is observed on the fixed-vocabulary 010 metric series
+// (metrics.go); observation never alters the outcome.
 func (s *Store) Send(ctx context.Context, req *SendRequest) (SendResult, error) {
+	res, err := s.send(ctx, req)
+	s.observeSend(res, err)
+	return res, err
+}
+
+func (s *Store) send(ctx context.Context, req *SendRequest) (SendResult, error) {
 	if s == nil || s.db == nil {
 		return SendResult{}, Refuse(ClassCoordinationUnavailable, "", "store has no database")
 	}
@@ -87,10 +95,10 @@ func (s *Store) Send(ctx context.Context, req *SendRequest) (SendResult, error) 
 
 	if a.State == "prepared" {
 		if req.Kind != SendInitial {
-			return s.refuse(a, Refuse(ClassSendModeMismatch, "kind", "attempt is unsigned; only initial is valid"))
+			return blocked(a, Refuse(ClassSendModeMismatch, "kind", "attempt is unsigned; only initial is valid"))
 		}
 		if s.signer == nil {
-			return s.refuse(a, Refuse(ClassAttemptNotSendable, "signer", "attempt is unsigned and no signer is configured"))
+			return blocked(a, Refuse(ClassAttemptNotSendable, "signer", "attempt is unsigned and no signer is configured"))
 		}
 		result, err := s.signer.Submit(ctx, a)
 		if err != nil {
@@ -110,7 +118,7 @@ func (s *Store) Send(ctx context.Context, req *SendRequest) (SendResult, error) 
 		return SendResult{}, Refuse(ClassCoordinationUnavailable, "", "freeze read failed")
 	} else if ref != nil {
 		s.recordStandaloneRefusal(ctx, a, ref)
-		return s.refuse(a, ref)
+		return blocked(a, ref)
 	}
 
 	// T024: a dispatch from signed/unknown is crash-ambiguous and MUST have a
@@ -122,9 +130,9 @@ func (s *Store) Send(ctx context.Context, req *SendRequest) (SendResult, error) 
 		}
 		switch rec.Classification {
 		case "unavailable":
-			return s.refuse(a, Refuse(ClassGateReadFailed, "reconcile", "chain probe unavailable; no dispatch decided"))
+			return blocked(a, Refuse(ClassGateReadFailed, "reconcile", "chain probe unavailable; no dispatch decided"))
 		case "included":
-			return s.refuse(a, Refuse(ClassAlreadyAccepted, "reconcile", "transaction is already included; no re-dispatch"))
+			return blocked(a, Refuse(ClassAlreadyAccepted, "reconcile", "transaction is already included; no re-dispatch"))
 		}
 		if a, err = s.AttemptByID(ctx, req.AttemptID); err != nil {
 			return SendResult{}, err
@@ -146,7 +154,7 @@ func (s *Store) Send(ctx context.Context, req *SendRequest) (SendResult, error) 
 // COMMIT carrying the gate snapshot + outcome + state transition + event.
 func (s *Store) sendRegion(ctx context.Context, a *Attempt, req *SendRequest, anchorAuth string) (SendResult, error) {
 	if s.rpc == nil {
-		return s.refuse(a, Refuse(ClassCoordinationUnavailable, "rpc", "no chain client configured"))
+		return blocked(a, Refuse(ClassCoordinationUnavailable, "rpc", "no chain client configured"))
 	}
 	tx, err := s.db.Begin(ctx)
 	if err != nil {
@@ -212,7 +220,6 @@ func (s *Store) sendRegion(ctx context.Context, a *Attempt, req *SendRequest, an
 	_ = returned
 	outcome, rpcClass := classifyDispatch(dispatchErr)
 	res.Snapshot.ObservedNow = dispatchedAt
-	s.observeDispatch(outcome)
 
 	if err := recordDispatchTx(ctx, tx, a, res, req.Kind, outcome, rpcClass, dispatchedAt); err != nil {
 		_ = tx.Rollback(ctx)
@@ -225,27 +232,25 @@ func (s *Store) sendRegion(ctx context.Context, a *Attempt, req *SendRequest, an
 		_ = tx.Rollback(ctx)
 		return s.recordRegionWriteFailure(ctx, a, res, req.Kind, hash, rpcClass)
 	}
-	s.observeUnknown(ctx)
 	return SendResult{Outcome: outcome, RPCClass: rpcClass, TxHash: hash, SendSeq: res.SendSeq}, nil
 }
 
 // commitRefusal commits zero-dispatch evidence in the region transaction.
+// When the refusal read itself poisoned the region transaction (a claim read
+// failing on SQLSTATE 42P01/42703 becomes claim_absent), the evidence is
+// re-committed in a standalone transaction and the EXACT refusal class is
+// returned — fail closed is never degraded into a coordination class
+// (G-010-4; R-010-11).
 func (s *Store) commitRefusal(ctx context.Context, tx pgx.Tx, a *Attempt, ref *RefusalError) (SendResult, error) {
 	if err := appendEventTx(ctx, tx, a.AttemptID, EventGateRefused, string(ref.Class), recoveryVersionPtr(a.RecoveryVersion), ref.Basis); err != nil {
 		_ = tx.Rollback(ctx)
-		if isInFailedTransaction(err) {
-			// G-010-4: an undefined-table/column claim read poisons the region
-			// transaction. Record the decided refusal in a fresh transaction so
-			// the class survives instead of degrading to coordination_unavailable.
-			s.recordStandaloneRefusal(ctx, a, ref)
-			return s.refuse(a, ref)
-		}
-		return s.recordRegionAbort(ctx, a, err)
+		s.recordStandaloneRefusal(ctx, a, ref)
+		return blocked(a, ref)
 	}
 	if err := tx.Commit(ctx); err != nil {
-		return s.refuse(a, ref)
+		return blocked(a, ref)
 	}
-	return s.refuse(a, ref)
+	return blocked(a, ref)
 }
 
 // recordRegionAbort handles G-010-2(b): a failure detected before dispatch was
@@ -263,7 +268,7 @@ func (s *Store) recordRegionAbort(ctx context.Context, a *Attempt, cause error) 
 		}
 	}
 	ref := Refuse(ClassCoordinationUnavailable, "", "region aborted before dispatch: "+cause.Error())
-	return s.refuse(a, ref)
+	return blocked(a, ref)
 }
 
 // recordRegionWriteFailure handles G-010-2(a): dispatch entered with protection
@@ -302,7 +307,6 @@ func (s *Store) recordRegionWriteFailure(ctx context.Context, a *Attempt, res ga
 		}()
 	}
 	_, _ = s.Reconcile(ctx, a.AttemptID, hash)
-	s.observeDispatch("unknown")
 	return SendResult{Outcome: "unknown", RPCClass: "storage_region_failure", TxHash: hash, SendSeq: res.SendSeq}, nil
 }
 

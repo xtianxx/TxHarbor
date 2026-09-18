@@ -9,6 +9,8 @@
 //	txharbor withdrawal-authz supply an upstream grant (or mint/revoke)
 //	txharbor apikey-auth      manage caller API keys (issue/rotate/revoke)
 //	txharbor nonce-admin      operate 008 nonce holds/registry (mint/release/status)
+//	txharbor withdrawal-exec  operate 011 execution permissions/claims/projection
+//	txharbor withdrawal-worker run the 011 execution worker
 package main
 
 import (
@@ -20,6 +22,7 @@ import (
 	"syscall"
 
 	"github.com/xtianxx/txharbor/internal/app"
+	"github.com/xtianxx/txharbor/internal/jointwire"
 )
 
 func main() {
@@ -30,7 +33,7 @@ func run(args []string) int {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	d := app.Deps{Getenv: os.LookupEnv, Stdout: os.Stdout, Stderr: os.Stderr}
+	d := app.Deps{Getenv: os.LookupEnv, Stdout: os.Stdout, Stderr: os.Stderr, JointWiring: jointwire.Worker}
 	if len(args) == 0 {
 		usage(os.Stderr)
 		return 2
@@ -53,6 +56,10 @@ func run(args []string) int {
 		return app.SignerAuth(ctx, args[1:], d)
 	case "nonce-admin":
 		return app.NonceAdmin(ctx, args[1:], d)
+	case "withdrawal-exec":
+		return app.WithdrawalExec(ctx, args[1:], d)
+	case "withdrawal-worker":
+		return app.WithdrawalWorkerCommand(ctx, args[1:], d)
 	case "help", "-h", "--help":
 		usage(os.Stdout)
 		return 0
@@ -76,6 +83,8 @@ commands:
   signer-serve      run the signer HTTP service (009, standalone listener)
   signer-auth       manage signer credentials (issue/rotate/revoke/set-can-sign)
   nonce-admin       operate 008 nonce holds/registry (mint/release/status)
+  withdrawal-exec   operate 011 execution permissions/claims/projection
+  withdrawal-worker run the 011 execution worker (claim/renew/advance/reconcile)
   help              show this help
 `)
 }

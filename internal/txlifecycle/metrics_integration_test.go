@@ -4,159 +4,233 @@ package txlifecycle
 
 import (
 	"context"
+	"net/http"
+	"net/http/httptest"
+	"strconv"
+	"strings"
 	"testing"
 
-	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/xtianxx/txharbor/internal/eth"
 	"github.com/xtianxx/txharbor/internal/metrics"
 )
 
-// txMetricValue reads one counter or gauge series from a real registry; an
-// absent series reads as 0.
-func txMetricValue(t *testing.T, m *metrics.Metrics, name string, want map[string]string) float64 {
+// metrics_integration_test.go executes quickstart V11's observability
+// acceptance (T055; constitution XII; R-010-13): the six fixed-vocabulary 010
+// series — dispatch outcomes, gate refusals by class, the unknown gauge,
+// reconcile classifications, receipt effects and revisions — exist on the real
+// registry and are recorded by the REAL store paths on the V-scenarios
+// (pause refusal, accepted dispatch, timeout unknown, reconcile + effective
+// receipt, reorg orphan + reconfirm). A final scan proves no metric label
+// ever carries a signature, a signed byte or a credential.
+
+// scrapeMetrics renders the exposition text through the same handler serve
+// mounts at /metrics.
+func scrapeMetrics(t *testing.T, m *metrics.Metrics) string {
 	t.Helper()
-	families, err := m.Gatherer().Gather()
-	if err != nil {
-		t.Fatalf("gather: %v", err)
+	rec := httptest.NewRecorder()
+	m.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/metrics", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("scrape status = %d, want 200", rec.Code)
 	}
-	for _, fam := range families {
-		if fam.GetName() != name {
+	return rec.Body.String()
+}
+
+// metricSeries is one parsed exposition series line.
+type metricSeries struct {
+	name   string
+	labels string
+	value  float64
+}
+
+// parseSeries extracts every numeric series line (TYPE/HELP excluded).
+func parseSeries(body string) []metricSeries {
+	var out []metricSeries
+	for _, line := range strings.Split(body, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "#") {
 			continue
 		}
-		for _, met := range fam.GetMetric() {
-			got := make(map[string]string, len(met.GetLabel()))
-			for _, pair := range met.GetLabel() {
-				got[pair.GetName()] = pair.GetValue()
-			}
-			match := true
-			for k, v := range want {
-				if got[k] != v {
-					match = false
-					break
-				}
-			}
-			if !match {
-				continue
-			}
-			if c := met.GetCounter(); c != nil {
-				return c.GetValue()
-			}
-			if g := met.GetGauge(); g != nil {
-				return g.GetValue()
-			}
+		fields := strings.Fields(line)
+		if len(fields) != 2 {
+			continue
 		}
+		v, err := strconv.ParseFloat(fields[1], 64)
+		if err != nil {
+			continue
+		}
+		s := metricSeries{value: v}
+		if i := strings.Index(fields[0], "{"); i >= 0 {
+			s.name = fields[0][:i]
+			s.labels = strings.Trim(fields[0][i+1:], "{}")
+		} else {
+			s.name = fields[0]
+		}
+		out = append(out, s)
 	}
-	return 0
+	return out
 }
 
-func txMetricExists(t *testing.T, m *metrics.Metrics, name string) bool {
+// seriesValue sums the series named `name` whose labels contain `label`
+// ("" matches the unlabeled series only). An absent series reads as 0: a
+// counter has no series until its first observation.
+func seriesValue(body string, name, label string) float64 {
+	total := 0.0
+	for _, s := range parseSeries(body) {
+		if s.name != name {
+			continue
+		}
+		if label == "" && s.labels != "" {
+			continue
+		}
+		if label != "" && !strings.Contains(s.labels, label) {
+			continue
+		}
+		total += s.value
+	}
+	return total
+}
+
+// expectSeriesDelta asserts one scenario moved exactly `want` on one series.
+func expectSeriesDelta(t *testing.T, before, after string, name, label string, want float64) {
 	t.Helper()
-	families, err := m.Gatherer().Gather()
-	if err != nil {
-		t.Fatalf("gather: %v", err)
+	got := seriesValue(after, name, label) - seriesValue(before, name, label)
+	if got != want {
+		t.Fatalf("series %s{%s} moved by %v, want %v", name, label, got, want)
 	}
-	for _, fam := range families {
-		if fam.GetName() == name {
-			return true
-		}
-	}
-	return false
 }
 
-// TestV11ObservabilityCounters is T055/V11: the 010 counters exist and are
-// recorded on the V-scenarios (accepted/unknown dispatch, gate refusal, unknown
-// gauge, reconcile class, receipt effect, reorg revision) (constitution XII;
-// R-010-13).
-func TestV11ObservabilityCounters(t *testing.T) {
+func TestV11TxMetricsRecorded(t *testing.T) {
 	m := metrics.New(func() bool { return true })
 	e := newEnv(t)
 	e.store = e.store.WithMetrics(m)
 	ctx := context.Background()
 
-	// V8/V9 path: accepted dispatch, effective receipt, reorg revision.
-	e.addBlock(98, blockHashHex(98), true)
-	f := e.seed()
-	f.sign()
-	if res, err := e.send(f, SendInitial, nil); err != nil || res.Outcome != "accepted" {
-		t.Fatalf("send = %+v %v", res, err)
-	}
-	e.rpc.mu.Lock()
-	e.rpc.txFound = true
-	e.rpc.txPending = false
-	e.rpc.receipt = receiptAt(98, blockHashHex(98), 1, []*types.Log{xferLog(fxAsset, f.sender, fxRecipient, 1000)})
-	e.rpc.mu.Unlock()
-	if res, err := e.store.Reconcile(ctx, f.attemptID, ""); err != nil || res.ReceiptEffect != "effective" {
-		t.Fatalf("receipt reconcile = %+v %v", res, err)
-	}
-	e.exec(`UPDATE chain_blocks SET canonical = FALSE WHERE chain_id = $1 AND number = 98`, e.chainID)
-	e.rpc.mu.Lock()
-	e.rpc.receipt = receiptAt(100, blockHashHex(100), 1, []*types.Log{xferLog(fxAsset, f.sender, fxRecipient, 1000)})
-	e.rpc.mu.Unlock()
-	if _, err := e.store.Reconcile(ctx, f.attemptID, ""); err != nil {
-		t.Fatalf("reorg reconcile: %v", err)
+	names := []string{
+		metrics.TxDispatchMetricName,
+		metrics.TxGateRefusalMetricName,
+		metrics.TxUnknownMetricName,
+		metrics.TxReconcileMetricName,
+		metrics.TxReceiptEffectMetricName,
+		metrics.TxRevisionMetricName,
 	}
 
-	// V4/FR-03 path: a dispatch timeout lands unknown.
-	e.rpc.mu.Lock()
-	e.rpc.txFound = false
-	e.rpc.txPending = false
-	e.rpc.receipt = nil
-	e.rpc.mu.Unlock()
-	u := e.seed()
-	u.sign()
+	base := scrapeMetrics(t, m)
+
+	var secretSamples []string
+
+	// V6: a present pause refuses with zero dispatch and counts exactly one
+	// gate refusal under the fixed pause_present class.
+	f0 := e.seed()
+	f0.sign()
+	e.exec(`INSERT INTO indexer_pause (chain_id, height, expected_hash, actual_hash, kind)
+		VALUES ($1,100,$2,$3,'hash_mismatch')`, e.chainID, blockHashHex(100), blockHashHex(101))
+	before := e.rpc.dispatchCount()
+	res, err := e.send(f0, SendInitial, nil)
+	assertBlocked(t, e, f0.attemptID, res, err, ClassPausePresent, before)
+	e.exec(`DELETE FROM indexer_pause WHERE chain_id = $1`, e.chainID)
+	after := scrapeMetrics(t, m)
+	expectSeriesDelta(t, base, after, metrics.TxGateRefusalMetricName, `class="pause_present"`, 1)
+	expectSeriesDelta(t, base, after, metrics.TxDispatchMetricName, "", 0)
+
+	// V3: one accepted dispatch counts one accepted send fact.
+	f1 := e.seed()
+	f1.sign()
+	secretSamples = append(secretSamples, f1.signOnly().Signature)
+	res, err = e.send(f1, SendInitial, nil)
+	if err != nil || res.Outcome != "accepted" {
+		t.Fatalf("send f1 = %+v %v, want accepted", res, err)
+	}
+	secretSamples = append(secretSamples, res.TxHash)
+	after = scrapeMetrics(t, m)
+	expectSeriesDelta(t, base, after, metrics.TxDispatchMetricName, `outcome="accepted"`, 1)
+
+	// V4: a timeout dispatch is a send fact (unknown outcome) and marks the
+	// unknown gauge: the business effect is undetermined.
+	f2 := e.seed()
+	f2.sign()
 	e.rpc.mu.Lock()
 	e.rpc.txErr = &eth.Error{Kind: eth.KindTimeout, Op: "stub"}
 	e.rpc.mu.Unlock()
-	if res, err := e.send(u, SendInitial, nil); err != nil || res.Outcome != "unknown" {
-		t.Fatalf("timeout send = %+v %v", res, err)
+	res, err = e.send(f2, SendInitial, nil)
+	if err != nil || res.Outcome != "unknown" {
+		t.Fatalf("send f2 = %+v %v, want unknown", res, err)
 	}
 	e.rpc.mu.Lock()
 	e.rpc.txErr = nil
 	e.rpc.mu.Unlock()
-	if got := txMetricValue(t, m, metrics.TxUnknownMetricName, nil); got != 1 {
+	secretSamples = append(secretSamples, res.TxHash)
+	after = scrapeMetrics(t, m)
+	expectSeriesDelta(t, base, after, metrics.TxDispatchMetricName, `outcome="unknown"`, 1)
+	if got := seriesValue(after, metrics.TxUnknownMetricName, ""); got != 1 {
 		t.Fatalf("unknown gauge = %v, want 1", got)
 	}
 
-	// V6 path: a zero-dispatch gate refusal.
-	g := e.seed()
-	g.sign()
-	e.exec(`DELETE FROM execution_claims WHERE intent_id = $1`, g.intentID)
-	before := e.rpc.dispatchCount()
-	res, err := e.send(g, SendInitial, nil)
-	if res.RefusalClass != string(ClassClaimAbsent) {
-		t.Fatalf("claim refusal class = %s (%v), want claim_absent", res.RefusalClass, err)
+	// V5/V7: reconcile observes f3 included; the effective receipt counts its
+	// effect on the receipt-effect series.
+	f3 := e.seed()
+	f3.sign()
+	if _, err := e.send(f3, SendInitial, nil); err != nil {
+		t.Fatalf("send f3: %v", err)
 	}
-	if e.rpc.dispatchCount() != before {
-		t.Fatal("gate refusal dispatched")
+	e.rpc.mu.Lock()
+	e.rpc.txFound = true
+	e.rpc.txPending = false
+	e.rpc.receipt = synthReceipt(f3.sender, 100)
+	e.rpc.mu.Unlock()
+	t.Cleanup(func() {
+		e.rpc.mu.Lock()
+		e.rpc.txFound = false
+		e.rpc.receipt = nil
+		e.rpc.mu.Unlock()
+	})
+	rec, err := e.store.Reconcile(ctx, f3.attemptID, "")
+	if err != nil || rec.Classification != "included" || rec.ReceiptEffect != "effective" {
+		t.Fatalf("reconcile f3 = %+v %v, want included/effective", rec, err)
 	}
+	after = scrapeMetrics(t, m)
+	expectSeriesDelta(t, base, after, metrics.TxReconcileMetricName, `classification="included"`, 1)
+	expectSeriesDelta(t, base, after, metrics.TxReceiptEffectMetricName, `effect="effective"`, 1)
 
-	for _, name := range []string{
-		metrics.TxDispatchMetricName, metrics.TxGateRefusalMetricName, metrics.TxUnknownMetricName,
-		metrics.TxReconcileMetricName, metrics.TxReceiptEffectMetricName, metrics.TxRevisionMetricName,
-	} {
-		if !txMetricExists(t, m, name) {
-			t.Errorf("metric family %s missing", name)
+	// V9: a reorg revises the revision chain twice — the orphaned receipt and
+	// the re-inclusion reconfirm each count one revision.
+	e.exec(`UPDATE chain_blocks SET canonical = FALSE WHERE chain_id = $1 AND number = 100`, e.chainID)
+	e.addBlock(101, blockHashHex(101), true)
+	e.rpc.mu.Lock()
+	e.rpc.receipt = synthReceipt(f3.sender, 101)
+	e.rpc.mu.Unlock()
+	if _, err := e.store.Reconcile(ctx, f3.attemptID, ""); err != nil {
+		t.Fatalf("reconcile after reorg: %v", err)
+	}
+	e.rpc.mu.Lock()
+	e.rpc.receipt = synthReceipt(f3.sender, 101)
+	e.rpc.mu.Unlock()
+	if _, err := e.store.Reconcile(ctx, f3.attemptID, ""); err != nil {
+		t.Fatalf("reconcile after re-inclusion: %v", err)
+	}
+	after = scrapeMetrics(t, m)
+	expectSeriesDelta(t, base, after, metrics.TxRevisionMetricName, "", 2)
+
+	// The secrecy scan: across the whole scrape, no label value may carry a
+	// signature, a signed byte, a tx hash or a credential — every label is a
+	// fixed vocabulary (FR-21/SC-09; constitution XII). After the scenarios
+	// every series has at least one child, so all six names must be exposed.
+	final := scrapeMetrics(t, m)
+	for _, name := range names {
+		if !strings.Contains(final, "# HELP "+name+" ") {
+			t.Fatalf("scrape missing metric name %q — the six 010 series must exist", name)
 		}
 	}
-	if got := txMetricValue(t, m, metrics.TxDispatchMetricName, map[string]string{"outcome": "accepted"}); got < 1 {
-		t.Errorf("dispatch accepted = %v, want >= 1", got)
+	for _, s := range parseSeries(final) {
+		for _, bad := range secretSamples {
+			if bad == "" {
+				continue
+			}
+			if strings.Contains(s.labels, bad) {
+				t.Fatalf("metric %s{%s} leaks a secret-bearing value", s.name, s.labels)
+			}
+		}
 	}
-	if got := txMetricValue(t, m, metrics.TxDispatchMetricName, map[string]string{"outcome": "unknown"}); got < 1 {
-		t.Errorf("dispatch unknown = %v, want >= 1", got)
-	}
-	if got := txMetricValue(t, m, metrics.TxGateRefusalMetricName, map[string]string{"class": string(ClassClaimAbsent)}); got < 1 {
-		t.Errorf("gate refusal claim_absent = %v, want >= 1", got)
-	}
-	if got := txMetricValue(t, m, metrics.TxReconcileMetricName, map[string]string{"classification": "included"}); got < 1 {
-		t.Errorf("reconcile included = %v, want >= 1", got)
-	}
-	if got := txMetricValue(t, m, metrics.TxReconcileMetricName, map[string]string{"classification": "not_found_yet"}); got < 1 {
-		t.Errorf("reconcile not_found_yet = %v, want >= 1", got)
-	}
-	if got := txMetricValue(t, m, metrics.TxReceiptEffectMetricName, map[string]string{"effect": "effective"}); got < 1 {
-		t.Errorf("receipt effect effective = %v, want >= 1", got)
-	}
-	if got := txMetricValue(t, m, metrics.TxRevisionMetricName, nil); got < 1 {
-		t.Errorf("revision counter = %v, want >= 1", got)
+	if strings.Contains(final, "test-credential") {
+		t.Fatal("scrape contains a credential string")
 	}
 }

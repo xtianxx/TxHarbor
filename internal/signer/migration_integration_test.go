@@ -50,15 +50,17 @@ const (
 	signerMigrationMergedHeadVersion = 10
 	// signerMigrationChainHeadVersion is the full embedded chain head on this
 	// 010 candidate: the PB/009-era head plus the 010 lane's own extensions.
-	signerMigrationChainHeadVersion = 13
+	signerMigrationChainHeadVersion = 14
 )
 
-// signerLaneExtensionVersions are the 010 lane's own migrations on top of the
-// PB/009-era head {1..10}: 000011 (tx lifecycle tables) and 000013 (guarded
-// intent-FK follow-up; a no-op below 011's 000012). 000012 is 011-reserved and
-// intentionally absent from the embedded set — that absence is a pinned
-// delivery-scope fact, asserted by TestSignerMigrationHistoryUntouched.
-var signerLaneExtensionVersions = []int64{11, 13}
+// signerLaneExtensionVersions are the migrations on top of the PB/009-era
+// head {1..10} on the 011 joint candidate: 000011 (010 tx lifecycle tables),
+// 000012 (011 withdrawal execution), 000013 (guarded intent-FK follow-up) and
+// 000014 (intent-FK repair). The 010 candidate's delivery-scope fact — 000012
+// absent — does NOT hold here: the 011 candidate carries 000012 by
+// construction, so the absence pin from the 010-side baseline is removed and
+// every extension name is pinned instead.
+var signerLaneExtensionVersions = []int64{11, 12, 13, 14}
 
 const (
 	// signerMaxUint256 is the declared upper bound of the value/amount CHECKs
@@ -342,16 +344,15 @@ func TestSignerMigrationHistoryUntouched(t *testing.T) {
 		t.Fatalf("embedded migration 10 = %q (present=%v), want the PB carrier 000010_withdrawal_authorization_scopes.sql", name, ok)
 	}
 	for _, v := range signerLaneExtensionVersions {
-		want := "000011_tx_lifecycle.sql"
-		if v == 13 {
-			want = "000013_tx_lifecycle_intent_fk.sql"
-		}
+		want := map[int64]string{
+			11: "000011_tx_lifecycle.sql",
+			12: "000012_withdrawal_execution.sql",
+			13: "000013_tx_lifecycle_intent_fk.sql",
+			14: "000014_intent_fk_repair.sql",
+		}[v]
 		if name, ok := seen[v]; !ok || name != want {
-			t.Fatalf("embedded migration %d = %q (present=%v), want the 010 lane's %s", v, name, ok, want)
+			t.Fatalf("embedded migration %d = %q (present=%v), want %s", v, name, ok, want)
 		}
-	}
-	if name, ok := seen[12]; ok {
-		t.Fatalf("embedded migration 12 = %q; 000012 is 011-reserved and must stay absent on the 010 candidate", name)
 	}
 	for v := range seen {
 		if v > signerMigrationChainHeadVersion {
@@ -380,19 +381,20 @@ func TestSignerMigrationHistoryUntouched(t *testing.T) {
 // TestSignerMigrationUpgradeDowngradeFrom007 covers the T004/T005 upgrade path
 // on an isolated scratch database: a real 007 database gains every embedded
 // version above 007 — 000008 (008-nonce-manager), the lane-owned 000009, PB's
-// carrier 000010, and the 010 lane's 000011 + 000013 — the status reports
-// 13/clean, the applied-descending DownTo(7) reverts 000013, 000011, 000010,
-// 000009, 000008 in that order (000009's Down drops exactly the six 009
-// tables) while the upstream 002 row survives, and re-up reproduces the same
-// state.
+// carrier 000010, and the 011-joint extensions 000011..000014 — the status
+// reports 14/clean, the applied-descending DownTo(7) reverts 000014, 000013,
+// 000012, 000011, 000010, 000009, 000008 in that order (000009's Down drops
+// exactly the six 009 tables) while the upstream 002 row survives, and re-up
+// reproduces the same state.
 //
-// T041 baseline update (010-candidate sync, Lane-M): the pre-sync expectation
-// was applied=3 skipped=7 with DownTo rolling back exactly [10, 9, 8]. The 010
-// candidate legitimately carries its own 000011 and 000013, so the same 007
-// database applies 000008, 000009, 000010, 000011 and 000013 (applied=5
-// skipped=7) and DownTo(7) rolls back exactly [13, 11, 10, 9, 8]. Applied
-// history is still never rewritten: the signer lane fills the reserved 9 and
-// touches nothing below it, and 000012 never appears.
+// Lane-U baseline update (011-candidate sync of the Lane-M 010 re-baseline):
+// on the 010 candidate the same 007 database applied five versions above 007
+// ([13, 11, 10, 9, 8] on the way down, 000012 absent). The 011 candidate
+// carries its full joint set, so the upgrade applies 000008..000010 and
+// 000011..000014 (applied=7 skipped=7) and DownTo(7) rolls back exactly
+// [14, 13, 12, 11, 10, 9, 8]. Applied history is still never rewritten: the
+// signer lane fills the reserved 9 and touches nothing below it, and every
+// extension rolls back strictly applied-descending.
 func TestSignerMigrationUpgradeDowngradeFrom007(t *testing.T) {
 	dsn := signerMigrationStartPostgres(t)
 	ctx := context.Background()
@@ -411,15 +413,15 @@ func TestSignerMigrationUpgradeDowngradeFrom007(t *testing.T) {
 		VALUES (1, 100, $1, $2, TRUE)`, signerMigrationHash("aa"), signerMigrationHash("bb"))
 
 	// Full embedded set applies every version above 007: 000008, the
-	// lane-owned 000009, PB's carrier 000010, and the 010 lane's
-	// 000011 + 000013.
+	// lane-owned 000009, PB's carrier 000010, and the joint extensions
+	// 000011..000014.
 	fullOpts := signerMigrationOptions(dsn)
 	out.Reset()
 	if err := db.MigrateUp(ctx, fullOpts, &out); err != nil {
 		t.Fatalf("upgrade MigrateUp() error = %v (output %q)", err, out.String())
 	}
-	if !strings.Contains(out.String(), "applied=5 skipped=7 pending=0") {
-		t.Fatalf("upgrade output = %q, want applied=5 skipped=7 pending=0 (000008, 000009, 000010, 000011, 000013)", out.String())
+	if !strings.Contains(out.String(), "applied=7 skipped=7 pending=0") {
+		t.Fatalf("upgrade output = %q, want applied=7 skipped=7 pending=0 (000008, 000009, 000010, 000011, 000012, 000013, 000014)", out.String())
 	}
 
 	out.Reset()
@@ -437,8 +439,9 @@ func TestSignerMigrationUpgradeDowngradeFrom007(t *testing.T) {
 	}
 
 	// Applied-descending DownTo(7) via a provider mirroring internal/db:
-	// every version above 007, head first — 000013, 000011, 000010, 000009,
-	// 000008 (000013's Down drops only the guarded FK constraint).
+	// every version above 007, head first — 000014, 000013, 000012, 000011,
+	// 000010, 000009, 000008 (000014's Down drops only the repaired FK
+	// constraint; 000013's the guarded FK; 000012's the 011 execution tables).
 	provider := signerMigrationNewProvider(t, sqlDB, migrations.FS)
 	results, err := provider.DownTo(ctx, signerMigrationBaselineVersion)
 	if err != nil {
@@ -449,7 +452,9 @@ func TestSignerMigrationUpgradeDowngradeFrom007(t *testing.T) {
 		gotDown = append(gotDown, r.Source.Version)
 	}
 	wantDown := []int64{
-		signerMigrationChainHeadVersion,    // 000013 010 follow-up (guarded FK drop)
+		signerMigrationChainHeadVersion,    // 000014 intent-FK repair (constraint drop)
+		13,                                 // 000013 guarded intent-FK follow-up
+		12,                                 // 000012 011 execution tables
 		11,                                 // 000011 010 tx lifecycle tables
 		signerMigrationMergedHeadVersion,   // 000010 PB carrier
 		signerMigrationCurrentVersion,      // 000009 lane-owned
@@ -476,8 +481,8 @@ func TestSignerMigrationUpgradeDowngradeFrom007(t *testing.T) {
 	if err := db.MigrateStatus(ctx, fullOpts, &out); err != nil {
 		t.Fatalf("MigrateStatus() after Down error = %v", err)
 	}
-	if !strings.Contains(out.String(), "current_version=7") || !strings.Contains(out.String(), "pending=5") {
-		t.Fatalf("status after Down = %q, want current_version=7 and pending=5", out.String())
+	if !strings.Contains(out.String(), "current_version=7") || !strings.Contains(out.String(), "pending=7") {
+		t.Fatalf("status after Down = %q, want current_version=7 and pending=7", out.String())
 	}
 
 	// Re-up reproduces the same clean state.
@@ -485,8 +490,8 @@ func TestSignerMigrationUpgradeDowngradeFrom007(t *testing.T) {
 	if err := db.MigrateUp(ctx, fullOpts, &out); err != nil {
 		t.Fatalf("re-up MigrateUp() error = %v (output %q)", err, out.String())
 	}
-	if !strings.Contains(out.String(), "applied=5 skipped=7 pending=0") {
-		t.Fatalf("re-up output = %q, want applied=5 skipped=7 pending=0", out.String())
+	if !strings.Contains(out.String(), "applied=7 skipped=7 pending=0") {
+		t.Fatalf("re-up output = %q, want applied=7 skipped=7 pending=0", out.String())
 	}
 	out.Reset()
 	if err := db.MigrateStatus(ctx, fullOpts, &out); err != nil {
@@ -570,22 +575,24 @@ func signerMigrationWantAuthorizationVersion(t *testing.T, sqlDB *sql.DB) {
 // the authorization_version snapshot) rather than the PB lane's pinned
 // pre-T037 fixture. Three eras, one scratch PostgreSQL each:
 //
-//	(a) empty             -> full chain 000001-000010 + {000011, 000013}:
-//	    applied=12, gate green
-//	(b) 008-era {1..8}     -> applies exactly 000009, 000010, 000011, 000013
+//	(a) empty             -> full chain 000001-000010 + 000011..000014:
+//	    applied=14, gate green
+//	(b) 008-era {1..8}     -> applies exactly 000009, 000010, 000011, 000012,
+//	    000013, 000014
 //	(c) PB-era {1..8,10}   -> gate refuses on pending 9, then the
 //	    WithAllowOutofOrder provider fills the gap with exactly 000009
 //
 // T041 baseline note: pre-sync the chain ended at 9 and (b)/(c) did not exist.
 // The merged tree legitimately carries 000008 and the PB carrier 000010; the
-// 010 candidate adds its own 000011/000013 on top (000012 011-reserved and
-// absent). This pins that 009 fills the reserved gap in every direction, that
-// the amended 000009 is what actually applies, and that the 010 extensions sit
-// strictly above the era head without touching it.
+// 011 joint candidate adds 000011..000014 on top (000012 present here — the
+// 010-side absence pin does not apply). This pins that 009 fills the reserved
+// gap in every direction, that the amended 000009 is what actually applies,
+// and that the joint extensions sit strictly above the era head without
+// touching it.
 //
-// Lane-M note (010-candidate sync): subtest (b) upgrades from the 008-era
-// {1..8} with the signer lane's FS subset — the 010 extension applies only in
-// the full embedded set legs, never inside an era fixture.
+// Lane-U note (011-candidate sync of the Lane-M 010 re-baseline): the counts
+// re-baseline to the full 14-file joint set; subtest (b) still upgrades from
+// the 008-era FS subset — no joint extension leaks into an era fixture.
 func TestSignerMigrationMergedChain(t *testing.T) {
 	t.Run("empty to full chain", func(t *testing.T) {
 		dsn := signerMigrationStartPostgres(t)
@@ -595,14 +602,14 @@ func TestSignerMigrationMergedChain(t *testing.T) {
 		if err := db.MigrateUp(ctx, opts, &out); err != nil {
 			t.Fatalf("MigrateUp(full chain) error = %v (output %q)", err, out.String())
 		}
-		if !strings.Contains(out.String(), "applied=12 skipped=0 pending=0") {
-			t.Fatalf("MigrateUp(full chain) output = %q, want applied=12 skipped=0 pending=0", out.String())
+		if !strings.Contains(out.String(), "applied=14 skipped=0 pending=0") {
+			t.Fatalf("MigrateUp(full chain) output = %q, want applied=14 skipped=0 pending=0", out.String())
 		}
 		state, err := db.Inspect(ctx, opts)
 		if err != nil {
 			t.Fatalf("Inspect() error = %v", err)
 		}
-		signerMigrationWantApplied(t, state, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 13)
+		signerMigrationWantApplied(t, state, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14)
 		signerMigrationWantGateGreen(t, ctx, opts)
 		sqlDB := signerMigrationOpenSQL(t, dsn)
 		signerMigrationWantTables(t, sqlDB)
@@ -634,14 +641,14 @@ func TestSignerMigrationMergedChain(t *testing.T) {
 		if err := db.MigrateUp(ctx, full, &out); err != nil {
 			t.Fatalf("upgrade MigrateUp() error = %v (output %q)", err, out.String())
 		}
-		if !strings.Contains(out.String(), "applied=4 skipped=8 pending=0") {
-			t.Fatalf("upgrade output = %q, want applied=4 skipped=8 pending=0 (000009, 000010, 000011, 000013)", out.String())
+		if !strings.Contains(out.String(), "applied=6 skipped=8 pending=0") {
+			t.Fatalf("upgrade output = %q, want applied=6 skipped=8 pending=0 (000009, 000010, 000011, 000012, 000013, 000014)", out.String())
 		}
 		state, err = db.Inspect(ctx, full)
 		if err != nil {
 			t.Fatalf("Inspect() after upgrade error = %v", err)
 		}
-		signerMigrationWantApplied(t, state, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 13)
+		signerMigrationWantApplied(t, state, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14)
 		signerMigrationWantGateGreen(t, ctx, full)
 		sqlDB := signerMigrationOpenSQL(t, dsn)
 		signerMigrationWantTables(t, sqlDB)
@@ -657,8 +664,8 @@ func TestSignerMigrationMergedChain(t *testing.T) {
 		if err := db.MigrateUp(ctx, pbEra, &out); err != nil {
 			t.Fatalf("MigrateUp(PB-era) error = %v (output %q)", err, out.String())
 		}
-		if !strings.Contains(out.String(), "applied=11 skipped=0 pending=0") {
-			t.Fatalf("MigrateUp(PB-era) output = %q, want applied=11 skipped=0 pending=0", out.String())
+		if !strings.Contains(out.String(), "applied=13 skipped=0 pending=0") {
+			t.Fatalf("MigrateUp(PB-era) output = %q, want applied=13 skipped=0 pending=0", out.String())
 		}
 
 		full := signerMigrationOptions(dsn)
@@ -684,14 +691,14 @@ func TestSignerMigrationMergedChain(t *testing.T) {
 		if err := db.MigrateUp(ctx, full, &out); err != nil {
 			t.Fatalf("gap-fill MigrateUp() error = %v (output %q)", err, out.String())
 		}
-		if !strings.Contains(out.String(), "applied=1 skipped=11 pending=0") {
-			t.Fatalf("gap-fill output = %q, want applied=1 skipped=11 pending=0", out.String())
+		if !strings.Contains(out.String(), "applied=1 skipped=13 pending=0") {
+			t.Fatalf("gap-fill output = %q, want applied=1 skipped=13 pending=0", out.String())
 		}
 		state, err = db.Inspect(ctx, full)
 		if err != nil {
 			t.Fatalf("Inspect() after gap fill error = %v", err)
 		}
-		signerMigrationWantApplied(t, state, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 13)
+		signerMigrationWantApplied(t, state, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14)
 		signerMigrationWantGateGreen(t, ctx, full)
 		sqlDB := signerMigrationOpenSQL(t, dsn)
 		signerMigrationWantTables(t, sqlDB)

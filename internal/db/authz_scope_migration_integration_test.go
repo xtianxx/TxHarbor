@@ -79,9 +79,9 @@ func TestAuthzScopeMigrationDownRemovesOnlyItself(t *testing.T) {
 	ctx := context.Background()
 	opts := testMigrateOptions(dsn)
 	// Build the database at exactly {1..10}: 000010 is the highest version
-	// this test owns. The full embedded set also carries the 010 lane's
-	// 000011/000013, and DownTo(9) would revert those too, which is not
-	// 000010's down-scope assertion.
+	// this test owns. The full embedded set would also carry the joint lane's
+	// 000011..000014, and DownTo(9) would revert those too, which is not
+	// 000010's down-scope assertion (same setup as the 000012 down test).
 	opts.FS = migrationSubsetFS(t, 10)
 
 	var out bytes.Buffer

@@ -5,6 +5,7 @@ package txlifecycle
 import (
 	"context"
 	"errors"
+	"slices"
 	"testing"
 	"time"
 
@@ -13,32 +14,12 @@ import (
 	"github.com/xtianxx/txharbor/internal/db"
 )
 
-// requireJointMigrations skips the joint-workspace migration tests on a lane
-// that does not carry 011's 000012. The 010 delivery branch migrates without
-// 011's tables by design (000013 records a lane no-op; see the migration's
-// lane guard), so the joint set {11,12,13} cannot be assembled here. The joint
-// evidence is recorded on joint-010-011-integration and is never re-claimed
-// from a lane-local run (FR-16; P5).
-func requireJointMigrations(t *testing.T) {
-	t.Helper()
-	files, err := db.MigrationFiles(db.Migrations)
-	if err != nil {
-		t.Fatalf("list migrations: %v", err)
-	}
-	for _, f := range files {
-		if f.Version == 12 {
-			return
-		}
-	}
-	t.Skip("011 migration 000012 not present in this lane; joint migration evidence is recorded on joint-010-011-integration (integration workspace)")
-}
-
 // TestT043MigrationSetMergeOrder re-verifies the applied migration set and the
 // provisional numbers in 010→011 merge order on the joint scratch DB (PLAN-1;
-// T043): 000011 (010) precedes 000012 (011) precedes 000013 (010 follow-up),
-// and no applied version is missing or duplicated.
+// T043): 000011 (010) precedes 000012 (011) precedes 000013 (010 guarded
+// follow-up) precedes 000014 (010 intent-FK repair), and no applied version is
+// missing or duplicated.
 func TestT043MigrationSetMergeOrder(t *testing.T) {
-	requireJointMigrations(t)
 	e := newEnv(t)
 	ctx := context.Background()
 	dsn := e.dsn
@@ -51,6 +32,7 @@ func TestT043MigrationSetMergeOrder(t *testing.T) {
 		11: "000011_tx_lifecycle.sql",
 		12: "000012_withdrawal_execution.sql",
 		13: "000013_tx_lifecycle_intent_fk.sql",
+		14: "000014_intent_fk_repair.sql",
 	}
 	byVersion := make(map[int64]string, len(files))
 	var versions []int64
@@ -63,8 +45,8 @@ func TestT043MigrationSetMergeOrder(t *testing.T) {
 			t.Errorf("version %d = %q, want %q", v, byVersion[v], name)
 		}
 	}
-	if last := versions[len(versions)-1]; last != 13 {
-		t.Errorf("highest migration = %d, want 13", last)
+	if last := versions[len(versions)-1]; last != 14 {
+		t.Errorf("highest migration = %d, want 14", last)
 	}
 
 	opts := db.MigrateOptions{DSN: dsn, LockTimeout: 10 * time.Second, ConnectTimeout: 10 * time.Second}
@@ -75,10 +57,10 @@ func TestT043MigrationSetMergeOrder(t *testing.T) {
 	if len(state.Pending) != 0 {
 		t.Fatalf("pending migrations: %v", state.Pending)
 	}
-	if state.Current != 13 {
-		t.Fatalf("current migration = %d, want 13", state.Current)
+	if state.Current != 14 {
+		t.Fatalf("current migration = %d, want 14", state.Current)
 	}
-	for _, v := range []int64{11, 12, 13} {
+	for _, v := range []int64{11, 12, 13, 14} {
 		found := false
 		for _, a := range state.Applied {
 			if a == v {
@@ -128,7 +110,6 @@ func TestT043MigrationSetMergeOrder(t *testing.T) {
 // raises 23503 on exactly tx_attempts_intent_fkey, and a seeded attempt
 // (existing data) stays valid (G-010-3; PLAN-1; J6).
 func TestT044IntentFK(t *testing.T) {
-	requireJointMigrations(t)
 	e := newEnv(t)
 	ctx := context.Background()
 
@@ -184,5 +165,119 @@ func TestT044IntentFK(t *testing.T) {
 		   '0x0000000000000000000000000000000000000000000000000000000000000001')`,
 		f.intentID, f.bindingID, f.authID, e.chainID, f.sender, fxAsset, fxRecipient); err != nil {
 		t.Fatalf("valid-intent insert refused: %v", err)
+	}
+}
+
+// TestT043JointClaimsIntentFK is the 011:T043 joint re-verification on the
+// integrated schema: the 011-owned execution_claims_intent_fkey and the
+// 010-owned tx_attempts_intent_fkey both exist as named, validated (not NOT
+// VALID) constraints pointing at payment_intents(intent_id), and an absent
+// payment_intents row is refused with 23503 on the exact constraint name. The
+// 010-side 23503 probe is TestT044IntentFK; this test adds the 011-side probe
+// that was missing from the lane record.
+func TestT043JointClaimsIntentFK(t *testing.T) {
+	e := newEnv(t)
+	ctx := context.Background()
+
+	for _, name := range []string{"execution_claims_intent_fkey", "tx_attempts_intent_fkey"} {
+		var refTable, refColumn string
+		var convalidated bool
+		err := e.pool.QueryRow(ctx,
+			`SELECT c.relname, a.attname, con.convalidated
+			   FROM pg_constraint con
+			   JOIN pg_class c ON c.oid = con.confrelid
+			   JOIN unnest(con.confkey) AS k(attnum) ON TRUE
+			   JOIN pg_attribute a ON a.attrelid = con.confrelid AND a.attnum = k.attnum
+			  WHERE con.conname = $1 AND con.contype = 'f'`, name).
+			Scan(&refTable, &refColumn, &convalidated)
+		if err != nil {
+			t.Fatalf("FK %s missing: %v", name, err)
+		}
+		if refTable != "payment_intents" || refColumn != "intent_id" || !convalidated {
+			t.Fatalf("FK %s references %s(%s) validated=%v, want payment_intents(intent_id) validated=true",
+				name, refTable, refColumn, convalidated)
+		}
+	}
+
+	_, err := e.pool.Exec(ctx,
+		`INSERT INTO execution_claims (intent_id, owner_id, lease_version, state, expires_at)
+		 VALUES ('missing-intent-t043', 'joint-t043', 1, 'active', now() + interval '1 hour')`)
+	var pgErr *pgconn.PgError
+	if !errors.As(err, &pgErr) || pgErr.Code != "23503" || pgErr.ConstraintName != "execution_claims_intent_fkey" {
+		t.Fatalf("absent-intent claim insert error = %v, want 23503 execution_claims_intent_fkey", err)
+	}
+}
+
+// TestT044JointClaimsColumnParity is the 011:T044 joint re-verification: the
+// live execution_claims column set equals the frozen J2 shape
+// (specs/011-withdrawal-executor/data-model.md Table 2) in order, every column
+// name 010's single mapping table reads (j2Columns) exists on the real table,
+// and the J2 semantics anchors are enforced by named constraints.
+func TestT044JointClaimsColumnParity(t *testing.T) {
+	e := newEnv(t)
+	ctx := context.Background()
+	f := e.seedUpstream()
+
+	want := []string{
+		"intent_id", "owner_id", "lease_version", "state",
+		"acquired_at", "expires_at", "last_heartbeat_at", "last_progress_at",
+		"stall_flagged_at", "ended_at", "end_kind", "updated_at",
+	}
+	rows, err := e.pool.Query(ctx,
+		`SELECT column_name FROM information_schema.columns
+		  WHERE table_schema = 'public' AND table_name = 'execution_claims'
+		  ORDER BY ordinal_position`)
+	if err != nil {
+		t.Fatalf("read execution_claims columns: %v", err)
+	}
+	defer rows.Close()
+	var live []string
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			t.Fatal(err)
+		}
+		live = append(live, name)
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(live, want) {
+		t.Fatalf("execution_claims columns = %v, want %v", live, want)
+	}
+	liveSet := make(map[string]bool, len(live))
+	for _, name := range live {
+		liveSet[name] = true
+	}
+	for _, col := range []string{j2Columns.IntentID, j2Columns.WorkerID, j2Columns.LeaseVersion, j2Columns.ExpiresAt, j2Columns.State} {
+		if !liveSet[col] {
+			t.Fatalf("010 claim mapping column %q absent from execution_claims", col)
+		}
+	}
+
+	probes := []struct {
+		name       string
+		sql        string
+		code       string
+		constraint string
+	}{
+		{"intent_unique", `INSERT INTO execution_claims (intent_id, owner_id, lease_version, state, expires_at)
+			VALUES ($1, 'parity-probe', 1, 'active', now() + interval '1 hour')`,
+			"23505", "execution_claims_pkey"},
+		{"lease_version_floor", `UPDATE execution_claims SET lease_version = 0 WHERE intent_id = $1`,
+			"23514", "execution_claims_lease_version_check"},
+		{"expiry_order", `UPDATE execution_claims SET expires_at = acquired_at - interval '1 second' WHERE intent_id = $1`,
+			"23514", "execution_claims_expiry_check"},
+		{"revocation_marker", `UPDATE execution_claims SET state = 'revoked' WHERE intent_id = $1`,
+			"23514", "execution_claims_state_consistency"},
+	}
+	for _, tc := range probes {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := e.pool.Exec(ctx, tc.sql, f.intentID)
+			var pgErr *pgconn.PgError
+			if !errors.As(err, &pgErr) || pgErr.Code != tc.code || pgErr.ConstraintName != tc.constraint {
+				t.Fatalf("error = %v, want %s on %s", err, tc.code, tc.constraint)
+			}
+		})
 	}
 }

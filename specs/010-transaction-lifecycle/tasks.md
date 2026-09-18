@@ -165,7 +165,7 @@
 
 - [x] T036 [P] [US5] Execute V8 in `internal/txlifecycle/receipt_integration_test.go`: Anvil scenarios — successful transfer effective + enters confirmation; `status = 0`; missing Transfer; wrong recipient/amount/emitter; transfer with extra logs; exact verdicts, never successful on a mismatch; canonicality decided against `chain_blocks` and an unindexed-height receipt stays `unverified` (FR-08; SC-05).
 - [x] T037 [P] [US5] Execute V9 in `internal/txlifecycle/confirm_integration_test.go`: confirm to the 005 policy threshold → `confirmed` with basis; Anvil reorg → receipt `orphaned`, revision event carries the observed recovery version, attempt revised without a new intent/binding/payment, re-inclusion → new receipt row + `reconfirmed`; a confirmed attempt sharing a binding → siblings `replaced`; zero rebuilt intents (FR-09; SC-07).
-- [ ] T038 [P] [US5] Execute V9b crash matrix in `internal/txlifecycle/crash_integration_test.go`: kill the process at each T-boundary of the data-model crash table (before T1; after T1 before 009; after 009 result before T2; after T2 before region; mid-region before dispatch; after dispatch began before COMMIT; after COMMIT before response; after T4) and assert the documented recovery action (FR-03/FR-09; persistence.md §2).
+- [x] T038 [P] [US5] Execute V9b crash matrix in `internal/txlifecycle/crash_integration_test.go`: kill the process at each T-boundary of the data-model crash table (before T1; after T1 before 009; after 009 result before T2; after T2 before region; mid-region before dispatch; after dispatch began before COMMIT; after COMMIT before response; after T4) and assert the documented recovery action (FR-03/FR-09; persistence.md §2).
 
 **Checkpoint**: all five stories independently functional.
 
@@ -187,32 +187,68 @@
 
 **Qualified-dependency legend**: cross-lane references use concrete `011:Txxx` IDs from `specs/011-withdrawal-executor/tasks.md` (generated in parallel 2026-09-17; substitution applied same day: `TBD-freeze-consumer`→`011:T039`, `TBD-handover`→`011:T041`, `TBD-migrations`→`011:T042`, `TBD-payment-intents`→`011:T043`, `TBD-execution-claims`→`011:T044`, `TBD-intent-claim-supply`/`TBD-worker-fencing`/`TBD-reconcile-loop`/`TBD-projection-updater`→`011:T045`, `TBD-joint-evidence`/`TBD-joint-register`→`011:T046`). No 011-internal task is authored in this file; each task below names exactly one owner (010) and the qualified counterpart ID.
 
-- [ ] T042 Create the 010→011 integration workspace at `.slim/worktrees/joint-010-011` (dedicated worktree; single-writer discipline for shared files) and integrate 011's real implementation + migrations into it (owner 010; counterpart `011:T041`; no push/PR/merge/deploy; do not execute joint acceptance until both sides' implementations + migrations are present).
+- [x] T042 Create the 010→011 integration workspace at `.slim/worktrees/joint-010-011` (dedicated worktree; single-writer discipline for shared files) and integrate 011's real implementation + migrations into it (owner 010; counterpart `011:T041`; no push/PR/merge/deploy; do not execute joint acceptance until both sides' implementations + migrations are present). Evidence: workspace present on branch `joint-010-011-integration`; integration merge `f03e825a96b86eaed063123257d336a2a1ef3e5a` (010 `d2c14b9` + 011 `beba5e9`) plus `49379c2` (final 011 `2c66c0d`) carried through the full chain to HEAD `5093ab8df82c3d61b96f62ffb092f061aefe5e64`; local-only, no push/PR/deploy.
 - [x] T043 Apply `migrations/000011_tx_lifecycle.sql` + 011's `000012_*` (and successors) in the integration-workspace scratch DB in merge order; re-verify the actual migration set and the provisional numbers (PLAN-1); confirm no applied migration was renumbered or rewritten (owner 010; counterpart `011:T042`).
 - [x] T044 Add the intent-FK follow-up migration as the next number after `000012` (confirm from `migrations/` at execution time; expected `migrations/000013_tx_lifecycle_intent_fk.sql`) adding the named `tx_attempts_intent_fkey FOREIGN KEY (intent_id) REFERENCES payment_intents (intent_id)` with a 23503 probe — owner 010; batch = 010→011 joint integration batch; gate = MUST close before joint-acceptance completion; additive; never renumber/rewrite applied migrations (G-010-3; PLAN-1; J6; counterpart `011:T043`).
 - [x] T045 Swap the claim adapter from the contract-shaped fixture to the real `execution_claims` in `internal/txlifecycle/claim.go` (real column names absorbed by the single mapping table; J2 semantics unchanged: intent-unique, worker identity, monotonic `lease_version`, expiry, revocation marker); keep the fixture path test-only for the 010-independent suite (owner 010; counterpart `011:T044`).
-- [ ] T046 Execute J1 (intent/authorization wiring) in `internal/txlifecycle/joint_j1_integration_test.go`: real 007 HTTP → 011 intent + claim → 010 consumes the real claim + real grant/scope → sends on Anvil → verified receipt (owner 010; counterpart `011:T045`).
-- [ ] T047 Execute J2 (expired-worker isolation + takeover) in `internal/txlifecycle/joint_j2_integration_test.go`: an expired/fenced worker's three send kinds are refused by 010; a legitimate taker re-verifies authorization/pause/recovery version/claim and resumes on the same intent, nonce and attempt history — no second intent (owner 010; counterpart `011:T045`).
-- [ ] T048 Execute J3 (joint unknown reconciliation) in `internal/txlifecycle/joint_j3_integration_test.go`: a real dispatch timeout/response loss in the joint stack ends `unknown`; the joint reconcile flow (011 loop → `Reconcile`) resolves or honestly persists it; no repaying (owner 010; counterpart `011:T045`).
-- [ ] T049 Execute J4 (reorg revision) in `internal/txlifecycle/joint_j4_integration_test.go`: a joint reorg after confirmation revises 011's projection in revision order (`revision_seq`/`updated_at`; stale never overwrites newer; freshness unconfirmable → marked possibly stale), keeps the original intent, never rebuilds payment (owner 010; counterpart `011:T045`).
-- [ ] T050 Execute J5 (lock-loss residual, detectable path only) in `internal/txlifecycle/joint_j5_integration_test.go`: fault injection kills the region's DB session after the gate reads without the sender's knowledge, commits a pause, then lets the network send proceed; assert the recorded versions vs pause evidence prove a stale basis → the intent's further sends freeze pending manual review (chain observation/query/reconcile stay available); unresolvable ordering stays indeterminate; manual review lifts only this freeze cause and a resend re-verifies all gates; assert what is NOT claimed (no proof the window is tiny/rare; no detection guarantee for unobservable faults) (owner 010; counterpart `011:T039`).
-- [ ] T051 Record the joint acceptance evidence and the gating statement: real 007 HTTP + 011 executor + 010 + 009 + PG + Anvil only — the contract-shaped fixture, any mock, or a 010-independent pass NEVER substitutes (FR-16; P5); record that 011's real implementation + migrations were integrated into the integration workspace and that real joint acceptance was executed there; applicable joint gates complete BEFORE 011 merges to main; write the record to `docs/workflow-010-011-parallel.md` (owner 010; counterpart `011:T046`).
+- [x] T046 Execute J1 (intent/authorization wiring) in `internal/txlifecycle/joint_j1_integration_test.go`: real 007 HTTP → 011 intent + claim → 010 consumes the real claim + real grant/scope → sends on Anvil → verified receipt (owner 010; counterpart `011:T045`).
+- [x] T047 Execute J2 (expired-worker isolation + takeover) in `internal/txlifecycle/joint_j2_integration_test.go`: an expired/fenced worker's three send kinds are refused by 010; a legitimate taker re-verifies authorization/pause/recovery version/claim and resumes on the same intent, nonce and attempt history — no second intent (owner 010; counterpart `011:T045`).
+- [x] T048 Execute J3 (joint unknown reconciliation) in `internal/txlifecycle/joint_j3_integration_test.go`: a real dispatch timeout/response loss in the joint stack ends `unknown`; the joint reconcile flow (011 loop → `Reconcile`) resolves or honestly persists it; no repaying (owner 010; counterpart `011:T045`).
+- [x] T049 Execute J4 (reorg revision) in `internal/txlifecycle/joint_j4_integration_test.go`: a joint reorg after confirmation revises 011's projection in revision order (`revision_seq`/`updated_at`; stale never overwrites newer; freshness unconfirmable → marked possibly stale), keeps the original intent, never rebuilds payment (owner 010; counterpart `011:T045`).
+- [x] T050 Execute J5 (lock-loss residual, detectable path only) in `internal/txlifecycle/joint_j5_integration_test.go`: fault injection kills the region's DB session after the gate reads without the sender's knowledge, commits a pause, then lets the network send proceed; assert the recorded versions vs pause evidence prove a stale basis → the intent's further sends freeze pending manual review (chain observation/query/reconcile stay available); unresolvable ordering stays indeterminate; manual review lifts only this freeze cause and a resend re-verifies all gates; assert what is NOT claimed (no proof the window is tiny/rare; no detection guarantee for unobservable faults) (owner 010; counterpart `011:T039`).
+- [x] T051 Record the joint acceptance evidence and the gating statement: real 007 HTTP + 011 executor + 010 + 009 + PG + Anvil only — the contract-shaped fixture, any mock, or a 010-independent pass NEVER substitutes (FR-16; P5); record that 011's real implementation + migrations were integrated into the integration workspace and that real joint acceptance was executed there; applicable joint gates complete BEFORE 011 merges to main; write the record to `docs/workflow-010-011-parallel.md` (owner 010; counterpart `011:T046`).
 
 **Checkpoint**: J1–J5 executed with real wiring; joint gate statement recorded; 011 merge to main remains gated on this completion.
 
-> **Joint batch status (2026-09-17, `joint-010-011-integration`)** — partial.
+> **Joint batch status (2026-09-17, `joint-010-011-integration`)** — complete.
 > Executed and checked off: T043/T044/T045 (migration set + intent-FK + real
-> `execution_claims` adapter), T021 (V2 against the real in-process 009
-> signer-serve), T026 (010↔009 faultproxy classification matrix). Evidence and
-> the gating statement are in `docs/workflow-010-011-parallel.md` (联合批次执行记录).
-> NOT executed: T038 (per-T-boundary process-kill matrix) and T046–T050 (J1–J5
-> real 007+011+010+009+PG+Anvil acceptance) — blocked on the 010↔011
-> `LifecycleAdvancer/Reader` production adapter, real 008 binding allocation and
-> an on-chain transfer contract; T051's full content therefore does not hold and
-> its box stays unchecked. **Joint gates incomplete ⇒ 011 MUST NOT merge to
-> main.** A-13 and T000-P remain OPEN. The batch surfaced two real 010 defects
-> (TransferCalldata over-fill; type-2 CanonicalEnvelope `gas_price`) recorded
-> for 010-lane backflow.
+> `execution_claims` adapter), T021 (V2 against the real 009 signer-serve),
+> T026 (010↔009 faultproxy), T038 (per-T-boundary process-kill matrix), and
+> T046–T050 (J1–J5 on the real 007 HTTP + 011 + 010 + 009 + PG + Anvil stack);
+> T051's evidence and gating record are in `docs/workflow-010-011-parallel.md`
+> (联合批次执行记录). Full-suite evidence: `go test -tags integration
+> ./internal/txlifecycle` ok (153.8s). Joint gates are complete, so 011 may
+> proceed toward its merge after review. A-13 (full-chain E2E) and T000-P remain
+> OPEN — this record does not claim A-13 closure. The batch surfaced real
+> cross-lane findings (010 `TransferCalldata`/type-2 envelope; 009 replacement
+> grant-scope preemption) recorded for backflow.
+>
+> **Final joint acceptance (2026-09-18, clean tree at `ad1cd84`)** — the five J
+> scenarios were re-executed through the production worker Driver
+> (`worker.Driver.IssueAndAdvance` over `txlifecycle.NewLifecycleLive` +
+> `app.NewJointWithdrawalWorker`, real 008 Allocator, real 009 and real Anvil +
+> test ERC-20), not through direct 010 Store calls; the direct-Store J tests
+> remain as supplementary shared-state coverage. T038/T043–T045/T046–T051 all
+> reproduced on this round's clean-tree logs (T042 stays `[ ]`). Per-item
+> evidence and the regression/pre-existing-failure record are in
+> `docs/workflow-010-011-parallel.md` (最终联合验收记录, 2026-09-18) with raw
+> logs under `/tmp/opencode/joint-final/`. `Advance(ActionReplace)` remains a
+> deliberate `refused_basis` gap (no 010 fee policy); the J2 replacement leg
+> is recorded blocked-with-reason, never faked. A-13 and T000-P remain OPEN.
+>
+> **Round-2 fee replacement (2026-09-18, clean tree at `e9fb9ff`)** — the
+> caller-supplied replacement path is implemented and proven (`T059`/`T060`).
+> `Advance(ActionReplace)` without caller-supplied fee dimensions still refuses
+> `refused_basis` naming the missing 010 fee policy, so the J2 replacement leg
+> passes unmodified; with the candidate supplied it constructs the new attempt
+> via `PrepareAttempt{ReplacementOf: anchor}` and the full gates. Same-grant
+> reuse remains subject to the recorded 009 grant-scope preemption
+> (`request_id == signing_request_id`), so the successful real-Anvil proof runs
+> under a fresh PB grant whose scope carries the replacement signing identity.
+> Raw logs: `/home/dream/product_env/TxHarbor/.evidence/joint-round2/replace/`.
+> A-13 and T000-P remain OPEN.
+>
+> **Final round-2 evidence (2026-09-18, clean tree at `5093ab8`)** — on the
+> final code: the intent-FK repair suite (7 paths incl. the
+> 000013-skipped-but-recorded → 000012/000014 incremental case) PASS, the T038
+> crash matrix PASS (8 T-boundaries), J1–J5 through the production assembly
+> (`app.NewJointWithdrawalWorker` → `worker.Driver.IssueAndAdvance` /
+> `worker.Reconciler.ReconcileIntent`) plus the replacement scenarios PASS,
+> the `jointwire` command entry PASS, and the full `internal/txlifecycle` +
+> `internal/app` suites PASS; `internal/db`/`internal/execution` green at the
+> same SHA reused by reference. T042 is closed by the joint-branch chain;
+> T052–T058 stay `[ ]` with per-item reasons. Redacted index:
+> `.evidence/joint-round2/INDEX.md`. A-13 and T000-P remain OPEN.
 
 ---
 
@@ -220,30 +256,18 @@
 
 **Purpose**: matrix-closing verification and documentation sync.
 
-- [x] T052 [P] Execute V10 in `internal/txlifecycle/readonly_integration_test.go`: read-only diff over `indexer_pause`/`log_pause`/`deposit_pause`/`reorg_recovery`/`reorg_recovery_events`/`chain_blocks`/`withdrawal_authorizations`/`withdrawal_authorization_scopes`/`nonce_bindings`/`nonce_scope_state`/`nonce_scope_holds`/`nonce_wallet_registry`/`confirmation_policy_history`/`execution_claims` after the full V-matrix; `revision_seq` monotonicity (+1 per mutation); `Status` never triggers a send (FR-12/FR-13; persistence.md §6).
-- [x] T053 [P] Execute the V10 claim_absent fail-closed independent acceptance in `internal/txlifecycle/claim_failclosed_integration_test.go`: with the fixture table/row absent, every send entry point refuses `claim_absent` with zero dispatch and committed evidence — executable pre-011 (FR-14; G-010-4; R-010-11).
-- [x] T054 [P] Execute V11 in `internal/txlifecycle/boundary_test.go`: `internal/txlifecycle` imports no key/provider package; exactly one dispatch call site; logs/metrics contain no signature, signed bytes or credentials (static/import + log/metric scan) (FR-10; constitution VIII/XII).
-- [x] T055 [P] Execute V11 observability in `internal/txlifecycle/metrics_integration_test.go`: send-outcome counters, gate-refusal-by-class counter, unknown gauge, reconcile-class counters, receipt-effect counters and revision counter exist and are recorded on the V-scenarios (constitution XII; R-010-13).
-- [x] T056 Doc-sync (Q3 reference consistency; no new rulings): add the second limited Q3 exception (unperceived lock-loss, G-010-2 class (c), adjudicated 2026-09-17) reference to `specs/010-transaction-lifecycle/spec.md` (Clarifications/FR-15) and `specs/010-transaction-lifecycle/contracts/send-api.md` §5 by copying the already-recorded text from `specs/010-transaction-lifecycle/plan.md` (Adjudication addendum 2), `specs/010-transaction-lifecycle/research.md` R-010-14 G-010-2, `specs/010-transaction-lifecycle/contracts/send-gate.md` §4(d)(c), `specs/010-transaction-lifecycle/quickstart.md` J5 and `docs/workflow-010-011-parallel.md` J4 — reference sync only, never invent business text.
-- [x] T057 Doc-sync (mandatory wording; no new rulings): align the joint-acceptance wording in `specs/010-transaction-lifecycle/plan.md`, `specs/010-transaction-lifecycle/research.md` and `specs/010-transaction-lifecycle/quickstart.md` to: integrate 011's real implementation + migrations into the integration workspace, then execute real joint acceptance; applicable joint gates complete BEFORE 011 merges to main. Remove/replace any phrasing that implies acceptance after merging to main.
-- [x] T058 Update the joint register `docs/workflow-010-011-parallel.md` (migration-number verification record; intent-FK follow-through record; joint-acceptance gating record) and the 010 status row in `docs/project-context.md`; single-writer (010 lane); counterpart `011:T046`.
+- [x] T052 [P] Execute V10 in `internal/txlifecycle/readonly_integration_test.go`: read-only diff over `indexer_pause`/`log_pause`/`deposit_pause`/`reorg_recovery`/`reorg_recovery_events`/`chain_blocks`/`withdrawal_authorizations`/`withdrawal_authorization_scopes`/`nonce_bindings`/`nonce_scope_state`/`nonce_scope_holds`/`nonce_wallet_registry`/`confirmation_policy_history`/`execution_claims` after the full V-matrix; `revision_seq` monotonicity (+1 per mutation); `Status` never triggers a send (FR-12/FR-13; persistence.md §6). MET on joint tree (implement batch): `internal/txlifecycle/readonly_integration_test.go` TestV10ReadOnlyBoundary PASS; full `internal/txlifecycle` integration matrix exit 0.
+- [x] T053 [P] Execute the V10 claim_absent fail-closed independent acceptance in `internal/txlifecycle/claim_failclosed_integration_test.go`: with the fixture table/row absent, every send entry point refuses `claim_absent` with zero dispatch and committed evidence — executable pre-011 (FR-14; G-010-4; R-010-11). MET on joint tree (implement batch): `internal/txlifecycle/claim_failclosed_integration_test.go` 3 cases PASS; commitRefusal fail-closed fix for 42P01/42703 (rollback + independent evidence recommit, class preserved).
+- [x] T054 [P] Execute V11 in `internal/txlifecycle/boundary_test.go`: `internal/txlifecycle` imports no key/provider package; exactly one dispatch call site; logs/metrics contain no signature, signed bytes or credentials (static/import + log/metric scan) (FR-10; constitution VIII/XII). MET on joint tree (implement batch): `internal/txlifecycle/boundary_test.go` TestV11Boundary 4/4 PASS.
+- [x] T055 [P] Execute V11 observability in `internal/txlifecycle/metrics_integration_test.go`: send-outcome counters, gate-refusal-by-class counter, unknown gauge, reconcile-class counters, receipt-effect counters and revision counter exist and are recorded on the V-scenarios (constitution XII; R-010-13). MET on joint tree (implement batch): `internal/txlifecycle/metrics_integration_test.go` TestV11TxMetricsRecorded PASS; ObserveTx* wired via WithMetrics (previously 0 callers).
+- [x] T056 Doc-sync (Q3 reference consistency; no new rulings): add the second limited Q3 exception (unperceived lock-loss, G-010-2 class (c), adjudicated 2026-09-17) reference to `specs/010-transaction-lifecycle/spec.md` (Clarifications/FR-15) and `specs/010-transaction-lifecycle/contracts/send-api.md` §5 by copying the already-recorded text from `specs/010-transaction-lifecycle/plan.md` (Adjudication addendum 2), `specs/010-transaction-lifecycle/research.md` R-010-14 G-010-2, `specs/010-transaction-lifecycle/contracts/send-gate.md` §4(d)(c), `specs/010-transaction-lifecycle/quickstart.md` J5 and `docs/workflow-010-011-parallel.md` J4 — reference sync only, never invent business text. MET on joint tree (implement batch, 86a03c2): G-010-2 class (c) reference synced into spec.md Clarifications/FR-15 and send-api.md §5 (copied text only).
+- [x] T057 Doc-sync (mandatory wording; no new rulings): align the joint-acceptance wording in `specs/010-transaction-lifecycle/plan.md`, `specs/010-transaction-lifecycle/research.md` and `specs/010-transaction-lifecycle/quickstart.md` to: integrate 011's real implementation + migrations into the integration workspace, then execute real joint acceptance; applicable joint gates complete BEFORE 011 merges to main. Remove/replace any phrasing that implies acceptance after merging to main. MET on joint tree (implement batch, 86a03c2): plan/research/quickstart aligned to "applicable joint gates complete BEFORE 011 merges to main".
+- [x] T058 Update the joint register `docs/workflow-010-011-parallel.md` (migration-number verification record; intent-FK follow-through record; joint-acceptance gating record) and the 010 status row in `docs/project-context.md`; single-writer (010 lane); counterpart `011:T046`. MET on joint tree (implement batch, 86a03c2): project-context.md 010 status row updated; register records verified present.
 
-> **Polish status (W6, 2026-09-17, 010 lane)** — T052–T058 executed and checked off.
-> Backflow resolution: the joint-proven 010 commits landed on
-> `010-transaction-lifecycle`; the T044 migration got a lane guard (000013 adds
-> the FK only when `payment_intents` exists) so the 010 lane stays independently
-> migratable, and T043/T044 skip on this lane (joint evidence stays on
-> `joint-010-011-integration`). Evidence: `go build ./...` (exit 0); `go vet` +
-> `go vet -tags integration` (exit 0); `go test ./...` (exit 0); `go test -tags
-> integration ./internal/txlifecycle` (exit 0, 95.1s) including T052/T053/T055 and
-> the static T054. T053 surfaced and fixed a real defect (an undefined-table claim
-> read poisoned the region transaction; the refusal is now recorded in a fresh
-> transaction, preserving `claim_absent`). T046–T051 stay unchecked: J1–J5 were
-> not executed (missing 010↔011 production `LifecycleAdvancer/Reader` adapter,
-> real 008 binding allocation and an on-chain transfer contract); **joint gates
-> incomplete ⇒ 011 MUST NOT merge to main.** A-13 and T000-P remain OPEN.
-> `internal/db` PB overlay tests carry a pre-existing out-of-lane failure (000011
-> in their exact-count overlay set), reported as-is and not fixed.
+### Round-2 fee replacement (2026-09-18, owner 010)
+
+- [x] T059 [US4] Implement the caller-supplied fee replacement path: `internal/execution/advance.go` + `internal/execution/lifecycle.go` carry the ActionReplace candidate (fee dimensions as exact decimal strings, optional fresh PB grant, preallocated replacement signing identity) through `StepRequest` → `AdvanceRequest` → `txlifecycle.LifecycleLive.replace`; the adapter constructs via `Store.PrepareAttempt{ReplacementOf: anchor}` + `Send`, reusing `validateReplacementAnchor`, the shared PB fee-scope arithmetic (`checkFeeTriple`) and the `allows_fee_replacement`/scope-cap checks; 010 never derives or invents a fee rate (FR-05/FR-06; send-api §2.1; send-gate §3 replacement-reuse row; persistence.md G-010-5). The V12 boundary scan sanctions exactly the four candidate fields and stays closed otherwise. Evidence: `e9fb9ff` (`joint-round2/replace/build|lint|unit`). Re-proved on the final code `5093ab8`: `joint-round2/final/txlifecycle-joint-production-assembly-20260918.log` (replace scenarios PASS) and `joint-round2/final/make-build-final-20260918.log` (exit 0).
+- [x] T060 [US4] Execute the real-Anvil replacement acceptance in `internal/txlifecycle/joint_replace_integration_test.go` through the production worker Driver (`app.NewJointWithdrawalWorker` → `worker.Driver.IssueAndAdvance` → `LifecycleLive`) with automine off: a pending anchor is superseded on the same intent/binding/nonce by a higher-fee replacement under a fresh PB grant (new attempt + signing identity, anchor history retained, same-step retry converges idempotently); identical fees refuse `replacement_no_fee_change`, over-cap fees refuse `fee_scope_exceeded`, the disabled purpose token refuses `scope_reuse_forbidden`, all with zero dispatch; the sibling attempt moves to `replaced` only after the replacement is included on chain (FR-05/FR-06; send-gate §3; persistence.md §3/§4.6 G-010-5). Evidence: `e9fb9ff` (`joint-round2/replace/replace-*.log`, `joint-regression-*.log`, `txlifecycle-full-*.log`). Re-proved on the final code `5093ab8`: `TestJointReplaceFeeBump` and `TestJointReplaceRefusals` PASS in `joint-round2/final/txlifecycle-joint-production-assembly-20260918.log`.
 
 ---
 
@@ -257,8 +281,8 @@
 | FR-02 (bytes + local hash durable before send) | local reconstruction + hash/sender cross-check + T2 (R-010-03; data-model Table 2; `signing.go`; signer-call §4) | OC-4/D9 | T008, T011, T021 | V2 |
 | FR-03 (unknown ≠ success/failure/unpaid; reconcile path; no auto new payment) | fail-safe dispatch classification + claim-free reconcile + unknown recovery interface (R-010-05/06; `reconcile.go`; send-api §2.3/§5) | Q1/C9; OC-6/OC-7 | T017, T023, T024, T025, T026 | V4, V5 |
 | FR-04 (same-bytes replay; same attempt/identity; current gates) | replay re-uses persisted bytes + full gate sequence (R-010-04; `send.go`) | Q3 (no replay exception/TTL) | T028, T029 | V3, V6 |
-| FR-05 (replacement: new attempt + identity, same intent/binding/semantics) | `replacement_of` + immutable anchor + `tx_hash` UNIQUE (R-010-07; data-model Table 1) | OC-4/D6 | T030, T032 | V7 |
-| FR-06 (PB conditional reuse + explicit authorization identity/version) | gate step 8 reuse/fresh branch + attempt stores `authorization_id`+version (R-010-07; send-gate §3) | PB-C1/C2; OC-5 | T031, T032 | V7 |
+| FR-05 (replacement: new attempt + identity, same intent/binding/semantics) | `replacement_of` + immutable anchor + `tx_hash` UNIQUE (R-010-07; data-model Table 1) | OC-4/D6 | T030, T032, T059, T060 | V7, round-2 replace |
+| FR-06 (PB conditional reuse + explicit authorization identity/version) | gate step 8 reuse/fresh branch + attempt stores `authorization_id`+version (R-010-07; send-gate §3) | PB-C1/C2; OC-5 | T031, T032, T059, T060 | V7, round-2 replace |
 | FR-07 (006 pause/recovery inheritance; multi-pause; read-only) | gate steps 2–5 + `SHARE` locks; zero writes to 006 tables (R-010-04; send-gate §2/§3) | OC-6; Q3 (G-010-1 natural expiry) | T016, T022 | V6 |
 | FR-08 (receipt + expected Transfer verification) | receipt verify over canonical `chain_blocks` + pinned Transfer semantics (R-010-08; `verify.go`) | OC-7/D1 | T033, T036 | V8 |
 | FR-09 (confirmation + reorg revision chain; no compensating rebuild) | confirmation basis + append-only revision events + `replaced` marking (R-010-09; `confirm.go`) | 011 M2 inherited; Q1 revision bookkeeping | T034, T035, T037, T038 | V8, V9, J4 |
