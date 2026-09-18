@@ -16,6 +16,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/xtianxx/txharbor/internal/config"
@@ -36,15 +37,20 @@ const claimScanLimit = 32
 const trackingScanLimit = 32
 
 // scanTrackingSQL lists the intents whose receipt/confirmation/reorg-revision
-// tracking must keep running (Lane-F2): terminal **completed** intents whose
-// latest sendable attempt is not yet durably confirmed against the current
-// chain truth. The completed state is deliberate: `completed` means the
-// execution steps converged (a `sent` fact can trigger it), NOT the payment
-// verdict, so tracking MUST continue. Failed intents are excluded (terminal
-// without tracking); the scan never grants any send permission and never
-// re-allocates.
+// tracking must keep running (Lane-F2/F3): **completed** and already-`revised`
+// intents whose latest sendable attempt is not yet durably confirmed against
+// the current chain truth, plus completed/revised intents whose 010 authority
+// revision version has outrun the 011 projection's stored version (the
+// "010 updated, 011 not consumed" candidates of Lane-F3/B2). The completed
+// state is deliberate: `completed` means the execution steps converged (a
+// `sent` fact can trigger it), NOT the payment verdict, so tracking MUST
+// continue; `revised` keeps tracking the original intent after a receipt
+// invalidation (FR-10), so a reorg/reconfirmation still converges. Failed
+// intents are excluded (terminal without tracking); the scan never grants any
+// send permission and never re-allocates.
 //
-// A completed intent stays a candidate while any of these holds:
+// A completed or revised intent stays a receipt candidate while any of these
+// holds:
 //  1. its attempt is still in flight (sent/effective/unknown/orphaned);
 //  2. no canonical receipt has reached its policy threshold yet (this also
 //     covers an attempt whose only receipt was orphaned);
@@ -55,6 +61,14 @@ const trackingScanLimit = 32
 //     whose receipt is still canonical is genuinely converged and drops
 //     out of the set).
 //
+// Independently, a completed or already-revised intent is a REVISION
+// candidate while its latest attempt's revision_seq is ahead of the
+// projection's stored lifecycle_version: the authority moved and 011 has not
+// consumed the version yet (the projection drives the revision watermark, so
+// an ordinary completion is never re-detected). Candidates without a
+// projection row are not revision candidates (the display row always exists
+// once an intent was admitted; a lost row is rebuilt, not invented here).
+//
 // The keyset (admitted_at, intent_id) cursor (see trackingCursor) walks the
 // pending set across cycles so a batch smaller than the whole set cannot
 // starve the tail; unlike the claimable scan, being scanned does not remove
@@ -62,29 +76,35 @@ const trackingScanLimit = 32
 const scanTrackingSQL = `SELECT i.intent_id, i.admitted_at
   FROM payment_intents i
   JOIN LATERAL (
-    SELECT a.attempt_id, a.state FROM tx_attempts a
+    SELECT a.attempt_id, a.state, a.revision_seq FROM tx_attempts a
     WHERE a.intent_id = i.intent_id
       AND a.state NOT IN ('prepared', 'signed')
     ORDER BY a.created_at DESC, a.attempt_id DESC LIMIT 1
   ) a ON TRUE
-  WHERE i.state = 'completed'
-    AND (a.state IN ('sent','effective','unknown','orphaned')
-         OR NOT EXISTS (SELECT 1 FROM tx_receipts r
-                        WHERE r.attempt_id = a.attempt_id
-                          AND r.canonicality = 'canonical'
-                          AND r.confirmations >= r.confirm_threshold)
-         OR EXISTS (SELECT 1 FROM tx_receipts r
-                    WHERE r.attempt_id = a.attempt_id
-                      AND r.canonicality = 'canonical'
-                      AND NOT EXISTS (SELECT 1 FROM chain_blocks b
-                                      WHERE b.chain_id = i.chain_id
-                                        AND b.number = r.block_number
-                                        AND b.hash = r.block_hash
-                                        AND b.canonical)
-                      AND EXISTS (SELECT 1 FROM chain_blocks h
-                                  WHERE h.chain_id = i.chain_id
-                                    AND h.canonical
-                                    AND h.number >= r.block_number)))
+  WHERE (
+      (i.state IN ('completed','revised')
+       AND (a.state IN ('sent','effective','unknown','orphaned')
+            OR NOT EXISTS (SELECT 1 FROM tx_receipts r
+                           WHERE r.attempt_id = a.attempt_id
+                             AND r.canonicality = 'canonical'
+                             AND r.confirmations >= r.confirm_threshold)
+            OR EXISTS (SELECT 1 FROM tx_receipts r
+                       WHERE r.attempt_id = a.attempt_id
+                         AND r.canonicality = 'canonical'
+                         AND NOT EXISTS (SELECT 1 FROM chain_blocks b
+                                         WHERE b.chain_id = i.chain_id
+                                           AND b.number = r.block_number
+                                           AND b.hash = r.block_hash
+                                           AND b.canonical)
+                         AND EXISTS (SELECT 1 FROM chain_blocks h
+                                     WHERE h.chain_id = i.chain_id
+                                       AND h.canonical
+                                       AND h.number >= r.block_number))))
+      OR (i.state IN ('completed','revised')
+          AND EXISTS (SELECT 1 FROM request_status_projection p
+                      WHERE p.request_id = i.request_id
+                        AND a.revision_seq > p.lifecycle_version))
+    )
     AND (i.admitted_at, i.intent_id) > ($2::timestamptz, $3::text)
   ORDER BY i.admitted_at, i.intent_id
   LIMIT $1`
@@ -169,7 +189,90 @@ func (w *WithdrawalWorker) runTrackingPass(ctx context.Context) {
 		if err := w.ConfirmAttempt(ctx, cand.intentID); err != nil {
 			w.log().Warn("confirmation tracking failed", "intent_id", cand.intentID, "error", logx.Redact(err.Error()))
 		}
+		// The 010 scan above may have just written the revision this step
+		// consumes (e.g. a reorg orphaning); the version guard makes the call
+		// a no-op for everything else.
+		if err := w.syncAuthorityRevision(ctx, cand.intentID); err != nil {
+			w.log().Warn("authority revision sync failed", "intent_id", cand.intentID, "error", logx.Redact(err.Error()))
+		}
 	}
+}
+
+// revisionTarget reports the revision fact edge the current 010 authority
+// facts justify for a completed/revised intent: only a receipt invalidation
+// (the current attempt is orphaned or ineffective) revises the result. An
+// unknown attempt is uncertainty, not a revision, and a sent/effective/
+// confirmed attempt is not one either; both advance the projection only,
+// never a state edge.
+func revisionTarget(facts execution.LifecycleFacts) (target, state string, ok bool) {
+	for _, a := range facts.Attempts {
+		if a.AttemptID != facts.CurrentAttemptID {
+			continue
+		}
+		switch a.State {
+		case "orphaned", "ineffective":
+			return execution.IntentRevised, a.State, true
+		}
+	}
+	return "", "", false
+}
+
+// syncAuthorityRevision consumes 010's authority revision version for one
+// completed/revised intent once it is ahead of the projection's stored
+// version (Lane-F3/B2: "010 updated, 011 not consumed"). The projection row
+// is the version guard, so a repeat scan, an older late version, or a restart
+// with nothing new is a no-op; a real invalidation applies the
+// authority-driven fact edge through RevisionConsumer (state +
+// revision_applied + projection), anything else advances the projection
+// only. It never allocates, claims, reconciles a step or sends: revision
+// consumption and sending stay separate.
+func (w *WithdrawalWorker) syncAuthorityRevision(ctx context.Context, intentID string) error {
+	if w.Reconciler == nil || w.Reconciler.Reader == nil {
+		return nil
+	}
+	var attemptRevision, storedVersion int64
+	err := w.Pool.QueryRow(ctx,
+		`SELECT a.revision_seq, p.lifecycle_version
+		   FROM payment_intents i
+		   JOIN LATERAL (
+		     SELECT a.revision_seq FROM tx_attempts a
+		     WHERE a.intent_id = i.intent_id
+		       AND a.state NOT IN ('prepared','signed')
+		     ORDER BY a.created_at DESC, a.attempt_id DESC LIMIT 1
+		   ) a ON TRUE
+		   JOIN request_status_projection p ON p.request_id = i.request_id
+		  WHERE i.intent_id = $1 AND i.state IN ('completed','revised')`, intentID).
+		Scan(&attemptRevision, &storedVersion)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if attemptRevision <= storedVersion {
+		return nil
+	}
+	facts, err := w.Reconciler.Reader.Read(ctx, intentID)
+	if err != nil {
+		return err
+	}
+	if facts.RevisionVersion <= storedVersion {
+		return nil
+	}
+	consumer := &execution.RevisionConsumer{Pool: w.Pool}
+	if target, state, ok := revisionTarget(facts); ok {
+		_, err := consumer.Apply(ctx, execution.RevisionFact{
+			IntentID: intentID, RevisionVersion: facts.RevisionVersion,
+			AttemptID: facts.CurrentAttemptID, TargetState: target,
+			Basis: "authority_invalidated state=" + state,
+		})
+		return err
+	}
+	_, err = consumer.Observe(ctx, execution.RevisionFact{
+		IntentID: intentID, RevisionVersion: facts.RevisionVersion,
+		AttemptID: facts.CurrentAttemptID, Basis: "authority revision observed",
+	})
+	return err
 }
 
 // WithdrawalWorker is the 011 execution worker. All durable state lives in
@@ -193,7 +296,9 @@ type WithdrawalWorker struct {
 	Driver     *execution.StepDriver
 	// AllocBinding provisions the 008 binding before the driver's step-issue
 	// gate (see JointDeps.AllocBinding). Always set by joint construction.
-	AllocBinding func(ctx context.Context, intentID string) error
+	// The returned string is the allocator outcome (allocated/replayed) for
+	// observability only; it never changes a decision.
+	AllocBinding func(ctx context.Context, intentID string) (string, error)
 	// ConfirmAttempt runs 010's receipt/confirmation scan before the
 	// reconciler consumes the authority facts (see JointDeps.ConfirmAttempt).
 	// Always set by joint construction.
@@ -394,6 +499,15 @@ func (w *WithdrawalWorker) execIntentCycle(ctx context.Context, intentID string,
 			return err
 		}
 	}
+	if intent.State == execution.IntentCompleted || intent.State == execution.IntentRevised {
+		// Lane-F3/B2: consume a newer 010 authority revision version into the
+		// 011 projection (a receipt invalidation also applies the
+		// completed->revised fact edge). No allocation, claim or send runs
+		// here; a fully consumed version is a no-op.
+		if err := w.syncAuthorityRevision(ctx, intentID); err != nil {
+			return err
+		}
+	}
 	if intent.State == execution.IntentCompleted {
 		// Tracking only: nothing below this point (reconciler projection
 		// refresh and the driver) touches a terminal intent — the durable
@@ -428,7 +542,7 @@ func (w *WithdrawalWorker) execIntentCycle(ctx context.Context, intentID string,
 	if w.AllocBinding == nil {
 		return fmt.Errorf("joint worker has no 008 binding allocator (incomplete joint wiring)")
 	}
-	if err := w.AllocBinding(ctx, intentID); err != nil {
+	if _, err := w.AllocBinding(ctx, intentID); err != nil {
 		return err
 	}
 	switch intent.State {

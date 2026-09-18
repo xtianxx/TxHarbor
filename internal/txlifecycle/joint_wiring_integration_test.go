@@ -48,7 +48,7 @@ func TestJointWorkerProductionWiring(t *testing.T) {
 		Advancer:       adapter,
 		Reader:         adapter,
 		Binding:        execution.NewLiveBindingReader(nonce.NewReadProvider(j.pool, "")),
-		AllocBinding:   func(ctx context.Context, intentID string) error { return nil },
+		AllocBinding:   func(ctx context.Context, intentID string) (string, error) { return "", nil },
 		ConfirmAttempt: func(ctx context.Context, intentID string) error { return nil },
 	})
 	if err != nil {

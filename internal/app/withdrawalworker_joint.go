@@ -47,7 +47,9 @@ type JointDeps struct {
 	// import graph stays free of 008's RPC-bearing packages. The 008
 	// allocator is idempotent for one intent (allocated first, replayed for
 	// the identical re-request), so a repeat call is a no-op by contract.
-	AllocBinding func(ctx context.Context, intentID string) error
+	// The returned string is the allocator outcome ("allocated"/"replayed")
+	// for observability only: the worker never branches on it.
+	AllocBinding func(ctx context.Context, intentID string) (string, error)
 	// ConfirmAttempt runs 010's receipt/confirmation scan for the intent's
 	// current attempt (V13-1: receipt/confirmation BEFORE completed). The
 	// implementation lives in the joint wiring composition root; it is a

@@ -94,6 +94,22 @@ func applyLifecycleProjection(ctx context.Context, q Queryer, requestID, attempt
 	return tag.RowsAffected() == 1, nil
 }
 
+// advanceLifecycleProjection applies a strictly newer authority revision
+// version to the display row and reports whether the row advanced. Unlike
+// applyLifecycleProjection it never refreshes an equal-version row, so callers
+// can gate evidence (events) on a real version move; the stored version is
+// never rewritten downward.
+func advanceLifecycleProjection(ctx context.Context, q Queryer, requestID, attemptID string, version int64) (bool, error) {
+	tag, err := q.Exec(ctx, `UPDATE request_status_projection
+		SET lifecycle_attempt_id = NULLIF($2, ''), lifecycle_version = $3,
+		    lifecycle_observed_at = now(), freshness = 'confirmed', stale_since = NULL, updated_at = now()
+		WHERE request_id = $1 AND lifecycle_version < $3`, requestID, attemptID, version)
+	if err != nil {
+		return false, fmt.Errorf("advance lifecycle projection: %w", err)
+	}
+	return tag.RowsAffected() == 1, nil
+}
+
 // markProjectionStale records a possibly-stale freshness without rewriting any
 // stored version or converting a known result. The coalesce keeps the first
 // stale_since: repeated failures do not move the watermark.

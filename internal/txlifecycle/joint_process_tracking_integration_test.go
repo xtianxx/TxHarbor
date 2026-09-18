@@ -259,6 +259,23 @@ func t28WaitUntil(t *testing.T, bound time.Duration, what string, cond func() bo
 	}
 }
 
+// t28WaitUntilDump is t28WaitUntil with the durable-facts + worker-output dump
+// on expiry (the revision-recovery scene's failure diagnostic).
+func t28WaitUntilDump(t *testing.T, s *laneWStack, intentID, attemptID string, bound time.Duration, what string, cond func() bool) {
+	t.Helper()
+	deadline := time.Now().Add(bound)
+	for {
+		if cond() {
+			return
+		}
+		if time.Now().After(deadline) {
+			t28LogAttemptDump(t, s, intentID, attemptID)
+			t.Fatalf("bounded wait expired: %s", what)
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+}
+
 // laneWStack is the disposable stack for the process tests: real migrated PG,
 // the harness Anvil, the in-process real 009 signer-serve, and the built
 // binary with the real child-process handle. The test writes its own
@@ -437,7 +454,7 @@ func laneWAdmit(t *testing.T, j *jointEnv) *jointIntent {
 
 // t28AssertNoReplay asserts the durable one-binding/one-attempt/one-send/
 // one-intent identity the 008 replay through the assembly path must keep.
-func t28AssertNoReplay(t *testing.T, j *jointEnv, jj *jointIntent) {
+func t28AssertNoReplay(t *testing.T, j *jointEnv, jj *jointIntent, wantIntentState string) {
 	t.Helper()
 	if n := j.t28Count(`SELECT count(*) FROM nonce_bindings WHERE intent_id = $1`, jj.intentID); n != 1 {
 		t.Fatalf("bindings for the intent = %d, want exactly 1 (replayed allocation, never a second nonce)", n)
@@ -456,9 +473,67 @@ func t28AssertNoReplay(t *testing.T, j *jointEnv, jj *jointIntent) {
 	if err := j.pool.QueryRow(j.ctx, `SELECT state FROM payment_intents WHERE intent_id = $1`, jj.intentID).Scan(&intentState); err != nil {
 		t.Fatalf("read intent state: %v", err)
 	}
-	if intentState != "completed" {
-		t.Fatalf("intent state = %s, want completed (completed != confirmed display)", intentState)
+	if intentState != wantIntentState {
+		t.Fatalf("intent state = %s, want %s", intentState, wantIntentState)
 	}
+}
+
+// t28ProjectionVersion reads the display projection's stored authority
+// revision version for one request.
+func (j *jointEnv) t28ProjectionVersion(requestID string) int64 {
+	j.t.Helper()
+	var version int64
+	if err := j.pool.QueryRow(j.ctx,
+		`SELECT lifecycle_version FROM request_status_projection WHERE request_id = $1`, requestID).Scan(&version); err != nil {
+		j.t.Fatalf("read projection version: %v", err)
+	}
+	return version
+}
+
+// t28AttemptRevision reads the attempt's current authority revision_seq.
+func (j *jointEnv) t28AttemptRevision(attemptID string) int64 {
+	j.t.Helper()
+	var revision int64
+	if err := j.pool.QueryRow(j.ctx,
+		`SELECT revision_seq FROM tx_attempts WHERE attempt_id = $1`, attemptID).Scan(&revision); err != nil {
+		j.t.Fatalf("read attempt revision: %v", err)
+	}
+	return revision
+}
+
+// t28View is the subset of the existing GET /execution view used as the
+// external projection query (no field is added for the test).
+type t28View struct {
+	Execution *struct {
+		State string `json:"state"`
+	} `json:"execution"`
+	Lifecycle *struct {
+		LifecycleVersion int64  `json:"lifecycle_version"`
+		Freshness        string `json:"freshness"`
+	} `json:"lifecycle"`
+}
+
+// t28ExecutionView calls the real external HTTP query against the harness
+// stack (same handler and route as production serve).
+func t28ExecutionView(t *testing.T, j *jointEnv, requestID string) t28View {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mux := http.NewServeMux()
+		h := &app.WithdrawalExecutionHandler{Pool: j.pool, ChainID: jointChainID}
+		mux.Handle("POST /withdrawals/{request_id}/execution", h)
+		mux.Handle("GET /withdrawals/{request_id}/execution", h)
+		mux.ServeHTTP(w, r)
+	}))
+	defer srv.Close()
+	status, raw := jointHTTPDo(t, http.MethodGet, srv.URL+"/withdrawals/"+requestID+"/execution", j.apiKey, "")
+	if status != http.StatusOK {
+		t.Fatalf("GET execution view status=%d body=%s", status, raw)
+	}
+	var view t28View
+	if err := json.Unmarshal(raw, &view); err != nil {
+		t.Fatalf("decode execution view %s: %v", raw, err)
+	}
+	return view
 }
 
 // TestJointProcessTrackingAfterCompleted pins the in-process core of Lane-F2:
@@ -503,7 +578,10 @@ func TestJointProcessTrackingAfterCompleted(t *testing.T) {
 		t.Fatalf("attempt facts = (%s %s %d), want (confirmed canonical >=%d)", state, canon, conf, threshold)
 	}
 	t.Logf("lane-f2: depth tracking reached in-process (%s/%s/%d)", state, canon, conf)
-	t28AssertNoReplay(t, s.j, jj)
+	t28WaitUntil(t, 30*time.Second, "the projection follows the confirmation revision", func() bool {
+		return s.j.t28ProjectionVersion(jj.requestID) == s.j.t28AttemptRevision(s.j.t28LatestAttemptID(jj.intentID))
+	})
+	t28AssertNoReplay(t, s.j, jj, "completed")
 }
 
 // TestJointProcessRestartTrackingAfterCompleted pins startup recovery: the
@@ -543,15 +621,17 @@ func TestJointProcessRestartTrackingAfterCompleted(t *testing.T) {
 		st, canon, c := s.j.t28AttemptFacts(jj.intentID)
 		return st == "confirmed" && canon == "canonical" && c >= threshold
 	})
-	t28AssertNoReplay(t, s.j, jj)
+	t28AssertNoReplay(t, s.j, jj, "completed")
 }
 
 // TestJointProcessReorgAfterCompleted pins reorg/revision tracking after
 // completion with the real chain primitives: revert the payment away, then
 // re-include the SAME signed bytes at the new canonical height. 010's T035
-// pass must revise the old canonical receipt to orphaned and then reconfirm
-// on the new canonical block — for an intent that already is `completed`,
-// through the same worker process, with no new attempt, send or nonce.
+// pass orphans the old canonical receipt and reconfirms on the new block; the
+// 011 tracking path consumes the authority revision in order — the receipt
+// invalidation applies completed->revised (revision_applied + projection) and
+// the reconfirmation advances the projection version — through the same worker
+// process, with no new attempt, send or nonce.
 func TestJointProcessReorgAfterCompleted(t *testing.T) {
 	const threshold = int64(1)
 	s := newLaneWStack(t, threshold)
@@ -570,6 +650,13 @@ func TestJointProcessReorgAfterCompleted(t *testing.T) {
 		return st == "confirmed" && canon == "canonical" && c >= threshold
 	})
 	attemptID := s.j.t28LatestAttemptID(jj.intentID)
+
+	// B2 separation: the revision consumption path never sends, and a
+	// revision is never a send permission. Close the current authorization on
+	// the test-controlled 007 grant before the invalidation so the
+	// pre-existing revised->executing send-class edge cannot run (it would
+	// have to pass the full gate set; the revoked grant refuses it).
+	s.j.mustExec(`UPDATE withdrawal_authorizations SET state = 'revoked' WHERE authorization_id = $1`, jj.authorizationID)
 
 	// Freeze the worker so the reorg input is fully installed in the chain
 	// truth before any post-reorg probe can race it.
@@ -592,19 +679,31 @@ func TestJointProcessReorgAfterCompleted(t *testing.T) {
 	t28MineBlocks(t, s.j, 1)
 	s.resumeWorker(t)
 
-	// The same worker process keeps tracking: the old canonical receipt is
-	// revised to orphaned (history retained), then the attempt reconfirms on
-	// the new canonical block — never failure, never a re-send permission.
+	// 010 revision: the old receipt is orphaned (history retained), then the
+	// attempt reconfirms on the new canonical block — never failure.
 	t28WaitUntil(t, 90*time.Second, "the receipt revised to orphaned after the reorg", func() bool {
 		return s.j.t28EventCount(attemptID, "orphaned") >= 1
 	})
-	reconfirmDeadline := time.Now().Add(90 * time.Second)
-	for s.j.t28EventCount(attemptID, "reconfirmed") < 1 {
-		if time.Now().After(reconfirmDeadline) {
-			t28LogAttemptDump(t, s, jj.intentID, attemptID)
-			t.Fatalf("bounded wait expired: the attempt reconfirmed on the new canonical block")
+	t28WaitUntil(t, 90*time.Second, "the attempt reconfirmed on the new canonical block", func() bool {
+		return s.j.t28EventCount(attemptID, "reconfirmed") >= 1
+	})
+
+	// 011 consumption: the invalidation applies the fact edge exactly once
+	// (completed -> revised), and the projection tracks the latest authority
+	// revision version (the reconfirm advances it in order).
+	t28WaitUntilDump(t, s, jj.intentID, attemptID, 90*time.Second, "the invalidation revision reaches the 011 state", func() bool {
+		var state string
+		if err := s.j.pool.QueryRow(s.j.ctx,
+			`SELECT state FROM payment_intents WHERE intent_id = $1`, jj.intentID).Scan(&state); err != nil {
+			t.Fatal(err)
 		}
-		time.Sleep(500 * time.Millisecond)
+		return state == "revised"
+	})
+	t28WaitUntilDump(t, s, jj.intentID, attemptID, 90*time.Second, "the projection follows the reconfirm revision", func() bool {
+		return s.j.t28ProjectionVersion(jj.requestID) == s.j.t28AttemptRevision(attemptID)
+	})
+	if n := s.j.t28Count(`SELECT count(*) FROM execution_events WHERE intent_id = $1 AND kind = 'revision_applied'`, jj.intentID); n != 1 {
+		t.Fatalf("revision_applied events = %d, want exactly 1 (one consumed invalidation edge)", n)
 	}
 
 	if n := s.j.t28Count(`SELECT count(*) FROM tx_receipts WHERE attempt_id = $1`, attemptID); n != 2 {
@@ -621,9 +720,89 @@ func TestJointProcessReorgAfterCompleted(t *testing.T) {
 		t.Fatalf("attempt facts after the reorg = (%s %s %d), want (confirmed canonical >=%d)", state, canon, conf, threshold)
 	}
 	// The reorg revision is tracked evidence, never a rebuilt payment.
-	t28AssertNoReplay(t, s.j, jj)
+	t28AssertNoReplay(t, s.j, jj, "revised")
 	if n := s.j.t28Count(`SELECT count(*) FROM tx_reconciliations WHERE attempt_id = $1`, attemptID); n < 2 {
 		t.Fatalf("reconciliation observations after the reorg = %d, want at least 2", n)
+	}
+
+	// External HTTP projection query (existing route/fields only): the view
+	// shows the revised execution state and the stored authority revision
+	// version, cross-checked against 010's attempt revision.
+	view := t28ExecutionView(t, s.j, jj.requestID)
+	if view.Execution == nil || view.Execution.State != "revised" {
+		t.Fatalf("view execution = %+v, want revised", view.Execution)
+	}
+	if view.Lifecycle == nil || view.Lifecycle.LifecycleVersion != s.j.t28AttemptRevision(attemptID) {
+		t.Fatalf("view lifecycle = %+v, want lifecycle_version %d", view.Lifecycle, s.j.t28AttemptRevision(attemptID))
+	}
+	if view.Lifecycle.Freshness != "confirmed" {
+		t.Fatalf("view lifecycle freshness = %s, want confirmed", view.Lifecycle.Freshness)
+	}
+	t.Logf("lane-f3: reorg revision consumed (revised, projection=%d, revision_applied=1)", view.Lifecycle.LifecycleVersion)
+}
+
+// TestJointProcessRestartConsumesRevisionAfterCompleted pins B2 restart
+// recovery: the worker is stopped after the confirmed completion, the reorg is
+// installed while it is down, and the fresh process's startup pass must
+// consume the authority revision (orphan -> completed->revised + projection)
+// and then the reconfirm version — with no second attempt, binding or send.
+func TestJointProcessRestartConsumesRevisionAfterCompleted(t *testing.T) {
+	const threshold = int64(1)
+	s := newLaneWStack(t, threshold)
+	s.waitWiringReady(t)
+	s.j.installTransferEmit(1000)
+
+	var snapshot hexutil.Uint64
+	jointRPC(t, &snapshot, s.j.anvilURL, "evm_snapshot")
+	jj := laneWAdmit(t, s.j)
+	t28WaitIntent(t, s.j.pool, s.j, jj.intentID, "completed", s.out, s.errOut, 90*time.Second)
+	t28WaitUntil(t, 60*time.Second, "the attempt confirmed before the restart", func() bool {
+		st, canon, c := s.j.t28AttemptFacts(jj.intentID)
+		return st == "confirmed" && canon == "canonical" && c >= threshold
+	})
+	attemptID := s.j.t28LatestAttemptID(jj.intentID)
+
+	// Never let the revision become a send: the test-controlled grant is
+	// revoked before the fresh process can reach the send-class edge.
+	s.j.mustExec(`UPDATE withdrawal_authorizations SET state = 'revoked' WHERE authorization_id = $1`, jj.authorizationID)
+
+	// Install the reorg while the worker is down, then restart.
+	s.stopWorker(t)
+	jointRevert(t, s.j.anvilURL, snapshot)
+	t28SyncChainTruth(t, s.j)
+	raw, storedHash := s.j.t28SignedBytes(attemptID)
+	var newHash string
+	jointRPC(t, &newHash, s.j.anvilURL, "eth_sendRawTransaction", hexutil.Encode(raw))
+	if !strings.EqualFold(newHash, storedHash) {
+		t.Fatalf("re-included tx hash = %s, want the identical signed-bytes hash %s", newHash, storedHash)
+	}
+	t28MineBlocks(t, s.j, 1)
+	s.startWorker(t)
+	s.waitWiringReady(t)
+
+	// Startup recovery consumes the invalidation revision, then the reconfirm
+	// revision advances the projection to the latest authority version.
+	t28WaitUntilDump(t, s, jj.intentID, attemptID, 90*time.Second, "the restarted process consumes the invalidation revision", func() bool {
+		var state string
+		if err := s.j.pool.QueryRow(s.j.ctx,
+			`SELECT state FROM payment_intents WHERE intent_id = $1`, jj.intentID).Scan(&state); err != nil {
+			t.Fatal(err)
+		}
+		return state == "revised" && s.j.t28EventCount(attemptID, "orphaned") >= 1
+	})
+	t28WaitUntilDump(t, s, jj.intentID, attemptID, 90*time.Second, "the restarted process reconfirms and the projection follows", func() bool {
+		return s.j.t28EventCount(attemptID, "reconfirmed") >= 1 &&
+			s.j.t28ProjectionVersion(jj.requestID) == s.j.t28AttemptRevision(attemptID)
+	})
+	if n := s.j.t28Count(`SELECT count(*) FROM execution_events WHERE intent_id = $1 AND kind = 'revision_applied'`, jj.intentID); n != 1 {
+		t.Fatalf("revision_applied events = %d, want exactly 1", n)
+	}
+	t28AssertNoReplay(t, s.j, jj, "revised")
+	view := t28ExecutionView(t, s.j, jj.requestID)
+	if view.Execution == nil || view.Execution.State != "revised" || view.Lifecycle == nil ||
+		view.Lifecycle.LifecycleVersion != s.j.t28AttemptRevision(attemptID) {
+		t.Fatalf("view after restart = %+v/%+v, want revised + lifecycle_version %d",
+			view.Execution, view.Lifecycle, s.j.t28AttemptRevision(attemptID))
 	}
 }
 

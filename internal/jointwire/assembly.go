@@ -114,28 +114,30 @@ func Worker(ctx context.Context, cfg *config.Config, pool *pgxpool.Pool) (app.Jo
 			}
 			return nil
 		},
-		AllocBinding: func(ctx context.Context, intentID string) error {
+		AllocBinding: func(ctx context.Context, intentID string) (string, error) {
 			// Provision-or-replay: the allocator is idempotent for one
 			// intent (allocated first, replayed for the identical
 			// re-request), so a repeat call is a no-op by contract. The
 			// sender and authorization come from the durable intent row.
+			// The outcome is returned as evidence for the caller; it never
+			// changes a decision (the worker ignores it).
 			var sender, authorizationID string
 			if err := pool.QueryRow(ctx,
 				`SELECT sender, authorization_id FROM payment_intents WHERE intent_id = $1`,
 				intentID).Scan(&sender, &authorizationID); err != nil {
-				return fmt.Errorf("008 allocator: read intent identity: %w", err)
+				return "", fmt.Errorf("008 allocator: read intent identity: %w", err)
 			}
 			binding, outcome, err := alloc.Allocate(ctx, nonce.AllocationRequest{
 				IntentID: intentID, ChainID: int64(cfg.ChainID), Sender: sender,
 				AuthorizationID: authorizationID,
 			})
 			if err != nil {
-				return fmt.Errorf("008 allocator: %w", err)
+				return "", fmt.Errorf("008 allocator: %w", err)
 			}
 			if binding == nil || (outcome != nonce.OutcomeAllocated && outcome != nonce.OutcomeReplayed) {
-				return fmt.Errorf("008 allocator: outcome %s, want allocated or replayed", outcome)
+				return "", fmt.Errorf("008 allocator: outcome %s, want allocated or replayed", outcome)
 			}
-			return nil
+			return string(outcome), nil
 		},
 	}, nil
 }
