@@ -48,6 +48,13 @@ type WithdrawalWorker struct {
 	// deployment builds them through NewJointWithdrawalWorker.
 	Reconciler *execution.Reconciler
 	Driver     *execution.StepDriver
+	// AllocBinding provisions the 008 binding before the driver's step-issue
+	// gate (see JointDeps.AllocBinding). Always set by joint construction.
+	AllocBinding func(ctx context.Context, intentID string) error
+	// ConfirmAttempt runs 010's receipt/confirmation scan before the
+	// reconciler consumes the authority facts (see JointDeps.ConfirmAttempt).
+	// Always set by joint construction.
+	ConfirmAttempt func(ctx context.Context, intentID string) error
 
 	mu     sync.Mutex
 	active map[string]context.CancelFunc
@@ -214,6 +221,16 @@ func (w *WithdrawalWorker) execIntentCycle(ctx context.Context, intentID string,
 	if intent.State == execution.IntentCompleted || intent.State == execution.IntentFailed {
 		return nil
 	}
+	if w.ConfirmAttempt != nil {
+		// 010's receipt/confirmation scan runs BEFORE the reconciler so the
+		// facts it consumes are the scanned ones (V13-1: receipt/confirmation
+		// precede completed; FR-16 covers confirmation tracking). A scan
+		// failure is retried on the next cycle; the reconciler never sees a
+		// fabricated fact.
+		if err := w.ConfirmAttempt(ctx, intentID); err != nil {
+			return err
+		}
+	}
 	if w.Reconciler != nil {
 		if _, err := w.Reconciler.ReconcileIntent(ctx, intentID, w.OwnerID, version); err != nil {
 			return err
@@ -232,6 +249,17 @@ func (w *WithdrawalWorker) execIntentCycle(ctx context.Context, intentID string,
 		return err
 	} else if open {
 		return nil
+	}
+	// The 008 binding must exist BEFORE the driver's step-issue gate: the
+	// issue gate observes the binding read-only and refuses an absent one
+	// with zero writes, so provisioning happens here, outside the gate
+	// transaction (the allocator is idempotent per intent: allocated first,
+	// replayed on the identical re-request).
+	if w.AllocBinding == nil {
+		return fmt.Errorf("joint worker has no 008 binding allocator (incomplete joint wiring)")
+	}
+	if err := w.AllocBinding(ctx, intentID); err != nil {
+		return err
 	}
 	switch intent.State {
 	case execution.IntentClaimed, execution.IntentReconciling, execution.IntentRevised:

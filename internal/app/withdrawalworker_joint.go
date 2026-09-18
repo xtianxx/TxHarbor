@@ -26,7 +26,7 @@ import (
 // (the txlifecycle joint tests import app, closing a test-build cycle).
 type JointWiringFunc func(ctx context.Context, cfg *config.Config, pool *pgxpool.Pool) (JointDeps, error)
 
-// JointDeps carries the joint-deployment boundary participants. All three are
+// JointDeps carries the joint-deployment boundary participants. All four are
 // required: a nil half would silently degrade the worker to standalone
 // behavior — exactly what joint wiring exists to prevent.
 type JointDeps struct {
@@ -39,6 +39,21 @@ type JointDeps struct {
 	// Binding is 011's 008 observation seam (execution.BindingReader over
 	// 008's read provider).
 	Binding execution.BindingReader
+	// AllocBinding provisions the 008 binding for one intent BEFORE the
+	// driver's step-issue gate observes it (the issue gate refuses an absent
+	// binding with zero writes, so an unsupplied allocator would loop the
+	// worker silently). The implementation lives in the joint wiring
+	// composition root (the 008 domain); app holds only the closure so its
+	// import graph stays free of 008's RPC-bearing packages. The 008
+	// allocator is idempotent for one intent (allocated first, replayed for
+	// the identical re-request), so a repeat call is a no-op by contract.
+	AllocBinding func(ctx context.Context, intentID string) error
+	// ConfirmAttempt runs 010's receipt/confirmation scan for the intent's
+	// current attempt (V13-1: receipt/confirmation BEFORE completed). The
+	// implementation lives in the joint wiring composition root; it is a
+	// no-op when nothing sendable exists and is safe to repeat (the scan
+	// advances with the chain).
+	ConfirmAttempt func(ctx context.Context, intentID string) error
 }
 
 // NewJointWithdrawalWorker returns the production-wired worker: the standalone
@@ -50,11 +65,19 @@ func NewJointWithdrawalWorker(pool *pgxpool.Pool, cfg *config.Config, m *metrics
 	if deps.Advancer == nil || deps.Reader == nil || deps.Binding == nil {
 		return nil, fmt.Errorf("joint withdrawal worker requires advancer, reader and binding")
 	}
+	if deps.AllocBinding == nil {
+		return nil, fmt.Errorf("joint withdrawal worker requires the 008 binding allocator (the step-issue gate refuses an absent binding with zero writes)")
+	}
+	if deps.ConfirmAttempt == nil {
+		return nil, fmt.Errorf("joint withdrawal worker requires the 010 confirmation scanner (receipt/confirmation must precede completion)")
+	}
 	w, err := NewWithdrawalWorker(pool, cfg, m, log)
 	if err != nil {
 		return nil, err
 	}
 	w.Reconciler = &execution.Reconciler{Pool: pool, Reader: deps.Reader}
 	w.Driver = &execution.StepDriver{Pool: pool, Claims: w.Claims, Binding: deps.Binding, Advancer: deps.Advancer}
+	w.AllocBinding = deps.AllocBinding
+	w.ConfirmAttempt = deps.ConfirmAttempt
 	return w, nil
 }

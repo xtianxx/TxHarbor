@@ -45,9 +45,11 @@ func TestJointWorkerProductionWiring(t *testing.T) {
 		t.Fatalf("010 lifecycle adapter: %v", err)
 	}
 	worker, err := app.NewJointWithdrawalWorker(j.pool, jointWorkerConfig(), nil, slog.Default(), app.JointDeps{
-		Advancer: adapter,
-		Reader:   adapter,
-		Binding:  execution.NewLiveBindingReader(nonce.NewReadProvider(j.pool, "")),
+		Advancer:       adapter,
+		Reader:         adapter,
+		Binding:        execution.NewLiveBindingReader(nonce.NewReadProvider(j.pool, "")),
+		AllocBinding:   func(ctx context.Context, intentID string) error { return nil },
+		ConfirmAttempt: func(ctx context.Context, intentID string) error { return nil },
 	})
 	if err != nil {
 		t.Fatalf("joint worker: %v", err)
