@@ -60,6 +60,12 @@ type jointEnv struct {
 	callerID  int64
 	apiKey    string
 	seq       int
+	// signerURL is the in-process signer-serve base URL (009): the worker
+	// process signs through it over real HTTP.
+	signerURL string
+	// signerCredential is the 009 bearer credential the in-process
+	// signer-serve issued (the worker process presents it).
+	signerCredential string
 }
 
 func jointRPC(t *testing.T, out any, url, method string, args ...any) {
@@ -156,8 +162,10 @@ func newJointEnv(t *testing.T) *jointEnv {
 	if err := signer.SetCanSign(ctx, pool, j.callerID, true); err != nil {
 		t.Fatalf("SetCanSign: %v", err)
 	}
-	baseURL := startSignerServe(t, ctx, jointSignerEnv(t, dsn, keyFile, sender, j.asset, j.recipient))
-	sc, err := NewSignerClient(SignerConfig{BaseURL: baseURL, Credential: cred, Timeout: 15 * time.Second})
+	signerURL := startSignerServe(t, ctx, jointSignerEnv(t, dsn, keyFile, sender, j.asset, j.recipient))
+	j.signerURL = signerURL
+	j.signerCredential = cred
+	sc, err := NewSignerClient(SignerConfig{BaseURL: signerURL, Credential: cred, Timeout: 15 * time.Second})
 	if err != nil {
 		t.Fatalf("NewSignerClient: %v", err)
 	}

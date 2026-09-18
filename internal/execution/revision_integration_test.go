@@ -12,6 +12,7 @@ package execution
 
 import (
 	"context"
+	"sync"
 	"testing"
 
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -234,4 +235,193 @@ func revisionAppliedCount(t *testing.T, ctx context.Context, pool *pgxpool.Pool,
 		t.Fatalf("count revision_applied: %v", err)
 	}
 	return n
+}
+
+func projectionRefreshedCount(t *testing.T, ctx context.Context, pool *pgxpool.Pool, intentID string) int {
+	t.Helper()
+	var n int
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM execution_events
+		WHERE intent_id = $1 AND kind = 'projection_refreshed'`, intentID).Scan(&n); err != nil {
+		t.Fatalf("count projection_refreshed: %v", err)
+	}
+	return n
+}
+
+// completedIntentV10 drives the V10 setup up to `completed` and returns the
+// attempt identity plus the pool-backed consumer.
+func completedIntentV10(t *testing.T, requestID, intentID string) (*pgxpool.Pool, *RevisionConsumer, string) {
+	t.Helper()
+	ctx, pool := executionPool(t)
+	store := execClaimStore(t, pool)
+	double := newLifecycleDouble()
+	driver := &StepDriver{Pool: pool, Claims: store, Binding: bindingDouble{result: BindingMatches}, Advancer: double}
+	version := seedExecClaimedIntent(t, ctx, pool, requestID, "authz-"+intentID, intentID, "owner-a", store)
+	out, err := driver.IssueAndAdvance(ctx, StepRequest{
+		IntentID: intentID, RequestID: requestID, CallerID: 1,
+		OwnerID: "owner-a", LeaseVersion: version, Action: ActionFirstBroadcast,
+	})
+	if err != nil || out.FinalStepState != StepConverged {
+		t.Fatalf("setup broadcast = %+v (err %v)", out, err)
+	}
+	double.readFacts[intentID] = LifecycleFacts{
+		CurrentAttemptID: out.AttemptID,
+		Attempts:         []AttemptRef{{AttemptID: out.AttemptID, State: "confirmed"}},
+		RevisionVersion:  1,
+	}
+	rec := &Reconciler{Pool: pool, Reader: double}
+	if _, err := rec.ReconcileIntent(ctx, intentID, "owner-a", version); err != nil {
+		t.Fatalf("reconcile to completed: %v", err)
+	}
+	if got := intentState(t, ctx, pool, intentID); got != IntentCompleted {
+		t.Fatalf("intent state = %s, want completed before revisions", got)
+	}
+	return pool, &RevisionConsumer{Pool: pool}, out.AttemptID
+}
+
+// TestRevisionReconfirmAndProjectionOnlyVersions pins the Lane-F3/B2
+// projection-consumption rules: a newer revision whose state edge is already
+// applied (a reconfirm after completed->revised) and a newer version with no
+// revision edge at all both advance the projection in order, exactly once,
+// while older/equal versions and repeat observations affect zero rows and
+// append no evidence; no state is rewritten and no revision is fabricated.
+func TestRevisionReconfirmAndProjectionOnlyVersions(t *testing.T) {
+	ctx := context.Background()
+	pool, consumer, attemptID := completedIntentV10(t, "req-v10r", "intent-v10r")
+
+	// The invalidation revision: completed -> revised, projection to 2.
+	res, err := consumer.Apply(ctx, RevisionFact{
+		IntentID: "intent-v10r", RevisionVersion: 2, AttemptID: attemptID,
+		TargetState: IntentRevised, Basis: "receipt_invalidated",
+	})
+	if err != nil || !res.Applied {
+		t.Fatalf("invalidation revision = %+v (err %v), want applied", res, err)
+	}
+
+	// A reconfirm revision (same target already applied): the version is
+	// consumed into the projection, the state stays revised.
+	res, err = consumer.Apply(ctx, RevisionFact{
+		IntentID: "intent-v10r", RevisionVersion: 3, AttemptID: attemptID,
+		TargetState: IntentRevised, Basis: "authority_reconfirmed",
+	})
+	if err != nil {
+		t.Fatalf("reconfirm revision: %v", err)
+	}
+	if res.Applied {
+		t.Fatalf("reconfirm revision = %+v, want no second state edge", res)
+	}
+	row, found, err := ReadProjection(ctx, pool, "req-v10r")
+	if err != nil || !found || row.LifecycleVersion != 3 {
+		t.Fatalf("projection after reconfirm = %+v found=%v err=%v, want lifecycle_version 3", row, found, err)
+	}
+	if got := revisionAppliedCount(t, ctx, pool, "intent-v10r"); got != 1 {
+		t.Fatalf("revision_applied events = %d, want 1 (the reconfirm consumes no state edge)", got)
+	}
+	if got := projectionRefreshedCount(t, ctx, pool, "intent-v10r"); got != 1 {
+		t.Fatalf("projection_refreshed events after reconfirm = %d, want 1 (the version was consumed)", got)
+	}
+	if got := intentState(t, ctx, pool, "intent-v10r"); got != IntentRevised {
+		t.Fatalf("intent state = %s, want revised", got)
+	}
+
+	// A version with no revision edge: projection-only advance, exactly one
+	// event, no revision_applied.
+	res, err = consumer.Observe(ctx, RevisionFact{
+		IntentID: "intent-v10r", RevisionVersion: 4, AttemptID: attemptID, Basis: "authority revision observed",
+	})
+	if err != nil {
+		t.Fatalf("observe revision: %v", err)
+	}
+	if res.Applied {
+		t.Fatalf("observe = %+v, want projection-only", res)
+	}
+	if got := projectionRefreshedCount(t, ctx, pool, "intent-v10r"); got != 2 {
+		t.Fatalf("projection_refreshed events = %d, want 2", got)
+	}
+	if got := revisionAppliedCount(t, ctx, pool, "intent-v10r"); got != 1 {
+		t.Fatalf("revision_applied events after observe = %d, want 1", got)
+	}
+
+	// Repeat and older versions: zero rows, zero new evidence.
+	if _, err := consumer.Observe(ctx, RevisionFact{IntentID: "intent-v10r", RevisionVersion: 4, AttemptID: attemptID}); err != nil {
+		t.Fatalf("repeat observe: %v", err)
+	}
+	if _, err := consumer.Observe(ctx, RevisionFact{IntentID: "intent-v10r", RevisionVersion: 3, AttemptID: attemptID}); err != nil {
+		t.Fatalf("older observe: %v", err)
+	}
+	if got := projectionRefreshedCount(t, ctx, pool, "intent-v10r"); got != 2 {
+		t.Fatalf("projection_refreshed events after repeats = %d, want 2 (idempotent)", got)
+	}
+	row, found, err = ReadProjection(ctx, pool, "req-v10r")
+	if err != nil || !found || row.LifecycleVersion != 4 {
+		t.Fatalf("projection after repeats = %+v found=%v err=%v, want lifecycle_version 4 (never rewritten downward)", row, found, err)
+	}
+}
+
+// TestRevisionConcurrentConsumption pins the concurrency guards: simultaneous
+// consumers of one revision version produce exactly one state edge and one
+// consumed version, and simultaneous projection observers append exactly one
+// event for the advanced version.
+func TestRevisionConcurrentConsumption(t *testing.T) {
+	ctx := context.Background()
+	pool, _, attemptID := completedIntentV10(t, "req-v10c", "intent-v10c")
+	consumer := &RevisionConsumer{Pool: pool}
+
+	var wg sync.WaitGroup
+	applied := make(chan bool, 4)
+	for i := 0; i < 4; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			res, err := consumer.Apply(ctx, RevisionFact{
+				IntentID: "intent-v10c", RevisionVersion: 2, AttemptID: attemptID,
+				TargetState: IntentRevised, Basis: "concurrent invalidation",
+			})
+			if err != nil {
+				t.Errorf("concurrent apply: %v", err)
+				return
+			}
+			applied <- res.Applied
+		}()
+	}
+	wg.Wait()
+	close(applied)
+	var wins int
+	for ok := range applied {
+		if ok {
+			wins++
+		}
+	}
+	if wins != 1 {
+		t.Fatalf("applied revisions = %d, want exactly 1", wins)
+	}
+	if got := revisionAppliedCount(t, ctx, pool, "intent-v10c"); got != 1 {
+		t.Fatalf("revision_applied events = %d, want 1", got)
+	}
+	if got := intentState(t, ctx, pool, "intent-v10c"); got != IntentRevised {
+		t.Fatalf("intent state = %s, want revised", got)
+	}
+	row, _, _ := ReadProjection(ctx, pool, "req-v10c")
+	if row.LifecycleVersion != 2 {
+		t.Fatalf("projection lifecycle_version = %d, want 2", row.LifecycleVersion)
+	}
+
+	for i := 0; i < 8; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if _, err := consumer.Observe(ctx, RevisionFact{
+				IntentID: "intent-v10c", RevisionVersion: 3, AttemptID: attemptID, Basis: "concurrent observe",
+			}); err != nil {
+				t.Errorf("concurrent observe: %v", err)
+			}
+		}()
+	}
+	wg.Wait()
+	if got := projectionRefreshedCount(t, ctx, pool, "intent-v10c"); got != 1 {
+		t.Fatalf("projection_refreshed events = %d, want exactly 1", got)
+	}
+	row, _, _ = ReadProjection(ctx, pool, "req-v10c")
+	if row.LifecycleVersion != 3 {
+		t.Fatalf("projection lifecycle_version = %d, want 3", row.LifecycleVersion)
+	}
 }

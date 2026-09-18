@@ -92,7 +92,19 @@ func (c *RevisionConsumer) Apply(ctx context.Context, fact RevisionFact) (Revisi
 		target = IntentRevised
 	}
 	if intent.State == target {
-		return RevisionResult{IntentID: fact.IntentID, RevisionVersion: fact.RevisionVersion, Basis: "already " + target}, nil
+		// The state edge is already applied (e.g. a reconfirm revision after
+		// completed->revised). The newer authority version is still consumed
+		// into the projection so the display follows the revision chain in
+		// order; no state is rewritten and no second event is fabricated.
+		advanced, err := c.consumeProjectionVersion(ctx, intent, fact)
+		if err != nil {
+			return RevisionResult{}, err
+		}
+		basis := "already " + target
+		if advanced {
+			basis += "; projection advanced"
+		}
+		return RevisionResult{IntentID: fact.IntentID, RevisionVersion: fact.RevisionVersion, Basis: basis}, nil
 	}
 	if ClassifyTransition(intent.State, target) != TransitionFact {
 		return RevisionResult{
@@ -130,6 +142,77 @@ func (c *RevisionConsumer) Apply(ctx context.Context, fact RevisionFact) (Revisi
 		IntentID: intent.IntentID, Applied: true, FromState: intent.State, ToState: target,
 		RevisionVersion: fact.RevisionVersion, Basis: fact.Basis,
 	}, nil
+}
+
+// consumeProjectionVersion advances the display projection to a strictly
+// newer authority revision version and records exactly one
+// projection_refreshed event when the row actually moved. It is the
+// projection half of revision consumption: no state edge, no authorization,
+// no claim, no send; repeat and older inputs affect zero rows.
+func (c *RevisionConsumer) consumeProjectionVersion(ctx context.Context, intent Intent, fact RevisionFact) (bool, error) {
+	tx, err := c.Pool.Begin(ctx)
+	if err != nil {
+		return false, fmt.Errorf("begin projection revision: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	advanced, err := advanceLifecycleProjection(ctx, tx, intent.RequestID, fact.AttemptID, fact.RevisionVersion)
+	if err != nil {
+		return false, err
+	}
+	if !advanced {
+		return false, nil
+	}
+	if err := AppendEvent(ctx, tx, Event{
+		IntentID: intent.IntentID, Kind: EventProjectionRefreshed,
+		AttemptID: fact.AttemptID, RevisionVersion: fact.RevisionVersion,
+		Detail: "authority revision observed basis=" + fact.Basis,
+	}); err != nil {
+		return false, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return false, fmt.Errorf("commit projection revision: %w", err)
+	}
+	return true, nil
+}
+
+// Observe consumes one authority revision version into the display projection
+// without a state transition: the authority moved (so the stored reference
+// version must follow in order) while the current facts justify no revision
+// fact edge. Version-guarded by the projection's own lifecycle_version (never
+// rewritten downward); no send, allocation or claim is involved.
+func (c *RevisionConsumer) Observe(ctx context.Context, fact RevisionFact) (RevisionResult, error) {
+	if fact.IntentID == "" {
+		return RevisionResult{}, errors.New("revision fact has no intent id")
+	}
+	if fact.RevisionVersion <= 0 {
+		return RevisionResult{IntentID: fact.IntentID, Basis: "no source version"}, nil
+	}
+	intent, found, err := ReadIntent(ctx, c.Pool, fact.IntentID)
+	if err != nil {
+		return RevisionResult{}, err
+	}
+	if !found {
+		return RevisionResult{IntentID: fact.IntentID, RevisionVersion: fact.RevisionVersion, Basis: "intent absent"}, nil
+	}
+	stored, err := AppliedRevision(ctx, c.Pool, fact.IntentID)
+	if err != nil {
+		return RevisionResult{}, err
+	}
+	if fact.RevisionVersion <= stored {
+		return RevisionResult{
+			IntentID: fact.IntentID, RevisionVersion: fact.RevisionVersion,
+			Basis: fmt.Sprintf("older_or_equal revision %d <= %d", fact.RevisionVersion, stored),
+		}, nil
+	}
+	advanced, err := c.consumeProjectionVersion(ctx, intent, fact)
+	if err != nil {
+		return RevisionResult{}, err
+	}
+	basis := "authority revision observed"
+	if !advanced {
+		basis = "older_or_equal projection"
+	}
+	return RevisionResult{IntentID: fact.IntentID, RevisionVersion: fact.RevisionVersion, Basis: basis}, nil
 }
 
 // ApplyAll consumes the given revisions in ascending version order.

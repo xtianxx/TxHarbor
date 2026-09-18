@@ -80,7 +80,7 @@ func (s *Store) applyReceipt(ctx context.Context, tx pgx.Tx, a *Attempt, hash st
 	}
 	confirmed := canonical && effect == "effective" && confirmations >= threshold
 
-	receiptID, err := upsertReceipt(ctx, tx, a.AttemptID, hash, int(receipt.Status), *blockNumber, strings.ToLower(blockHash),
+	receiptID, storedCanonicality, err := upsertReceipt(ctx, tx, a.AttemptID, hash, int(receipt.Status), *blockNumber, strings.ToLower(blockHash),
 		effect, detail, canonicality, confirmations, threshold, policySeq, head)
 	if err != nil {
 		return "", 0, err
@@ -90,7 +90,14 @@ func (s *Store) applyReceipt(ctx context.Context, tx pgx.Tx, a *Attempt, hash st
 	if err != nil {
 		return "", 0, err
 	}
-	toState, extra := receiptTransition(state, effect, canonical, confirmed)
+	// A receipt row that history already revised to `orphaned` never drives a
+	// state transition again: the observed block is the old orphan identity
+	// (same (tx_hash, block_hash)), not a new canonical inclusion (data-model
+	// Table 5: orphaned is terminal for the row; a re-inclusion carries a new
+	// block hash and therefore writes a new row).
+	stateCanonical := canonical && storedCanonicality != "orphaned"
+	stateConfirmed := confirmed && storedCanonicality != "orphaned"
+	toState, extra := receiptTransition(state, effect, stateCanonical, stateConfirmed)
 	if toState != "" {
 		if _, err := applyStateTx(ctx, tx, a.AttemptID, revision, []string{state}, toState, extra); err != nil {
 			if errors.Is(err, ErrRevisionMoved) {
@@ -108,7 +115,10 @@ func (s *Store) applyReceipt(ctx context.Context, tx pgx.Tx, a *Attempt, hash st
 	if err := appendEventTx(ctx, tx, a.AttemptID, event, reason, recoveryVersionPtr(a.RecoveryVersion), "receipt_id="+itoa(receiptID)); err != nil {
 		return "", 0, err
 	}
-	if confirmed {
+	// The confirmed event belongs to the transition, not to the observation:
+	// repeat scans of an already-confirmed attempt are idempotent and append
+	// no further confirmed events (nor revision bumps).
+	if toState == "confirmed" {
 		if err := appendEventTx(ctx, tx, a.AttemptID, EventConfirmed, "", recoveryVersionPtr(a.RecoveryVersion),
 			"confirm_threshold="+itoa(threshold)+" policy_seq="+itoa(policySeq)+" confirmations="+itoa(confirmations)+" tip="+itoa(head)); err != nil {
 			return "", 0, err
@@ -120,7 +130,7 @@ func (s *Store) applyReceipt(ctx context.Context, tx pgx.Tx, a *Attempt, hash st
 			return "", 0, err
 		}
 	}
-	if state == "orphaned" && canonical && effect == "effective" {
+	if state == "orphaned" && stateCanonical && effect == "effective" {
 		if err := appendEventTx(ctx, tx, a.AttemptID, EventReconfirmed, "", recoveryVersionPtr(a.RecoveryVersion),
 			"receipt_id="+itoa(receiptID)); err != nil {
 			return "", 0, err
@@ -133,7 +143,7 @@ func (s *Store) applyReceipt(ctx context.Context, tx pgx.Tx, a *Attempt, hash st
 	if _, err := s.reviseOrphanedReceipts(ctx, tx, a, strings.ToLower(blockHash)); err != nil {
 		return "", 0, err
 	}
-	if confirmed || effect == "effective" {
+	if stateConfirmed || (effect == "effective" && storedCanonicality != "orphaned") {
 		if err := s.markSiblingsReplaced(ctx, tx, a); err != nil {
 			return "", 0, err
 		}
@@ -144,13 +154,19 @@ func (s *Store) applyReceipt(ctx context.Context, tx pgx.Tx, a *Attempt, hash st
 	return effect, confirmations, nil
 }
 
-// receiptTransition maps the verdict onto the attempt state machine.
+// receiptTransition maps the verdict onto the attempt state machine. A repeat
+// observation that would re-apply the current state returns "", so receipts
+// stay idempotent (no revision bump, no duplicate confirmed event) while a
+// real edge (sent/effective/unknown/orphaned -> confirmed) still applies.
 func receiptTransition(state, effect string, canonical, confirmed bool) (string, string) {
 	if !canonical {
 		return "", ""
 	}
 	if effect == "effective" {
 		if confirmed {
+			if state == "confirmed" {
+				return "", ""
+			}
 			return "confirmed", "effective_at = COALESCE(effective_at, now()), confirmed_at = COALESCE(confirmed_at, now())"
 		}
 		if state == "effective" || state == "confirmed" {
@@ -165,10 +181,31 @@ func receiptTransition(state, effect string, canonical, confirmed bool) (string,
 }
 
 // upsertReceipt converges repeat observations on tx_receipts_tx_block_uniq:
-// progress is updated, the row is never duplicated.
+// the row is never duplicated, and the fields that legitimately advance are
+// rewritten only from the CURRENT chain view (data-model Table 5):
+//
+//   - an `unverified` row (first observed while the indexer's canonical view
+//     had not reached its block) is promoted to `canonical` only when this
+//     observation's chain view contains its (block_number, block_hash);
+//   - a row already revised to `orphaned` never returns to `canonical`
+//     (orphaned is terminal for that identity; a re-inclusion carries a new
+//     block hash and therefore writes a new row);
+//   - confirmation progress and its basis are refreshed only while the
+//     observation is canonical, so a stale or non-canonical observation can
+//     never overwrite newer progress; the recorded basis of an already
+//     confirmed row is left as evidence;
+//   - `confirmed_at` is only ever set together with a canonical row
+//     (tx_receipts_confirmed_at_check).
+//
+// `effect`/`status`/`transfer_detail` stay pinned to the (tx_hash,
+// block_hash) identity: the same block yields the same receipt verdict, and a
+// different block is a different row. Returns the row's canonicality after
+// the write so the caller can keep the attempt transition off historical
+// orphans.
 func upsertReceipt(ctx context.Context, tx pgx.Tx, attemptID, hash string, status int, blockNumber int64, blockHash,
-	effect, detail, canonicality string, confirmations, threshold, policySeq, head int64) (int64, error) {
+	effect, detail, canonicality string, confirmations, threshold, policySeq, head int64) (int64, string, error) {
 	var receiptID int64
+	var storedCanonicality string
 	var tip *int64
 	if head >= 0 {
 		tip = &head
@@ -181,15 +218,33 @@ func upsertReceipt(ctx context.Context, tx pgx.Tx, attemptID, hash string, statu
 		 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,
 		         CASE WHEN $13 THEN now() ELSE NULL END, now())
 		 ON CONFLICT ON CONSTRAINT tx_receipts_tx_block_uniq DO UPDATE SET
-		   confirmations = EXCLUDED.confirmations,
-		   confirm_tip_number = EXCLUDED.confirm_tip_number,
+		   canonicality = CASE
+		       WHEN tx_receipts.canonicality = 'unverified' AND EXCLUDED.canonicality = 'canonical'
+		       THEN 'canonical' ELSE tx_receipts.canonicality END,
+		   confirmations = CASE
+		       WHEN EXCLUDED.canonicality = 'canonical' AND tx_receipts.canonicality <> 'orphaned'
+		       THEN EXCLUDED.confirmations ELSE tx_receipts.confirmations END,
+		   confirm_tip_number = CASE
+		       WHEN EXCLUDED.canonicality = 'canonical' AND tx_receipts.canonicality <> 'orphaned'
+		       THEN EXCLUDED.confirm_tip_number ELSE tx_receipts.confirm_tip_number END,
+		   confirm_threshold = CASE
+		       WHEN EXCLUDED.canonicality = 'canonical' AND tx_receipts.canonicality <> 'orphaned'
+		            AND tx_receipts.confirmed_at IS NULL
+		       THEN EXCLUDED.confirm_threshold ELSE tx_receipts.confirm_threshold END,
+		   confirm_policy_seq = CASE
+		       WHEN EXCLUDED.canonicality = 'canonical' AND tx_receipts.canonicality <> 'orphaned'
+		            AND tx_receipts.confirmed_at IS NULL
+		       THEN EXCLUDED.confirm_policy_seq ELSE tx_receipts.confirm_policy_seq END,
 		   updated_at = now(),
-		   confirmed_at = COALESCE(tx_receipts.confirmed_at, EXCLUDED.confirmed_at)
-		 RETURNING receipt_id`,
+		   confirmed_at = CASE
+		       WHEN EXCLUDED.canonicality = 'canonical' AND tx_receipts.canonicality <> 'orphaned'
+		       THEN COALESCE(tx_receipts.confirmed_at, EXCLUDED.confirmed_at)
+		       ELSE tx_receipts.confirmed_at END
+		 RETURNING receipt_id, canonicality`,
 		attemptID, hash, status, blockNumber, blockHash, effect, detail,
 		canonicality, confirmations, threshold, policySeq, tip,
-		effect == "effective" && canonicality == "canonical" && confirmations >= threshold).Scan(&receiptID)
-	return receiptID, err
+		effect == "effective" && canonicality == "canonical" && confirmations >= threshold).Scan(&receiptID, &storedCanonicality)
+	return receiptID, storedCanonicality, err
 }
 
 func itoa(v int64) string {
