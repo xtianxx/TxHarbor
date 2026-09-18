@@ -30,6 +30,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/ethereum/go-ethereum/common"
+	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -183,6 +185,151 @@ func repWantRecordedReuseRefusal(t *testing.T, pool *pgxpool.Pool, callerID int6
 	}
 }
 
+// repKeyedFixture generates the fixture signing key and a live-signature deps
+// set bound to it: policy + dev provider for the same sender, the
+// contract-shape 008 binding double and the no-op scope lock. The baseline
+// body's fixed sender (0x1111…) can never match a throwaway key, so a test
+// that must actually reach SignTx rewires the body to this sender instead
+// (repRewireSender) and seeds the carrier anchor under the same address.
+func repKeyedFixture(t *testing.T, pool *pgxpool.Pool) (string, SubmitDeps) {
+	t.Helper()
+	key, err := crypto.GenerateKey()
+	if err != nil {
+		t.Fatalf("GenerateKey: %v", err)
+	}
+	sender := strings.ToLower(crypto.PubkeyToAddress(key.PublicKey).Hex())
+	provider, err := NewDevKeyProvider(ModeDevelopment, writeTestKey(t, common.Bytes2Hex(crypto.FromECDSA(key))), 0)
+	if err != nil {
+		t.Fatalf("NewDevKeyProvider: %v", err)
+	}
+	if got := strings.ToLower(provider.Address().Hex()); got != sender {
+		t.Fatalf("provider bound to %s, want the fixture sender %s", got, sender)
+	}
+	return sender, SubmitDeps{
+		DB: pool, Policy: sslPolicy(t, sender), Provider: provider,
+		Binding:   &gateBindingDouble{results: map[string]BindingResult{"pi-1b44": BindingMatches}},
+		ScopeLock: &dlvScope{},
+	}
+}
+
+// repRewireSender retargets the baseline compliant body at the generated
+// fixture sender (policy, carrier scope and provider must all bind the same
+// address for the reuse to reach a real signature).
+func repRewireSender(body, sender string) string {
+	return strings.Replace(body,
+		`"sender": "0x1111111111111111111111111111111111111111"`,
+		`"sender": "`+sender+`"`, 1)
+}
+
+// repRowState reads one persisted row's terminal disposition.
+func repRowState(t *testing.T, pool *pgxpool.Pool, callerID int64, requestID string) (state, refusalClass string) {
+	t.Helper()
+	if err := pool.QueryRow(context.Background(),
+		`SELECT state, refusal_class FROM signing_requests
+		  WHERE caller_id = $1 AND signing_request_id = $2`,
+		callerID, requestID).Scan(&state, &refusalClass); err != nil {
+		t.Fatalf("read persisted state %s: %v", requestID, err)
+	}
+	return state, refusalClass
+}
+
+// repSignatureCount counts the persisted results of one request identity.
+func repSignatureCount(t *testing.T, pool *pgxpool.Pool, rowID int64) int {
+	t.Helper()
+	var n int
+	if err := pool.QueryRow(context.Background(),
+		`SELECT count(*) FROM signature_results WHERE signing_request_row = $1`,
+		rowID).Scan(&n); err != nil {
+		t.Fatalf("count signature_results for row %d: %v", rowID, err)
+	}
+	return n
+}
+
+// repAuditCount counts one audit reason class for one request identity.
+func repAuditCount(t *testing.T, pool *pgxpool.Pool, requestID, reasonClass string) int {
+	t.Helper()
+	var n int
+	if err := pool.QueryRow(context.Background(),
+		`SELECT count(*) FROM signing_request_audit
+		  WHERE signing_request_id = $1 AND reason_class = $2`,
+		requestID, reasonClass).Scan(&n); err != nil {
+		t.Fatalf("count audits for %s: %v", requestID, err)
+	}
+	return n
+}
+
+// TestSignerReplacementSameGrantGrantGatesStillApply pins that the same-grant
+// reuse admission runs after the 007 grant state/expiry gates: a revoked or
+// expired grant refuses a well-formed replacement (authorization_revoked /
+// authorization_expired) before the reuse/scope evaluation, with zero
+// signatures, recorded on the new identity as a replacement of the anchor —
+// the reuse path never bypasses the grant's current validity.
+func TestSignerReplacementSameGrantGrantGatesStillApply(t *testing.T) {
+	pool := signerAuthStartPG(t)
+	ctx := context.Background()
+	const callerID = int64(gateCallerID)
+
+	cred, err := IssueCredential(ctx, pool, callerID, "rep-grant-state")
+	if err != nil {
+		t.Fatalf("IssueCredential: %v", err)
+	}
+	gateReset006(t, pool)
+	gateSeedGrant(t, pool)
+
+	sender, deps := repKeyedFixture(t, pool)
+	anchorID := submitSeedRow(t, pool, callerID, repRewireSender(submitGrantBody(), sender), string(StateReceived))
+	repSeedScope(t, pool, gateAuthID, true, 117000000000000, 1800000000, 1200000000)
+	gateExec(t, pool, `UPDATE withdrawal_authorization_scopes SET sender = $2 WHERE authorization_id = $1`,
+		gateAuthID, sender)
+
+	cases := []struct {
+		name  string
+		state string
+		want  RefusalClass
+	}{
+		{"revoked", "revoked", ClassAuthorizationRevoked},
+		{"expired", "active", ClassAuthorizationExpired},
+	}
+	for i, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			gateExec(t, pool, `UPDATE withdrawal_authorizations SET state = $2 WHERE authorization_id = $1`,
+				gateAuthID, tc.state)
+			if tc.want == ClassAuthorizationExpired {
+				gateExec(t, pool, `UPDATE withdrawal_authorizations SET expires_at = now() - interval '1 minute'
+					WHERE authorization_id = $1`, gateAuthID)
+			}
+			requestID := "sr-rep-state-" + strconv.Itoa(i)
+			body := repRewireSender(repBody(requestID, "at-rep-state-"+strconv.Itoa(i), gateAuthID), sender)
+			resp, err := Submit(ctx, deps, cred, []byte(body))
+			if resp != nil {
+				t.Fatalf("%s grant returned a signature response: %+v", tc.name, resp)
+			}
+			signerAuthRefusal(t, err, tc.want)
+
+			rowID, rowAuth, replacementOf := repRowFacts(t, pool, callerID, requestID)
+			if rowAuth != gateAuthID || replacementOf == nil || *replacementOf != anchorID {
+				t.Fatalf("refused replacement = auth %s replacement_of %v, want %s/%d", rowAuth, replacementOf, gateAuthID, anchorID)
+			}
+			state, refusalClass := repRowState(t, pool, callerID, requestID)
+			if state != string(StateRejected) || refusalClass != string(tc.want) {
+				t.Fatalf("refused replacement = %q/%q, want rejected/%s", state, refusalClass, tc.want)
+			}
+			if got := repSignatureCount(t, pool, rowID); got != 0 {
+				t.Fatalf("%s refusal produced %d result row(s), want 0", tc.name, got)
+			}
+		})
+	}
+
+	// Reset to active so the shared fixture state is clean; the anchor and the
+	// one-anchor index are untouched by either refusal.
+	gateExec(t, pool, `UPDATE withdrawal_authorizations SET state = 'active', expires_at = now() + interval '1 hour'
+		WHERE authorization_id = $1`, gateAuthID)
+	id, authID, anchorReplacementOf := repRowFacts(t, pool, callerID, "sr-7f3a")
+	if id != anchorID || authID != gateAuthID || anchorReplacementOf != nil || repNonAnchorCount(t, pool, gateAuthID) != 1 {
+		t.Fatalf("anchor rebound after grant-state refusals: id=%d auth=%s replacement_of=%v", id, authID, anchorReplacementOf)
+	}
+}
+
 // TestSignerReplacementReuseRefusedWithoutVerifiablePermit is the branch-1
 // fail-closed path: a replacement naming the anchor's grant is refused while no
 // carrier can express "explicitly permits the fee-replacement purpose". The
@@ -301,14 +448,14 @@ func TestSignerReplacementReuseRefusedByPurposeAndFeeGate(t *testing.T) {
 }
 
 // TestSignerReplacementPermittedScopeAdmitsReuse is OC-5 branch 1's admission
-// (H3/T038): with a scope that explicitly permits the fee-replacement purpose
-// and covers the raised fee, the fee replacement is persisted as a replacement
-// row under the anchor's grant — a new identity, the anchor partial-unique
-// keeping exactly one non-replacement row, the anchor never rebound, and no
-// reuse-gate ("fresh authorization required") refusal recorded. The outcome
-// past this admission is the joint legal-path case (T040): the H4/T039 scope
-// gate evaluates the carrier for the replacement's new request identity, so no
-// signature is asserted here.
+// (H3/T038) and the V13-4b identity split: the carrier binds the anchor's
+// ORIGINATING request identity, while the fee replacement is a NEW signing
+// identity (new signing_request_id + attempt_id) over the same intent/binding/
+// nonce. With a scope that explicitly permits the fee-replacement purpose and
+// covers the raised fee, the reuse is admitted AND signs under the anchor's
+// grant — persisted as a signed replacement row, one result row for the new
+// identity, the anchor partial-unique keeping exactly one non-replacement row,
+// the anchor never rebound, and no reuse-gate refusal recorded.
 func TestSignerReplacementPermittedScopeAdmitsReuse(t *testing.T) {
 	pool := signerAuthStartPG(t)
 	ctx := context.Background()
@@ -321,23 +468,55 @@ func TestSignerReplacementPermittedScopeAdmitsReuse(t *testing.T) {
 	gateReset006(t, pool)
 	gateSeedGrant(t, pool)
 
-	anchorID := submitSeedRow(t, pool, callerID, submitGrantBody(), string(StateReceived))
+	// The signing key, the carrier scope and the provider all bind one sender,
+	// so the admitted reuse reaches a real signature (a throwaway provider key
+	// can never sign for the baseline body's fixed sender).
+	sender, deps := repKeyedFixture(t, pool)
+
+	// The anchor is the grant's first use and the request identity the carrier
+	// binds (repSeedScope writes request_id = the anchor body's identity).
+	anchorBody := repRewireSender(submitGrantBody(), sender)
+	anchorID := submitSeedRow(t, pool, callerID, anchorBody, string(StateReceived))
 
 	// Caps cover the raised fee: 65000 gas × 1.8 gwei max fee, 1.2 gwei tip.
 	repSeedScope(t, pool, gateAuthID, true, 117000000000000, 1800000000, 1200000000)
+	gateExec(t, pool, `UPDATE withdrawal_authorization_scopes SET sender = $2 WHERE authorization_id = $1`,
+		gateAuthID, sender)
 
-	body := repBody("sr-rep-permit", "at-rep-permit", gateAuthID)
-	_, _ = Submit(ctx, submitTestDeps(t, pool), cred, []byte(body))
+	body := repRewireSender(repBody("sr-rep-permit", "at-rep-permit", gateAuthID), sender)
+	resp, err := Submit(ctx, deps, cred, []byte(body))
+	if err != nil {
+		t.Fatalf("permitted same-grant reuse was refused: %v", err)
+	}
+	if resp == nil || resp.Signature == "" || resp.TxHash == "" {
+		t.Fatalf("permitted reuse returned no persisted result: %+v", resp)
+	}
 
-	// The reuse was admitted: the new identity is bound as a replacement of the
-	// anchor under the same grant, not refused with the fresh-authorization
-	// instruction.
+	// The reuse was admitted and signed: the new identity is a durable signed
+	// replacement of the anchor under the same grant, and the carrier's bound
+	// request identity stays the anchor's, never the replacement's.
 	rowID, rowAuth, replacementOf := repRowFacts(t, pool, callerID, "sr-rep-permit")
 	if rowID == anchorID {
 		t.Fatalf("reuse reused the anchor row id %d; a replacement is a new row/identity", anchorID)
 	}
 	if rowAuth != gateAuthID || replacementOf == nil || *replacementOf != anchorID {
 		t.Fatalf("permitted reuse bound to auth=%s replacement_of=%v, want %s/%d", rowAuth, replacementOf, gateAuthID, anchorID)
+	}
+	state, refusalClass := repRowState(t, pool, callerID, "sr-rep-permit")
+	if state != string(StateSigned) || refusalClass != "" {
+		t.Fatalf("permitted reuse row = %q/%q, want signed/''", state, refusalClass)
+	}
+	if got := repSignatureCount(t, pool, rowID); got != 1 {
+		t.Fatalf("permitted reuse persisted %d result row(s), want exactly 1", got)
+	}
+	var scopeRequestID string
+	if err := pool.QueryRow(ctx,
+		`SELECT request_id FROM withdrawal_authorization_scopes WHERE authorization_id = $1`,
+		gateAuthID).Scan(&scopeRequestID); err != nil {
+		t.Fatalf("read carrier request_id: %v", err)
+	}
+	if scopeRequestID != "sr-7f3a" || strings.Contains(scopeRequestID, "sr-rep-permit") {
+		t.Fatalf("carrier request_id = %q, want the anchor identity sr-7f3a", scopeRequestID)
 	}
 	var reuseRefusals int
 	if err := pool.QueryRow(ctx,
@@ -349,6 +528,19 @@ func TestSignerReplacementPermittedScopeAdmitsReuse(t *testing.T) {
 	if reuseRefusals != 0 {
 		t.Fatalf("permitted reuse recorded %d reuse-gate refusal(s), want 0", reuseRefusals)
 	}
+	if n := repAuditCount(t, pool, "sr-rep-permit", string(ClassAuthorizationInvalid)); n != 0 {
+		t.Fatalf("permitted reuse recorded %d authorization_invalid audit(s), want 0", n)
+	}
+
+	// Same-identity retry converges on the persisted result: no second row and
+	// no second signature.
+	resp2, err := Submit(ctx, deps, cred, []byte(body))
+	if err != nil || resp2.Signature != resp.Signature || resp2.TxHash != resp.TxHash {
+		t.Fatalf("same-identity retry = %+v / %v, want the persisted %s/%s", resp2, err, resp.Signature, resp.TxHash)
+	}
+	if got := repSignatureCount(t, pool, rowID); got != 1 {
+		t.Fatalf("retry persisted %d result row(s), want the original 1", got)
+	}
 
 	// The anchor keeps its id, identity and grant; the index keeps exactly one
 	// non-replacement row on the grant.
@@ -359,6 +551,108 @@ func TestSignerReplacementPermittedScopeAdmitsReuse(t *testing.T) {
 	}
 	if got := repNonAnchorCount(t, pool, gateAuthID); got != 1 {
 		t.Fatalf("anchor requests on the grant = %d, want exactly 1", got)
+	}
+}
+
+// TestSignerReplacementSameGrantRefusesAnchorRebinding is V13-4b's guardrail
+// on the reuse admission: a fee replacement over its anchor's grant may change
+// only the fee dimensions. A changed nonce, payload or other payment binding
+// against the anchor's persisted row is refused authorization_invalid before
+// any signature, recorded on the new identity, and a carrier that binds
+// neither the anchor nor the replacement identity is refused too — the anchor
+// row and the one-anchor index stay untouched in every case.
+func TestSignerReplacementSameGrantRefusesAnchorRebinding(t *testing.T) {
+	pool := signerAuthStartPG(t)
+	ctx := context.Background()
+	const callerID = int64(gateCallerID)
+
+	cred, err := IssueCredential(ctx, pool, callerID, "rep-rebind")
+	if err != nil {
+		t.Fatalf("IssueCredential: %v", err)
+	}
+	gateReset006(t, pool)
+	gateSeedGrant(t, pool)
+
+	sender, deps := repKeyedFixture(t, pool)
+	anchorID := submitSeedRow(t, pool, callerID, repRewireSender(submitGrantBody(), sender), string(StateReceived))
+	repSeedScope(t, pool, gateAuthID, true, 117000000000000, 1800000000, 1200000000)
+	gateExec(t, pool, `UPDATE withdrawal_authorization_scopes SET sender = $2 WHERE authorization_id = $1`,
+		gateAuthID, sender)
+
+	t.Run("changed nonce", func(t *testing.T) {
+		body := repRewireSender(repBody("sr-rep-rebind", "at-rep-rebind", gateAuthID), sender)
+		body = strings.Replace(body, `"nonce": "42"`, `"nonce": "43"`, 1)
+
+		resp, err := Submit(ctx, deps, cred, []byte(body))
+		if resp != nil {
+			t.Fatalf("anchor-rebinding reuse returned a signature response: %+v", resp)
+		}
+		signerAuthRefusal(t, err, ClassAuthorizationInvalid)
+
+		rowID, rowAuth, replacementOf := repRowFacts(t, pool, callerID, "sr-rep-rebind")
+		if rowAuth != gateAuthID || replacementOf == nil || *replacementOf != anchorID {
+			t.Fatalf("refused replacement = auth %s replacement_of %v, want %s/%d", rowAuth, replacementOf, gateAuthID, anchorID)
+		}
+		state, refusalClass := repRowState(t, pool, callerID, "sr-rep-rebind")
+		if state != string(StateRejected) || refusalClass != string(ClassAuthorizationInvalid) {
+			t.Fatalf("refused replacement = %q/%q, want rejected/authorization_invalid", state, refusalClass)
+		}
+		if got := repSignatureCount(t, pool, rowID); got != 0 {
+			t.Fatalf("refused replacement produced %d result row(s), want 0", got)
+		}
+		action, reason, detail := repLastAudit(t, pool, "sr-rep-rebind")
+		if action != "authorization_refused" || reason != string(ClassAuthorizationInvalid) ||
+			!strings.Contains(detail, "anchor_identity_mismatch=nonce") {
+			t.Fatalf("refusal audit = %q/%q/%q, want authorization_refused naming the nonce rebinding", action, reason, detail)
+		}
+	})
+
+	t.Run("carrier binds another request identity", func(t *testing.T) {
+		gateExec(t, pool, `UPDATE withdrawal_authorization_scopes SET request_id = 'sr-other'
+			WHERE authorization_id = $1`, gateAuthID)
+		defer gateExec(t, pool, `UPDATE withdrawal_authorization_scopes SET request_id = 'sr-7f3a'
+			WHERE authorization_id = $1`, gateAuthID)
+
+		body := repRewireSender(repBody("sr-rep-wrong-anchor", "at-rep-wrong-anchor", gateAuthID), sender)
+		resp, err := Submit(ctx, deps, cred, []byte(body))
+		if resp != nil {
+			t.Fatalf("wrong-carrier reuse returned a signature response: %+v", resp)
+		}
+		signerAuthRefusal(t, err, ClassAuthorizationInvalid)
+
+		rowID, _, replacementOf := repRowFacts(t, pool, callerID, "sr-rep-wrong-anchor")
+		if replacementOf == nil || *replacementOf != anchorID {
+			t.Fatalf("refused replacement_of = %v, want the anchor %d", replacementOf, anchorID)
+		}
+		if got := repSignatureCount(t, pool, rowID); got != 0 {
+			t.Fatalf("wrong-carrier reuse produced %d result row(s), want 0", got)
+		}
+	})
+
+	t.Run("cross-intent rebinding", func(t *testing.T) {
+		body := repRewireSender(repBody("sr-rep-cross-intent", "at-rep-cross-intent", gateAuthID), sender)
+		body = strings.Replace(body, `"intent_id": "pi-1b44"`, `"intent_id": "pi-other"`, 1)
+
+		resp, err := Submit(ctx, deps, cred, []byte(body))
+		if resp != nil {
+			t.Fatalf("cross-intent rebinding returned a signature response: %+v", resp)
+		}
+		signerAuthRefusal(t, err, ClassAuthorizationInvalid)
+		// No anchor matched the other intent, so the row never became a second
+		// non-replacement request on the grant (the partial index refused the
+		// insert and the transaction rolled back).
+		if got := submitRowCount(t, pool, callerID, "sr-rep-cross-intent"); got != 0 {
+			t.Fatalf("cross-intent rebinding persisted %d row(s), want 0", got)
+		}
+		if got := repNonAnchorCount(t, pool, gateAuthID); got != 1 {
+			t.Fatalf("anchor requests on the grant = %d, want exactly 1", got)
+		}
+	})
+
+	// The anchor row and the one-anchor index stay untouched by every refusal.
+	id, authID, anchorReplacementOf := repRowFacts(t, pool, callerID, "sr-7f3a")
+	if id != anchorID || authID != gateAuthID || anchorReplacementOf != nil || repNonAnchorCount(t, pool, gateAuthID) != 1 {
+		t.Fatalf("anchor rebound after refusals: id=%d auth=%s replacement_of=%v", id, authID, anchorReplacementOf)
 	}
 }
 
