@@ -208,3 +208,127 @@ remain OPEN; the production process entry point (`WithdrawalWorkerCommand`)
 still constructs the standalone worker, so production adapter assembly stays
 A-13 scope. The deliberate `Advance(ActionReplace)` -> `refused_basis` gap (no
 010 fee policy) is recorded, not faked.
+
+*(Point-in-time record: the "standalone constructor" clause above was closed
+on current main by the A-13 consolidation below — Lane-W wired
+`jointwire.Worker` into `cmd/txharbor` and the process E2E exercises it. The
+historical text is kept as-is.)*
+
+---
+
+## A-13 acceptance consolidation (2026-09-19, current main `df5a280`)
+
+**Purpose**: fold the Lane-W / Lane-F2 / Lane-F3 evidence (PR #16, merge commit
+`df5a2808dfae976c1d0fa0d99bff9b5dc30bcf70`, main CI push run `35401917939`)
+into the acceptance matrix, state per-item satisfied/gap honestly, and give the
+orchestrator a closure-basis conclusion. **A-13 stays OPEN pending user
+review** (this section is input, not a status change). No new adjudication; the
+clause texts are the constitution XI withdrawal-flow sentence, 011 quickstart
+V13-1–7, and 010 FR-16 as already recorded, read-only.
+
+**Current-main anchors** (all read-only):
+
+- `df5a280` = PR #16 merge (parents `3ea6eb1` + `b8a0fb0`); tree byte-identical
+  to candidate `b8a0fb0`.
+- Lane commits on main: `fe57888` (Lane-W process entry E2E), `28e8cc3`
+  (Lane-F2 continued tracking), `b8a0fb0` (Lane-F3 B1/B2).
+- Main CI push run `35401917939` (4/4 jobs): integration job ran
+  `make test-integration` over the whole tree — `internal/txlifecycle` ok
+  160.99s, `app` ok 134.19s, `execution` ok 101.66s, `jointwire` ok 12.30s,
+  `db` ok 103.82s, `nonce` ok 100.07s, `signer` ok 98.44s, `indexer` ok
+  457.51s; zero SKIP/FAIL. Sanitized log:
+  `.evidence/lane-g4/logs/ci-run-35401917939.log` (run-level; the CI log is
+  non-verbose, so per-test claims below cite the lane/round-2 logs, not "main
+  is green" alone).
+- Evidence trees (repo-external, never committed): `.evidence/lane-w/`,
+  `.evidence/lane-f2/`, `.evidence/lane-f3/`, `.evidence/lane-g4/`,
+  `.evidence/joint-round2/` (INDEX.md carries command/exit/sha256 per log).
+
+### Per-item matrix
+
+| # | Clause / completion condition | Evidence (test → assertion → log) | On current main | Verdict |
+|---|---|---|---|---|
+| V13-1 | Full first-broadcast chain: admission (011) → intent → claim → 010 attempt → 009 signature → Anvil send → receipt/confirmation → `completed`; identity chain traceable | `TestJointProcessEntryEndToEnd` (`internal/txlifecycle/joint_process_entry_integration_test.go:206`; binary build `:193`, child `withdrawal-worker` `:218`; identity chain `:281`; on-chain receipt `:348`; effect `:364`). Full chain through confirmation depth in one run: `TestJointProcessTrackingAfterCompleted` (`joint_process_tracking_integration_test.go:545`; completed-on-`sent` `:558`, depth reached `:580`). Logs: `.evidence/lane-w/LANE-W-NOTE.md`, `.evidence/lane-f3/logs/process-tests.log` (entry + 4 tracking E2Es), `.evidence/lane-f2/logs/lane-f2-tests.log` | Real process, real HTTP/PG/Anvil/009 through the production `jointwire.Worker` assembly; ran in main CI (txlifecycle package) | **Satisfied** |
+| V13-2a | Two workers on one intent | 011 claim exclusivity under 8-way concurrent `Acquire` (one winner): `TestClaimExclusivityRenewalExpiry` (`internal/execution/claim_integration_test.go:61`); expired-worker fencing + monotonic takeover through the production worker: `TestJointDriverJ2ExpiredWorkerIsolationAndTakeover` (`joint_driver_integration_test.go:204`) | Claim-layer exclusivity + takeover proven; **no literal dual-process concurrent run** | **Partial** (evidence limitation: the race is exercised at the claim layer, not as two live worker processes) |
+| V13-2b | Revoke/expiry racing a send at 010's gate (**both lock orders**); no double send / no second attempt for one step | No concurrent interleave test found: refusals are sequential (`TestV6GateRefusals` `send_integration_test.go:40`; `TestDisqualificationFencesHolderWrites` `fencing_integration_test.go:87`; J2 expiry-then-send `joint_driver_integration_test.go:220`). The 008-layer revoke-vs-admission race (`internal/nonce/authz_revoke_race_integration_test.go:459`) is a different boundary. No-double-send leg **is** covered: `TestV6RaceOrdering/concurrent_send_replay` (`send_integration_test.go:184`), `already_accepted` (`:172`), crash `after_commit_before_response` (`crash_integration_test.go:175`) | No concurrent both-lock-orders scene executed on any tree | **Gap** (unexecuted scene, not a failure) |
+| V13-3 | Unknown: RPC timeout / response loss / restart during send ⇒ unknown + reconcile, never failure/not-paid; no second intent/binding | `TestJointDriverJ3UnknownReconciliation` (`joint_driver_integration_test.go:363`) + direct `TestJointJ3` (`joint_j3_integration_test.go:49`); crash matrix `after_dispatch_before_commit` → `unknown` probe-first (`crash_integration_test.go:151-172`); F2/F3 no-second-intent assertions | Byte-identical test files on main; verbose evidence `joint-round2/final/txlifecycle-joint-production-assembly-20260918.log` (J1–J5 driver 5/5 PASS), crash log 8/8; main CI ran the same files | **Satisfied** |
+| V13-4a | Same-bytes replay identity | `TestV3ReplayIdentity` (`replay_integration_test.go:14`, byte-identical dispatch); J2 taker replay through the production worker (`joint_driver_integration_test.go:264-290`); crash `after_commit` retry → `already_accepted` no duplicate | On main; joint-round2 verbose + crash matrix logs | **Satisfied** |
+| V13-4b | Replacement under the **PB conditional reuse rule**, fee-triple test on the 010 side, history preserved | Fresh-grant replacement end-to-end: `TestJointReplaceFeeBump` (`joint_replace_integration_test.go:112`) — new attempt/signing, same intent/binding/nonce, anchor history kept, sibling `replaced` only after chain fact; refusals: `TestJointReplaceRefusals` (`:205`, no-fee-change / over-cap / reuse_forbidden). **Same-grant reuse leg blocked**: `internal/signer/submit.go:254-267` re-applies `EvaluateGrantScope` after `EvaluateGrantReuse`, and `internal/signer/gates.go:283-297` requires `scope.RequestID == req.SigningRequestID`, so a same-grant replacement with a new signing identity is refused by 009 (recorded in `docs/workflow-010-011-parallel.md` joint-batch record as a 009 delivery-branch defect; no fix commit on main — latest `gates.go` change `51fa19f`) | Fresh-grant + 010-side reuse refusal proven; conditional-reuse admission leg not executable end-to-end | **Gap** (blocked by the recorded 009 defect) |
+| V13-5a | Pause set/clear | 011: `TestPauseRefusesStepIssue` (`recovery_gate_integration_test.go:34`), `TestMultiplePauseRowsNotBypassed` (`:59`, clearing one keeps the other); 010 gate: `TestV6GateRefusals/pause_present` (`send_integration_test.go:63`) + accepted send after clear (`readonly_integration_test.go:111-121`); J5 freeze + controlled release, pause remains → still refused (`joint_driver_integration_test.go:726-753`) | On main; joint-round2 verbose | **Satisfied** |
+| V13-5b | Reorg with receipt invalidation / confirmation rollback ⇒ revision tracking, projection freshness, no compensation intent | `TestJointDriverJ4` (`joint_driver_integration_test.go:456`) + direct `TestJointJ4` (`joint_j4_integration_test.go:82`); real Anvil revert + identical-bytes re-inclusion through the production process: `TestJointProcessReorgAfterCompleted` (`joint_process_tracking_integration_test.go:635`) — `orphaned`→`reconfirmed`, `completed→revised`, `revision_applied` exactly 1 (`:705`), projection = authority revision, external HTTP view `revised`/`confirmed` (`:731-741`), 1 binding/attempt/send (`:723`); restart variant `TestJointProcessRestartConsumesRevisionAfterCompleted` (`:749`); B1 keeps orphan history and confirmation basis (`receipt_canonicality_integration_test.go:174-233`) | On main; Lane-F3 process logs + joint-round2 | **Satisfied** |
+| V13-6 | Non-substitution (no double/fixture/010-independent cited as joint) | Process tests drive the real binary and `jointwire.Worker`; the J tests use the production `txlifecycle.LifecycleLive` adapter + real 008 `nonce.Allocator` + real 009 signer-serve + real Anvil ERC-20 emitter. Contract-shape doubles appear only in 010-independent suites, labeled test-only | On main | **Satisfied** |
+| V13-7 | Inherited limited exceptions (G-010-1 / G-010-2(c)) as recorded inputs | `TestT041ResidualEvidence` (`residual_integration_test.go:12`: last-moment expiry refusal; region-abort; freeze + controlled release; indeterminate ordering does not freeze); J5 detectable path. Not re-adjudicated | On main | **Satisfied (as inputs)** |
+| — | Register's stated A-13 residual scope: "生产进程入口对适配器的装配（`WithdrawalWorkerCommand` 仍用 standalone 构造器）" | Closed by Lane-W: `cmd/txharbor` injects `jointwire.Worker` (`cmd/txharbor/main.go:36`), the command refuses unlinked wiring (`internal/app/withdrawalworker.go:657`), and `TestJointProcessEntryEndToEnd` exercises the assembly through the real binary/Run loop; `TestWorkerAssemblyWiresRealParticipants` + `TestWithdrawalWorkerCommandLiveEntry` pin the assembly | On main; main CI | **Satisfied** |
+| — | 008 allocation + replay on the real assembly path | `TestWorkerAssemblyAllocationReplayOutcome` (`internal/jointwire/allocation_replay_integration_test.go:27`): real assembly closure → `allocated` then `replayed`, same intent/binding/nonce, 1/1 rows; F2/F3 process tests assert 1 binding/attempt/send durably | On main; Lane-F3 log | **Satisfied** |
+| — | 009 signing + broadcast (real) | Process E2E: in-process real `app.SignerServe` + real Anvil send (`joint_process_entry_integration_test.go`); `TestT021V2RealSigner` (`signing_integration_test.go:141`) byte-identity; J tests | On main | **Satisfied** |
+| — | Post-`completed` confirmation depth | `TestJointProcessTrackingAfterCompleted` (`:545-584`): completed on `sent` alone (receipts=0), then receipt canonical + depth 3 in the same process; threshold from the real `confirmation_policy_history` table (test-controlled value) | On main; Lane-F2 log | **Satisfied** |
+| — | Restart recovery | `TestJointProcessRestartTrackingAfterCompleted` (`:592`) — completed intent is unclaimable; only the restarted process's tracking reaches confirmed; `TestJointProcessRestartConsumesRevisionAfterCompleted` (`:749`) | On main; Lane-F2/F3 logs | **Satisfied** |
+| — | B1 post-hoc canonicality (lagging view) | `TestV8UnverifiedPromotesWithChainTruth` (`receipt_canonicality_integration_test.go:87`): unverified stays until chain truth catches up (`:114`), then canonical + depth; repeat scans idempotent (no revision bump, one `confirmed` event) | On main; Lane-F3 log | **Satisfied** |
+| — | B2 revision consumption into 011 + external HTTP projection | `TestRevisionReconfirmAndProjectionOnlyVersions` (`revision_integration_test.go:287`), `TestRevisionConcurrentConsumption` (`:364`); process scenes above; `t28ExecutionView` (`joint_process_tracking_integration_test.go:518`) queries the existing `GET /withdrawals/{request_id}/execution` route and cross-checks the DB version | On main; Lane-F3 log | **Satisfied** |
+
+### Historical out-of-lane failures (now closed on main)
+
+The T042 note's `internal/db` hard-coded-sequence failures and the V12
+secrets-token finding were both closed before this consolidation: the db
+suite is green in main CI (`35401917939`, `db` ok 103.82s; the migration-set
+adaptations landed via `3fe4b73`/`4a0f207`, merged with the 011 candidate at
+`3ea6eb1`), and the `internal/config/config.go` dispatch-timeout comment was
+reworded (`c21f3da`).
+The 010 defects the joint round exposed (`TransferCalldata`
+selector/recipient clobbering, `CanonicalEnvelope` fee-shape `omitempty`) are
+fixed on main (`299d39e`, `82b5c9a`).
+
+### Evidence limitations (kept, not papered over)
+
+1. Chain truth (`chain_blocks`) is harness-controlled in the process tests
+   (`t28SyncChainTruth`), exactly like the joint acceptance's `seedChainTruth`;
+   the production indexer process is not inside the withdrawal-chain scene
+   (its own E2E lives in 002/003/006 lanes). Constitution XI's deposit flow is
+   deliberately out of scope here (no deposit-in-same-scene condition added).
+2. The process tests write a test-controlled confirmation threshold into the
+   real `confirmation_policy_history` source table; the depth is test-controlled
+   by design.
+3. J2–J5 / T060-replacement / V9b-crash verbose evidence is the joint-round2
+   final logs at content-identical files (byte-identity checked for
+   `joint_j2/j3/j5/replace/crash/migration_joint`; J1/J4/wiring/process-entry
+   were additionally re-run verbose in Lane-F3). Main CI ran the same package
+   but its log is non-verbose, so it is not cited as per-test proof.
+4. The B1 promotion/progress rules were verified against the stub chain probe
+   (`stubRPC`) for the canonicality matrix, plus the real-Anvil reorg scene for
+   the revision path.
+
+### Closure conclusion (for the orchestrator / user review)
+
+**A-13 does not yet meet a "fully satisfied" closure bar**: two V13 scene
+elements lack executed evidence, and one of them is blocked by a recorded
+production defect.
+
+- **Minimum supplements (ordered)**:
+  1. **V13-4b**: fix the 009 same-grant reuse path (do not re-apply the
+     identity-equality `EvaluateGrantScope` check to a replacement that already
+     passed `EvaluateGrantReuse`, or adjudicate the intended carrier shape),
+     then run a same-grant fee replacement end-to-end through the production
+     worker (same intent/binding/nonce, new signing identity, real 009 + Anvil)
+     — or record an explicit adjudication that the fresh-grant path is the
+     intended PB conditional reuse shape.
+  2. **V13-2b**: one deterministic interleave test racing claim revoke/expiry
+     against a 010 send gate in both lock orders (real PostgreSQL; a
+     lock-observation barrier in the shape of the 008
+     `authz_revoke_race_integration_test.go` precedent), asserting zero double
+     dispatch and no second attempt.
+  3. **V13-2a (optional, evidence limitation)**: a literal two-worker-process
+     race on one intent; the claim layer already proves exclusivity, so this is
+     strengthening, not a correctness hole.
+- **Non-blocking legacy items** (do not gate A-13): harness-controlled chain
+  truth / indexer-outside-scene (limitation 1), test-controlled confirmation
+  threshold (limitation 2), the deliberate `Advance(ActionReplace)` ->
+  `refused_basis` no-fee-policy gap (recorded, not faked), and the sticky
+  freeze marker design (only the 010-side release lifts it).
+- Everything else in V13-1/3/5/6/7 plus the register's production-process-entry
+  scope, the 008 allocation/replay path, the 009 signing/broadcast leg, the
+  post-`completed` confirmation depth, restart recovery, reorg re-inclusion,
+  B1 canonicality and B2 revision/projection is satisfied with the evidence
+  above on current main `df5a280`.
+- **A-13 and T000-P stay OPEN**; this consolidation does not change either
+  status and does not claim production readiness or main-verified equivalence
+  beyond the cited runs.
