@@ -58,7 +58,6 @@ func (s *Store) applyReceipt(ctx context.Context, tx pgx.Tx, a *Attempt, hash st
 	}
 	expected := ExpectedTransfer{Asset: asset, Sender: sender, Recipient: recipient, Amount: amount}
 	effect, detail := receiptEffect(int(receipt.Status), receipt.Logs, expected)
-	s.observeReceiptEffect(effect)
 
 	var canonical bool
 	if err := tx.QueryRow(ctx,
@@ -126,6 +125,9 @@ func (s *Store) applyReceipt(ctx context.Context, tx pgx.Tx, a *Attempt, hash st
 			"receipt_id="+itoa(receiptID)); err != nil {
 			return "", 0, err
 		}
+		if s.metrics != nil {
+			s.metrics.ObserveTxRevision()
+		}
 	}
 
 	if _, err := s.reviseOrphanedReceipts(ctx, tx, a, strings.ToLower(blockHash)); err != nil {
@@ -135,6 +137,9 @@ func (s *Store) applyReceipt(ctx context.Context, tx pgx.Tx, a *Attempt, hash st
 		if err := s.markSiblingsReplaced(ctx, tx, a); err != nil {
 			return "", 0, err
 		}
+	}
+	if s.metrics != nil {
+		s.metrics.ObserveTxReceiptEffect(effect)
 	}
 	return effect, confirmations, nil
 }

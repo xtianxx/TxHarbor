@@ -7,44 +7,60 @@ import (
 	"testing"
 )
 
-// TestV10ClaimAbsentFailClosed is T053/V10's pre-011 independent acceptance:
-// with the contract-shaped claim fixture table or row absent, every send entry
-// point refuses claim_absent with zero dispatch and committed evidence
-// (FR-14; G-010-4; R-010-11). Executable before 011 merges.
-func TestV10ClaimAbsentFailClosed(t *testing.T) {
-	e := newEnv(t)
-	ctx := context.Background()
-	f := e.seed()
-	f.sign()
+// TestV10ClaimFailClosed is quickstart V10's claim_absent acceptance (T053):
+// with the claim carrier broken at three independent levels — the fixture
+// table absent (SQLSTATE 42P01), the row absent, and a required column absent
+// (SQLSTATE 42703) — EVERY send entry point refuses claim_absent, dispatches
+// nothing and commits gate_refused evidence. The adapter fails closed and
+// never degrades into an unqualified send (FR-14; G-010-4; R-010-11); the
+// suite is executable pre-011 because the claim read is 010's own gate.
+func TestV10ClaimFailClosed(t *testing.T) {
+	cases := []struct {
+		name  string
+		smash func(f *fixture)
+	}{
+		{"claim_table_absent", func(f *fixture) {
+			f.env.exec(`DROP TABLE execution_claims`)
+		}},
+		{"claim_row_absent", func(f *fixture) {
+			f.env.exec(`DELETE FROM execution_claims WHERE intent_id = $1`, f.intentID)
+		}},
+		{"claim_column_absent", func(f *fixture) {
+			f.env.exec(`ALTER TABLE execution_claims DROP COLUMN owner_id`)
+		}},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			e := newEnv(t)
+			f := e.seed()
+			f.sign()
+			c.smash(f)
 
-	// Table absent: the contract-shaped fixture is dropped entirely.
-	e.exec(`DROP TABLE execution_claims`)
-	for _, kind := range []SendKind{SendInitial, SendReplay} {
-		before := e.rpc.dispatchCount()
-		res, err := e.send(f, kind, nil)
-		assertBlocked(t, e, f.attemptID, res, err, ClassClaimAbsent, before)
-	}
+			for _, kind := range []SendKind{SendInitial, SendReplay} {
+				before := e.rpc.dispatchCount()
+				res, err := e.send(f, kind, nil)
+				assertBlocked(t, e, f.attemptID, res, err, ClassClaimAbsent, before)
 
-	// Row absent: the table exists but carries no claim for the intent.
-	e.exec(`CREATE TABLE execution_claims (
-		intent_id TEXT PRIMARY KEY, owner_id TEXT NOT NULL,
-		lease_version BIGINT NOT NULL, state TEXT NOT NULL DEFAULT 'active',
-		acquired_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-		expires_at TIMESTAMPTZ NOT NULL, ended_at TIMESTAMPTZ, end_kind TEXT)`)
-	for _, kind := range []SendKind{SendInitial, SendReplay} {
-		before := e.rpc.dispatchCount()
-		res, err := e.send(f, kind, nil)
-		assertBlocked(t, e, f.attemptID, res, err, ClassClaimAbsent, before)
-	}
-
-	if got := e.rpc.dispatchCount(); got != 0 {
-		t.Fatalf("dispatch count = %d, want 0 (claim_absent is fail-closed)", got)
-	}
-	a, err := e.store.AttemptByID(ctx, f.attemptID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if a.State != "signed" {
-		t.Fatalf("attempt state = %s, want signed (zero-dispatch refusals never transition)", a.State)
+				// Zero dispatch is durable, not just in-process: no
+				// tx_send_attempts row may exist for the refused attempt.
+				var sends int
+				if err := e.pool.QueryRow(context.Background(),
+					`SELECT count(*) FROM tx_send_attempts WHERE attempt_id = $1`, f.attemptID).Scan(&sends); err != nil {
+					t.Fatal(err)
+				}
+				if sends != 0 {
+					t.Fatalf("%s: %d send rows after a claim_absent refusal, want 0", kind, sends)
+				}
+				// The refusal moved no revision: the attempt stays signed.
+				var revision int64
+				if err := e.pool.QueryRow(context.Background(),
+					`SELECT revision_seq FROM tx_attempts WHERE attempt_id = $1`, f.attemptID).Scan(&revision); err != nil {
+					t.Fatal(err)
+				}
+				if revision != 2 {
+					t.Fatalf("%s: revision_seq = %d, want 2 (refusal is not a mutation)", kind, revision)
+				}
+			}
+		})
 	}
 }

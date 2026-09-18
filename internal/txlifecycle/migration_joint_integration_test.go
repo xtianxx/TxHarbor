@@ -14,33 +14,12 @@ import (
 	"github.com/xtianxx/txharbor/internal/db"
 )
 
-// requireJointMigrations skips the joint-workspace migration tests on a lane
-// that does not carry 011's 000012. The 010 delivery branch migrates without
-// 011's tables by design (000013 records a lane no-op; see the migration's
-// lane guard), so the joint set {11,12,13} cannot be assembled here. The joint
-// evidence is recorded on joint-010-011-integration and is never re-claimed
-// from a lane-local run (FR-16; P5).
-func requireJointMigrations(t *testing.T) {
-	t.Helper()
-	files, err := db.MigrationFiles(db.Migrations)
-	if err != nil {
-		t.Fatalf("list migrations: %v", err)
-	}
-	for _, f := range files {
-		if f.Version == 12 {
-			return
-		}
-	}
-	t.Skip("011 migration 000012 not present in this lane; joint migration evidence is recorded on joint-010-011-integration (integration workspace)")
-}
-
 // TestT043MigrationSetMergeOrder re-verifies the applied migration set and the
 // provisional numbers in 010→011 merge order on the joint scratch DB (PLAN-1;
 // T043): 000011 (010) precedes 000012 (011) precedes 000013 (010 guarded
 // follow-up) precedes 000014 (010 intent-FK repair), and no applied version is
 // missing or duplicated.
 func TestT043MigrationSetMergeOrder(t *testing.T) {
-	requireJointMigrations(t)
 	e := newEnv(t)
 	ctx := context.Background()
 	dsn := e.dsn
@@ -131,7 +110,6 @@ func TestT043MigrationSetMergeOrder(t *testing.T) {
 // raises 23503 on exactly tx_attempts_intent_fkey, and a seeded attempt
 // (existing data) stays valid (G-010-3; PLAN-1; J6).
 func TestT044IntentFK(t *testing.T) {
-	requireJointMigrations(t)
 	e := newEnv(t)
 	ctx := context.Background()
 
