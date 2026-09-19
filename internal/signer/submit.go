@@ -31,12 +31,16 @@ const submitWriteGuard = "SET LOCAL statement_timeout = '5s'"
 // no application clock).
 const submitClockSQL = `SELECT clock_timestamp()`
 
-// submitAnchorSQL returns the anchor (non-replacement) row id a fee-replacement
+// submitAnchorSQL returns the anchor (non-replacement) row a fee-replacement
 // request attaches to: same caller, intent_id and binding_ref on the same
 // authorization, a different request identity (OC-4; research R7). No row means
-// no anchor: the request is the first use of its grant. Pure SELECT — the anchor
-// row's authorization_id is never updated ("旧请求换绑禁止").
-const submitAnchorSQL = `SELECT id FROM signing_requests
+// no anchor: the request is the first use of its grant. The row carries the
+// anchor's request identity (the identity the carrier's request_id binds) and
+// the payment binding a legitimate replacement must preserve (V13-4b); the
+// anchor's authorization_id is never updated ("旧请求换绑禁止"). Pure SELECT.
+const submitAnchorSQL = `SELECT id, signing_request_id, chain_id, sender, nonce::text, tx_type,
+	to_addr, value::text, data, gas_limit::text, asset, recipient, amount::text
+	FROM signing_requests
 	WHERE caller_id = $1 AND intent_id = $2 AND binding_ref = $3
 	  AND authorization_id = $4 AND replacement_of IS NULL
 	  AND signing_request_id <> $5
@@ -182,8 +186,9 @@ func submitFirst(ctx context.Context, deps SubmitDeps, caller Caller, req *Reque
 	// binding_ref (OC-4). When it names its anchor's grant it is inserted as
 	// that anchor's replacement, so the partial anchor index keeps exactly one
 	// non-replacement request per grant; the reuse itself is gated on the
-	// scope's purpose token + fee range after the grant read below. The lookup
-	// is a plain read of 009's own rows: no new lock object.
+	// scope's purpose token + fee range + the anchor's preserved payment
+	// binding after the grant read below (V13-4b). The lookup is a plain read
+	// of 009's own rows: no new lock object.
 	anchor, err := findAnchorRow(ctx, tx, caller.ID, req)
 	if err != nil {
 		return nil, refuse(ClassStorageUnavailable, "", "storage unavailable")
@@ -251,10 +256,23 @@ func submitFirst(ctx context.Context, deps SubmitDeps, caller Caller, req *Reque
 	// Otherwise the caller must obtain a fresh authorization and re-issue via
 	// PB; the refusal is recorded on the new identity, zero signatures, and the
 	// anchor row is never rebound.
+	//
+	// V13-4b identity split: the replacement's new signing identity is NOT the
+	// carrier's bound request identity — the carrier binds the anchor's
+	// originating request (request_id). The reuse therefore preserves the
+	// anchor's payment binding (chain/sender/nonce/tx shape/payload/
+	// gas_limit/asset/recipient/amount; the fee dimensions are the one free
+	// axis) and the carrier coverage below is evaluated against the anchor's
+	// signing_request_id, never the replacement's own new identity.
+	boundRequestID := req.SigningRequestID
 	if anchor != nil {
 		if class := EvaluateGrantReuse(scope, req); class != "" {
-			return nil, submitRefusal(ctx, tx, deps, rowID, caller.ID, req, class, "authorization_id", string(class), reuseRefusalDetail(*anchor, scope))
+			return nil, submitRefusal(ctx, tx, deps, rowID, caller.ID, req, class, "authorization_id", string(class), reuseRefusalDetail(anchor.RowID, scope))
 		}
+		if class := EvaluateAnchorBinding(*anchor, req); class != "" {
+			return nil, submitRefusal(ctx, tx, deps, rowID, caller.ID, req, class, "authorization_id", string(class), anchorBindingRefusalDetail(*anchor, req))
+		}
+		boundRequestID = anchor.SigningRequestID
 	}
 
 	// H4 (T039): the decision consumes the carrier read in the same FOR SHARE
@@ -262,7 +280,7 @@ func submitFirst(ctx context.Context, deps SubmitDeps, caller Caller, req *Reque
 	// refused authorization_unverifiable per request (PB-FR-04, R11); only a
 	// present-and-verifiable scope passes. The detail records the carrier as
 	// actually observed.
-	if class := EvaluateGrantScope(scope, req); class != "" {
+	if class := EvaluateGrantScopeBoundIdentity(scope, req, boundRequestID); class != "" {
 		return nil, submitRefusal(ctx, tx, deps, rowID, caller.ID, req, class, "authorization_id", string(class), "authorization_id="+req.AuthorizationID+" scope_carrier="+scopeCarrierState(scope))
 	}
 
@@ -306,23 +324,31 @@ func submitFirst(ctx context.Context, deps SubmitDeps, caller Caller, req *Reque
 
 // findAnchorRow reads the anchor a fee-replacement request attaches to; nil
 // means no anchor (the request is the first use of its grant, or a fresh-grant
-// replacement that is its own anchor — research R7).
-func findAnchorRow(ctx context.Context, tx pgx.Tx, callerID int64, req *Request) (*int64, error) {
-	var anchorID int64
+// replacement that is its own anchor — research R7). The snapshot carries the
+// anchor's request identity (the carrier's bound request_id) and the payment
+// binding the replacement must preserve (V13-4b).
+func findAnchorRow(ctx context.Context, tx pgx.Tx, callerID int64, req *Request) (*ReplacementAnchor, error) {
+	var a ReplacementAnchor
 	err := tx.QueryRow(ctx, submitAnchorSQL,
-		callerID, req.IntentID, req.BindingRef, req.AuthorizationID, req.SigningRequestID).Scan(&anchorID)
+		callerID, req.IntentID, req.BindingRef, req.AuthorizationID, req.SigningRequestID).Scan(
+		&a.RowID, &a.SigningRequestID, &a.ChainID, &a.Sender, &a.Nonce, &a.TxType,
+		&a.To, &a.Value, &a.Data, &a.GasLimit, &a.Asset, &a.Recipient, &a.Amount)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, nil
 	}
 	if err != nil {
 		return nil, err
 	}
-	return &anchorID, nil
+	return &a, nil
 }
 
 // insertRequestRow is the plain identity+content INSERT (state='received');
 // anchor non-nil marks an OC-5 replacement (H3/T038).
-func insertRequestRow(ctx context.Context, tx pgx.Tx, callerID int64, anchor *int64, req *Request, policyVersion string, envelope []byte, contentHash common.Hash, data []byte) (int64, error) {
+func insertRequestRow(ctx context.Context, tx pgx.Tx, callerID int64, anchor *ReplacementAnchor, req *Request, policyVersion string, envelope []byte, contentHash common.Hash, data []byte) (int64, error) {
+	var anchorRowID any
+	if anchor != nil {
+		anchorRowID = anchor.RowID
+	}
 	var rowID int64
 	err := tx.QueryRow(ctx, submitInsertSQL,
 		callerID, req.SigningRequestID, req.AttemptID, req.IntentID, req.BindingRef,
@@ -331,7 +357,7 @@ func insertRequestRow(ctx context.Context, tx pgx.Tx, callerID int64, anchor *in
 		nullIfEmpty(req.GasPrice), nullIfEmpty(req.MaxFeePerGas), nullIfEmpty(req.MaxPriorityFeePerGas),
 		lowerAddr(req.Asset), lowerAddr(req.Recipient), req.Amount,
 		envelopeText(envelope), contentHash.Hex(), req.AuthorizationID, strings.Repeat("0", 64), policyVersion,
-		anchor,
+		anchorRowID,
 	).Scan(&rowID)
 	return rowID, err
 }
@@ -591,6 +617,13 @@ func scopeCarrierState(scope GrantScope) string {
 func reuseRefusalDetail(anchorID int64, scope GrantScope) string {
 	return "anchor=" + strconv.FormatInt(anchorID, 10) + " scope_carrier=" + scopeCarrierState(scope) +
 		" allows_fee_replacement=" + strconv.FormatBool(scope.AllowsFeeReplacement) + " fresh_authorization_required"
+}
+
+// anchorBindingRefusalDetail records which anchor-bound field the replacement
+// tried to change (V13-4b: fees are the only free dimension), without secrets.
+func anchorBindingRefusalDetail(anchor ReplacementAnchor, req *Request) string {
+	return "anchor=" + strconv.FormatInt(anchor.RowID, 10) + " anchor_request_id=" + anchor.SigningRequestID +
+		" anchor_identity_mismatch=" + anchorRebindingField(anchor, req)
 }
 
 // bindingClassName maps a BindingResult to the recorded binding_class.

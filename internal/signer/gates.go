@@ -9,12 +9,14 @@
 package signer
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"math/big"
 	"strings"
 	"time"
 
+	"github.com/ethereum/go-ethereum/common/hexutil"
 	"github.com/ethereum/go-ethereum/crypto"
 )
 
@@ -279,8 +281,22 @@ type GrantScope struct {
 // carrier refuses authorization_unverifiable; a carrier that does not cover
 // this request refuses authorization_invalid. Pure comparison: no write, no
 // inference from history or caller claims. "" means the carrier is present and
-// covers the request.
+// covers the request. The bound request identity is the request's own
+// signing_request_id; a fee replacement evaluates the carrier against its
+// anchor's identity instead (EvaluateGrantScopeBoundIdentity).
 func EvaluateGrantScope(scope GrantScope, req *Request) RefusalClass {
+	return EvaluateGrantScopeBoundIdentity(scope, req, req.SigningRequestID)
+}
+
+// EvaluateGrantScopeBoundIdentity is EvaluateGrantScope with the carrier's
+// bound request identity supplied explicitly (V13-4b identity split). A
+// fee-replacement request is a NEW signing identity over its anchor's grant,
+// so the carrier's request_id must equal the ANCHOR's signing_request_id —
+// never the replacement's own new identity — and the replacement must have
+// passed EvaluateGrantReuse with the same carrier. For a first use the bound
+// identity is the request's own signing_request_id. "" means the carrier is
+// present and covers the request.
+func EvaluateGrantScopeBoundIdentity(scope GrantScope, req *Request, boundRequestID string) RefusalClass {
 	if !scope.Present {
 		return ClassAuthorizationUnverifiable
 	}
@@ -290,7 +306,7 @@ func EvaluateGrantScope(scope GrantScope, req *Request) RefusalClass {
 	if !strings.EqualFold(scope.Sender, req.Sender) {
 		return ClassAuthorizationInvalid
 	}
-	if scope.IntentID != req.IntentID || scope.RequestID != req.SigningRequestID {
+	if scope.IntentID != req.IntentID || scope.RequestID != boundRequestID {
 		return ClassAuthorizationInvalid
 	}
 	return feeScopeRefusal(scope, req)
@@ -310,6 +326,95 @@ func EvaluateGrantReuse(scope GrantScope, req *Request) RefusalClass {
 		return ClassAuthorizationInvalid
 	}
 	return feeScopeRefusal(scope, req)
+}
+
+// ReplacementAnchor is the persisted anchor row an OC-5 fee replacement
+// attaches to (H3/T038; V13-4b identity split): the ORIGINAL request identity
+// the PB carrier's request_id binds, plus the payment binding the replacement
+// must preserve. It is a read-time snapshot of 009's own row, never a caller
+// claim.
+type ReplacementAnchor struct {
+	// RowID is the anchor's signing_requests row id (the replacement_of target).
+	RowID int64
+	// SigningRequestID is the anchor's request identity — the identity the
+	// carrier binds — never the replacement's new signing identity.
+	SigningRequestID string
+	ChainID          int64
+	Sender           string
+	Nonce            string
+	TxType           int
+	To               string
+	Value            string
+	Data             []byte
+	GasLimit         string
+	Asset            string
+	Recipient        string
+	Amount           string
+}
+
+// EvaluateAnchorBinding applies the V13-4b identity split to a fee-replacement
+// request that names its anchor's grant: the replacement is a NEW signing
+// identity, so only the fee dimensions may differ (gas_price /
+// max_fee_per_gas / max_priority_fee_per_gas, bounded by EvaluateGrantReuse's
+// carrier caps). The chain, sender, nonce, tx shape, gas limit and the transfer
+// binding (to/value/data/asset/recipient/amount) must stay the anchor's — a
+// rebinding attempt is refused, never signed. "" admits; otherwise
+// ClassAuthorizationInvalid.
+func EvaluateAnchorBinding(a ReplacementAnchor, req *Request) RefusalClass {
+	if anchorRebindingField(a, req) != "" {
+		return ClassAuthorizationInvalid
+	}
+	return ""
+}
+
+// anchorRebindingField names the first anchor-bound field the replacement
+// changed, or "" when the replacement preserves the anchor's binding. The fee
+// dimensions are deliberately not part of the anchor binding.
+func anchorRebindingField(a ReplacementAnchor, req *Request) string {
+	switch {
+	case a.ChainID != int64(req.ChainID):
+		return "chain_id"
+	case !strings.EqualFold(a.Sender, req.Sender):
+		return "sender"
+	case a.TxType != int(req.TxType):
+		return "tx_type"
+	case !equalDecimal(a.Nonce, req.Nonce):
+		return "nonce"
+	case !equalDecimal(a.Value, req.Value):
+		return "value"
+	case !equalDecimal(a.GasLimit, req.GasLimit):
+		return "gas_limit"
+	case !equalDecimal(a.Amount, req.Amount):
+		return "amount"
+	case !strings.EqualFold(a.To, req.To):
+		return "to"
+	case !strings.EqualFold(a.Asset, req.Asset):
+		return "asset"
+	case !strings.EqualFold(a.Recipient, req.Recipient):
+		return "recipient"
+	case !anchorDataEqual(a.Data, req.Data):
+		return "data"
+	default:
+		return ""
+	}
+}
+
+// anchorDataEqual compares the persisted calldata bytes with the request's
+// 0x-hex data; an undecodable request data fails closed as a mismatch.
+func anchorDataEqual(anchor []byte, request string) bool {
+	data, err := hexutil.Decode(request)
+	if err != nil {
+		return false
+	}
+	return bytes.Equal(anchor, data)
+}
+
+// equalDecimal compares two decimal integer strings numerically (leading zeros
+// and the NUMERIC round-trip canonicalization are not semantic).
+func equalDecimal(a, b string) bool {
+	ai, okA := new(big.Int).SetString(a, 10)
+	bi, okB := new(big.Int).SetString(b, 10)
+	return okA && okB && ai.Cmp(bi) == 0
 }
 
 // feeScopeRefusal enforces the PB-C2 fee bounds on the request's fee triple:

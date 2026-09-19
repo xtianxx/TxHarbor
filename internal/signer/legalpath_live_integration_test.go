@@ -209,7 +209,12 @@ func lpMintID(t *testing.T, ctx context.Context, env map[string]string) string {
 // lpSeedOpts is the supplied-grant shape: scopeless (legacy stock) or a scoped
 // carrier with the given caps / purpose token / expiry.
 type lpSeedOpts struct {
-	scoped               bool
+	scoped bool
+	// scopeRequestID is the carrier's bound request identity (the originating
+	// 007 request). Empty means the fixture's own requestID, i.e. the first use
+	// submits under the identity the carrier binds; a fee replacement leaves it
+	// pointing at the anchor's identity (V13-4b identity split).
+	scopeRequestID       string
 	allowsFeeReplacement bool
 	feeMaxTotal          int64
 	feeMaxPerGas         int64
@@ -233,10 +238,14 @@ func lpSupply(t *testing.T, ctx context.Context, f *lpFixture, opts lpSeedOpts) 
 		"--reason", "T040 H5 joint legal path",
 	}
 	if opts.scoped {
+		scopeRequest := opts.scopeRequestID
+		if scopeRequest == "" {
+			scopeRequest = f.requestID
+		}
 		args = append(args,
 			"--api-key", f.apiKey,
 			"--intent-id", f.intentID,
-			"--request-id", f.requestID,
+			"--request-id", scopeRequest,
 			"--sender", f.sender,
 			"--fee-max-total", strconv.FormatInt(opts.feeMaxTotal, 10),
 			"--fee-max-per-gas", strconv.FormatInt(opts.feeMaxPerGas, 10),
@@ -665,11 +674,12 @@ func lpPayloadFacts(t *testing.T, payload []byte) map[string]string {
 
 // lpSeedAnchor writes one predecessor (anchor) request row directly: the
 // replacement shares the anchor's caller + intent_id + binding_ref + grant
-// while the grant's carrier binds the request identity that actually submits
-// (the replacement). The PB carrier content is immutable, and this anchor
-// needed no signature of its own — it is the predecessor attempt the
-// replacement supersedes (research R7: "a replacement reusing the anchor's
-// grant MUST declare the anchor's intent_id (and the same binding_ref)").
+// while the grant's carrier binds the anchor's request identity (the
+// originating request) — never the replacement's. This seeded anchor needed no
+// signature of its own — it is the predecessor attempt the replacement
+// supersedes (research R7: "a replacement reusing the anchor's grant MUST
+// declare the anchor's intent_id (and the same binding_ref)"). The permitted
+// reuse scene uses a real first use instead (the anchor submits and signs).
 func lpSeedAnchor(t *testing.T, ctx context.Context, pool *pgxpool.Pool, f *lpFixture, requestID, attemptID string) int64 {
 	t.Helper()
 	var id int64
@@ -793,11 +803,29 @@ func TestSignerLegalPathH5(t *testing.T) {
 	})
 
 	t.Run("permitted fee replacement reuses the supplied grant", func(t *testing.T) {
+		// V13-4b identity split: the carrier binds the grant's originating
+		// request (the anchor's signing_request_id); the fee replacement is a
+		// NEW attempt + signing identity over the same intent/binding/nonce.
+		const anchorRequestID = "sr-h5-rep-anchor-2"
+		const anchorAttemptID = "at-h5-rep-anchor-2"
 		f := lpSeed(t, ctx, pool, alloc, live, baseEnv, 2, lpSeedOpts{
-			scoped: true, allowsFeeReplacement: true,
+			scoped: true, scopeRequestID: anchorRequestID, allowsFeeReplacement: true,
 			feeMaxTotal: 200000000000000, feeMaxPerGas: 2000000000, feeMaxPriority: 1500000000,
 		})
-		anchorID := lpSeedAnchor(t, ctx, pool, f, "sr-h5-rep-anchor-2", "at-h5-rep-anchor-2")
+		scope, found := lpScope(t, ctx, pool, f.authzID)
+		if !found || scope.requestID != anchorRequestID {
+			t.Fatalf("carrier request_id = %q found=%v, want the originating %q", scope.requestID, found, anchorRequestID)
+		}
+
+		// The anchor is the grant's first legal use: it signs and persists
+		// under the carrier's bound identity.
+		anchorBody := f.lpBody(t, anchorRequestID, anchorAttemptID, "1500000000", "1000000000")
+		anchorResp := lpSubmit(t, ctx, f, anchorBody)
+		anchor := lpRow(t, ctx, pool, f.callerID, anchorRequestID)
+		if anchor.state != "signed" || anchor.replacementOf != nil || anchor.authzID != f.authzID {
+			t.Fatalf("anchor row = %+v, want signed/non-replacement on %s", anchor, f.authzID)
+		}
+		lpWantPersistedResult(t, ctx, pool, anchor.rowID, anchorResp.Signature, anchorResp.TxHash)
 
 		// The replacement is a new attempt (new signing_request_id +
 		// attempt_id, OC-4) over the same intent + binding, fee raised within
@@ -809,8 +837,8 @@ func TestSignerLegalPathH5(t *testing.T) {
 		if row.state != "signed" || row.authzID != f.authzID {
 			t.Fatalf("replacement = state %q authz %q, want signed/%s", row.state, row.authzID, f.authzID)
 		}
-		if row.replacementOf == nil || *row.replacementOf != anchorID {
-			t.Fatalf("replacement_of = %v, want the anchor row %d", row.replacementOf, anchorID)
+		if row.replacementOf == nil || *row.replacementOf != anchor.rowID {
+			t.Fatalf("replacement_of = %v, want the anchor row %d", row.replacementOf, anchor.rowID)
 		}
 		if row.authVersion == nil || *row.authVersion != 1 {
 			t.Fatalf("replacement authorization_version = %v, want 1", row.authVersion)
@@ -834,13 +862,13 @@ func TestSignerLegalPathH5(t *testing.T) {
 		// No second intent/nonce: one 008 binding backs both attempts, both
 		// rows carry the same live binding reference and nonce, and the anchor
 		// is never rebound or replaced in place.
-		anchor := lpRow(t, ctx, pool, f.callerID, "sr-h5-rep-anchor-2")
-		if anchor.rowID != anchorID || anchor.replacementOf != nil || anchor.authzID != f.authzID || anchor.state != "received" {
-			t.Fatalf("anchor row changed: %+v, want id %d/nil/%s", anchor, anchorID, f.authzID)
+		anchorAfter := lpRow(t, ctx, pool, f.callerID, anchorRequestID)
+		if anchorAfter.rowID != anchor.rowID || anchorAfter.replacementOf != nil || anchorAfter.authzID != f.authzID || anchorAfter.state != "signed" {
+			t.Fatalf("anchor row changed: %+v, want id %d/nil/%s signed", anchorAfter, anchor.rowID, f.authzID)
 		}
-		if anchor.nonce != row.nonce || anchor.bindingRef != row.bindingRef || row.bindingRef != f.bindingID {
+		if anchorAfter.nonce != row.nonce || anchorAfter.bindingRef != row.bindingRef || row.bindingRef != f.bindingID {
 			t.Fatalf("anchor/replacement nonce+binding = %q/%q vs %q/%q, want one binding %s nonce %s",
-				anchor.nonce, anchor.bindingRef, row.nonce, row.bindingRef, f.bindingID, f.nonce)
+				anchorAfter.nonce, anchorAfter.bindingRef, row.nonce, row.bindingRef, f.bindingID, f.nonce)
 		}
 		if got := lpBindingCount(t, ctx, pool, f.intentID); got != 1 {
 			t.Fatalf("008 bindings for the intent = %d, want exactly 1 (no second intent/nonce)", got)
@@ -849,7 +877,8 @@ func TestSignerLegalPathH5(t *testing.T) {
 			t.Fatalf("anchor requests on the grant = %d, want exactly 1", got)
 		}
 
-		// The replacement delivers under the same live binding.
+		// The replacement delivers under the same live binding; the second
+		// same-identity delivery is byte-identical (never a re-sign).
 		sink := &lpSink{}
 		res, err := lpDeliver(t, ctx, f, sink)
 		if err != nil || res.Verdict != signer.VerdictDelivered || sink.count() != 1 {
@@ -863,14 +892,21 @@ func TestSignerLegalPathH5(t *testing.T) {
 		if !ok || adm.verdict != "delivered" || adm.bindingClass != "matches" {
 			t.Fatalf("replacement admission = %+v found=%v, want delivered/matches", adm, ok)
 		}
+		res2, err := lpDeliver(t, ctx, f, sink)
+		if err != nil || res2.Verdict != signer.VerdictDelivered || sink.count() != 2 {
+			t.Fatalf("replacement redelivery = %+v / %v sink=%d, want idempotent delivered", res2, err, sink.count())
+		}
+		if !bytes.Equal(sink.payloads[0], sink.payloads[1]) {
+			t.Fatal("replacement redelivery payload is not byte-identical")
+		}
 		lpWantPersistedResult(t, ctx, pool, row.rowID, resp.Signature, resp.TxHash)
 		t.Logf("permitted replacement: anchor=%d replacement_of=%d grant=%s; one 008 binding for intent %s (nonce %s); delivery verdict=%s binding_class=%s",
-			anchorID, *row.replacementOf, f.authzID, f.intentID, f.nonce, adm.verdict, adm.bindingClass)
+			anchor.rowID, *row.replacementOf, f.authzID, f.intentID, f.nonce, adm.verdict, adm.bindingClass)
 	})
 
 	t.Run("forbidden replacement reuse refuses per identity", func(t *testing.T) {
 		f := lpSeed(t, ctx, pool, alloc, live, baseEnv, 3, lpSeedOpts{
-			scoped: true, allowsFeeReplacement: false,
+			scoped: true, scopeRequestID: "sr-h5-rep-anchor-3", allowsFeeReplacement: false,
 			feeMaxTotal: 200000000000000, feeMaxPerGas: 2000000000, feeMaxPriority: 1500000000,
 		})
 		anchorID := lpSeedAnchor(t, ctx, pool, f, "sr-h5-rep-anchor-3", "at-h5-rep-anchor-3")
