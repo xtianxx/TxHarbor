@@ -125,7 +125,14 @@ func runStreams(ctx context.Context, lease leaseSession, serves []ServeFunc) err
 
 // serveStreams runs every loop under one heartbeat. It returns nil when the loops
 // stopped because ctx was cancelled, ErrLeaseLost when the heartbeat or a loop
-// reported the lease gone, and the first stop error otherwise.
+// reported the lease gone, and the first fatal stop error otherwise.
+//
+// A durable business pause (a persisted pause row that halted a loop) is NOT a
+// terminal failure: the paused loop stays stopped (no retry, no automatic
+// unpause) while the remaining loops keep running. If every loop has stopped
+// and only pauses account for it, the coordinator stays resident with the
+// heartbeat until ctx ends or the lease is lost, so the HTTP/health/observation
+// surface and the 006 recovery participant remain reachable (Lane-F5).
 func serveStreams(ctx context.Context, lease leaseSession, serves []ServeFunc) error {
 	pairCtx, cancelPair := context.WithCancel(ctx)
 	defer cancelPair()
@@ -164,6 +171,7 @@ func serveStreams(ctx context.Context, lease leaseSession, serves []ServeFunc) e
 	var (
 		firstErr error
 		lost     bool
+		paused   int
 	)
 	for range serves {
 		err := <-errs
@@ -172,6 +180,14 @@ func serveStreams(ctx context.Context, lease leaseSession, serves []ServeFunc) e
 		case errors.Is(err, ErrLeaseLost):
 			lost = true
 			cancelPair()
+		case isPauseStop(err):
+			// Durable business pause: halt this loop without cancelling its
+			// siblings and without treating the stop as terminal. The pause
+			// row, the scanner state and the audit/metric surface are already
+			// recorded by the loop that stopped.
+			paused++
+			slog.Warn("indexer stream halted on a durable pause; service stays up",
+				"error", logx.Redact(err.Error()))
 		default:
 			if firstErr == nil {
 				firstErr = err
@@ -188,8 +204,22 @@ func serveStreams(ctx context.Context, lease leaseSession, serves []ServeFunc) e
 		return fmt.Errorf("%w: %v", ErrLeaseLost, heartbeatErr)
 	case lost:
 		return ErrLeaseLost
-	default:
+	case firstErr != nil:
 		return firstErr
+	case paused > 0:
+		// Every loop has stopped, and at least one stopped on a durable
+		// business pause with no fatal error: stay resident (heartbeat keeps
+		// the lease, zero writes, zero retries) until shutdown or lease loss.
+		<-pairCtx.Done()
+		mu.Lock()
+		heartbeatErr = hbErr
+		mu.Unlock()
+		if heartbeatErr != nil {
+			return fmt.Errorf("%w: %v", ErrLeaseLost, heartbeatErr)
+		}
+		return nil
+	default:
+		return nil
 	}
 }
 
