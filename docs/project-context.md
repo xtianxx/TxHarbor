@@ -10,7 +10,7 @@ PostgreSQL / Redis / Kafka / EVM RPC。详见 `agent.md` 与
 | --- | --- |
 | 001–009 及 PB（012-007-authorization-carrier） | 已合并至 main（009 PR#12 `295c49d`，main CI `35192040030` 四项全绿） |
 | 010 transaction-lifecycle | 已合并至 main（PR #15，merge `3ea6eb1`，main CI `35326220521` 四项全绿）。specify（`7d2022b`）与 clarify（`bd59754`）已完成；实现与真实联合验收在联合工作区完成——J1–J5 全部执行且全绿（记录见 `docs/workflow-010-011-parallel.md`）；T052–T058（Phase 10 polish：V10/V11 验收、边界/可观测性/文档同步）已随候选合入（`6cd6178`） |
-| 011 withdrawal-executor | 已合并至 main（PR #15，merge `3ea6eb1`，main CI `35326220521` 四项全绿）。T001–T053 完成；`migrations/000012_withdrawal_execution.sql`（sha256 `29613714…`）按 000011→000012→000013（+000014 intent-FK 修复）合并顺序核验；`execution_claims` 列与 data-model Table 2 一致；两条 intent-FK 均已验证。生产进程入口（`withdrawal-worker` → `jointwire.Worker`）与 completed 后持续追踪、B1/B2 已随 PR #16（merge `df5a280`，main CI `35401917939` 四项全绿）合入；A-13/T000-P 保持 **OPEN**（A-13 归并记录见 `specs/011-withdrawal-executor/integration-readiness.md` 的 “A-13 acceptance consolidation”，2026-09-19） |
+| 011 withdrawal-executor | 已合并至 main（PR #15，merge `3ea6eb1`，main CI `35326220521` 四项全绿）。T001–T053 完成；`migrations/000012_withdrawal_execution.sql`（sha256 `29613714…`）按 000011→000012→000013（+000014 intent-FK 修复）合并顺序核验；`execution_claims` 列与 data-model Table 2 一致；两条 intent-FK 均已验证。生产进程入口（`withdrawal-worker` → `jointwire.Worker`）与 completed 后持续追踪、B1/B2 已随 PR #16（merge `df5a280`，main CI `35401917939` 四项全绿）合入；V13-2b 撤销/到期×发送门禁双锁序交错与 V13-4b 同 grant 条件复用已随 PR #17（merge `f51cde5`，main CI `35410128327` 四项全绿）合入，**A-13 已 CLOSED**（2026-09-19，关闭登记见 `specs/011-withdrawal-executor/integration-readiness.md` 的 “A-13 formal closure”）；**T000-P 独立保持 OPEN**（未部署，不宣称生产就绪） |
 | 010/011 并行 | 限定例外见 `docs/workflow-010-011-parallel.md`（2026-09-17 用户决定）；008/009 例外保持不变 |
 
 ## 实际协作文件索引
