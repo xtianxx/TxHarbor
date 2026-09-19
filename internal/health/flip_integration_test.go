@@ -48,8 +48,9 @@ func TestReadyzFlipsAndRecoversWithRealDependencies(t *testing.T) {
 	base := "http://" + addr
 	signals := make(chan os.Signal, 1)
 	done := make(chan int, 1)
+	served := newFlipServeExit()
 	go func() {
-		done <- app.Serve(ctx, app.Deps{
+		code := app.Serve(ctx, app.Deps{
 			Getenv: envMap(map[string]string{
 				"TXHARBOR_PG_DSN":                  dsn,
 				"TXHARBOR_RPC_URL":                 rpcURL,
@@ -67,6 +68,8 @@ func TestReadyzFlipsAndRecoversWithRealDependencies(t *testing.T) {
 			Stderr:  os.Stderr,
 			Signals: signals,
 		})
+		served.mark(code)
+		done <- code
 	}()
 
 	waitForStatus(t, base+"/readyz", http.StatusOK, 30*time.Second)
@@ -94,16 +97,70 @@ func TestReadyzFlipsAndRecoversWithRealDependencies(t *testing.T) {
 	}
 	waitForStatus(t, base+"/readyz", http.StatusOK, 10*time.Second)
 
-	// RPC outage and recovery behave the same way.
-	if err := anvilCtr.Stop(ctx, &stopTimeout); err != nil {
-		t.Fatalf("stop anvil: %v", err)
-	}
+	// RPC outage and recovery behave the same way — same-chain injection
+	// (Lane-F4): the Anvil container is paused and unpaused through the Docker
+	// API, so the process, its stable address and its in-memory chain stay
+	// identical and only RPC traffic stalls. (In-container SIGSTOP cannot stop
+	// PID 1: the PID-namespace init is protected from inside signals.) The
+	// previous stop/start injection restarted a NEW chain, which the indexer
+	// correctly pauses on; that production contract question is recorded
+	// separately and is neither fixed nor endorsed by this test change.
+	before := readFlipChainIdentity(t, rpcURL, dsn)
+	pauseClient := flipPauseAnvil(t, anvilCtr)
+	paused := true
+	defer func() {
+		if paused {
+			// Failure-path release: never leave the container paused.
+			_ = flipUnpauseAnvil(pauseClient, anvilCtr)
+		}
+	}()
+	flipRPCBlocked(t, rpcURL, 2*time.Second)
 	waitForStatus(t, base+"/readyz", http.StatusServiceUnavailable, 10*time.Second)
 	waitForStatus(t, base+"/livez", http.StatusOK, time.Second)
-	if err := anvilCtr.Start(ctx); err != nil {
-		t.Fatalf("start anvil: %v", err)
+	if !served.alive() {
+		t.Fatalf("serve exited while Anvil was paused: %s", served.reason())
 	}
+	if err := flipUnpauseAnvil(pauseClient, anvilCtr); err != nil {
+		t.Fatalf("unpause anvil: %v", err)
+	}
+	paused = false
 	waitForStatus(t, base+"/readyz", http.StatusOK, 10*time.Second)
+
+	// Same-chain continuity: the resumed endpoint is the SAME chain (chain id
+	// and block-0/genesis hash), and the persisted scan identity (chain_blocks
+	// rows + log_checkpoint) is untouched, with no chain_view_changed pause.
+	after := readFlipChainIdentity(t, rpcURL, dsn)
+	if before.chainIDHex != after.chainIDHex || before.block0Hash != after.block0Hash {
+		t.Fatalf("chain identity changed across pause/unpause: before=%s/%s after=%s/%s",
+			before.chainIDHex, before.block0Hash, after.chainIDHex, after.block0Hash)
+	}
+	if strings.Join(before.blocks, ",") != strings.Join(after.blocks, ",") || before.checkpoint != after.checkpoint {
+		t.Fatalf("persisted scan identity changed across pause/unpause: blocks %v -> %v; checkpoint %s -> %s",
+			before.blocks, after.blocks, before.checkpoint, after.checkpoint)
+	}
+	if after.logPause != 0 {
+		t.Fatalf("log_pause rows = %d after same-chain recovery, want 0 (no chain_view_changed)", after.logPause)
+	}
+	if !served.alive() {
+		t.Fatalf("serve exited after recovery: %s", served.reason())
+	}
+
+	// Sustained recovery, not a single instantaneous 200: the real probe cycle
+	// must advance (rpc/success counter grows) and a later readiness probe must
+	// still be 200 with the process alive.
+	from := readFlipProbeCounter(t, base, "rpc", "success")
+	adv, advanced := waitFlipProbeAdvance(t, base, "rpc", "success", from, 8*time.Second)
+	if !advanced {
+		t.Fatalf("rpc probe counter did not advance beyond %v (no sustained recovery); %s", from, served.reason())
+	}
+	if status, body := flipReadyzStatus(t, base); status != http.StatusOK {
+		t.Fatalf("post-advance readyz = %d (%s); %s", status, body, served.reason())
+	}
+	if !served.alive() {
+		t.Fatalf("serve exited during the sustained-recovery observation: %s", served.reason())
+	}
+	t.Logf("same-chain recovery: chain_id=%s block0=%s blocks=%v checkpoint=%s probe_rpc_success=%v->%v log_pause=0 serve=alive",
+		after.chainIDHex, after.block0Hash, after.blocks, after.checkpoint, from, adv)
 
 	// Clean signal-driven exit within the 15s budget.
 	signals <- syscall.SIGTERM
