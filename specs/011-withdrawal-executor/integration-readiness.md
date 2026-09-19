@@ -7,6 +7,13 @@ here.
 **Scope**: the 011-side record that feeds 010's joint record tasks (`010:T051`, `010:T058`). It states
 what is verified and what is **not**. J1–J5 are **NOT executed**; A-13 and T000-P remain **OPEN**.
 
+**Current status (2026-09-19)**: **A-13 is CLOSED** — the formal closure record
+with its baseline, evidence index and retained limitations is
+"A-13 formal closure" at the end of this file. **T000-P stays independently
+OPEN** (production provider selection; nothing is deployed and no production
+readiness is claimed). Every "OPEN" statement in the point-in-time sections
+below is a historical snapshot kept as-is, superseded by this pointer.
+
 **Grounding**: read-only integration workspace `.slim/worktrees/joint-010-011`
 (branch `joint-010-011-integration`, baseline `f03e825` = 010 `d2c14b9` + 011 `beba5e9`; joint records
 through HEAD `3d8556e`). No write to that worktree.
@@ -250,10 +257,10 @@ V13-1–7, and 010 FR-16 as already recorded, read-only.
 |---|---|---|---|---|
 | V13-1 | Full first-broadcast chain: admission (011) → intent → claim → 010 attempt → 009 signature → Anvil send → receipt/confirmation → `completed`; identity chain traceable | `TestJointProcessEntryEndToEnd` (`internal/txlifecycle/joint_process_entry_integration_test.go:206`; binary build `:193`, child `withdrawal-worker` `:218`; identity chain `:281`; on-chain receipt `:348`; effect `:364`). Full chain through confirmation depth in one run: `TestJointProcessTrackingAfterCompleted` (`joint_process_tracking_integration_test.go:545`; completed-on-`sent` `:558`, depth reached `:580`). Logs: `.evidence/lane-w/LANE-W-NOTE.md`, `.evidence/lane-f3/logs/process-tests.log` (entry + 4 tracking E2Es), `.evidence/lane-f2/logs/lane-f2-tests.log` | Real process, real HTTP/PG/Anvil/009 through the production `jointwire.Worker` assembly; ran in main CI (txlifecycle package) | **Satisfied** |
 | V13-2a | Two workers on one intent | 011 claim exclusivity under 8-way concurrent `Acquire` (one winner): `TestClaimExclusivityRenewalExpiry` (`internal/execution/claim_integration_test.go:61`); expired-worker fencing + monotonic takeover through the production worker: `TestJointDriverJ2ExpiredWorkerIsolationAndTakeover` (`joint_driver_integration_test.go:204`) | Claim-layer exclusivity + takeover proven; **no literal dual-process concurrent run** | **Partial** (evidence limitation: the race is exercised at the claim layer, not as two live worker processes) |
-| V13-2b | Revoke/expiry racing a send at 010's gate (**both lock orders**); no double send / no second attempt for one step | Deterministic interleave test added (this batch); previously refusals were only sequential (`TestV6GateRefusals` `send_integration_test.go:40`; `TestDisqualificationFencesHolderWrites` `fencing_integration_test.go:87`; J2 expiry-then-send `joint_driver_integration_test.go:220`). The 008-layer revoke-vs-admission race (`internal/nonce/authz_revoke_race_integration_test.go:459`) is a different boundary. No-double-send leg **is** covered: `TestV6RaceOrdering/concurrent_send_replay` (`send_integration_test.go:184`), `already_accepted` (`:172`), crash `after_commit_before_response` (`crash_integration_test.go:175`) | Deterministic interleave now executed: `TestV13_2bRevokeGateInterleave` `internal/txlifecycle/revoke_gate_race_integration_test.go` (4 scenes, both lock orders, real PG/gates; revoke-first refusal zero-dispatch; send-lock-first fenced replay; natural expiry; queued-auth expiry; bounded barriers, sanitized timing) — 4/4 PASS + `-count=3` + race + V6 regression; logs `.evidence/lane-a13-v13-2b/` | New in this batch (committed here) | **Satisfied** |
+| V13-2b | Revoke/expiry racing a send at 010's gate (**both lock orders**); no double send / no second attempt for one step | Deterministic interleave test added (this batch); previously refusals were only sequential (`TestV6GateRefusals` `send_integration_test.go:40`; `TestDisqualificationFencesHolderWrites` `fencing_integration_test.go:87`; J2 expiry-then-send `joint_driver_integration_test.go:220`). The 008-layer revoke-vs-admission race (`internal/nonce/authz_revoke_race_integration_test.go:459`) is a different boundary. No-double-send leg **is** covered: `TestV6RaceOrdering/concurrent_send_replay` (`send_integration_test.go:184`), `already_accepted` (`:172`), crash `after_commit_before_response` (`crash_integration_test.go:175`) | Deterministic interleave now executed: `TestV13_2bRevokeGateInterleave` `internal/txlifecycle/revoke_gate_race_integration_test.go` (4 scenes, both lock orders, real PG/gates; revoke-first refusal zero-dispatch; send-lock-first fenced replay; natural expiry; queued-auth expiry; bounded barriers, sanitized timing) — 4/4 PASS + `-count=3` + race + V6 regression; logs `.evidence/lane-a13-v13-2b/` (new in this batch, committed by PR #17) | **Satisfied** |
 | V13-3 | Unknown: RPC timeout / response loss / restart during send ⇒ unknown + reconcile, never failure/not-paid; no second intent/binding | `TestJointDriverJ3UnknownReconciliation` (`joint_driver_integration_test.go:363`) + direct `TestJointJ3` (`joint_j3_integration_test.go:49`); crash matrix `after_dispatch_before_commit` → `unknown` probe-first (`crash_integration_test.go:151-172`); F2/F3 no-second-intent assertions | Byte-identical test files on main; verbose evidence `joint-round2/final/txlifecycle-joint-production-assembly-20260918.log` (J1–J5 driver 5/5 PASS), crash log 8/8; main CI ran the same files | **Satisfied** |
 | V13-4a | Same-bytes replay identity | `TestV3ReplayIdentity` (`replay_integration_test.go:14`, byte-identical dispatch); J2 taker replay through the production worker (`joint_driver_integration_test.go:264-290`); crash `after_commit` retry → `already_accepted` no duplicate | On main; joint-round2 verbose + crash matrix logs | **Satisfied** |
-| V13-4b | Replacement under the **PB conditional reuse rule**, fee-triple test on the 010 side, history preserved | Fresh-grant replacement end-to-end: `TestJointReplaceFeeBump` (`joint_replace_integration_test.go:112`) — new attempt/signing, same intent/binding/nonce, anchor history kept, sibling `replaced` only after chain fact; refusals: `TestJointReplaceRefusals` (`:205`, no-fee-change / over-cap / reuse_forbidden). **Same-grant reuse leg blocked**: `internal/signer/submit.go:254-267` re-applies `EvaluateGrantScope` after `EvaluateGrantReuse`, and `internal/signer/gates.go:283-297` requires `scope.RequestID == req.SigningRequestID`, so a same-grant replacement with a new signing identity is refused by 009 (recorded in `docs/workflow-010-011-parallel.md` joint-batch record as a 009 delivery-branch defect; no fix commit on main — latest `gates.go` change `51fa19f`) | Same-grant leg fixed + proven end-to-end: 009 anchored reuse (`EvaluateGrantScopeBoundIdentity` + anchor binding pin; no scope deletion/identity rewrite/allow-all) + `TestJointReplaceFeeBumpSameGrant` (real worker Driver + 009 HTTP + Anvil; same grant, new attempt/identity, broadcast + sibling revise from chain fact; retry idempotent) + signer matrices/legalpath; pre-fix failures kept; `refused_basis` no-fee remains expected behavior | New in this batch (committed here) | **Satisfied** |
+| V13-4b | Replacement under the **PB conditional reuse rule**, fee-triple test on the 010 side, history preserved | Fresh-grant replacement end-to-end: `TestJointReplaceFeeBump` (`joint_replace_integration_test.go:112`) — new attempt/signing, same intent/binding/nonce, anchor history kept, sibling `replaced` only after chain fact; refusals: `TestJointReplaceRefusals` (`:205`, no-fee-change / over-cap / reuse_forbidden). **Same-grant reuse leg blocked**: `internal/signer/submit.go:254-267` re-applies `EvaluateGrantScope` after `EvaluateGrantReuse`, and `internal/signer/gates.go:283-297` requires `scope.RequestID == req.SigningRequestID`, so a same-grant replacement with a new signing identity is refused by 009 (recorded in `docs/workflow-010-011-parallel.md` joint-batch record as a 009 delivery-branch defect; no fix commit on main — latest `gates.go` change `51fa19f`) | Same-grant leg fixed + proven end-to-end: 009 anchored reuse (`EvaluateGrantScopeBoundIdentity` + anchor binding pin; no scope deletion/identity rewrite/allow-all) + `TestJointReplaceFeeBumpSameGrant` (real worker Driver + 009 HTTP + Anvil; same grant, new attempt/identity, broadcast + sibling revise from chain fact; retry idempotent) + signer matrices/legalpath; pre-fix failures kept; `refused_basis` no-fee remains expected behavior (new in this batch, committed by PR #17) | **Satisfied** |
 | V13-5a | Pause set/clear | 011: `TestPauseRefusesStepIssue` (`recovery_gate_integration_test.go:34`), `TestMultiplePauseRowsNotBypassed` (`:59`, clearing one keeps the other); 010 gate: `TestV6GateRefusals/pause_present` (`send_integration_test.go:63`) + accepted send after clear (`readonly_integration_test.go:111-121`); J5 freeze + controlled release, pause remains → still refused (`joint_driver_integration_test.go:726-753`) | On main; joint-round2 verbose | **Satisfied** |
 | V13-5b | Reorg with receipt invalidation / confirmation rollback ⇒ revision tracking, projection freshness, no compensation intent | `TestJointDriverJ4` (`joint_driver_integration_test.go:456`) + direct `TestJointJ4` (`joint_j4_integration_test.go:82`); real Anvil revert + identical-bytes re-inclusion through the production process: `TestJointProcessReorgAfterCompleted` (`joint_process_tracking_integration_test.go:635`) — `orphaned`→`reconfirmed`, `completed→revised`, `revision_applied` exactly 1 (`:705`), projection = authority revision, external HTTP view `revised`/`confirmed` (`:731-741`), 1 binding/attempt/send (`:723`); restart variant `TestJointProcessRestartConsumesRevisionAfterCompleted` (`:749`); B1 keeps orphan history and confirmation basis (`receipt_canonicality_integration_test.go:174-233`) | On main; Lane-F3 process logs + joint-round2 | **Satisfied** |
 | V13-6 | Non-substitution (no double/fixture/010-independent cited as joint) | Process tests drive the real binary and `jointwire.Worker`; the J tests use the production `txlifecycle.LifecycleLive` adapter + real 008 `nonce.Allocator` + real 009 signer-serve + real Anvil ERC-20 emitter. Contract-shape doubles appear only in 010-independent suites, labeled test-only | On main | **Satisfied** |
@@ -299,6 +306,11 @@ fixed on main (`299d39e`, `82b5c9a`).
 
 ### Closure conclusion (for the orchestrator / user review)
 
+> **Status update (2026-09-19)**: the orchestrator/user review completed and
+> **A-13 is now CLOSED** on main `f51cde5` — see "A-13 formal closure" at the
+> end of this file. This subsection is kept as the point-in-time closure-basis
+> input the review consumed; its "stays OPEN" wording is historical.
+
 **A-13 closure basis (this batch)**: the two recorded gaps are now closed with executed evidence (V13-2b interleave, V13-4b same-grant reuse); remaining items are the ordered supplements below. A-13 stays OPEN pending user review.
 
 - **Minimum supplements (ordered)**:
@@ -330,3 +342,104 @@ fixed on main (`299d39e`, `82b5c9a`).
 - **A-13 and T000-P stay OPEN**; this consolidation does not change either
   status and does not claim production readiness or main-verified equivalence
   beyond the cited runs.
+
+---
+
+## A-13 formal closure (2026-09-19, main `f51cde5`)
+
+**Status**: **A-13 CLOSED** (full-chain joint acceptance gate). **T000-P stays
+independently OPEN** (production KMS/HSM provider selection). Nothing is
+deployed by this record and no production readiness is claimed.
+
+**Closure date**: 2026-09-19 (PR #17 merged 2026-09-19T00:40:01Z; main push CI
+green the same day).
+
+**Code baseline**: `main` @ `f51cde5b40833aa2071aa01b2da3e060870ef567` — the
+PR #17 merge commit (parents `df5a2808dfae976c1d0fa0d99bff9b5dc30bcf70` +
+`d477c2b050e9ee4b74eecf1c6dc552afe3ca54ef`). The merge tree is byte-identical
+to the reviewed candidate `d477c2b0` tree (`git diff` of the two trees is
+empty): what was reviewed is exactly what main carries.
+
+**Closure basis (all five; never "CI is green, therefore closed")**:
+
+1. **The existing A-13 requirement matrix** — this file's "A-13 acceptance
+   consolidation" per-item matrix (Constitution XI withdrawal flow + 011
+   quickstart V13-1–V13-7 + 010 FR-16) with every item **Satisfied** except
+   V13-2a, which remains the accepted evidence-limitation entry (claim-layer
+   exclusivity + takeover proven; no literal dual-process run), plus the
+   accepted limitations and non-blocking leftovers below.
+2. **Versioned full-chain and fault evidence** — Lane-W process-entry E2E,
+   Lane-F2 post-`completed` tracking, Lane-F3 B1 canonicality / B2
+   revision-projection, the J1–J5 driver rows and the V9b crash matrix, each
+   with commands/exits/checksums in its `.evidence/` tree.
+3. **V13-2b / V13-4b gap completion** — the two elements the 2026-09-19
+   consolidation kept open were implemented, negatively controlled and merged
+   in this batch (see closure locations).
+4. **Targeted review** — the A-13 consolidation review (Lane-G4), the V13-4b
+   fix review (pre-fix negative controls + post-fix reruns in
+   `.evidence/lane-a13/`), the V13-2b interleave evidence
+   (`.evidence/lane-a13-v13-2b/`), and the publish/merge verification records
+   (`.evidence/lane-p6/`, `.evidence/lane-g5/`).
+5. **This main verification** — PR #17 CI run `35408675638` (4/4 required jobs)
+   on the exact reviewed head, then main push CI run
+   [35410128327](https://github.com/xtianxx/TxHarbor/actions/runs/35410128327)
+   on the merge commit `f51cde5`: lint 45s, build 20s, unit + race 1m48s,
+   integration (Docker) 8m43s — all success, every step executed (no
+   skipped/cancelled step), zero FAIL/SKIP/panic markers; all 14 integration
+   packages `ok`, including `internal/txlifecycle` 170.1s,
+   `internal/signer` 103.9s, `internal/app` 134.3s, `internal/jointwire` 12.4s.
+
+**Closure locations (what closed each previously-open element)**:
+
+| Element | Where it closed | Evidence |
+|---|---|---|
+| Production process entry / adapter assembly (register scope) | Lane-W: `cmd/txharbor` injects `jointwire.Worker`; the command refuses unlinked wiring; `TestJointProcessEntryEndToEnd`, `TestWorkerAssemblyWiresRealParticipants`, `TestWithdrawalWorkerCommandLiveEntry` | `.evidence/lane-w/`; main `df5a280` |
+| Post-`completed` continued confirmation/tracking | Lane-F2 (`28e8cc3`): tracking pass + restart variants (`TestJointProcessTrackingAfterCompleted`, `TestJointProcessRestartTrackingAfterCompleted`) | `.evidence/lane-f2/`; main `df5a280` |
+| Reorg / revision projection | Lane-F3 (`b8a0fb0`): B1 canonicality (`TestV8UnverifiedPromotesWithChainTruth`) + B2 revision consumption/projection (`TestRevisionReconfirmAndProjectionOnlyVersions`, `TestJointProcessReorgAfterCompleted`) | `.evidence/lane-f3/`; main `df5a280` |
+| V13-2b revoke/expiry × send-gate interleave (both lock orders) | Lane-a13: `TestV13_2bRevokeGateInterleave` (`internal/txlifecycle/revoke_gate_race_integration_test.go`), 4 scenes + `-count=3` + race + V6 regression | `.evidence/lane-a13-v13-2b/`; merged by PR #17 |
+| V13-4b same-grant PB conditional reuse | Lane-a13: 009 `EvaluateGrantScopeBoundIdentity` + anchor binding pin (`internal/signer/{submit,gates}.go`); `TestJointReplaceFeeBumpSameGrant` (worker Driver → real 009 HTTP → Anvil), signer matrices + legalpath; pre-fix negative controls kept | `.evidence/lane-a13/`; merged by PR #17 |
+
+**Evidence index (repo-external, never committed)**:
+
+- Lane evidence trees: `.evidence/lane-w/`, `.evidence/lane-f2/`,
+  `.evidence/lane-f3/`, `.evidence/lane-g4/`, `.evidence/lane-a13/`,
+  `.evidence/lane-a13-v13-2b/`, `.evidence/joint-round2/` (J1–J5 and crash
+  verbose logs).
+- Merge/publish records: `.evidence/lane-p6/` (PR #17 publish + PR CI),
+  `.evidence/lane-g5/` (merge + main push CI watch/summary logs).
+- PR #16 / main `df5a280` (Lane-W/F2/F3 fold-in): main CI run `35401917939`;
+  log `.evidence/lane-g4/logs/ci-run-35401917939.log`.
+- PR #17 / main `f51cde5` (this closure):
+  https://github.com/xtianxx/TxHarbor/pull/17, PR CI run `35408675638`, main
+  push CI run `35410128327` (step-level conclusions read from the Actions jobs
+  API).
+
+**CI non-verbose limitation (kept explicit)**: the repo CI runs non-verbose
+`go test`, so CI logs carry package-level results only. The specific test
+names/assertions of V13-2b, the signer reuse matrix and the same-grant
+replacement E2E are supplemented by the local verbose logs under
+`.evidence/lane-a13*/`; the main CI proves the packages compile and run green
+on the merge commit, and is not cited as per-test proof.
+
+**Retained exceptions / limitations / non-blocking leftovers** (accepted; do
+not re-open A-13):
+
+- V13-2a stays an evidence limitation: claim-layer exclusivity + takeover
+  proven; no literal dual-process concurrent run.
+- Harness-controlled chain truth / indexer outside the withdrawal scene, and
+  the test-controlled confirmation threshold (limitations 1–2 above).
+- B1 promotion/progress verified against the stub chain probe plus the
+  real-Anvil reorg scene (limitation 4 above).
+- `Advance(ActionReplace)` → `refused_basis` no-fee-policy gap is expected,
+  recorded behavior, never faked.
+- The sticky freeze-marker design (only the 010-side release lifts it).
+- Inherited limited exceptions G-010-1 / G-010-2(c) remain recorded inputs.
+
+**Boundary note**: the 010-owned joint register
+`docs/workflow-010-011-parallel.md` keeps its historical batch records
+unchanged (single-writer rule); its point-in-time "OPEN" lines are superseded
+by this closure record. Historical failed/red runs and earlier OPEN snapshots
+in this file are preserved as-is.
+
+**Non-claims**: this closure deploys nothing, does not close T000-P, does not
+assert production readiness, and does not change any historical record above.
