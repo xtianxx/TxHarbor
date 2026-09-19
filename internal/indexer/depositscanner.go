@@ -1320,6 +1320,13 @@ func (s *DepositScanner) ServeLoop(ctx context.Context, lease *Lease, checkLost 
 			if errors.As(err, &corrupt) {
 				return err
 			}
+			if ctx.Err() != nil {
+				// Loop cancellation, not a durable-state read failure: exit
+				// cleanly without recording a retry state (the same clean-nil
+				// polarity the capture-recovery branch already uses). The last
+				// meaningful state is left untouched.
+				return nil
+			}
 			// The durable state is unreadable: bounded retry with zero
 			// advance. The exact guards re-adjudicate the unit on retry.
 			s.depState.Store(2)
@@ -1349,6 +1356,13 @@ func (s *DepositScanner) ServeLoop(ctx context.Context, lease *Lease, checkLost 
 			var drift *upstreamDriftError
 			if errors.As(err, &drift) {
 				return err
+			}
+			if ctx.Err() != nil {
+				// Loop cancellation, not a durable-state read failure: exit
+				// cleanly without recording a retry state (same polarity as
+				// the capture-recovery branch). The last meaningful state is
+				// left untouched.
+				return nil
 			}
 			s.depState.Store(2)
 			if !s.wait(ctx, back.next()) {
