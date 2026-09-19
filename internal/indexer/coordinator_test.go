@@ -332,16 +332,75 @@ func TestRunTrioLeaseLossReacquiresThreeLoops(t *testing.T) {
 		t.Fatal("RunTrio did not stop on context cancellation")
 	}
 }
-func TestRunPairStopErrorStopsBothWithoutReacquire(t *testing.T) {
+
+// TestRunPairPauseStopKeepsPeersAndWaits pins the Lane-F5 polarity: a durable
+// business pause halts only the loop that reported it. The sibling keeps
+// running (no cancellation), and RunPair stays resident — the serve process
+// must not exit on a pause — returning nil only after ctx cancellation.
+func TestRunPairPauseStopKeepsPeersAndWaits(t *testing.T) {
 	lease := &fakeLease{}
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
+	paused := make(chan struct{})
+	peerDone := make(chan struct{})
+	headerServe := func(c context.Context, checkLost func() error) error {
+		close(paused)
+		return fmt.Errorf("chain-level pause: %w", errPaused)
+	}
+	logServe := func(c context.Context, checkLost func() error) error {
+		<-paused
+		<-c.Done()
+		close(peerDone)
+		return nil
+	}
+
+	done := make(chan error, 1)
+	go func() { done <- RunPair(ctx, lease, headerServe, logServe) }()
+
+	<-paused
+	// The pause must not cancel the sibling within a bounded observation
+	// window, and must not return from RunPair.
+	select {
+	case <-peerDone:
+		t.Fatal("peer loop was cancelled by a non-terminal pause stop")
+	case <-time.After(300 * time.Millisecond):
+	}
+	select {
+	case err := <-done:
+		t.Fatalf("RunPair returned on a pause stop: %v", err)
+	default:
+	}
+
+	cancel()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("RunPair() = %v, want nil on shutdown after a pause", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("RunPair did not stop on context cancellation")
+	}
+	<-peerDone
+	if got := lease.acquisitions(); got != 1 {
+		t.Fatalf("acquisitions = %d, want 1 (a pause is not a lease loss)", got)
+	}
+}
+
+// TestRunPairFatalStopErrorStopsBothWithoutReacquire preserves the terminal
+// polarity for non-pause stops: a startup/config refusal cancels the sibling
+// and is returned as-is without re-acquisition.
+func TestRunPairFatalStopErrorStopsBothWithoutReacquire(t *testing.T) {
+	lease := &fakeLease{}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	fatal := errors.New("start height changed: refusing to scan")
 	var peerStopped atomic.Bool
 	logStarted := make(chan struct{})
 	headerServe := func(c context.Context, checkLost func() error) error {
 		<-logStarted
-		return fmt.Errorf("chain-level pause: %w", errPaused)
+		return fatal
 	}
 	logServe := func(c context.Context, checkLost func() error) error {
 		close(logStarted)
@@ -350,14 +409,128 @@ func TestRunPairStopErrorStopsBothWithoutReacquire(t *testing.T) {
 		return nil
 	}
 
-	err := RunPair(ctx, lease, headerServe, logServe)
-	if !errors.Is(err, errPaused) {
-		t.Fatalf("RunPair() = %v, want errPaused", err)
+	done := make(chan error, 1)
+	go func() { done <- RunPair(ctx, lease, headerServe, logServe) }()
+
+	select {
+	case err := <-done:
+		if !errors.Is(err, fatal) {
+			t.Fatalf("RunPair() = %v, want the fatal stop error", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("RunPair did not return the fatal stop error")
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) && !peerStopped.Load() {
+		time.Sleep(5 * time.Millisecond)
 	}
 	if !peerStopped.Load() {
 		t.Fatal("peer loop was not stopped by the terminal error")
 	}
 	if got := lease.acquisitions(); got != 1 {
 		t.Fatalf("acquisitions = %d, want 1 (no retry after a stop error)", got)
+	}
+}
+
+// TestRunQuatroPlusRecoveryPauseKeepsRecoveryParticipant proves the Lane-F5
+// lifecycle requirement on the five-stream coordinator: when one stream halts
+// on a durable pause, the 006 recovery participant is NOT cancelled and the
+// coordinator stays resident until shutdown.
+func TestRunQuatroPlusRecoveryPauseKeepsRecoveryParticipant(t *testing.T) {
+	lease := &fakeLease{}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	allStarted := make(chan struct{})
+	var startWG sync.WaitGroup
+	startWG.Add(4)
+	hold := func(c context.Context, checkLost func() error) error {
+		startWG.Done()
+		<-c.Done()
+		return nil
+	}
+	recoveryStarted := make(chan struct{})
+	recoveryCancelled := make(chan struct{})
+	recoveryServe := func(c context.Context, checkLost func() error) error {
+		close(recoveryStarted)
+		<-c.Done()
+		close(recoveryCancelled)
+		return nil
+	}
+	paused := make(chan struct{})
+	logServe := func(c context.Context, checkLost func() error) error {
+		startWG.Done()
+		<-allStarted
+		close(paused)
+		return fmt.Errorf("durable log pause row present: %w", errPaused)
+	}
+	go func() { startWG.Wait(); close(allStarted) }()
+
+	done := make(chan error, 1)
+	go func() {
+		done <- RunQuatroPlusRecovery(ctx, lease,
+			hold, logServe, hold, hold, recoveryServe)
+	}()
+	<-paused
+	<-recoveryStarted
+
+	// Give the pause stop time to reach the coordinator, then assert the
+	// recovery participant and the coordinator itself are still alive.
+	select {
+	case <-recoveryCancelled:
+		t.Fatal("006 recovery participant was cancelled by a non-terminal pause")
+	case err := <-done:
+		t.Fatalf("coordinator returned on a pause stop: %v", err)
+	case <-time.After(300 * time.Millisecond):
+	}
+
+	cancel()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("RunQuatroPlusRecovery() = %v, want nil on shutdown", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("coordinator did not stop on context cancellation")
+	}
+	select {
+	case <-recoveryCancelled:
+	case <-time.After(5 * time.Second):
+		t.Fatal("recovery participant did not stop on shutdown")
+	}
+	if got := lease.acquisitions(); got != 1 {
+		t.Fatalf("acquisitions = %d, want 1", got)
+	}
+}
+
+// TestIsPauseStopClassification pins the classification boundary: persisted
+// pause stops are non-terminal; config refusals, drift, corruption, lease loss
+// and ctx cancellation are not.
+func TestIsPauseStopClassification(t *testing.T) {
+	cases := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{"nil", nil, false},
+		{"header/log pause sentinel", fmt.Errorf("durable pause row present: %w", errPaused), true},
+		{"stream pause gate", &streamPauseError{stream: "log_pause", chainID: 31337}, true},
+		{"chain view divergence", &chainViewError{height: 3, expected: "0xaa", actual: "0xbb"}, true},
+		{"structural upstream gap", &depositGap{class: depositGapStructural, cause: gapCauseBehindHead, from: 1, to: 2}, true},
+		{"transient upstream gap", &depositGap{class: depositGapTransient, cause: gapCauseBehindHead, from: 1, to: 2}, false},
+		{"deposit parse failure", &depositParseError{height: 1, class: "bad_data", detail: "x"}, true},
+		{"deposit identity conflict", &depositIdentityConflictError{identity: "i", detail: "d"}, true},
+		{"deposit corrupt state", &depositCorruptStateError{detail: "x"}, false},
+		{"upstream drift", &upstreamDriftError{persisted: "a", expected: "b"}, false},
+		{"stale state", errStaleState, false},
+		{"lease lost", fmt.Errorf("%w: heartbeat", ErrLeaseLost), false},
+		{"context cancelled", context.Canceled, false},
+		{"confirmation tip missing", errConfirmationTipMissing, false},
+		{"generic error", errors.New("boom"), false},
+	}
+	for _, tc := range cases {
+		if got := isPauseStop(tc.err); got != tc.want {
+			t.Fatalf("isPauseStop(%s) = %v, want %v", tc.name, got, tc.want)
+		}
 	}
 }
