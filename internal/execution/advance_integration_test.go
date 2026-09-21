@@ -65,6 +65,26 @@ func TestAdvanceBoundedRetrySameStep(t *testing.T) {
 	}
 }
 
+// TestAdvanceExhaustedRetriesLeaveStepIssued is quickstart V7's exhaustion arm:
+// an Advancer that always reports transport/unavailable exhausts the bounded
+// same-step retry budget and leaves the step issued for the next cycle.
+//
+// Defect: none known - coverage gap. The original test asserted only the final
+// step state, so advance.go's retry budget `attempt < max` could relax to
+// `<= max` (one extra external 010 call) without failing.
+// Invariant: for transport/unavailable classes the advanceLoop calls the 010
+// boundary EXACTLY maxRetries times (default 3, StepDriver.maxRetries) with the
+// same step_id; exhaustion is issued/retryable with ClassLifecycleUnavailable
+// and fabricates no attempt, outcome class, success, or failure (advance.go:239
+// -268). The step row stays issued with attempt_id NULL for reconcile.
+// Gap: no assertion counted the boundary calls or pinned the exhausted step's
+// attempt/outcome columns.
+// Level: integration (real PostgreSQL scratch DB + the labeled test-only
+// lifecycleDouble; never joint evidence).
+// Criteria: callCount(stepID) == 3 (exactly the budget, not 4); outcome
+// issued/retryable/ClassLifecycleUnavailable; DB step state issued with no
+// outcome_class and no attempt_id; zero attempts recorded by the double; and
+// no step_converged/step_unknown evidence for the step.
 func TestAdvanceExhaustedRetriesLeaveStepIssued(t *testing.T) {
 	ctx, pool := executionPool(t)
 	store := execClaimStore(t, pool)
@@ -81,8 +101,39 @@ func TestAdvanceExhaustedRetriesLeaveStepIssued(t *testing.T) {
 	if out.FinalStepState != StepIssued || !out.Retryable {
 		t.Fatalf("exhausted retries = %+v, want issued/retryable (never failure)", out)
 	}
-	if state, _ := stepState(t, ctx, pool, out.StepID); state != StepIssued {
-		t.Fatalf("step state = %s, want issued", state)
+	if out.Refusal != ClassLifecycleUnavailable {
+		t.Fatalf("exhausted refusal = %s, want %s", out.Refusal, ClassLifecycleUnavailable)
+	}
+	// The retry budget is exactly maxRetries (3): an off-by-one calls the 010
+	// boundary a fourth time.
+	if got := double.callCount(out.StepID); got != 3 {
+		t.Fatalf("advance calls for step = %d, want exactly 3 (the bounded budget; exhaustion must not call again)", got)
+	}
+	// Exhaustion writes no attempt and no outcome: the step stays durable
+	// reconcile evidence with attempt_id NULL.
+	if state, outcome := stepState(t, ctx, pool, out.StepID); state != StepIssued || outcome != "" {
+		t.Fatalf("step = %s/%q, want issued with no outcome_class", state, outcome)
+	}
+	var attemptID *string
+	if err := pool.QueryRow(ctx, `SELECT attempt_id FROM execution_steps WHERE step_id = $1`, out.StepID).Scan(&attemptID); err != nil {
+		t.Fatalf("read step attempt_id: %v", err)
+	}
+	if attemptID != nil {
+		t.Fatalf("step attempt_id = %q, want NULL (exhaustion must not fabricate an attempt)", *attemptID)
+	}
+	double.mu.Lock()
+	attempts := len(double.attempts)
+	double.mu.Unlock()
+	if attempts != 0 {
+		t.Fatalf("attempts recorded = %d, want 0", attempts)
+	}
+	var converged int
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM execution_events
+		WHERE step_id = $1 AND kind IN ('step_converged', 'step_unknown')`, out.StepID).Scan(&converged); err != nil {
+		t.Fatalf("count converge evidence: %v", err)
+	}
+	if converged != 0 {
+		t.Fatalf("converge/unknown events for the exhausted step = %d, want 0", converged)
 	}
 }
 
