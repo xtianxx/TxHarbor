@@ -1,2 +1,24 @@
 # Local environment file: copy .env.example to .env and edit. Never commit it.
 .env
+
+# BEGIN oh-my-opencode-slim worktrees
+.slim/worktrees/
+.slim/worktrees.json
+# END oh-my-opencode-slim worktrees
+
+# opencode local session state (run-continuation JSONs). Machine-local, ever-growing, never commit.
+.omo/
+
+# Go build and test artifacts.
+*.test
+coverage.out
+coverage.html
+*.coverprofile
+/txharbor
+/dist/
+
+# OS and editor local state.
+/.DS_Store
+Thumbs.db
+.idea/
+.vscode/
