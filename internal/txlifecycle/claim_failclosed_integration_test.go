@@ -31,7 +31,9 @@ func TestV10ClaimFailClosed(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			e := newEnv(t)
+			// Destructive lane (DROP TABLE / DROP COLUMN): dedicated container
+			// per whitelist.
+			e := newDedicatedEnv(t)
 			f := e.seed()
 			f.sign()
 			c.smash(f)

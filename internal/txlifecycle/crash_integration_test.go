@@ -28,8 +28,8 @@ var crashBoundaries = []string{
 // parent supplies a migrated DSN and a boundary; it then exits hard so no
 // cleanup or deferred commit can run.
 func TestCrashHelper(t *testing.T) {
-	dsn := os.Getenv("TX_CRASH_DSN")
-	point := os.Getenv("TX_CRASH_POINT")
+	dsn := os.Getenv(txCrashDSNEnv)
+	point := os.Getenv(txCrashPointEnv)
 	if dsn == "" || point == "" {
 		t.Skip("not a crash-helper run")
 	}
@@ -76,12 +76,15 @@ func driveCrashBoundary(t *testing.T, e *env, point string) {
 
 // TestV9bCrashMatrix is T038: kill the process at each T-boundary and assert
 // the documented recovery action is determined by the surviving durable state.
+// The lane is whitelisted to a dedicated container per boundary (startPGDedicated):
+// its helper subprocess is hard-killed and must never share the package-wide
+// container's lifecycle.
 func TestV9bCrashMatrix(t *testing.T) {
 	for _, point := range crashBoundaries {
 		t.Run(point, func(t *testing.T) {
-			dsn := startPG(t)
+			dsn := startPGDedicated(t)
 			cmd := exec.Command(os.Args[0], "-test.run=TestCrashHelper", "-test.v")
-			cmd.Env = append(os.Environ(), "TX_CRASH_DSN="+dsn, "TX_CRASH_POINT="+point)
+			cmd.Env = append(os.Environ(), txCrashDSNEnv+"="+dsn, txCrashPointEnv+"="+point)
 			out, err := cmd.CombinedOutput()
 			if err == nil {
 				t.Fatalf("crash helper did not exit hard; output=%s", out)

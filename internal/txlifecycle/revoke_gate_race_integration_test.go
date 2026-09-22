@@ -327,6 +327,11 @@ func rgCommitRaw(t *testing.T, tx pgx.Tx) {
 
 // rgWaitForWaiter blocks until some other session is waiting on a lock whose
 // current statement matches needle.
+//
+// TODO(shared-pg): this probe reads cluster-wide pg_stat_activity (no datname
+// filter). Safe while this package runs serially against its own per-test
+// databases; revisit before another package shares the container or any test
+// gains t.Parallel (see txlifecycle_shared_pg_test.go).
 func rgWaitForWaiter(t *testing.T, pool *pgxpool.Pool, needle string, tl *rgTimeline) {
 	t.Helper()
 	deadline := time.Now().Add(rgWaitDeadline)
