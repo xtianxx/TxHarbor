@@ -28,7 +28,6 @@
 package indexer
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -37,7 +36,6 @@ import (
 	"strconv"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"testing"
 	"time"
 
@@ -2150,98 +2148,11 @@ func TestDepositCommitFieldConflictFailsWholeBatch(t *testing.T) {
 }
 
 // --- T010: crash recovery and uncertain-commit verdicts ----------------------
-
-// Fault-injection triggers, matched against the SQL text pgx writes to the
-// connection. The markers name the exact protocol points:
-const (
-	// depositFaultAfterReads is the first statement of the commit transaction:
-	// once it is written every unit query has completed, so a connection death
-	// here is the deterministic "process exits after the queries, before any
-	// write" state.
-	depositFaultAfterReads = "SET LOCAL statement_timeout"
-	// depositFaultMidTransaction is the progress UPDATE of an advancing unit,
-	// written after the observations: failing there must roll them all back
-	// (no partial commit). The first unit's INSERT checkpoint path is covered
-	// by depositFaultAfterReads.
-	depositFaultMidTransaction = "UPDATE deposit_checkpoint"
-	// depositFaultCommit is the COMMIT statement itself (the reply-lost and
-	// never-reached cases).
-	depositFaultCommit = "commit"
-	// depositFaultPauseAudit is the pause audit INSERT shared by the manual
-	// release (insertReleasePauseAuditSQL) and the authorization
-	// (insertAuthPauseAuditSQL) paths: failing it must roll the whole pause
-	// transaction back. One marker covers both statements because both insert
-	// into deposit_pause_audit.
-	depositFaultPauseAudit = "INSERT INTO deposit_pause_audit"
-)
-
-// Deposit-fault verdicts returned by depositFault.match.
-const (
-	depositFaultNone = iota
-	depositFaultDropReply
-	depositFaultFailWrite
-)
-
-// depositFault injects deterministic faults into every connection of a fault
-// pool, through a real dial wrapper (never by simulating return values). A SQL
-// trigger matches a client write containing marker: dropReply forwards the
-// statement and closes the connection before the reply can be read (the
-// statement lands, the worker observes a connection error: the process-exit /
-// uncertain-commit state); failWrite closes before forwarding (the statement
-// never lands: a mid-transaction connection failure). sticky makes every
-// matching write fire so a worker that must stay dead cannot slip a commit
-// through while the test stops it. failDials fails every dial while set
-// (transient database unavailability). fired closes on the first trigger so
-// tests synchronize on the fault itself, never on sleeps.
-type depositFault struct {
-	marker    string
-	dropReply bool
-	sticky    bool
-	armed     atomic.Bool
-	fires     atomic.Int32
-	dialFails atomic.Bool
-	dialTries atomic.Int32
-	fired     chan struct{}
-	once      sync.Once
-}
-
-func newDepositFault() *depositFault { return &depositFault{fired: make(chan struct{})} }
-
-// armSQL arms a SQL-text trigger.
-func (f *depositFault) armSQL(marker string, dropReply, sticky bool) {
-	f.marker = marker
-	f.dropReply = dropReply
-	f.sticky = sticky
-	f.armed.Store(true)
-}
-
-func (f *depositFault) disarm() { f.armed.Store(false) }
-
-// match classifies one client write and records the trigger.
-func (f *depositFault) match(b []byte) int {
-	if !f.armed.Load() || f.marker == "" || !bytes.Contains(b, []byte(f.marker)) {
-		return depositFaultNone
-	}
-	if !f.sticky && !f.armed.CompareAndSwap(true, false) {
-		return depositFaultNone
-	}
-	f.fires.Add(1)
-	f.once.Do(func() { close(f.fired) })
-	if f.dropReply {
-		return depositFaultDropReply
-	}
-	return depositFaultFailWrite
-}
-
-// waitFired blocks until the trigger fires at least once.
-func (f *depositFault) waitFired(t *testing.T, what string) {
-	t.Helper()
-	select {
-	case <-f.fired:
-	case <-time.After(15 * time.Second):
-		t.Fatalf("timed out waiting for the injected fault: %s", what)
-	}
-}
+//
+// The pure-logic half of the injector (trigger markers, verdicts,
+// depositFault.match and the frontend startup-packet guard) lives in
+// deposit_fault_injection_test.go so the plain, Docker-free unit run covers
+// it; only the connection plumbing stays here.
 
 type depositFaultConn struct {
 	net.Conn
