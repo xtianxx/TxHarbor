@@ -74,6 +74,13 @@ func TestReadyzFlipsAndRecoversWithRealDependencies(t *testing.T) {
 
 	waitForStatus(t, base+"/readyz", http.StatusOK, 30*time.Second)
 	waitForStatus(t, base+"/livez", http.StatusOK, 5*time.Second)
+	// /readyz 200 and txharbor_ready 1 do not prove the probe runner has run:
+	// serve pre-seeds the aggregate ready before the listener opens and the
+	// ready metric is a GaugeFunc, while txharbor_probe_total is a CounterVec
+	// whose dep/result child exists only after the first ObserveProbe. Wait
+	// (bounded, condition-driven) for that real first cycle instead of racing
+	// the single scrape below.
+	waitFlipProbeSeriesObserved(t, base, flipProbeSeriesWaitTimeout)
 	if body := httpGet(t, base+"/metrics"); !strings.Contains(body, "txharbor_ready 1") ||
 		!strings.Contains(body, "txharbor_probe_total") {
 		t.Fatalf("metrics missing foundation metrics:\n%s", body)
