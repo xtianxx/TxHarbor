@@ -81,6 +81,17 @@ func TestReadyzFlipsAndRecoversWithRealDependencies(t *testing.T) {
 
 	stopTimeout := 5 * time.Second
 
+	// Silent first-write barrier (Phase 1 plan A): wait until the indexers'
+	// first commits (chain_blocks + log_checkpoint, mirrored by the serve
+	// observers in /metrics) are present and quiet before stopping PostgreSQL,
+	// so the real fault injection cannot race the first write. The barrier
+	// observation < Stop timestamp ordering edge is logged below.
+	settledAt, settled := waitFlipFirstWritesSettled(t, base, dsn)
+	stopAt := time.Now()
+	t.Logf("barrier ordering edge: settled_at=%s stop_at=%s gap=%s observation{%s}",
+		settledAt.Format(time.RFC3339Nano), stopAt.Format(time.RFC3339Nano),
+		stopAt.Sub(settledAt).Round(time.Millisecond), settled)
+
 	// Database outage: readyz 503 within 10s, livez stays 200.
 	if err := pgCtr.Stop(ctx, &stopTimeout); err != nil {
 		t.Fatalf("stop postgres: %v", err)
