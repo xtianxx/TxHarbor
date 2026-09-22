@@ -65,6 +65,11 @@ func race26SecondPool(t *testing.T, ctx context.Context, dsn, appName string) *p
 // race26WaitBlocked polls pg_stat_activity until the named connection parks
 // on a lock (wait_event_type='Lock'). Polling a lock-wait is the sync point;
 // there is no fixed-sleep timing anywhere in this file.
+//
+// TODO(shared-pg): this poll reads cluster-wide pg_stat_activity. Safe while
+// package indexer runs serially against its own per-test databases; revisit
+// before any cross-package container sharing or t.Parallel
+// (indexer_shared_pg_test.go).
 func race26WaitBlocked(t *testing.T, ctx context.Context, pool *pgxpool.Pool, appName, describe string) {
 	t.Helper()
 	waitUntil(t, time.Now().Add(10*time.Second), describe, func() bool {

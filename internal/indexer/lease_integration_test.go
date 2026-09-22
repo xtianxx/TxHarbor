@@ -12,42 +12,53 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
-	"github.com/testcontainers/testcontainers-go"
-	"github.com/testcontainers/testcontainers-go/modules/postgres"
-	"github.com/testcontainers/testcontainers-go/wait"
 
 	"github.com/xtianxx/txharbor/internal/db"
 )
 
-// startIndexerPostgres boots a real PostgreSQL container and applies the
-// embedded migrations. It skips (never passes) when no Docker provider is
-// available.
+// startIndexerPostgres creates a fresh, uniquely named database inside the
+// package-wide PostgreSQL container booted by TestMain
+// (indexer_shared_pg_test.go), applies the embedded migrations to it, and
+// returns the derived DSN. It never returns sharedBaseDSN.
+//
+// Docker gating moved to TestMain: when no provider is healthy TestMain exits
+// 0 before m.Run, so the package is skipped (never silently passed) without a
+// per-test container. The returned DSN is private to this call: the database
+// is dropped in t.Cleanup (WITH (FORCE)) unless TXHARBOR_KEEP_DB=1 or the test
+// failed, in which case its name and DSN are logged for triage.
 func startIndexerPostgres(t *testing.T) string {
 	t.Helper()
-	testcontainers.SkipIfProviderIsNotHealthy(t)
 	ctx := context.Background()
-	ctr, err := postgres.Run(ctx, "postgres:18.6-trixie",
-		postgres.WithDatabase("txharbor"),
-		postgres.WithUsername("txharbor"),
-		postgres.WithPassword("txharbor"),
-		testcontainers.WithWaitStrategy(
-			wait.ForLog("database system is ready to accept connections").WithOccurrence(2)),
-	)
-	if err != nil {
-		t.Fatalf("start postgres container: %v", err)
+	if adminPool == nil || sharedBaseDSN == "" {
+		t.Fatal("shared postgres not initialized: TestMain must run this package with -tags integration")
 	}
-	t.Cleanup(func() { _ = ctr.Terminate(context.Background()) })
-	dsn, err := ctr.ConnectionString(ctx, "sslmode=disable")
+
+	dbName := uniqueIndexerTestDBName(t)
+	// Serialize CREATE DATABASE: PostgreSQL serializes on the template
+	// database, so ordered creation avoids template1 lock contention.
+	indexerDBMu.Lock()
+	_, err := adminPool.Exec(ctx, "CREATE DATABASE "+pgx.Identifier{dbName}.Sanitize())
+	indexerDBMu.Unlock()
 	if err != nil {
-		t.Fatalf("postgres connection string: %v", err)
+		t.Fatalf("create test database %s: %v", dbName, err)
 	}
+
+	dsn, err := deriveIndexerDSN(sharedBaseDSN, dbName)
+	if err != nil {
+		_ = dropIndexerTestDB(ctx, dbName)
+		t.Fatalf("derive dsn for %s: %v", dbName, err)
+	}
+
 	if err := db.MigrateUp(ctx, db.MigrateOptions{
 		DSN:            dsn,
 		LockTimeout:    5 * time.Second,
 		ConnectTimeout: 5 * time.Second,
 	}, io.Discard); err != nil {
-		t.Fatalf("migrate up: %v", err)
+		_ = dropIndexerTestDB(ctx, dbName) // never leak a half-migrated database
+		t.Fatalf("migrate up %s: %v", dbName, err)
 	}
+
+	t.Cleanup(func() { cleanupIndexerTestDB(t, dbName, dsn) })
 	return dsn
 }
 

@@ -47,6 +47,11 @@ func guardLockTable(t *testing.T, ctx context.Context, dsn, table string) func()
 // guardWaitBlocked polls pg_stat_activity until one backend is actively
 // waiting on a lock for a query mentioning the fragment (deterministic proof
 // that the scanner reached the target read before the cancel).
+//
+// TODO(shared-pg): this poll reads cluster-wide pg_stat_activity. Safe while
+// package indexer runs serially against its own per-test databases; revisit
+// before any cross-package container sharing or t.Parallel
+// (indexer_shared_pg_test.go).
 func guardWaitBlocked(t *testing.T, ctx context.Context, pool *pgxpool.Pool, fragment string) {
 	t.Helper()
 	waitUntil(t, time.Now().Add(10*time.Second), "scanner blocked on "+fragment, func() bool {
