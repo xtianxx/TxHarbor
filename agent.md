@@ -2,6 +2,8 @@
 
 Production-oriented EVM wallet + transaction infrastructure. Monorepo: API / Indexer / Worker / Signer / PostgreSQL / Redis / Kafka / EVM RPC.
 
+总览与快速启动见 `README.md`；已合并变更见 `CHANGELOG.md`。
+
 ## Core Principles
 
 - Reliability over feature velocity.

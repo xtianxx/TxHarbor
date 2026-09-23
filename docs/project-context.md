@@ -15,6 +15,7 @@ PostgreSQL / Redis / Kafka / EVM RPC。详见 `agent.md` 与
 
 ## 实际协作文件索引
 
+- 总览入口：`README.md`（能力总览、快速启动、限制与 T000-P 状态）；变更记录：`CHANGELOG.md`
 - 根指南：`agent.md`（根目录无 `AGENTS.md`）
 - 章程：`.specify/memory/constitution.md`
 - 单一活动 feature 指针：`.specify/feature.json`（当前 `specs/007-withdrawal-creation`；
