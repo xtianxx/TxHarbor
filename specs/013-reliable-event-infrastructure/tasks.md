@@ -33,18 +33,18 @@
 | 批次 | 交付链 | 任务范围（文档 ID） | 进入准则 | 退出准则（证据） | 本地提交节点（orchestrator 执行） |
 |---|---|---|---|---|---|
 | B1 环境与迁移基础 | 1, 8 | T001–T007 + T008–T009 | 设计文档批准；分支干净 | 配置 fail-closed 单测、依赖构建、compose profile 启停、Makefile 各层 target、迁移 up/down/up + 命名约束探针 | `feat(events): add event infrastructure scaffolding and 000015 schema` |
-| B2 Outbox 核心与契约合流 | 1, 2 | T010–T016 | B1 退出 | Append 原子性/身份/版本 Integration 绿；Contract 信封/兼容矩阵绿；**合流检查**（迁移 T009 × 契约 T014 × Append T015 同时绿）后方可进入 B3+ | `feat(events): add transactional outbox core and event contract` |
-| B3 生产者集成与 cutover | 1, 2 | T026–T032 + T038–T040 | B2 合流通过 | 各域原子性探针（T038–T040）绿；cutover/回退证据（T031）；5 类目录一致性（T032，8 类由 T058 收口） | `feat(events): emit outbox events from deposit and withdrawal transactions` |
+| B2 Outbox 核心与契约合流 | 1, 2 | T010–T016 | B1 退出 | Append 原子性/身份/版本 Integration 绿；Contract 信封/兼容矩阵绿；**合流检查**（迁移 T009 × 契约 T014 × Append T015 × import 边界 T016 同时绿）后方可进入 B3+ | `feat(events): add transactional outbox core and event contract` |
+| B3 生产者集成与 cutover | 1, 2 | T026–T032 + T038–T040 | B2 合流通过 | 各域原子性探针（T038–T040）绿；010 attempt 级引用完整性取证（T032/T040：未知结果尝试的 `state_changed` 载荷 attempt 引用 100% 存在）；cutover/回退证据（T031）；5 类目录一致性（T032，8 类由 T058 收口） | `feat(events): emit outbox events from deposit and withdrawal transactions` |
 | B4 发布器 | 3 | T033–T037 | B2/B3 | V-PUBLISHER（PG+Kafka）绿；崩溃点矩阵；blocked 可见可审计；表述检查（无跨系统恰好一次） | `feat(events): add outbox publisher with lease claim and crash recovery` |
 | B5 消费者、隔离与重放 + 核心 E2E | 3, 4 | T041–T051 + T078–T079 | B4 退出 | V-IDEMPOTENCY/V-PROGRESS/V-RETRY-QUARANTINE 绿；PD-4 反例断言 0 新意图/nonce/签名/广播；E2E 充值/提现核心流绿 | `feat(events): add idempotent consumer with quarantine and audited replay` |
 | B6 修订 | 2 | T052–T058 | B3（生产者）+ B5（消费者） | V-REVISION（生产者×2 + 消费者）绿；8/8 目录矩阵收口；修订 0 新付款 | `feat(events): emit and converge reorg revision events` |
 | B7 Redis 缓存与限流 | 5 | T059–T068（消费 T017/T018） | B1/B2；可与 B3–B6 并行 | V-CACHE/V-RATELIMIT（组件+HTTP）绿；PD-1 拒绝新创建与存量继续分别验收；单独故障组件证据 | `feat(cache): add non-authoritative cache and fail-closed rate limiting` |
-| B8 容量保护与追赶 | 6 | T069–T074 + T018 | B4 + B7（错误通道） | V-CAPACITY/V-CATCHUP 绿；停新保在途、补扫、在途完成、再故障 0 丢失/0 重复 | `feat(events): add outbox capacity guard and catch-up rescan` |
-| B9 五态故障矩阵与最终验收 | 1, 7 | T019–T025 + T080 | B3–B8 全部合流；故障环境就绪 | 矩阵一致率 100%、门禁绕过 0、五项 0 不变量、证据包含 FR-16 边界声明 | `test(fault): add five-state failure matrix drills` |
+| B8 容量保护与追赶 | 6 | T069–T074 + T018 | B4 + B7（错误通道） | V-CAPACITY/V-CATCHUP 绿；停新保在途、补扫、在途完成、再故障 0 丢失/0 重复；`internal/faultdrill` 基建可构建（T073：`go build ./...`） | `feat(events): add outbox capacity guard and catch-up rescan` |
+| B9 五态故障矩阵与最终验收 | 1, 7 | T019–T025 + T080 | B3–B8 全部合流；故障环境就绪（faultdrill 基建来自 B8 T073） | 矩阵一致率 100%、门禁绕过 0、五项 0 不变量、证据包含 FR-16 边界声明 | `test(fault): add five-state failure matrix drills` |
 | B10 观测与基准 | 7 | T075–T077 + T081 | B9 | 指标/告警齐备且有来源标注；V-BENCH 报告 100% 产出（数值待测不编造）；账本证据含边界声明 | `perf(events): add PG-only baseline and full-stack benchmark` |
 | B11 CI 接入与收口 | 8 + 全部 | T082–T088 | B10 | PR 必需检查映射、独立 Fault/Perf 工作流不阻塞 PR、耗时预算实测、分层/DeDo 审计、quickstart 证据索引、文档同步、覆盖审计 | `ci(events): add layered checks and closeout records` |
 
-**跨批次成员说明**：T017/T018 为故障态与降级面载体，B7/B8 消费；T019 为故障演练基建，B9 使用；T078/T079 于 B5 执行（消费者就绪后），T080 于 B9 执行；T075–T077/T081 于 B10 执行。批次完成后由 orchestrator 执行批次验证并本地提交；**不推送/PR/合并/部署**。
+**跨批次成员说明**：T017/T018 为故障态与降级面载体，B7/B8 消费；T073 于 B8 创建 `internal/faultdrill` 基建（`doc.go`＋`harness.go` 骨架，保证 B8 完成后 `go build ./...` 通过）并执行追赶测试；T019 于 B9 扩展 harness 编排（B9 首任务，T020–T025/T080 依赖）；T078/T079 于 B5 执行（消费者就绪后），T080 于 B9 执行；T075–T077/T081 于 B10 执行。批次完成后由 orchestrator 执行批次验证并本地提交；**不推送/PR/合并/部署**。
 
 ---
 
@@ -56,7 +56,7 @@
 - [ ] T002 [P] 扩展 `go.mod`/`go.sum`：加入并固定新依赖 `github.com/twmb/franz-go`（纯 Go、幂等 producer）、`github.com/redis/go-redis/v9`、`testcontainers-go/modules/redis` 与 Kafka 模块（或经评估的 Redpanda 轻量候选，R17）；逐一验证版本可用性并记录理由；**MUST NOT** 引入 Debezium/CDC、Kubernetes 或其它新基础设施。完成条件：`go build ./...` 与 `go vet ./...` 通过；依赖清单仅含本 feature 范围。（FR-03/28；plan Primary Dependencies；R17；adr.md §5；层：build/lint；证据：go.mod diff + 版本记录）
 - [ ] T003 [P] 新建 `internal/metrics/events.go` 与 `internal/metrics/events_test.go`：按 verification.md §1 注册 `outbox_pending_count`、`outbox_pending_oldest_age_seconds`、`outbox_publish_failures_total{error_class}`、`outbox_published_total`/`outbox_attempts_total`、`consumer_lag_seconds`/`consumer_lag_messages`、`consumer_applied_total`/`consumer_retry_total`/`consumer_quarantine_total`、`consumer_catchup_seconds`、`cache_hits_total`/`cache_misses_total`/`cache_fallback_total`/`cache_epoch_rotations_total`、`ratelimit_denied_total{class}`/`ratelimit_unavailable`/`ratelimit_recovery_total`、`rpc_budget_paused_total{class}`、`capacity_soft_breaches_total`/`capacity_refusals_total{op_class}`、`redis_available`/`kafka_available`、`events_identity_conflict_total{event_type}`、`outbox_blocked_count`；标签仅含接口类/事件族/错误分类，**MUST NOT** 含凭据。完成条件：注册表齐全且既有指标不改名。（FR-24；verification.md §1；D9；层：Unit；证据：注册表清单测试）
 - [ ] T004 [P] 扩展 `compose.yaml`：新增 `redis` 与 Kafka（KRaft 单节点、显式创建 `txharbor.events.v1`、关闭 auto-create）并置于 profile（如 `--profile events`）；默认 `docker compose up -d` 仍为 PG+Anvil（PG-only 基线可运行）；镜像 tag 先验证可用后固定并记录；健康检查与 127.0.0.1 绑定沿用现状风格。完成条件：profile 启停冒烟通过；默认基线不带动 Redis/Kafka。（D10；R17；quickstart §1；层：本地编排；证据：启停记录 + compose diff）
-- [ ] T005 [P] 扩展 `Makefile`：新增 `test-integration-redis`、`test-integration-kafka`（新 build tags，如 `integration_redis`/`integration_kafka`）、`test-e2e`（tag `e2e`）、`test-fault`（tag `fault`）、`test-perf`（tag `perf`）；各层可独立运行、Unit 不启动中间件；既有 `test`/`test-race`/`test-integration` 语义不变。完成条件：target 清单可被本地与 CI 独立调用；无默认串跑全部中间件。（FR-28；verification.md §3；plan Testing；层：构建/CI；证据：target 清单与冒烟记录）
+- [ ] T005 [P] 扩展 `Makefile`：新增 `test-contract`（tag `contract`；Contract 层独立入口，无中间件、无 Docker）、`test-integration-redis`、`test-integration-kafka`（新 build tags，如 `integration_redis`/`integration_kafka`）、`test-e2e`（tag `e2e`）、`test-fault`（tag `fault`）、`test-perf`（tag `perf`）；各层可独立运行、Unit 不启动中间件；既有 `test`/`test-race`/`test-integration` 语义不变。完成条件：target 清单可被本地与 CI 独立调用（Contract 用例 T014/T051/T058 经 `make test-contract` 独立执行）；无默认串跑全部中间件。（FR-28；verification.md §3；plan Testing；层：构建/CI；证据：target 清单与冒烟记录）
 - [ ] T006 [P] 新建 `internal/testutil/redis.go` 与 `internal/testutil/kafka.go`（test-support，供带 tag 的测试复用）：Redis/Kafka testcontainers 启动/清理、broker 地址、显式 topic 创建（不允许 auto-create）、故障注入钩子（停容器/断连）与就绪等待；资源命名随机化防冲突。完成条件：骨架测试能起停两类容器并创建 topic；`make test`（无 tag）不受影响。（FR-28；R16/R17；verification.md §3；层：Integration 基建；证据：容器启停日志）
 - [ ] T007 [P] 新建 `internal/app/eventpublisher.go`、`internal/app/eventconsumer.go`、`internal/app/eventsadmin.go`（仅参数解析、usage、fail-closed 配置加载、空循环入口，无业务逻辑），并在 `cmd/txharbor/main.go` 增加 `event-publisher`/`event-consumer`/`events-admin` 分发与 usage；**`cmd/txharbor/main.go` 为 013 单写者——本任务后其它批次只扩展 `internal/app` 对应文件，不再编辑它**。完成条件：`go build ./...`；三个子命令 `--help` 可用且配置缺失时 fail-closed；既有子命令不受影响。（plan Summary/Project Structure；quickstart §1；层：Unit/CLI 冒烟；证据：构建 + help 输出）
 
@@ -71,16 +71,16 @@
 **⚠️ CRITICAL**: 本阶段（含合流检查）完成前，任何用户故事批次不得进入。
 
 - [ ] T008 新建 `migrations/000015_event_infrastructure.sql`（goose；纯增量，编号紧随 `000014`；**本文件 013 唯一 owner 任务，合流检查为 T009**）：按 data-model §2 建 7 表——`outbox_events`（`identity_kind` CHECK、部分 UNIQUE `outbox_events_log_identity_uniq`（`chain_id, block_hash, tx_hash, log_index` WHERE `identity_kind='evm_log'`）与 `outbox_events_object_identity_uniq`（`aggregate_type, aggregate_id, aggregate_version` WHERE `business_object`）、CHECK `outbox_events_log_identity_shape`/`state_consistency`/`revision_shape`、pending 队列/容量/保留/来源审计索引）、`consumer_progress`、`consumer_inbox`、`consumer_versions`、`consumer_quarantine`（含 `(consumer_name,event_id) WHERE status='open'` 部分唯一）、`event_ops_audit`（`operation_id UNIQUE`、`op_kind` CHECK）、`event_system_state`（单行 CHECK + `cutover_at` 种子 + `catalog_version=1`）；命名前缀 `outbox_`/`consumer_`/`event_` 支持 23505/23514 精确分类；**不改动** `000001`–`000014` 任何对象。完成条件：DDL 可应用；列/约束/索引与 data-model 逐项一致。（FR-07/08/09/13/14/15/20；data-model §2/§8；D1；层：Integration-PG；证据：schema 快照）
-- [ ] T009 迁移验证 + **合流检查（迁移）**：在 scratch DB 执行 `up`→`down`→`up`；对每个命名约束做负向探针（重复 `evm_log`/`business_object` 身份、`published` 无 `published_at`、`blocked` 无 `last_error_class`、修订缺 `recovery_version`、负 offset、重复开放隔离、重复 `operation_id`、`event_system_state.id≠1`）→ 23505/23514 且仅按 `ConstraintName` 分类；对 `000001`–`000014` 做 additive-only diff（无上游对象变化）。**合流门禁**：T009 × T014（契约）× T015（Append 原子性）同时绿后，B3+ 方可进入。**回退**：down 仅在受控窗口使用；「仅停发射而业务继续」记录为违规，不得作为回退方案。完成条件：up/down/up 干净、探针命中预期约束名。（data-model §2/§7/§8/§10；R14；FR-27；层：Integration-PG；证据：迁移日志 + 约束探针 + 回退步骤记录）
+- [ ] T009 迁移验证 + **合流检查（迁移）**：在 scratch DB 执行 `up`→`down`→`up`；对每个命名约束做负向探针（重复 `evm_log`/`business_object` 身份、`published` 无 `published_at`、`blocked` 无 `last_error_class`、修订缺 `recovery_version`、负 offset、重复开放隔离、重复 `operation_id`、`event_system_state.id≠1`）→ 23505/23514 且仅按 `ConstraintName` 分类；对 `000001`–`000014` 做 additive-only diff（无上游对象变化）。**合流门禁**：T009 × T014（契约）× T015（Append 原子性）× T016（import 边界）同时绿后，B3+ 方可进入。**回退**：down 仅在受控窗口使用；「仅停发射而业务继续」记录为违规，不得作为回退方案。完成条件：up/down/up 干净、探针命中预期约束名。（data-model §2/§7/§8/§10；R14；FR-27；层：Integration-PG；证据：迁移日志 + 约束探针 + 回退步骤记录）
 - [ ] T010 [P] 新建 `internal/events/catalog.go` 与 `internal/events/catalog_test.go`：定义目录 v1 全部 8 类（`deposit.observation.created`/`status_changed`/`reinstated`、`deposit.confirmation.confirmed`、`deposit.revision.applied`、`withdrawal.request.received`、`withdrawal.execution.state_changed`/`revised`）、`identity_kind ∈ {evm_log,business_object}`、信封字段、`event_id` 的 UUIDv5 确定性派生（`evm_log|chain|block_hash|tx_hash|log_index`；`business_object|type|id|version`）、payload 规范化 JSON + sha256、`schema_version` 从 1 起与兼容常量；载荷 **MUST NOT** 含密钥/凭据/原始签名字节。完成条件：8 类与派生规则单测通过（同事实同身份、载荷字节稳定）。（FR-09/10/12；contracts/events.md §1–3；data-model §3/§9；R2/R3/R4；层：Unit + Contract（T014）；证据：单测）
 - [ ] T011 新建 `internal/events/append.go` 与 `internal/events/append_test.go`：`Append(ctx, tx, Event)` 只接受调用方已在进行的 PG 事务；同事务内计算 `aggregate_version = coalesce(max,0)+1`（依赖调用方对源行的锁，UNIQUE 兜底；冲突不得靠重试掩盖）；写入用 `INSERT ... ON CONFLICT (<自然键>) DO UPDATE ... WHERE payload_hash = EXCLUDED.payload_hash`——同身份同内容 = 幂等 no-op（返回既有行、不告警）；同身份异内容 = 拒绝事务 + `events_identity_conflict_total` 告警；构造上不存在「提交后补写事件」的调用形态；**不得**使用触发器/CDC。完成条件：四类分支单测通过；与 T014/T015 构成 Outbox 核心合流门禁。（FR-07/09；D1；data-model §2 Table1/§3/§10；R1/R2/R3；层：Unit + Integration（T015）；证据：冲突/幂等分支断言）
 - [ ] T012 [P] 新建 `internal/events/outbox.go` 与 `internal/events/outbox_test.go`：发布状态机读取与守卫（`pending`/`published`/`blocked` 合法转换；`blocked` 仅经审计解阻回 `pending`；非法转换 0 行即拒绝）；发布器领取查询（`pending AND next_attempt_at<=now() ORDER BY id FOR UPDATE SKIP LOCKED`）、带 `claim_owner` 条件的 ack 标记、退避调度；容量观测查询（`pending` 计数/最老等待按事件族，PG 部分索引，**Redis 不参与**）；保留期裁剪查询（仅 `published`、记录审计水位，**绝不**删除/覆盖 `pending|blocked`）。完成条件：状态守卫与查询构造单测通过；SQL 内无网络调用。（FR-08/20/21；contracts/outbox-publisher.md §0/§4/§6；data-model §6/§8；R6/R13；层：Unit；证据：状态转换/查询断言）
 - [ ] T013 [P] 新建 `internal/events/errors.go` 与 `internal/events/errors_test.go`：封闭错误分类——outbox 身份冲突/契约错误（不可重试）、发布瞬时类（broker 不可达/超时/限流/leader 切换）与永久类（序列化/契约校验/无效 topic）、消费隔离原因 `retry_exhausted|non_retryable|version_gap|schema_unsupported|identity_mismatch`；23505/23514 仅按 `ConstraintName` 分类；未知错误默认不可重试且可观测。完成条件：分类矩阵单测逐项通过。（data-model §10；contracts/outbox-publisher.md §4；contracts/consumer.md §4/§7；FR-08/14；层：Unit；证据：分类矩阵测试）
-- [ ] T014 新建 `internal/events/events_contract_test.go`（Contract 层）+ **合流检查（事件契约）**：校验信封必填字段与两类身份自然键、`schema_version` 兼容规则（新增可选字段同版本、消费者忽略未知字段、破坏性变更必须新版本 + 兼容窗口）、`event_type+schema_version` 解析路由、载荷最小化与禁含字段扫描、目录 v1 基础声明；**合流门禁**：与 T009/T015 同绿后方可进入 B3+；后续任何目录/信封语义改动必须走新版本（FR-12），不得原地变更。完成条件：兼容矩阵用例全部通过；目录与 contracts/events.md §3 逐项一致。（FR-09/10/12；contracts/events.md §1–§4；R4；层：Contract；证据：契约用例输出）
+- [ ] T014 新建 `internal/events/events_contract_test.go`（Contract 层，`contract` tag；经 `make test-contract` 独立执行）+ **合流检查（事件契约）**：校验信封必填字段与两类身份自然键、`schema_version` 兼容规则（新增可选字段同版本、消费者忽略未知字段、破坏性变更必须新版本 + 兼容窗口）、`event_type+schema_version` 解析路由、载荷最小化与禁含字段扫描、目录 v1 基础声明；**合流门禁**：与 T009/T015/T016 同绿后方可进入 B3+；后续任何目录/信封语义改动必须走新版本（FR-12），不得原地变更。完成条件：兼容矩阵用例全部通过；目录与 contracts/events.md §3 逐项一致。（FR-09/10/12；contracts/events.md §1–§4；R4；层：Contract；证据：契约用例输出）
 - [ ] T015 新建 `internal/events/append_integration_test.go`（Integration-PG，真实迁移 `000015`）：对每个集成点形态构造「事务提交/事务回滚」两路径（提交 → 业务行与 outbox 行同现且同对象版本连续；回滚 → 两者皆无、0 残留）；同身份同内容重复 `Append` → no-op 行数不变；同身份异内容 → 事务拒绝 + 冲突计数；并发同对象版本竞争 → UNIQUE 兜底、0 静默覆盖。完成条件：全部断言通过。（FR-07/09；quickstart Q1；V-ATOMICITY；SC-03；层：Integration-PG；证据：行数对照 + 冲突分类）
-- [ ] T016 [P] 新建 `internal/events/boundary_test.go`：静态/运行时断言 `internal/events` 不 import 上游 writer 包与 RPC/dial/signer 包；无触发器/CDC 路径；事务内无网络发布调用；载荷/日志扫描不含密钥、凭据、原始签名字节。完成条件：断言通过，违反即失败。（FR-02/03；R18；constitution VIII；plan Structure Decision；层：Unit/结构扫描；证据：扫描结果）
+- [ ] T016 [P] 新建 `internal/events/boundary_test.go`：静态/运行时断言 `internal/events` 不 import 上游 writer 包与 RPC/dial/signer 包；无触发器/CDC 路径；事务内无网络发布调用；载荷/日志扫描不含密钥、凭据、原始签名字节。**合流门禁成员**：与 T009/T014/T015 同绿后方可进入 B3+（import 边界为资金安全前提）。完成条件：断言通过，违反即失败。（FR-02/03；R18；constitution VIII；plan Structure Decision；层：Unit/结构扫描；证据：扫描结果）
 
-**Checkpoint**: 迁移/契约/Append 合流通过——用户故事批次可进入。
+**Checkpoint**: 迁移/契约/Append/import 边界合流通过——用户故事批次可进入。
 
 ---
 
@@ -92,13 +92,13 @@
 
 - [ ] T017 [P] [US1] 新建 `internal/health/dependencies.go` 与 `internal/health/dependencies_test.go`：Redis/Kafka 可用性探针（停/起可判定），暴露为非权威健康信号（`redis_available`/`kafka_available`，复用 T003 指标）；**MUST NOT** 被任何资金门禁、授权、幂等、对账判定读取（静态断言）。完成条件：探针单测 + 无门禁引用断言；serve 冒烟可用。（FR-04/24；D9；contracts/redis.md §1；层：Unit + Integration 冒烟；证据：探针状态输出）
 - [ ] T018 [P] [US1] 扩展 `internal/app/serve.go`（单写者链 T018→T063）：非关键功能降级开关（由依赖健康驱动、可配置）与查询/事件投递状态降级标注（积压未清时表达为降级信息，不伪装实时）；关键路径（充值/确认/修订/在途提款/已接受提款）不受非关键降级影响；降级状态可观测。完成条件：serve 集成断言降级不阻塞关键 handler、标注字段存在、0 门禁读取健康信号。（FR-04；D8；spec 矩阵「查询/非关键功能」行；层：Integration-PG；证据：降级开关测试）
-- [ ] T019 [P] [US1] 新建 `internal/faultdrill/doc.go`（无 tag，保证包可构建）与 `internal/faultdrill/harness.go`（`//go:build fault`，test-support）：五态故障注入（停/恢复 Redis、Kafka；双停）、场景编排、指标快照采集、证据落盘（日志/导出/环境规格 + commit）；场景可重复、失败不吞错；**不进入生产构建**。完成条件：`make test-fault` 可运行骨架场景。（FR-26；verification.md §2/§3；层：Fault 基建；证据：骨架场景运行记录）
-- [ ] T020 [P] [US1] 新建 `internal/faultdrill/matrix_contract_test.go`（`fault` tag）：结构断言——资金决策路径不 import `internal/cache`/`internal/ratelimit`；门禁不读 Redis/Kafka/健康信号；事件/投递状态从不被解读为授权或许可；重复投递路径不存在新提款意图/nonce/签名/广播调用。完成条件：全部断言通过。（FR-02/05/06；contracts/consumer.md §9；层：Fault/结构；证据：扫描报告）
-- [ ] T021 [P] [US1] 新建 `internal/faultdrill/state_normal_redis_test.go`（`fault` tag；进入条件 B7 完成）：正常态与仅 Redis 故障态逐项验证矩阵七类操作——充值处理继续（缓存旁路、RPC 有界降级）、确认与重组恢复继续（读 PG）、提款创建仅 Redis 故障时 100% 拒绝且错误明确可重试（0 无限制放行）、已有提款执行继续（资格/绑定读 PG）、查询降级直读 PG 且 0 陈旧财务权威、事件订阅继续、非关键功能降级；安全前提 0 门禁绕过。（FR-04/18/26；PD-1；quickstart Q6/Q8；V-DRILL；SC-01/08；层：Fault；证据：逐项断言 + 指标快照）
-- [ ] T022 [P] [US1] 新建 `internal/faultdrill/state_kafka_test.go`（`fault` tag；进入条件 B4/B5）：仅 Kafka 故障态——业务按 PG 继续且事件入 Outbox 积压（0 丢失、0 覆盖）、提款创建接收语义不变（接近容量边界按 PD-2 先拒可控新写入）、已有提款执行在途继续、事件订阅停止投递但积压有界可观测、非关键功能降级；「订阅端未收到」不被读作业务未发生。（FR-04/20/21；PD-2；quickstart Q7/Q8；层：Fault；证据：积压指标 + 断言）
-- [ ] T023 [P] [US1] 新建 `internal/faultdrill/state_dual_test.go`（`fault` tag；进入条件 B7/B8）：双故障（关 Redis+Kafka，保 PG+本地链）——七类操作按矩阵；提款创建拒绝（PD-1）与 Outbox 积压（PD-2）分别验收；恢复后事件补齐、进度恢复；0 重复提款意图、0 重复链上付款、0 孤儿永久入账、0 权威状态丢失、0 门禁绕过、0 静默丢失。完成条件：断言通过；证据含模拟消费者入账幂等与 FR-16 边界声明。（FR-04/05/06/26；SC-01/02/12；quickstart Q8；层：Fault；证据：演练报告）
-- [ ] T024 [P] [US1] 新建 `internal/faultdrill/state_catchup_refailure_test.go`（`fault` tag；进入条件 B8）：恢复追赶态七类行为（继续 + 事件补齐；积压状态可见、不伪装实时）；追赶期间再次故障 → 安全重暂停、0 丢失、0 重复财务效果、进度可续；缓存/限流恢复为惰性/受控重建，不瞬间无界。完成条件：断言通过；追赶时间可观测（数值待测，不编造）。（FR-22/23；SC-10；quickstart Q9；V-CATCHUP；层：Fault；证据：时间线与指标）
-- [ ] T025 [P] [US1] 新建 `internal/faultdrill/matrix_invariants_test.go`（`fault` tag）：汇总断言五态 × 七类矩阵一致率 100%（与 spec 矩阵逐格比对表）、门禁绕过 0、重复提款意图 0、重复链上付款 0、孤儿永久入账 0、权威状态丢失 0、静默事件丢失 0；产出证据包（演练日志、指标导出、审计摘录、环境规格 + commit）与 FR-16 边界声明。完成条件：证据包完整、与 verification.md §2 对齐。（FR-05/06/26；SC-01/02/12；D8；层：Fault；证据：`docs/evidence/013/` 证据包）
+- [ ] T019 [US1] 扩展 `internal/faultdrill/harness.go`（单写者链 T073→T019；**B9 首任务**）：在 B8 骨架（T073）上补齐五态（正常/仅 Redis/仅 Kafka/双故障/恢复追赶）故障注入与场景编排、逐态指标快照采集、证据落盘（日志/导出/环境规格 + commit）；场景可重复、失败不吞错；**不进入生产构建**。完成条件：`make test-fault` 可运行五态骨架场景；T020–T025/T080 依赖本任务（同包 harness 与故障环境）。
+- [ ] T020 [US1] 新建 `internal/faultdrill/matrix_contract_test.go`（`fault` tag；依赖 T019 harness）：结构断言——资金决策路径不 import `internal/cache`/`internal/ratelimit`；门禁不读 Redis/Kafka/健康信号；事件/投递状态从不被解读为授权或许可；重复投递路径不存在新提款意图/nonce/签名/广播调用。完成条件：全部断言通过。（FR-02/05/06；contracts/consumer.md §9；层：Fault/结构；证据：扫描报告）
+- [ ] T021 [US1] 新建 `internal/faultdrill/state_normal_redis_test.go`（`fault` tag；进入条件 B7 完成 + T019 harness）：正常态与仅 Redis 故障态逐项验证矩阵七类操作——充值处理继续（缓存旁路、RPC 有界降级）、确认与重组恢复继续（读 PG）、提款创建仅 Redis 故障时 100% 拒绝且错误明确可重试（0 无限制放行）、已有提款执行继续（资格/绑定读 PG）、查询降级直读 PG 且 0 陈旧财务权威、事件订阅继续、非关键功能降级；安全前提 0 门禁绕过。（FR-04/18/26；PD-1；quickstart Q6/Q8；V-DRILL；SC-01/08；层：Fault；证据：逐项断言 + 指标快照）
+- [ ] T022 [US1] 新建 `internal/faultdrill/state_kafka_test.go`（`fault` tag；进入条件 B4/B5 + T019 harness）：仅 Kafka 故障态——业务按 PG 继续且事件入 Outbox 积压（0 丢失、0 覆盖）、提款创建接收语义不变（接近容量边界按 PD-2 先拒可控新写入）、已有提款执行在途继续、事件订阅停止投递但积压有界可观测、非关键功能降级；「订阅端未收到」不被读作业务未发生。（FR-04/20/21；PD-2；quickstart Q7/Q8；层：Fault；证据：积压指标 + 断言）
+- [ ] T023 [US1] 新建 `internal/faultdrill/state_dual_test.go`（`fault` tag；进入条件 B7/B8 + T019 harness）：双故障（关 Redis+Kafka，保 PG+本地链）——七类操作按矩阵；提款创建拒绝（PD-1）与 Outbox 积压（PD-2）分别验收；恢复后事件补齐、进度恢复；0 重复提款意图、0 重复链上付款、0 孤儿永久入账、0 权威状态丢失、0 门禁绕过、0 静默丢失。完成条件：断言通过；证据含模拟消费者入账幂等与 FR-16 边界声明。（FR-04/05/06/26；SC-01/02/12；quickstart Q8；层：Fault；证据：演练报告）
+- [ ] T024 [US1] 新建 `internal/faultdrill/state_catchup_refailure_test.go`（`fault` tag；进入条件 B8 + T019 harness）：恢复追赶态七类行为（继续 + 事件补齐；积压状态可见、不伪装实时）；追赶期间再次故障 → 安全重暂停、0 丢失、0 重复财务效果、进度可续；缓存/限流恢复为惰性/受控重建，不瞬间无界。完成条件：断言通过；追赶时间可观测（数值待测，不编造）。（FR-22/23；SC-10；quickstart Q9；V-CATCHUP；层：Fault；证据：时间线与指标）
+- [ ] T025 [US1] 新建 `internal/faultdrill/matrix_invariants_test.go`（`fault` tag；依赖 T019 harness）：汇总断言五态 × 七类矩阵一致率 100%（与 spec 矩阵逐格比对表）、门禁绕过 0、重复提款意图 0、重复链上付款 0、孤儿永久入账 0、权威状态丢失 0、静默事件丢失 0；产出证据包（演练日志、指标导出、审计摘录、环境规格 + commit）与 FR-16 边界声明。完成条件：证据包完整、与 verification.md §2 对齐。（FR-05/06/26；SC-01/02/12；D8；层：Fault；证据：`docs/evidence/013/` 证据包）
 
 **Checkpoint**: 用户故事 1 的机制载体由 B3–B8 提供，矩阵演练于 B9 独立执行并通过。
 
@@ -116,7 +116,7 @@
 - [ ] T029 [P] [US2] 在 `internal/withdrawal/intake.go` 的 `SubmitWithdrawal` 事务内接入 `Append`，发射 `withdrawal.request.received`（对象版本 +1；载荷：request_id、caller、状态 Accepted）；**不改变** 007 receive-only 语义、认证/授权/幂等契约；事件送达不属于接收语义。完成条件：原子性由 T039 验证；既有 007 测试保持绿。（FR-05/07；data-model §4；007 只读；层：Integration-PG（T039）；证据：T039）
 - [ ] T030 [P] [US2] 在 `internal/execution/intent.go`（`TransitionIntent` 事务）与 `internal/execution/advance.go`（`converge` 事务）内接入 `Append`，发射 `withdrawal.execution.state_changed`（011 关键转换含终态；载荷：`from_state`/`to_state`、intent_id、attempt 引用、冻结/暂停上下文）；事件不是发送许可，重复投递不得触发新发送。完成条件：原子性由 T040 验证；011 门禁语义不变。（FR-05/07；data-model §4；011 只读；层：Integration-PG（T040）；证据：T040）
 - [ ] T031 [US2] 扩展 `internal/app/eventsadmin.go`（单写者链 T031→T045）：`bootstrap-export` 只读快照导出（供下游初始化历史状态；**不写业务表、不发射伪造历史事件**）与 cutover 操作路径（`cutover_at` 由迁移种子；上线后目录转换开始发射；首见版本即消费者基线）；配套受控回退程序：停发布器/消费者 → 盘点并导出 `pending|blocked`（或先排空）→ down 迁移 → 移除接线，明确「仅停发射而业务继续」为违规。完成条件：导出前后业务表计数不变、事件表无 cutover 前补造行；回退步骤记录与 T009 衔接。（FR-07；data-model §7；R14；quickstart Q0；层：Integration-PG；证据：导出对照 + 回退记录）
-- [ ] T032 [US2] 新建 `internal/events/catalog_conformance_integration_test.go`：对已实现的 5 类非修订事件（T026–T030）逐类断言 `event_type`/`schema_version=1`/身份类/版本单调/链身份字段/载荷最小化；同对象版本从 1 连续；同事实重复写入身份唯一。修订 3 类由 T058 收口（US4）。完成条件：5 类逐项通过并输出一致性矩阵。（FR-07/09/10；contracts/events.md §3；层：Integration-PG；证据：一致性矩阵）
+- [ ] T032 [US2] 新建 `internal/events/catalog_conformance_integration_test.go`：对已实现的 5 类非修订事件（T026–T030）逐类断言 `event_type`/`schema_version=1`/身份类/版本单调/链身份字段/载荷最小化；同对象版本从 1 连续；同事实重复写入身份唯一。修订 3 类由 T058 收口（US4）。完成条件：5 类逐项通过并输出一致性矩阵；010 attempt 级引用完整性取证——未知结果尝试上 `withdrawal.execution.state_changed` 载荷的 attempt 引用 100% 存在；若目录 v1 无法表达已批准状态事实，按 Blockers 节流程回报 orchestrator 契约缺口（不新增业务事件、不自行扩目录）。（FR-07/09/10；contracts/events.md §3；层：Integration-PG；证据：一致性矩阵）
 - [ ] T033 [US2] 新建 `internal/events/publisher.go` 与 `internal/events/publisher_test.go`：领取（单事务 `FOR UPDATE SKIP LOCKED` → 写 claim lease → 提交）、**发布在事务外**（`ProduceSync`；`acks=all`、幂等 producer、`max.in.flight≤5`、delivery/request timeout 有界）、ack 后独立事务以 `id=ANY($ids) AND claim_owner=$owner` 标记 `published`；租约过期可重领（重复发布可接受）；瞬时失败释放领取 + 指数退避（初始值 base 1s/cap 60s/±20% 抖动，测量后校准）；永久类置 `blocked` + 告警（绝不丢弃）；**准确表述：至少一次投递 + 幂等处理，不宣称跨系统恰好一次**。完成条件：状态机单测通过；发布无持锁网络调用。（FR-08/21；contracts/outbox-publisher.md §1–§5；R6；层：Unit + Integration（T036/T037）；证据：状态机断言）
 - [ ] T034 [US2] 扩展 `internal/app/eventpublisher.go`：`event-publisher` 长驻循环——有界批量/并发/轮询、优雅停机（停止领取、完成在途、释放未确认）、多实例天然分片（SKIP LOCKED + 租约；不依赖 Redis 锁）、周期执行对账审计入口（T035）；发布速率有界，不无界冲击 broker/PG。完成条件：单实例与双实例冒烟；停机无「未提交行被发布」；配置 fail-closed。（FR-08/21；D2；contracts/outbox-publisher.md §5；层：Integration-PG/Kafka（T036/T037）；证据：双实例运行记录）
 - [ ] T035 [US2] 新建 `internal/events/audit.go` 与 `internal/events/audit_integration_test.go`：周期按 `source_kind/source_id/source_version` 比对来源表最近水位与 outbox 行；缺口 → 指标 + 告警（检测兜底），**不做静默补写**，修复走 `events-admin` 审计路径；只读、不持锁跨外部调用；不触碰 `pending|blocked`。完成条件：注入缺口可检出并告警、无自动写回。（plan D1 对账审计；data-model §4；FR-07/24；层：Integration-PG；证据：缺口检出记录）
@@ -124,7 +124,7 @@
 - [ ] T037 [P] [US2] 新建 `internal/events/publisher_kafka_integration_test.go`（Integration-Kafka）：真实 broker 下投递确认、重复发布可发生且可被吸收（消费者侧由 T046/T050 验证）、多实例并发领取、停机→恢复排空（批量/并发有界）、topic 显式创建（无 auto-create）；测试与注释禁止任何「跨系统恰好一次」表述。完成条件：通过；排空窗口数值待测、不编造。（FR-08/21；SC-03；quickstart Q2；层：Integration-Kafka；证据：投递/重复记录）
 - [ ] T038 [P] [US2] 新建 `internal/indexer/outbox_atomicity_integration_test.go`（Integration-PG）：覆盖 T026–T028 三个集成点提交/回滚两路径——提交必有事件行且同对象版本连续；回滚两者皆无；重复事实同身份同内容 no-op；同身份异内容拒绝 + 告警；`deposit.observation.created` 身份为三元组、高度不作身份。完成条件：逐集成点断言通过。（FR-07/09；SC-03；V-ATOMICITY；quickstart Q1；层：Integration-PG；证据：探针输出）
 - [ ] T039 [P] [US2] 新建 `internal/withdrawal/outbox_intake_atomicity_integration_test.go`（Integration-PG）：覆盖 T029 集成点提交/回滚；`caller_id + idempotency_key` 重放不产生第二请求也不产生第二事件（同身份 no-op）；Accepted 语义与既有门禁不变；提交失败 0 事件可见。完成条件：断言通过。（FR-05/07；SC-03；V-ATOMICITY；层：Integration-PG；证据：探针输出）
-- [ ] T040 [P] [US2] 新建 `internal/execution/outbox_execution_atomicity_integration_test.go`（Integration-PG）：覆盖 T030 集成点提交/回滚；关键转换与事件同事务；重复投递不触发任何新 intent/nonce/签名/广播（调用计数断言）；非法转换不产生事件。完成条件：断言通过。（FR-05/07；SC-03；V-ATOMICITY；层：Integration-PG；证据：探针输出）
+- [ ] T040 [P] [US2] 新建 `internal/execution/outbox_execution_atomicity_integration_test.go`（Integration-PG）：覆盖 T030 集成点提交/回滚；关键转换与事件同事务；重复投递不触发任何新 intent/nonce/签名/广播（调用计数断言）；非法转换不产生事件。完成条件：断言通过；010 未知结果尝试上 `state_changed` 载荷 attempt 引用 100% 存在（attempt 级引用完整性取证）；目录无法表达已批准状态事实时按 Blockers 节流程回报，不新增业务事件。（FR-05/07；SC-03；V-ATOMICITY；层：Integration-PG；证据：探针输出）
 
 **Checkpoint**: MVP 核心——同事务 Outbox、5 类事件发射、至少一次发布、身份/版本收敛；US2 可独立验证（Q1/Q2）。
 
@@ -146,7 +146,7 @@
 - [ ] T048 [P] [US3] 新建 `internal/events/quarantine_integration_test.go`（Integration-PG）：可重试失败按有界退避重试；超限/不可重试/未知版本/链身份不匹配 → 持久隔离且审计告警 100%，不静默丢弃、不无限阻塞其它事件；修复后重放幂等（效果计数不增）；无界重试次数 0。完成条件：断言通过。（FR-12/14；SC-05；quickstart Q4；V-RETRY-QUARANTINE；层：Integration-PG；证据：隔离/重放记录）
 - [ ] T049 [P] [US3] 新建 `internal/events/replay_boundary_integration_test.go`（Integration-PG）：重放/解阻**反例验证**——重放 `withdrawal.request.received`、`withdrawal.execution.state_changed`、修订类事件后，断言 0 新建提款意图、0 新 nonce 分配、0 新签名、0 新广播（对 007/008/009/010/011 相关表与调用计数取证）；审计行含操作者/范围/理由/结果且 `operation_id` 重复提交返回既有结果；自动重试与人工重放指标分列。完成条件：计数不变断言全绿。（FR-05/14；PD-4；SC-02/05；quickstart Q4；层：Integration-PG；证据：计数不变 + 审计摘录）
 - [ ] T050 [P] [US3] 新建 `internal/events/consumer_kafka_integration_test.go`（Integration-Kafka）：真实 Kafka 下重复/乱序投递、消费者组 rebalance、lag 可观测；以参考消费者 PG 效果计「同一事件有效应用次数 = 1」；「消费者已处理」≠「具备发送资格」；测试与文档禁止「跨系统恰好一次」表述。完成条件：通过。（FR-13/15/22；SC-04/06；quickstart Q2/Q3；层：Integration-Kafka；证据：rebalance/重复运行记录）
-- [ ] T051 [P] [US3] 新建 `internal/events/consumer_contract_test.go`（Contract 层）：模拟上游消费者兼容矩阵——未知可选字段被忽略、同版本向后兼容可用；破坏性变更需新版本 + 兼容窗口；未知/不支持版本 fail-closed 隔离并告警；路由解析正确；边界声明覆盖 FR-16（不保证外部真实账本）。完成条件：兼容矩阵通过。（FR-12/16；contracts/events.md §4、consumer.md §7–8；SC-05/12；层：Contract；证据：兼容矩阵输出）
+- [ ] T051 [P] [US3] 新建 `internal/events/consumer_contract_test.go`（Contract 层，`contract` tag；经 `make test-contract` 独立执行）：模拟上游消费者兼容矩阵——未知可选字段被忽略、同版本向后兼容可用；破坏性变更需新版本 + 兼容窗口；未知/不支持版本 fail-closed 隔离并告警；路由解析正确；边界声明覆盖 FR-16（不保证外部真实账本）。完成条件：兼容矩阵通过。（FR-12/16；contracts/events.md §4、consumer.md §7–8；SC-05/12；层：Contract；证据：兼容矩阵输出）
 
 **Checkpoint**: 消费幂等/进度/隔离/重放独立可验证（Q3/Q4）；PD-4 反例断言成立。
 
@@ -164,7 +164,7 @@
 - [ ] T055 [P] [US4] 新建 `internal/indexer/revision_events_integration_test.go`（Integration-PG）：浅重组影响 Pending/Confirmed 充值——修订事件携带旧身份/新状态或 Orphaned/原因/恢复版本；`revises_event_id` 指向旧事件；同旧 `block_hash` 再 canonical 时 `reinstated` 与新观察区分；与业务转换同事务原子；重复/乱序修订投递幂等。完成条件：通过。（FR-11；SC-07；quickstart Q11；V-REVISION；层：Integration-PG；证据：修订行对照）
 - [ ] T056 [P] [US4] 新建 `internal/execution/execution_revision_events_integration_test.go`（Integration-PG）：链上事实修订发射 `withdrawal.execution.revised` 且修订不触发新发送；重复/乱序不重复转换；修订后的后续发送仍须重验全部门禁（不存在「修订即许可」）。完成条件：发送计数不变。（FR-05/11；SC-07；quickstart Q11；层：Integration-PG；证据：计数断言）
 - [ ] T057 [P] [US4] 新建 `internal/events/revision_consumer_integration_test.go`（Integration-PG）：消费者应用修订后收敛到修订后状态；重复/乱序修订幂等率 100%；0 次把 Orphaned 当有效 canonical；0 新付款意图/发送；修订先于原事件到达时不误用（版本守卫 + 隔离策略）。完成条件：收敛计数通过。（FR-11；SC-07；quickstart Q11；层：Integration-PG；证据：收敛计数）
-- [ ] T058 [P] [US4] 新建 `internal/events/revision_contract_test.go`（Contract 层）：修订事件载荷必填字段（`superseded_identity`、新 canonical 或 Orphaned、原因、`recovery_version`、`revises_event_id`）逐项断言；完成目录 v1 全部 8 类声明/发射一致性收口（与 T032 合并输出 8/8 矩阵）；修订类型语义不得原地变更（FR-12）。完成条件：8/8 矩阵产出。（FR-11/12；contracts/events.md §3/§5；层：Contract；证据：8/8 目录矩阵）
+- [ ] T058 [P] [US4] 新建 `internal/events/revision_contract_test.go`（Contract 层，`contract` tag；经 `make test-contract` 独立执行）：修订事件载荷必填字段（`superseded_identity`、新 canonical 或 Orphaned、原因、`recovery_version`、`revises_event_id`）逐项断言；完成目录 v1 全部 8 类声明/发射一致性收口（与 T032 合并输出 8/8 矩阵）；修订类型语义不得原地变更（FR-12）。完成条件：8/8 矩阵产出。（FR-11/12；contracts/events.md §3/§5；层：Contract；证据：8/8 目录矩阵）
 
 **Checkpoint**: US4 独立可验证（Q11）；修订不改变任何付款语义。
 
@@ -197,11 +197,11 @@
 
 **Independent Test**: 停机期间观察积压与最老等待指标；恢复后观察排空、追赶与再故障；验证 0 丢失、0 重复财务效果、进度可续。（Q7/Q9。）
 
-- [ ] T069 [P] [US6] 新建 `internal/events/capacity.go` 与 `internal/events/capacity_test.go`：容量观测（`outbox_pending_count`/`outbox_pending_oldest_age_seconds` 按事件族，PG 部分索引，**Redis 不参与**）；软/硬边界门禁在**接纳新可控制工作之前**判定；`soft` 起拒绝可控新资金写入（与 T062 同款可重试错误通道）；`hard` 时不拒绝链上已发生事实（从可靠进度暂停、恢复后补扫）；`pending|blocked` 红线（不静默丢弃、不覆盖未发布、不删除）；配置 fail-closed 公式校验（`0 < reserve < soft_limit < hard_limit`；阈值按 capacity.md §5 方法测量）；接纳后事件必然可写（I-CAP）。完成条件：门禁判定与不变量单测通过。（FR-20；PD-2；contracts/capacity.md §1–§3；data-model §6；R13；层：Unit + Integration（T072）；证据：T072）
+- [ ] T069 [P] [US6] 新建 `internal/events/capacity.go` 与 `internal/events/capacity_test.go`：容量观测（`outbox_pending_count`/`outbox_pending_oldest_age_seconds` 按事件族，PG 部分索引，**Redis 不参与**）；软/硬边界门禁在**接纳新可控制工作之前**判定；`soft` 起拒绝可控新资金写入（与 T062 同款可重试错误通道）；`hard` 时：不拒绝链上已发生事实；持久化仍安全时不可拒绝事实继续入 Outbox（`pending` 可超 `hard`），无法安全持久化时从可靠进度暂停、恢复后补扫；**准确表述**：`hard_limit` 为准入闸＋暂停触发器，非物理容量上限（已接纳写入永不因容量拒绝；不得暗示物理容量不会耗尽）；`pending|blocked` 红线（不静默丢弃、不覆盖未发布、不删除）；配置 fail-closed 公式校验（`0 < reserve < soft_limit < hard_limit`；阈值按 capacity.md §5 方法测量）；接纳后事件必然可写（I-CAP）。完成条件：门禁判定与不变量单测通过；hard_limit 语义表述检查通过（准入闸＋暂停触发器，非物理容量上限）。（FR-20；PD-2；contracts/capacity.md §1–§3；data-model §6；R13；层：Unit + Integration（T072）；证据：T072）
 - [ ] T070 [US6] 扩展 `internal/withdrawal/intake.go`（单写者链 T029→T070）：可控新资金写入接入容量软门禁——`soft ≤ pending < hard` 时拒绝（明确可重试错误，与 T062 同通道）+ `capacity_refusals_total{op_class}`；已由 PG 接受的请求与重放不受影响；**不得**让容量判定依赖 Redis；**不得**因容量原因放宽任何既有门禁。完成条件：软边界拒绝 100%、存量继续、0 门禁绕过（T072）。（FR-20；PD-2；contracts/capacity.md §3；层：Integration-PG（T072）；证据：T072）
 - [ ] T071 [P] [US6] 新建 `internal/indexer/capacitypause.go`（不改上游门禁语义）：容量硬边界下若无法安全持久化——按 003/004 可靠进度暂停链上处理并记录可恢复证据，容量恢复后**补扫**（不跳过观察、不拒绝链上已发生事实）；在途提款按既有暂停/对账协议收尾（结果未知先对账），**不新建付款意图**；暂停/补扫状态可观测。完成条件：单测 + 场景记录；补扫连续性断言（T072/T073）。（FR-20；PD-2；contracts/capacity.md §3；层：Integration-PG（T072）/Fault（T073）；证据：暂停与补扫记录）
 - [ ] T072 [P] [US6] 新建 `internal/events/capacity_integration_test.go`（Integration-PG；先以小配置阈值注入）：停机累积至 `pending ≥ soft` → 可控新写入 100% 拒绝且可重试、链上观察/确认/修订继续或按可靠进度暂停（不得拒绝事实）、在途提款完成且事件齐备、`pending` 无「业务提交无事件」缺口、0 静默丢弃/0 覆盖；恢复排空；`pending_count`/`oldest_age` 可观测率 100%。完成条件：通过。（FR-20；SC-09；quickstart Q7；V-CAPACITY；层：Integration-PG；证据：边界行为记录 + 行数对照）
-- [ ] T073 [P] [US6] 新建 `internal/faultdrill/catchup_test.go`（`fault` tag）：恢复排空与消费者追赶；追赶期间再次停 Kafka/Redis → 安全重暂停，0 丢失、0 重复财务效果、进度可续；追赶时间可观测（数值待测，不编造）；发布器恢复排空有界、消费者 lag 下降可观测。完成条件：通过。（FR-21/22；SC-09/10；quickstart Q9；V-CATCHUP；层：Fault；证据：时间线与计数）
+- [ ] T073 [P] [US6] 新建 `internal/faultdrill/doc.go`（无 tag，保证包可构建）、`internal/faultdrill/harness.go`（`//go:build fault`，test-support：故障注入原语（停/恢复 Redis、Kafka；双停）、场景编排、指标快照采集、证据落盘（日志/导出/环境规格 + commit）骨架；单写者链 T073→T019）与 `internal/faultdrill/catchup_test.go`（`fault` tag）：恢复排空与消费者追赶；追赶期间再次停 Kafka/Redis → 安全重暂停，0 丢失、0 重复财务效果、进度可续；追赶时间可观测（数值待测，不编造）；发布器恢复排空有界、消费者 lag 下降可观测。完成条件：`go build ./...` 通过（B8 退出前提）；`make test-fault` 可运行追赶骨架场景并通过。（FR-21/22；SC-09/10；quickstart Q9；V-CATCHUP；层：Fault；证据：时间线与计数）
 - [ ] T074 [P] [US6] 新建 `internal/events/publisher_catchup_integration_test.go`（Integration-Kafka）：Kafka 恢复后发布器从持久 `pending` 排空（批量/并发/退避有界，不无界冲击 broker/PG）；已 ack 项保持 `published`、未确认项回退避；再次故障 0 丢失；排空过程 `outbox_pending_count`/`oldest_age` 可观测。完成条件：通过。（FR-21；SC-09；quickstart Q2/Q9；层：Integration-Kafka；证据：排空曲线记录）
 
 **Checkpoint**: US6 独立可验证（Q7/Q9）；PD-2 停新保在途、补扫、在途完成三者不矛盾。
@@ -219,7 +219,7 @@
 - [ ] T077 [US7] 新建 `internal/perf/bench_test.go`（`perf` tag）与 `docs/evidence/013/benchmark_report_template.md`：执行 A/B 同负载同故障对照并产出报告（中位数/分位数/方差、故障期降级对比、追赶时间、资源占用、结论与置信限制）；未测数值 0 次表述为「已达标」，一律标「待测/待裁决」；Kafka 价值结论只在此报告产出后成立；若结果支持调整范围，MUST 另行提交用户决定（PD-3，不自动删减）。完成条件：报告 100% 产出且字段齐全、绑定 commit 与环境规格。（FR-25；SC-11；adr.md §3/§4；层：Performance；证据：`docs/evidence/013/` 报告）
 - [ ] T078 [P] [US7] 新建 `internal/app/e2e_deposit_test.go`（`e2e` tag，全栈 + Anvil；执行批次 B5）：核心充值流 `链上交易 → 索引 → 观测 → 确认 → 事件发射/投递/消费` 全链通过；与 PG-only 基线同核心语义；事件与业务状态一致（同事务）；无 mock 替代验收证据。完成条件：全链通过。（FR-26/28；constitution X/XI；verification.md §3；SC-03；层：E2E；证据：全链运行记录）
 - [ ] T079 [P] [US7] 新建 `internal/app/e2e_withdrawal_test.go`（`e2e` tag，全栈 + Anvil；执行批次 B5）：核心提现流 `API 请求 → 持久化接收 → … → 执行 → 事件` 通过；重复请求不产生第二请求/事件；`withdrawal.request.received` 不改变 Accepted 语义。完成条件：全链通过。（FR-05/26；verification.md §3；层：E2E；证据：全链运行记录）
-- [ ] T080 [US7] 新建 `internal/faultdrill/drill_test.go`（`fault` tag；执行批次 B9）：双故障演练主场景——正常 → 仅 Redis → 仅 Kafka → 双故障（关 Redis+Kafka，保 PG+本地链）→ 恢复追赶；七类操作逐项核对 + 恢复后事件补齐/进度恢复/0 重复提款意图/0 重复链上付款/0 孤儿永久入账/0 权威状态丢失；证据包覆盖矩阵、模拟消费者入账幂等证据与 FR-16 边界声明；门禁绕过 0。完成条件：通过。（FR-04/05/06/26；SC-01/02/12；quickstart Q8；V-DRILL；层：Fault；证据：演练报告 + 审计摘录）
+- [ ] T080 [US7] 新建 `internal/faultdrill/drill_test.go`（`fault` tag；执行批次 B9；依赖 T019 harness）：双故障演练主场景——正常 → 仅 Redis → 仅 Kafka → 双故障（关 Redis+Kafka，保 PG+本地链）→ 恢复追赶；七类操作逐项核对 + 恢复后事件补齐/进度恢复/0 重复提款意图/0 重复链上付款/0 孤儿永久入账/0 权威状态丢失；证据包覆盖矩阵、模拟消费者入账幂等证据与 FR-16 边界声明；门禁绕过 0。完成条件：通过。（FR-04/05/06/26；SC-01/02/12；quickstart Q8；V-DRILL；层：Fault；证据：演练报告 + 审计摘录）
 - [ ] T081 [P] [US7] 新建 `internal/faultdrill/ledger_evidence_test.go`（`fault` tag）：「不重复入账」证据——重复投递下模拟上游消费者账本恰好一次入账；证据明确声明只覆盖本项目事件身份/版本/投递语义 + 消费者幂等契约 + 参考消费者，**不保证外部真实账本**；0 次对外部账本的保证声明。完成条件：入账计数与边界声明齐备。（FR-16；SC-12；verification.md §5；层：Fault/证据审查；证据：入账计数 + 边界声明）
 
 **Checkpoint**: US7 独立可验证（Q8/Q10）；对照报告与演练证据齐备且无未测宣称。
@@ -230,7 +230,7 @@
 
 **Purpose**: CI 接入、耗时核验、分层/DeDo 审计、quickstart 证据汇总、文档同步与覆盖收口。
 
-- [ ] T082 [P] 扩展 `.github/workflows/ci.yml`：按 verification.md §3–§4 接入普通 PR 必需检查——`internal/events/**`/迁移 `000015` → Unit + Integration-PG + Contract + Race；`internal/cache/**`/`internal/ratelimit/**` → Unit + Integration-Redis（缺 Docker 时降级为 Unit + 标记待跑）；上游集成点文件 → Unit + Integration-PG + 受影响资金安全回归（幂等/门禁/重放断言）+ E2E 核心；发布器/消费者运行时 → Unit + Integration-PG + Integration-Kafka；复用既有 setup-go 缓存、`docker info` 校验与凭据 masking 模式；**MUST NOT** 在普通 PR 启动完整 Fault/Perf。（FR-28；verification.md §4；层：CI；证据：workflow diff + PR 运行记录）
+- [ ] T082 [P] 扩展 `.github/workflows/ci.yml`：按 verification.md §3–§4 接入普通 PR 必需检查——`internal/events/**`/迁移 `000015` → Unit + Contract（`make test-contract`）+ Integration-PG + Race；事件契约语义变更（`contracts/events.md`、`internal/events/catalog.go`、信封/schema 版本）→ Contract（`make test-contract`）+ 参考消费者兼容回归（T051/T058），破坏性变更必须新版本 + 兼容窗口（FR-12），不得原地变更；`internal/cache/**`/`internal/ratelimit/**` → Unit + Integration-Redis（缺 Docker 时 Unit 照跑 + Integration-Redis 记『待运行』：PR 打 `ci:integration-pending` 标签并阻止合并，后续必需 run 补跑转绿后解除）；上游集成点文件 → Unit + Integration-PG + 受影响资金安全回归（幂等/门禁/重放断言）+ E2E 核心；发布器/消费者运行时 → Unit + Integration-PG + Integration-Kafka；复用既有 setup-go 缓存、`docker info` 校验与凭据 masking 模式；**MUST NOT** 在普通 PR 启动完整 Fault/Perf。完成条件：workflow diff + PR 运行记录；Docker 不可用时的『待运行』记录机制、补跑责任与关闭条件（label＋必需后续 run／阻塞合并）写入 workflow 注释并与 verification.md §4 一致；未运行检查不得标通过、不得静默跳过。（FR-28；verification.md §3–§4；层：CI；证据：workflow diff + PR 运行记录）
 - [ ] T083 [P] 新建 `.github/workflows/fault-perf.yml`：Fault Injection 与 Performance 独立运行（定时/手动/发布前门禁），失败不阻塞普通 PR、但阻塞对应发布声明（无证据不得宣称 FR-25/26 达标）；复用现有 Docker/testcontainers 自供与镜像固定策略。完成条件：手动触发可跑通；与普通 PR 触发矩阵分离可验证。（FR-28；verification.md §4；层：CI；证据：独立运行记录）
 - [ ] T084 [P] 实测并记录 CI 耗时预算：在目标 runner 上先测各层基线（PG-only/全栈）→ 预算 = max(基线 × 显式余量, 固定下限) 且不超过层 CI timeout 硬上限；余量系数与 timeout 来源写入 `docs/evidence/013/ci_budget.md` 并同步 CI 配置；**MUST NOT** 编造分钟数（未实测一律标待测）。完成条件：基线与预算记录可复核。（FR-28；verification.md §4；层：CI/测量；证据：基线测量记录 + 预算配置）
 - [ ] T085 [P] 新建 `internal/app/layering_audit_test.go`（Unit）：分层独立性审计——Unit 不依赖外部中间件；各 Integration 层按组件可独立运行；Fault/Perf 不在普通 PR 触发；`go.mod`/`compose.yaml`/CI 中 **0 处** Debezium/CDC/Kubernetes 运行或测试依赖（ADR §5/FR-28）；`internal/events` import 边界（不 import RPC/signer/上游 writer）。完成条件：扫描全部通过，违反即失败。（FR-03/28；adr.md §5；constitution XIII；层：Unit/结构；证据：扫描输出）
@@ -245,9 +245,10 @@
 | 共享载体 | 单一 owner 任务链（顺序编辑，禁止并行） | 合流检查 | 下游门禁 |
 |---|---|---|---|
 | `migrations/000015_event_infrastructure.sql` | T008 | T009（up/down/up + 命名约束探针 + additive-only diff） | B3+ 全部生产者/消费者批次 |
-| 事件契约（`internal/events/catalog.go`、`append.go`、信封/兼容测试） | T010 → T011；`events_contract_test.go` T014 | T014 × T009 × T015 三方同绿 | B3+；任何语义变更须新版本 + 兼容窗口 |
+| 事件契约（`internal/events/catalog.go`、`append.go`、信封/兼容测试） | T010 → T011；`events_contract_test.go` T014 | T014 × T009 × T015 × T016 四方同绿 | B3+；任何语义变更须新版本 + 兼容窗口 |
 | 资金状态文件（生产者集成） | `internal/indexer/reorgcommit.go`：T028 → T052（US4 修订）；`internal/indexer/depositcommit.go`：T026；`internal/indexer/confirmcommit.go`：T027；`internal/withdrawal/intake.go`：T029 → T070；`internal/execution/intent.go`+`advance.go`：T030；`internal/execution/revision.go`：T053 | T038/T039/T040（域原子性探针）+ T085（import 边界） | 每域探针绿后方可合并到主线批次 |
 | 事件运行时 | `internal/events/publisher.go` T033；`internal/events/consumer.go` T041 → T054；`internal/events/quarantine.go` T042 → T045；`internal/events/audit.go` T035；`internal/events/capacity.go` T069 | T036/T046/T048/T072 对应层验证 | 对应故事 checkpoint |
+| 故障演练基建 | `internal/faultdrill/doc.go`、`harness.go`：T073（B8 创建骨架）→ T019（B9 扩展编排） | T073 完成条件：`go build ./...` 通过、`make test-fault` 骨架可运行 | B9 矩阵任务 T020–T025/T080 |
 | 应用接线 | `cmd/txharbor/main.go`：T007（唯一 owner）；`internal/app/eventpublisher.go` T034；`internal/app/eventconsumer.go` T044；`internal/app/eventsadmin.go` T031 → T045；`internal/app/serve.go` T018 → T063 | 各 batch 退出证据 | 后续批次只扩展 `internal/app`，不回改 main.go |
 | 环境/构建 | `compose.yaml` T004；`Makefile` T005；`go.mod` T002；`internal/config/config.go` T001 → T075（仅新增告警键）；`internal/metrics/*` T003 → T075 | T085 分层审计 | CI 批次 B11 |
 
@@ -261,11 +262,11 @@
 
 - **Setup (Phase 1)**: 无依赖，全部 [P]（文件互不相交）。
 - **Foundational (Phase 2)**: 依赖 Setup；**阻塞全部用户故事**；T008→T009 顺序，T011 依赖 T010，T014/T015 依赖 T010/T011。
-- **用户故事（Phase 3–9）**: 均依赖 Foundational 合流（T009×T014×T015）。故事内部依赖如下；同一优先级内按真实前置排序执行：
+- **用户故事（Phase 3–9）**: 均依赖 Foundational 合流（T009×T014×T015×T016）。故事内部依赖如下；同一优先级内按真实前置排序执行：
   - **US2（P1，MVP）**: B2 合流后进入；T026–T030 可并行，T032–T034 依赖 T011/T012，T035 依赖 T012，验证任务依赖对应实现。
   - **US3（P1）**: 依赖 US2 的发布器（需要可消费事件）；T041 先行，T042–T044 紧随，T045 依赖 T042，验证任务依赖 T041/T044。
   - **US4（P1）**: 依赖 US2 的目录/Append 与 US3 的消费者版本守卫；T052 依赖 T028（单写者链），T054 依赖 T041。
-  - **US1（P1，闭包）**: T017/T018 可与 B2–B7 并行开发；T021–T025 进入条件为 B3–B8 全部合流（矩阵载体来自各故事）。
+  - **US1（P1，闭包）**: T017/T018 可与 B2–B7 并行开发；B9 中 T019 先行（补齐 T073 于 B8 创建的 faultdrill harness），T020–T025/T080 依赖 T019（同包 harness 与故障环境，顺序执行，不标 [P]）；T021–T025 进入条件为 B3–B8 全部合流（矩阵载体来自各故事）。
   - **US5（P2）**: 依赖 Foundational；与 B3–B6 无强依赖，可并行（仅失效器消费事件时依赖 US2 事件流）。
   - **US6（P2）**: 依赖 US2（Outbox 观测/发布器）与 US5（错误通道）；T070 依赖 T029（单写者链）。
   - **US7（P2）**: T078/T079 于 B5 执行（消费者就绪）；T080 于 B9 执行（依赖 US1）；T075–T077/T081 于 B10 执行。
@@ -275,15 +276,15 @@
 
 ```text
 B1: T001..T007 ─┬─▶ T008 ─▶ T009 ──────────────┐
-                ├─▶ T010 ─▶ T011 ─▶ T014/T015/T016 ┤─▶ 合流（迁移×契约×Append）
+                ├─▶ T010 ─▶ T011 ─▶ T014/T015/T016 ┤─▶ 合流（迁移×契约×Append×import 边界）
                 └─▶ T012/T013 ─────────────────┘
 B3: T026..T030 ─▶ T038/T039/T040（域原子性）；T031（cutover/回退）；T032（5 类一致性）
 B4: T033 ─▶ T034 ─▶ T036/T037；T035（对账审计）
 B5: T041 ─▶ T044 ─▶ T046..T051；T042 ─▶ T045；T043；T078/T079（E2E）
 B6: T052/T053/T054 ─▶ T055/T056/T057/T058（8/8 目录收口）
 B7: T059/T061 ─▶ T060/T062 ─▶ T063/T064 ─▶ T065..T068；消费 T017/T018
-B8: T069 ─▶ T070/T071 ─▶ T072; T073/T074（追赶与再故障）；消费 T018
-B9: T019..T025（五态矩阵）+ T080（V-DRILL 终验）
+B8: T069 ─▶ T070/T071 ─▶ T072; T073（faultdrill 基建 + 追赶）/T074；消费 T018
+B9: T019（harness 补齐，先行）─▶ T020..T025（五态矩阵）+ T080（V-DRILL 终验）；依赖 B8 T073
 B10: T075/T076 ─▶ T077；T081（账本边界证据）
 B11: T082/T083/T084（CI）/ T085/T086/T087/T088（收口）
 ```
@@ -297,6 +298,7 @@ B11: T082/T083/T084（CI）/ T085/T086/T087/T088（收口）
 - US4：T053/T055–T058 可并行；T052/T054 为单写者链。
 - US5：T059/T061 可并行；T065–T068 可并行（T064 依赖 T061/T062）。
 - US6：T069/T071 可并行；T072–T074 可并行（依赖 T069/T070）。
+- US1：T017/T018 可并行；B9 中 T019 先行，T020–T025/T080 依赖 T019 的 harness（同包同故障环境，顺序执行，不标 [P]）。
 - US7/Polish：各验证与审计文件互不相交，可并行。
 
 ---
@@ -346,7 +348,7 @@ Task: "T068 invalidation in internal/cache/invalidator_integration_test.go"
 
 ### MVP first
 
-1. Phase 1 Setup → Phase 2 Foundational（CRITICAL，含迁移×契约×Append 合流检查）。
+1. Phase 1 Setup → Phase 2 Foundational（CRITICAL，含迁移×契约×Append×import 边界合流检查）。
 2. Phase 4 US2 → B3 生产者集成 → B4 发布器：最小可演示增量（业务状态与事件同事务、至少一次发布、身份/版本收敛）。
 3. Phase 5 US3：消费幂等/进度/隔离/重放 + 核心 E2E（B5）。
 4. 三个 P1（US2/US3/US4）与 Redis（US5）验证通过后再推进 B8–B9。
@@ -361,13 +363,13 @@ Setup + Foundational → US2（MVP）→ US3 → US4 → US5（可与 US2–US4 
 | 节点 | 验证命令（示例） | 提交信息（Conventional Commits，无 attribution trailer） |
 |---|---|---|
 | B1 | `make build && make test && make test-integration`（迁移探针） | `feat(events): add event infrastructure scaffolding and 000015 schema` |
-| B2 | `make test && make test-integration`（events 包） | `feat(events): add transactional outbox core and event contract` |
+| B2 | `make test && make test-contract && make test-integration`（events 包） | `feat(events): add transactional outbox core and event contract` |
 | B3 | `make test-integration`（indexer/withdrawal/execution 探针） | `feat(events): emit outbox events from deposit and withdrawal transactions` |
 | B4 | `make test && make test-integration-kafka` | `feat(events): add outbox publisher with lease claim and crash recovery` |
-| B5 | `make test-integration && make test-e2e` | `feat(events): add idempotent consumer with quarantine and audited replay` |
-| B6 | `make test-integration` | `feat(events): emit and converge reorg revision events` |
+| B5 | `make test-contract && make test-integration && make test-e2e` | `feat(events): add idempotent consumer with quarantine and audited replay` |
+| B6 | `make test-contract && make test-integration` | `feat(events): emit and converge reorg revision events` |
 | B7 | `make test-integration-redis && make test` | `feat(cache): add non-authoritative cache and fail-closed rate limiting` |
-| B8 | `make test-integration && make test-fault` | `feat(events): add outbox capacity guard and catch-up rescan` |
+| B8 | `make build && make test-integration && make test-fault` | `feat(events): add outbox capacity guard and catch-up rescan` |
 | B9 | `make test-fault` | `test(fault): add five-state failure matrix drills` |
 | B10 | `make test-perf`（独立，不阻塞普通 PR） | `perf(events): add PG-only baseline and full-stack benchmark` |
 | B11 | CI 触发矩阵核验 + 审计测试 | `ci(events): add layered checks and closeout records` |

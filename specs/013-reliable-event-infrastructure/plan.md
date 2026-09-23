@@ -27,7 +27,7 @@
 
 **Storage**: PostgreSQL 为唯一权威（Charter III）。新增对象在 `migrations/000015_event_infrastructure.sql`（纯增量 DDL，编号在 `000014` 之后；见表清单见 [data-model.md](data-model.md)）：`outbox_events`、`consumer_progress`、`consumer_inbox`、`consumer_versions`、`consumer_quarantine`、`event_ops_audit`、`event_system_state`。Redis 仅承载缓存/限流/临时协调（非权威）；Kafka 仅承载事件投递（非权威）；两者丢失不得使权威状态不可恢复。
 
-**Testing**: 分层（FR-28，细则 [verification.md](verification.md)）——Unit（无外部中间件）；Integration 分组件：PostgreSQL（沿用 `-tags integration`）/ Redis（新 tag）/ Kafka（新 tag）；Contract（事件信封、schema 版本、消费者兼容）；E2E（充值/提现核心流）；Fault Injection 与 Performance 独立运行。命令设计：`make test`、`make test-race`、`make test-integration` 保持现状；新增 `test-integration-redis`、`test-integration-kafka`、`test-e2e`、`test-fault`、`test-perf`（实现批次添加，本文定义触发与预算方法）。本地编排：compose 增加 `redis`、`kafka`（KRaft 单节点，实现阶段固定镜像 tag），以 profile 保持 PG-only 基线可运行。
+**Testing**: 分层（FR-28，细则 [verification.md](verification.md)）——Unit（无外部中间件）；Integration 分组件：PostgreSQL（沿用 `-tags integration`）/ Redis（新 tag）/ Kafka（新 tag）；Contract（事件信封、schema 版本、消费者兼容）；E2E（充值/提现核心流）；Fault Injection 与 Performance 独立运行。命令设计：`make test`、`make test-race`、`make test-integration` 保持现状；新增 `test-contract`、`test-integration-redis`、`test-integration-kafka`、`test-e2e`、`test-fault`、`test-perf`（实现批次添加，本文定义触发与预算方法）。本地编排：compose 增加 `redis`、`kafka`（KRaft 单节点，实现阶段固定镜像 tag），以 profile 保持 PG-only 基线可运行。
 
 **Target Platform**: Linux server；单部署、单链（沿用 v1 范围）；本地确定性环境 Anvil + PostgreSQL + Redis + Kafka + Docker Compose（Charter X）。
 
@@ -168,7 +168,7 @@
 
 ### D10 — 测试分层与 CI 成本（FR-28；重点 7）
 
-分层与触发见 [verification.md](verification.md) §3–4：Unit 无中间件；Integration 按 PG/Redis/Kafka 分组件独立运行；Contract 验证事件格式/版本/消费者兼容；E2E 核心充提流；Fault Injection 与 Performance 独立运行、不在普通 PR 触发；受影响资金安全回归（幂等、门禁、重放断言）在普通 PR 仍运行。预算给方法（同 runner 基线的倍数 + 硬上限来自 CI timeout），不编造分钟数。本步不改 ci.yml，只定义实现批次的接入要求。
+分层与触发见 [verification.md](verification.md) §3–4：Unit 无中间件；Integration 按 PG/Redis/Kafka 分组件独立运行；Contract（无中间件，`make test-contract` 独立入口）验证事件格式/版本/消费者兼容；E2E 核心充提流；Fault Injection 与 Performance 独立运行、不在普通 PR 触发；受影响资金安全回归（幂等、门禁、重放断言）在普通 PR 仍运行。预算给方法（同 runner 基线的倍数 + 硬上限来自 CI timeout），不编造分钟数。本步不改 ci.yml，只定义实现批次的接入要求。
 
 ## Seven-key closure map（任务重点闭合项 → 载体）
 
@@ -241,7 +241,7 @@ migrations/
 
 compose.yaml             # IMPLEMENTATION BATCH: add redis + kafka (KRaft) under a profile,
                          # keeping base PG+Anvil as the PG-only baseline
-Makefile                 # IMPLEMENTATION BATCH: test-integration-redis/kafka, test-e2e/fault/perf
+Makefile                 # IMPLEMENTATION BATCH: test-contract, test-integration-redis/kafka, test-e2e/fault/perf
 ```
 
 **Structure Decision**: 沿用 `internal/<domain>` 单包一域布局（009/011 先例）与子命令接线模式；`internal/events` 拥有 outbox/发布/消费/隔离/审计，不 import 上游 writer 包与 RPC/dial 包（import 边界测试）；上游集成只经同一事务内的 `Append` 调用与只读查询；`internal/cache`、`internal/ratelimit` 独立可测且不持有权威状态。无新监听器：`events-admin`/`event-publisher`/`event-consumer` 均为子命令循环。

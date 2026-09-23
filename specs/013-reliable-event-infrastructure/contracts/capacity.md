@@ -28,6 +28,8 @@
 
 红线：MUST NOT 静默丢弃事件、MUST NOT 覆盖未发布事件、MUST NOT 删除 `pending|blocked`、MUST NOT 让缓存/Redis 参与判定、MUST NOT 因容量问题放宽任何上游门禁（PD-2/FR-20/SC-09）。
 
+**hard_limit 语义（准确表述）**：`hard_limit` 是**准入闸 + 暂停触发器**，不是物理容量上限，也不承诺存储永不耗尽。已接纳单元的写入 MUST NOT 因容量被拒绝（I-CAP，§2）；链上已发生事实 MUST NOT 被拒绝，因此 `pending` 可以超过 `hard_limit`：持久化仍安全时不可拒绝的链上事实继续入 Outbox；无法安全持久化（含物理存储/写入能力受限）时从可靠进度暂停、恢复后补扫。MUST NOT 把 `hard_limit` 表述为物理容量上限，也不得暗示物理容量不会耗尽（物理存储真正耗尽属于「无法安全持久化」，按暂停/补扫处置，绝不静默丢弃）。
+
 ## §4 验收断言（Fault/Integration 层）
 
 - 停机注入期间：已提交事件丢失数 0；`outbox_pending_count`/`oldest_age` 可观测率 100%。

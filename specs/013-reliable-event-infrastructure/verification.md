@@ -68,12 +68,12 @@
 | Integration-PG | Outbox 原子性、冲突、领取/租约、inbox/版本/进度、容量查询、重放审计 | PostgreSQL（testcontainers，现状 `-tags integration`） | `make test-integration`（现状可用） | 独立 |
 | Integration-Redis | 缓存失效/epoch/回源有界、限流脚本/失效处置 | Redis 容器 | `make test-integration-redis`（新增） | 独立 |
 | Integration-Kafka | 投递确认、重复/乱序、消费者组/rebalance、lag | Kafka 容器 | `make test-integration-kafka`（新增） | 独立 |
-| Contract | 信封/目录/schema 版本/兼容矩阵/消费者兼容（含未知版本 fail-closed）、参考消费者 | PG（+可无 Kafka，直接投喂） | `make test` + `-tags integration` 子集（新增 contract 用例） | 独立 |
+| Contract | 信封/目录/schema 版本/兼容矩阵/消费者兼容（含未知版本 fail-closed）、参考消费者 | 无中间件（纯 Go，直接投喂 fixture；无 Docker） | `make test-contract`（新增；tag `contract`，T014/T051/T058 归属该 tag） | 独立 |
 | E2E | 充值流（链→索引→识别→确认→事件）与提现流（API→…→执行→事件）核心路径 | 全栈 + Anvil | `make test-e2e`（新增） | 独立 |
 | Fault Injection | V-PUBLISHER/V-RATELIMIT/V-CAPACITY/V-CATCHUP/V-DRILL（含关 Redis+Kafka） | 全栈 + 故障注入 | `make test-fault`（新增） | 独立，不进普通 PR |
 | Performance | V-BENCH 对照报告（p95/p99/吞吐/资源/追赶） | 全栈 | `make test-perf`（新增） | 独立，不进普通 PR |
 
-分层纪律：Unit 不依赖外部中间件；各 Integration 层按组件独立可运行；普通 Go 改动不默认启动全部中间件/本地链/全演练（FR-28）。Debezium 不在任何层。
+分层纪律：Unit 不依赖外部中间件；Contract 无中间件、经 `make test-contract` 独立运行（tag `contract`）；各 Integration 层按组件独立可运行；普通 Go 改动不默认启动全部中间件/本地链/全演练（FR-28）。Debezium 不在任何层。
 
 ## 4. PR 回归触发与预算（方法，不编造分钟数）
 
@@ -81,13 +81,16 @@
 
 | 变更路径 | 必需检查（普通 PR） | 独立检查（定时/手动/发布前） |
 |---|---|---|
-| `internal/events/**`、迁移 `000015` | Unit + Integration-PG + Contract + Race | Fault、Perf、V-DRILL |
-| `internal/cache/**`、`internal/ratelimit/**` | Unit + Integration-Redis（缺 Redis 时降级为 Unit + 标记待跑） | Fault、Perf、V-DRILL |
+| `internal/events/**`、迁移 `000015` | Unit + Contract（`make test-contract`）+ Integration-PG + Race | Fault、Perf、V-DRILL |
+| 事件契约语义（`contracts/events.md`、`internal/events/catalog.go`、信封/schema 版本） | Contract（`make test-contract`）+ 参考消费者兼容回归（T051/T058）；破坏性变更须新版本 + 兼容窗口（FR-12） | Fault、Perf、V-DRILL |
+| `internal/cache/**`、`internal/ratelimit/**` | Unit + Integration-Redis；缺 Docker 时 Unit 照跑、Integration-Redis 记『待运行』（`ci:integration-pending` 标签 + 阻止合并，后续必需 run 补跑转绿后解除；不得标通过/静默跳过） | Fault、Perf、V-DRILL |
 | 上游集成点文件（indexer/withdrawal/execution 等） | Unit + Integration-PG + 受影响资金安全回归（幂等/门禁/重放断言）+ E2E 核心 | Fault、Perf |
 | 发布器/消费者运行时 | Unit + Integration-PG + Integration-Kafka | Fault、Perf |
 | 文档/规格目录 | 现有 docs 检查 | — |
 
 **受影响资金安全回归**（MUST 仍运行）：幂等（重复投递/重复请求）、门禁不被绕过、重放不产生新付款动作、原子性断言——即便变更「看起来」不相关，只要触及集成点或事件运行时即触发。
+
+**『待运行』纪律（Docker/中间件不可用）**：任何因环境缺失未运行的检查一律记『待运行』并阻断合并（label + 必需后续 run），不得呈现为通过、不得静默跳过；补跑必须使用真实中间件与真实迁移（mock/double 不得作为验收证据）；『待运行』记录、补跑责任与关闭条件由 T082 在 workflow 中固化并与本表一致。
 
 **预算方法**：在目标 runner 上先测基线耗时（各层 × PG-only/全栈），预算 = max(基线 × 显式余量, 固定下限) 且不超过层 CI timeout 硬上限；余量系数与 timeout 在实现批次按测量写入 CI 配置并记录来源。本文件不写具体分钟数（未实测）。
 
