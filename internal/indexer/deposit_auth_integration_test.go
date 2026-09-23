@@ -1640,6 +1640,10 @@ func TestDepositAuthD11SameInstanceOldRevision(t *testing.T) {
 			done <- outcome{res: res, err: err}
 		}()
 
+		// TODO(shared-pg): this poll reads cluster-wide pg_stat_activity. Safe
+		// while package indexer runs serially against its own per-test
+		// databases; revisit before any cross-package container sharing or
+		// t.Parallel (indexer_shared_pg_test.go).
 		waitUntil(t, time.Now().Add(10*time.Second), "authorization DELETE to park on the held pause row lock", func() bool {
 			var waiting bool
 			if err := pool.QueryRow(ctx, `

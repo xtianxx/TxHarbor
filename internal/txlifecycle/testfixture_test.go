@@ -18,6 +18,7 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/crypto"
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/testcontainers/testcontainers-go"
 	"github.com/testcontainers/testcontainers-go/modules/postgres"
@@ -27,13 +28,58 @@ import (
 	"github.com/xtianxx/txharbor/internal/eth"
 )
 
-// startPG boots a real PostgreSQL container (skips, never passes, without
-// Docker) and applies every embedded migration. (T019 scratch DB only.)
+// startPG creates a fresh, uniquely named database inside the package-wide
+// PostgreSQL container booted by TestMain (txlifecycle_shared_pg_test.go),
+// applies every embedded migration to it, and returns the derived DSN. It
+// never returns sharedBaseDSN. (T019 scratch DB only.)
+//
+// Docker gating moved to TestMain: when no provider is healthy TestMain exits
+// 0 before m.Run, so the package is skipped (never silently passed) without a
+// per-test container. The returned DSN is private to this call: the database
+// is dropped in t.Cleanup (WITH (FORCE)) unless TXHARBOR_KEEP_DB=1 or the test
+// failed, in which case its name and DSN are logged for triage.
 func startPG(t *testing.T) string {
+	t.Helper()
+	ctx := context.Background()
+	if adminPool == nil || sharedBaseDSN == "" {
+		t.Fatal("shared postgres not initialized: TestMain must run this package with -tags integration")
+	}
+
+	dbName := uniqueTxLifecycleTestDBName(t)
+	// Serialize CREATE DATABASE: PostgreSQL serializes on the template
+	// database, so ordered creation avoids template1 lock contention.
+	txlifecycleDBMu.Lock()
+	_, err := adminPool.Exec(ctx, "CREATE DATABASE "+pgx.Identifier{dbName}.Sanitize())
+	txlifecycleDBMu.Unlock()
+	if err != nil {
+		t.Fatalf("create test database %s: %v", dbName, err)
+	}
+
+	dsn, err := deriveTxLifecycleDSN(sharedBaseDSN, dbName)
+	if err != nil {
+		_ = dropTxLifecycleTestDB(ctx, dbName)
+		t.Fatalf("derive dsn for %s: %v", dbName, err)
+	}
+
+	opts := db.MigrateOptions{DSN: dsn, LockTimeout: 10 * time.Second, ConnectTimeout: 10 * time.Second}
+	if err := db.MigrateUp(ctx, opts, io.Discard); err != nil {
+		_ = dropTxLifecycleTestDB(ctx, dbName) // never leak a half-migrated database
+		t.Fatalf("migrate up %s: %v", dbName, err)
+	}
+	t.Cleanup(func() { cleanupTxLifecycleTestDB(t, dbName, dsn) })
+	return dsn
+}
+
+// startPGDedicated boots a dedicated PostgreSQL container (skips, never
+// passes, without Docker) and applies every embedded migration. It is reserved
+// for the whitelisted lanes that must not share the package-wide container:
+// the crash matrix (hard-killed re-exec children) and the schema-destructive
+// tests. Everywhere else startPG is the entry point.
+func startPGDedicated(t *testing.T) string {
 	t.Helper()
 	testcontainers.SkipIfProviderIsNotHealthy(t)
 	ctx := context.Background()
-	ctr, err := postgres.Run(ctx, "postgres:18.6-trixie",
+	ctr, err := postgres.Run(ctx, txlifecyclePGImage,
 		postgres.WithDatabase("txharbor"),
 		postgres.WithUsername("txharbor"),
 		postgres.WithPassword("txharbor"),
@@ -138,9 +184,20 @@ type env struct {
 	devKey *ecdsa.PrivateKey
 }
 
+// newEnv opens one migrated scratch database derived from the package-wide
+// PostgreSQL container (startPG -> TestMain, txlifecycle_shared_pg_test.go).
 func newEnv(t *testing.T) *env {
 	t.Helper()
 	return newEnvWithDSN(t, startPG(t))
+}
+
+// newDedicatedEnv opens one migrated scratch database on a dedicated
+// PostgreSQL container. It is reserved for the whitelisted schema-destructive
+// tests (they DROP/ALTER tables on purpose) so the shared container is never
+// exposed to their blast radius.
+func newDedicatedEnv(t *testing.T) *env {
+	t.Helper()
+	return newEnvWithDSN(t, startPGDedicated(t))
 }
 
 // newEnvWithDSN opens an env on an already-migrated scratch database (the

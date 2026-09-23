@@ -6,8 +6,9 @@
 //
 // Every database assertion here is a raw-SQL probe; no withdrawal intake/grant
 // classifier (ValidateAmount, CanonicalAddress, ...) is exercised. Each test
-// boots its own isolated scratch PostgreSQL container via testcontainers and
-// terminates it in t.Cleanup.
+// derives its own isolated scratch database inside the package-wide PostgreSQL
+// container booted by TestMain (withdrawal_shared_pg_test.go) and drops it in
+// t.Cleanup.
 package withdrawal
 
 import (
@@ -23,13 +24,11 @@ import (
 	"testing/fstest"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	_ "github.com/jackc/pgx/v5/stdlib" // database/sql driver for the raw probes
 	"github.com/pressly/goose/v3"
 	"github.com/pressly/goose/v3/lock"
-	"github.com/testcontainers/testcontainers-go"
-	"github.com/testcontainers/testcontainers-go/modules/postgres"
-	"github.com/testcontainers/testcontainers-go/wait"
 
 	"github.com/xtianxx/txharbor/internal/db"
 	"github.com/xtianxx/txharbor/migrations"
@@ -64,27 +63,34 @@ var withdrawalHistoricalMigrations = []string{
 	"migrations/000006_reorg_recovery.sql",
 }
 
-// withdrawalStartPostgres boots a real PostgreSQL container and returns its
-// DSN. Skips (never passes) when no Docker provider is available.
+// withdrawalStartPostgres creates a fresh, uniquely named database inside the
+// package-wide PostgreSQL container booted by TestMain
+// (withdrawal_shared_pg_test.go) and returns the derived DSN. It never returns
+// sharedBaseDSN. It does not migrate: callers apply the migration range they
+// need (grantSetup applies the full embedded chain, the migration tests pin
+// their own subset), exactly as before.
 func withdrawalStartPostgres(t *testing.T) string {
 	t.Helper()
-	testcontainers.SkipIfProviderIsNotHealthy(t)
 	ctx := context.Background()
-	ctr, err := postgres.Run(ctx, "postgres:18.6-trixie",
-		postgres.WithDatabase("txharbor"),
-		postgres.WithUsername("txharbor"),
-		postgres.WithPassword("txharbor"),
-		testcontainers.WithWaitStrategy(
-			wait.ForLog("database system is ready to accept connections").WithOccurrence(2)),
-	)
-	if err != nil {
-		t.Fatalf("start postgres container: %v", err)
+	if adminPool == nil || sharedBaseDSN == "" {
+		t.Fatal("shared postgres not initialized: TestMain must run this package with -tags integration")
 	}
-	t.Cleanup(func() { _ = ctr.Terminate(context.Background()) })
-	dsn, err := ctr.ConnectionString(ctx, "sslmode=disable")
+	dbName := uniqueWithdrawalTestDBName(t)
+	// Serialize CREATE DATABASE: PostgreSQL serializes on the template
+	// database, so ordered creation avoids template1 lock contention.
+	withdrawalDBMu.Lock()
+	_, err := adminPool.Exec(ctx, "CREATE DATABASE "+pgx.Identifier{dbName}.Sanitize())
+	withdrawalDBMu.Unlock()
 	if err != nil {
-		t.Fatalf("postgres connection string: %v", err)
+		t.Fatalf("create test database %s: %v", dbName, err)
 	}
+
+	dsn, err := deriveWithdrawalDSN(sharedBaseDSN, dbName)
+	if err != nil {
+		_ = dropWithdrawalTestDB(ctx, dbName) // never leak an unusable database
+		t.Fatalf("derive dsn for %s: %v", dbName, err)
+	}
+	t.Cleanup(func() { cleanupWithdrawalTestDB(t, dbName, dsn) })
 	return dsn
 }
 

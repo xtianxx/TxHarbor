@@ -11,7 +11,8 @@ import (
 // G-010-2(c) freeze + controlled release, and G-010-1 last-moment expiry.
 func TestT041ResidualEvidence(t *testing.T) {
 	t.Run("region_aborted_no_dispatch", func(t *testing.T) {
-		e := newEnv(t)
+		// Destructive lane (DROP TABLE): dedicated container per whitelist.
+		e := newDedicatedEnv(t)
 		ctx := context.Background()
 		f := e.seed()
 		f.sign()
