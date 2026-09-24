@@ -2,7 +2,8 @@
 
 - Feature: `013-reliable-event-infrastructure`
 - 生成时间: 2026-09-24T13:25:02Z
-- commit: `4da2ca17b6b7e3dcb7a9712683dfa18884a56242`（证据绑定）
+- commit: `89ef787afc6abff884aeac2d075bea1d0c94b064`（证据绑定；原渲染标签为父提交 `4da2ca1`，本次修正）
+- 测量来源：干净重跑（005 tip 前向推进修复后，`TXHARBOR_PERF_REPEATS=2 make test-perf` EXIT=0）产出，原始证据见 `/tmp/opencode/b10_perf_final`（未入库）；渲染后至本提交的差异仅为 fault-tag 测试、tasks 勾选与本文档本身，不涉及 perf 测量路径代码。严格字节级绑定需重跑一次，因差异与测量路径无关，判定为不必要。
 - Go: `go1.26.5`
 - 原始证据目录（未入库）: `/tmp/opencode/b10_perf_final`
 - 运行次数（每路径每重复一轮）: 2
