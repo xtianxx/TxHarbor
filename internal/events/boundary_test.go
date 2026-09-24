@@ -3,10 +3,12 @@
 // payload checks. internal/events MUST NOT import upstream writer packages
 // (indexer/withdrawal/execution/txlifecycle/nonce) or RPC/dial/signer
 // packages: upstream business transactions call Append, so the dependency
-// arrow is upstream -> events only. There are no triggers, no CDC and no
-// network publish call anywhere in this package; payloads and log material
-// never carry keys, credentials or raw signature bytes (FR-02/03; research
-// R18; plan Structure Decision; constitution VIII).
+// arrow is upstream -> events only. There are no triggers and no CDC; broker
+// clients live only in the publisher runtime (which publishes) and the
+// consumer runtime (which never publishes), never in the transaction-bound
+// Append path; payloads and log material never carry keys, credentials or raw
+// signature bytes (FR-02/03; research R18; plan Structure Decision;
+// constitution VIII).
 package events
 
 import (
@@ -112,9 +114,9 @@ var forbiddenRuntimeTokens = []string{
 // appear in the transaction-bound emission path: publishing happens in the
 // publisher runtime outside any transaction, never inside this package's
 // Append path (T016 "事务内无网络发布调用"; contracts/outbox-publisher.md §0).
-// The publisher runtime itself is the single place allowed to carry the broker
-// client (T033); its "publish outside any transaction / never publish an
-// uncommitted row" property is asserted at runtime by T036.
+// The publisher runtime itself is the single place allowed to publish (T033);
+// its "publish outside any transaction / never publish an uncommitted row"
+// property is asserted at runtime by T036.
 var forbiddenPublishTokens = []string{
 	"ProduceSync",
 	"franz-go",
@@ -127,10 +129,14 @@ var forbiddenPublishTokens = []string{
 	"grpc.Dial",
 }
 
-// publisherRuntimeSources are the files allowed to carry a broker client. The
-// list is explicit so a publish call added anywhere else still fails this test.
-var publisherRuntimeSources = map[string]bool{
+// brokerRuntimeSources are the files allowed to carry a broker client: the
+// publisher runtime (T033, which publishes) and the consumer runtime (T044,
+// a franz-go group *consumer* that never publishes). The list is explicit so
+// a publish call added anywhere else still fails this test; append.go (the
+// transaction-bound emission path) stays free of every broker token.
+var brokerRuntimeSources = map[string]bool{
 	"publisher.go": true,
+	"consumer.go":  true,
 }
 
 func TestT016NoTriggerCDCOrNetworkPublish(t *testing.T) {
@@ -140,12 +146,12 @@ func TestT016NoTriggerCDCOrNetworkPublish(t *testing.T) {
 				t.Errorf("%s carries a trigger/CDC path (%q)", file.name, token)
 			}
 		}
-		if publisherRuntimeSources[file.name] {
+		if brokerRuntimeSources[file.name] {
 			continue
 		}
 		for _, token := range forbiddenPublishTokens {
 			if strings.Contains(file.src, token) {
-				t.Errorf("%s carries a network publish call (%q)", file.name, token)
+				t.Errorf("%s carries a broker/network call outside the broker runtime sources (%q)", file.name, token)
 			}
 		}
 	}

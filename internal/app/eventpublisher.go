@@ -333,19 +333,6 @@ func wantsHelp(args []string) bool {
 	return len(args) == 1 && (args[0] == "-h" || args[0] == "--help" || args[0] == "help")
 }
 
-// runEmptyLoop blocks until ctx is cancelled, waking on the configured poll
-// cadence. It performs no work and never reports progress it did not make
-// (the event-consumer skeleton fills this shape in T041/T044).
-func runEmptyLoop(ctx context.Context, poll time.Duration) int {
-	for {
-		select {
-		case <-ctx.Done():
-			return 0
-		case <-time.After(poll):
-		}
-	}
-}
-
 // eventPublisherUsage documents the runtime surface.
 func eventPublisherUsage(w io.Writer) {
 	fmt.Fprint(w, `usage: txharbor event-publisher
