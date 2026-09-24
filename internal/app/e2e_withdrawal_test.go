@@ -67,8 +67,10 @@ func TestE2EWithdrawalRequestExecutionEvents(t *testing.T) {
 	dsn := e2eStartPostgres(t)
 	rpcURL := e2eStartAnvil(t)
 	kafka := e2eStartKafka(t)
+	redisCtr := e2eStartRedis(t)
 	pool := e2eOpenPool(t, dsn)
 	env := e2eBaseEnv(dsn, rpcURL, e2eFreeAddr(t), kafka.Brokers())
+	env["TXHARBOR_REDIS_ADDR"] = redisCtr.HostPort()
 
 	const (
 		sender       = "0x5151305151305151305151305151305151305151"

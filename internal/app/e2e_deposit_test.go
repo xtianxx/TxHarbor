@@ -132,6 +132,22 @@ func e2eStartKafka(t *testing.T) *testutil.Kafka {
 	return kafka
 }
 
+// e2eStartRedis boots the 013 non-authoritative Redis carrier for the serve
+// process (cache + distributed rate limiting). B7 wires both into serve, and
+// PD-1 refuses new withdrawal creation while limiting is unavailable, so the
+// full-stack tests must provide a real instance instead of a placeholder
+// address.
+func e2eStartRedis(t *testing.T) *testutil.Redis {
+	t.Helper()
+	testcontainers.SkipIfProviderIsNotHealthy(t)
+	redisCtr, err := testutil.StartRedis(context.Background())
+	if err != nil {
+		t.Fatalf("start redis: %v", err)
+	}
+	t.Cleanup(func() { _ = redisCtr.Close(context.Background()) })
+	return redisCtr
+}
+
 // e2eFreeAddr reserves one loopback address.
 func e2eFreeAddr(t *testing.T) string {
 	t.Helper()
@@ -408,9 +424,11 @@ func TestE2EDepositChainToConsumer(t *testing.T) {
 	dsn := e2eStartPostgres(t)
 	rpcURL := e2eStartAnvil(t)
 	kafka := e2eStartKafka(t)
+	redisCtr := e2eStartRedis(t)
 	pool := e2eOpenPool(t, dsn)
 	accounts := e2eAnvilAccounts(t, rpcURL)
 	env := e2eBaseEnv(dsn, rpcURL, e2eFreeAddr(t), kafka.Brokers())
+	env["TXHARBOR_REDIS_ADDR"] = redisCtr.HostPort()
 
 	// The real serve process: header/log/deposit/confirmation/recovery loops.
 	var serveOut, serveErr e2eBuffer

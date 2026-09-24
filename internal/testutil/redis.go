@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"net"
 	"net/netip"
+	"net/url"
 	"strconv"
 	"time"
 
@@ -68,6 +69,16 @@ func StartRedis(ctx context.Context) (*Redis, error) {
 
 // Addr returns the redis:// connection string.
 func (r *Redis) Addr() string { return r.addr }
+
+// HostPort returns the "host:port" address in the configuration form
+// (TXHARBOR_REDIS_ADDR expects host:port, not a URL).
+func (r *Redis) HostPort() string {
+	u, err := url.Parse(r.addr)
+	if err != nil || u.Host == "" {
+		return r.addr
+	}
+	return u.Host
+}
 
 // Stop stops the container: fault injection for "Redis unavailable".
 func (r *Redis) Stop(ctx context.Context) error {
