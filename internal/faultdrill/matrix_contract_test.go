@@ -161,7 +161,12 @@ func TestMatrixContractCapacityAssemblyIsWired(t *testing.T) {
 		"buildCapacityGuard(pool, cfg, m)",
 		"logScanner.SetCapacityPauseGate(capacityGuard)",
 		"depositScanner.SetCapacityPauseGate(capacityGuard)",
-		"CapacityGate: capacityGuard",
+		// B10 defect fix (typed-nil interface): the guard reaches the
+		// withdrawal receive path only when it exists, so the unconfigured
+		// (PG-only) baseline keeps its pre-013 behavior instead of failing
+		// closed on a typed-nil interface.
+		"if capacityGuard != nil {",
+		"withdrawH.CapacityGate = capacityGuard",
 		"capacityGuard.Observe(ctx)",
 	})
 	assertTokens(t, filepath.Join("..", "app", "withdrawalhttp.go"), []string{

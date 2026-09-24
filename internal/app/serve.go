@@ -452,10 +452,19 @@ func Serve(ctx context.Context, d Deps) int {
 	// policy read is wired into startup: the row is written by the privileged
 	// out-of-loop authorization and may not exist yet.
 	withdrawH := &WithdrawalHandler{
-		Pool:         pool,
-		ChainID:      chainID,
-		Metrics:      m,
-		CapacityGate: capacityGuard,
+		Pool:    pool,
+		ChainID: chainID,
+		Metrics: m,
+	}
+	// B10 defect fix (T089 assembly): assign the capacity gate only when the
+	// guard exists. A typed nil *events.CapacityGuard assigned into the
+	// CapacityAdmitter interface becomes a non-nil interface holding a nil
+	// pointer, so the PG-only baseline (no capacity configured) would fail
+	// closed with "capacity state unreadable" on every first create instead
+	// of leaving the pre-013 behavior unchanged — the opposite of what
+	// internal/app/capacity.go documents for the unconfigured case.
+	if capacityGuard != nil {
+		withdrawH.CapacityGate = capacityGuard
 	}
 	// T018/T063: the 013 middleware wraps every funding/query route — the
 	// limiter admission (PD-1 fail-closed for new withdrawal creation) outside

@@ -70,6 +70,9 @@ func TestLoadEvents013DisabledKeepsExistingSemantics(t *testing.T) {
 	if (cfg.RateLimit != RateLimitConfig{}) {
 		t.Errorf("RateLimit = %+v, want zero while disabled", cfg.RateLimit)
 	}
+	if (cfg.Events.Alerts != AlertsConfig{}) {
+		t.Errorf("Events.Alerts = %+v, want zero while disabled", cfg.Events.Alerts)
+	}
 	if strings.Contains(cfg.Summary(), "events_enabled") {
 		t.Errorf("summary %q must not carry the 013 block while disabled", cfg.Summary())
 	}
@@ -126,10 +129,42 @@ func TestLoadEvents013EnabledParsesFullSet(t *testing.T) {
 		cfg.Capacity.DrainTargetWindow != 30*time.Minute {
 		t.Errorf("capacity = %+v", cfg.Capacity)
 	}
-	for _, want := range []string{"events_enabled=true", "kafka_topic=txharbor.events.test", "capacity_soft=1000"} {
+	for _, want := range []string{"events_enabled=true", "kafka_topic=txharbor.events.test", "capacity_soft=1000",
+		"alerts_enabled=true"} {
 		if !strings.Contains(cfg.Summary(), want) {
 			t.Errorf("summary %q lacks %q", cfg.Summary(), want)
 		}
+	}
+}
+
+// TestLoadEvents013AlertKeys pins the T075 alert wiring keys: the alert switch
+// defaults on while the feature is enabled (observability only), an explicit
+// false disables it, and the optional sustained-window override parses while
+// its invalid forms are refused fail-closed.
+func TestLoadEvents013AlertKeys(t *testing.T) {
+	cfg, err := Load(fakeEnv(eventsEnv()))
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if !cfg.Events.Alerts.Enabled {
+		t.Error("Alerts.Enabled = false, want the default on while events are enabled")
+	}
+	if cfg.Events.Alerts.SoftSustainedWindow != 0 {
+		t.Errorf("SoftSustainedWindow = %v, want zero (derive from the capacity drain window)", cfg.Events.Alerts.SoftSustainedWindow)
+	}
+
+	env := eventsEnv()
+	env[EnvEventsAlertEnabled] = "false"
+	env[EnvEventsAlertSoftSustainedWindow] = "90s"
+	cfg, err = Load(fakeEnv(env))
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if cfg.Events.Alerts.Enabled {
+		t.Error("Alerts.Enabled = true, want the explicit false")
+	}
+	if cfg.Events.Alerts.SoftSustainedWindow != 90*time.Second {
+		t.Errorf("SoftSustainedWindow = %v, want 90s", cfg.Events.Alerts.SoftSustainedWindow)
 	}
 }
 
@@ -171,6 +206,9 @@ func TestLoadEvents013FailClosed(t *testing.T) {
 		}},
 		{"consumer retry limit zero", func(env map[string]string) { env[EnvEventsConsumerRetryLimit] = "0" }},
 		{"publisher batch zero", func(env map[string]string) { env[EnvEventsPublisherBatch] = "0" }},
+		{"alert switch not boolean", func(env map[string]string) { env[EnvEventsAlertEnabled] = "yes" }},
+		{"alert sustained window zero", func(env map[string]string) { env[EnvEventsAlertSoftSustainedWindow] = "0s" }},
+		{"alert sustained window malformed", func(env map[string]string) { env[EnvEventsAlertSoftSustainedWindow] = "soon" }},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

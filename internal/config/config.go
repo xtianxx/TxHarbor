@@ -132,6 +132,12 @@ const (
 	EnvEventsCapacityRetention     = "TXHARBOR_EVENTS_CAPACITY_RETENTION"
 	EnvEventsCapacityMaxShutdown   = "TXHARBOR_EVENTS_CAPACITY_MAX_SHUTDOWN_WINDOW"
 	EnvEventsCapacityDrainTarget   = "TXHARBOR_EVENTS_CAPACITY_DRAIN_TARGET_WINDOW"
+	// 013 alert wiring (T075; FR-24; verification.md §1). The alert switch is
+	// an observability toggle only (it never changes a gate); the sustained
+	// window override is optional and derives from the capacity drain target
+	// window when absent. No numeric business threshold lives here.
+	EnvEventsAlertEnabled             = "TXHARBOR_EVENTS_ALERT_ENABLED"
+	EnvEventsAlertSoftSustainedWindow = "TXHARBOR_EVENTS_ALERT_SOFT_SUSTAINED_WINDOW"
 )
 const (
 	DefaultHTTPAddr           = "127.0.0.1:8080"
@@ -312,6 +318,27 @@ type EventsConfig struct {
 	Enabled   bool
 	Publisher EventsPublisherConfig
 	Consumer  EventsConsumerConfig
+	Alerts    AlertsConfig
+}
+
+// AlertsConfig is the 013 alert wiring configuration (T075; FR-24;
+// verification.md §1; contracts/capacity.md §5.6). Alert emission is
+// observability only: disabling it never changes a gate, a refusal or any
+// financial state. Numeric thresholds are NOT stored here — they come from
+// Capacity (soft/hard limits and the drain target window, provenance:
+// contracts/capacity.md §5 measurement method); this block only carries the
+// switch and the optional sustained-window override.
+type AlertsConfig struct {
+	// Enabled is the alert-emission switch. Default true while the feature is
+	// enabled (an operator decision, not a business threshold); an explicit
+	// false disables emission without touching any behaviour.
+	Enabled bool
+	// SoftSustainedWindow overrides how long `pending >= soft_limit` must hold
+	// before the sustained-soft alert fires. Zero derives the window from
+	// Capacity.DrainTargetWindow (the configured window named by
+	// verification.md §1 / contracts/capacity.md §5.6); a positive value is an
+	// explicit operator window. Never an invented default.
+	SoftSustainedWindow time.Duration
 }
 
 // EventsPublisherConfig bounds the outbox publisher: claim batch size, poll
@@ -629,10 +656,11 @@ func (c *Config) Summary() string {
 	)
 	if c.Events.Enabled {
 		summary += fmt.Sprintf(
-			" events_enabled=true events_publisher_batch=%d events_consumer_batch=%d kafka_brokers=%d kafka_topic=%s redis_addr=%s capacity_soft=%d capacity_hard=%d capacity_reserve=%d",
+			" events_enabled=true events_publisher_batch=%d events_consumer_batch=%d kafka_brokers=%d kafka_topic=%s redis_addr=%s capacity_soft=%d capacity_hard=%d capacity_reserve=%d alerts_enabled=%t",
 			c.Events.Publisher.Batch, c.Events.Consumer.Batch,
 			len(c.Kafka.Brokers), c.Kafka.Topic, c.Redis.Addr,
-			c.Capacity.SoftLimit, c.Capacity.HardLimit, c.Capacity.Reserve)
+			c.Capacity.SoftLimit, c.Capacity.HardLimit, c.Capacity.Reserve,
+			c.Events.Alerts.Enabled)
 	}
 	return summary
 }
@@ -1191,6 +1219,31 @@ func (c *Config) loadEvents013(getenv Getenv, errs *[]error) {
 	c.Capacity.Retention = retention
 	c.Capacity.MaxShutdownWindow = maxShutdown
 	c.Capacity.DrainTargetWindow = drainTarget
+
+	// Alert wiring (T075; FR-24; verification.md §1). The switch defaults to
+	// on while the feature is enabled and never gates anything; the
+	// sustained-soft window derives from Capacity.DrainTargetWindow unless an
+	// explicit positive override is configured. Both are observability-only
+	// knobs; no threshold is invented here.
+	if enabled {
+		c.Events.Alerts.Enabled = true
+		if raw, ok := getenv(EnvEventsAlertEnabled); ok && raw != "" {
+			v, err := strconv.ParseBool(raw)
+			if err != nil {
+				*errs = append(*errs, invalid(EnvEventsAlertEnabled, "%q is not a boolean", raw))
+			} else {
+				c.Events.Alerts.Enabled = v
+			}
+		}
+		if raw, ok := getenv(EnvEventsAlertSoftSustainedWindow); ok && raw != "" {
+			d, err := time.ParseDuration(raw)
+			if err != nil || d <= 0 {
+				*errs = append(*errs, invalid(EnvEventsAlertSoftSustainedWindow, "%q is not a positive duration", raw))
+			} else {
+				c.Events.Alerts.SoftSustainedWindow = d
+			}
+		}
+	}
 }
 
 // parseBrokerList splits a comma-separated Kafka bootstrap list and validates

@@ -48,9 +48,11 @@ type ConfirmationDriftError struct{ detail string }
 func (e *ConfirmationDriftError) Error() string { return "confirmation policy drift: " + e.detail }
 
 // ConfirmationChainViewError is the §候选分类 loop-stop side expressed as a
-// commit refusal: the tip moved or vanished, the candidate row is gone or no
-// longer pending, its referenced block is missing / non-canonical /
-// hash-diverged, or the re-computed gate no longer holds. Zero writes.
+// commit refusal: the tip vanished, regressed or was replaced (a pure
+// forward advance of a still-canonical captured tip is errStaleState, the
+// row-level race), the candidate row is gone or no longer pending, its
+// referenced block is missing / non-canonical / hash-diverged, or the
+// re-computed gate no longer holds. Zero writes.
 type ConfirmationChainViewError struct{ detail string }
 
 func (e *ConfirmationChainViewError) Error() string {
@@ -273,6 +275,24 @@ func (c *ConfirmationCommitter) ConfirmDepositUnit(ctx context.Context, lease *L
 		return &ConfirmationChainViewError{detail: fmt.Sprintf("canonical tip number %d is negative", tipNumber)}
 	}
 	if uint64(tipNumber) != basis.TipNumber || tipHash != basis.TipHash {
+		// B10 defect fix (data-model §候选分类 "行级等待：选中后 tip 推进"):
+		// a captured tip that is still on the canonical chain while the
+		// canonical tip merely ADVANCED is the pure selection race — the row
+		// stays Pending and the scanner re-captures on the fresh basis next
+		// tick. The commit still refuses with zero writes; only the verdict
+		// differs (errStaleState -> retry tick) from a chain-view anomaly. A
+		// tip that regressed, moved to another hash, or left the canonical
+		// chain remains a halt (tip 不可信 / tip_missing).
+		if uint64(tipNumber) > basis.TipNumber {
+			var capturedHash string
+			err := tx.QueryRow(ctx, canonicalBlockHashSQL, c.cfg.ChainID, int64(basis.TipNumber)).Scan(&capturedHash)
+			switch {
+			case err == nil && capturedHash == basis.TipHash:
+				return errStaleState
+			case err != nil && !errors.Is(err, pgx.ErrNoRows):
+				return fmt.Errorf("re-read captured tip block: %w", err)
+			}
+		}
 		return &ConfirmationChainViewError{detail: fmt.Sprintf(
 			"captured tip (%d %s) differs from canonical tip (%d %s)",
 			basis.TipNumber, basis.TipHash, tipNumber, tipHash)}
