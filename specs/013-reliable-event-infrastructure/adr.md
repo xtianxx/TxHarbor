@@ -1,6 +1,6 @@
 # ADR: 013 Reliable Event Infrastructure — Redis & Kafka 引入决策与价值证明设计
 
-**Feature**: 013-reliable-event-infrastructure | **Date**: 2026-09-24 | **Status**: Proposed（设计阶段；收益假设待同负载对照基准验证）
+**Feature**: 013-reliable-event-infrastructure | **Date**: 2026-09-24 | **Status**: Accepted（实施记录见 §6：客户端/镜像已固定，Redis/Kafka 载体与基准报告已落地；收益为本地对照观测，生产结论待测/待裁决）
 
 **Context sources**: [spec.md](spec.md)（FR-25、PD-3、Non-Goals）、[plan.md](plan.md)（D5–D7/D9）、[research.md](research.md)（R10–R13/R15/R17）、章程 1.1.0（III/VI/XIII 与「架构演进」）。本文件按任务要求在模板无 ADR 章节的情况下独立交付，并由 plan.md 引用；不虚构 Spec Kit 命令支持。
 
@@ -111,4 +111,25 @@
 
 ## 6. 状态与承诺
 
-本 ADR 为设计阶段提案（Proposed）：接受「引入并验证」，拒绝「预判收益」；实现批次固定客户端/镜像 tag 后补记「Accepted/实施记录」；基准结果回填本文件或追加报告并按 PD-3 流程处理范围问题。
+**Status: Accepted（2026-09-24，实施记录如下）。** 接受「引入并验证」，拒绝「预判收益」。
+
+### ADR-013-01 实施记录（Redis 非权威缓存 + 分布式限流）
+
+- 客户端：`github.com/redis/go-redis/v9 v9.22.0`（go.mod，T002 固定）；本地编排镜像 `redis:8.2.10-alpine`（compose `events` profile）。
+- 落地：`internal/cache`（cache-aside、epoch 命名空间、事件驱动失效、TTL 兜底、有界回源）、`internal/ratelimit`（按接口类原子限流、不可用判定、PD-1 策略）与 serve 接线；提交 `96c2c28`（B7）。
+- 验证（本地）：V-CACHE/V-RATELIMIT 组件层与 HTTP 层绿（`/tmp/opencode/redis_final.log`、`b10_e2e_final.log`）；PD-1 双验收线（拒绝新创建 / 存量继续）分别通过；无门禁绕过。
+- 边界保持：Redis 不参与任何资金门禁/授权/幂等/对账判定（T020/T085 结构断言）。
+
+### ADR-013-02 实施记录（Kafka + 事务性 Outbox）
+
+- 客户端：`github.com/twmb/franz-go v1.22.0` + `pkg/kadm v1.19.0`（幂等 producer、acks=all）；测试/本地 broker 镜像 `confluentinc/confluent-local:7.9.10`（testutil 固定）、compose `apache/kafka:4.1.0`（KRaft、显式建 topic、关闭 auto-create）。
+- 落地：迁移 `000015_event_infrastructure.sql`；`internal/events`（Append 同事务、身份/版本契约、发布器、消费者、隔离/重放、容量、修订）与 `internal/app` 运行时；提交 `23561da`（B1）、`e126330`（B2）、`53ccbc6`（B3）、`cba7a9b`（B4）、`eb4e06b`（B5）、`cff0f8d`（B6）、`55a742b`（B8）、`4da2ca1`（B9）。
+- 验证（本地）：V-ATOMICITY/V-PUBLISHER/V-IDEMPOTENCY/V-PROGRESS/V-RETRY-QUARANTINE/V-REVISION/V-CAPACITY/V-CATCHUP/V-DRILL 全部通过；五态矩阵一致率 100%、门禁绕过 0、五项 0 不变量（证据 `/tmp/opencode/b9_evidence_*/`、`b10_fault_final.log`）。
+- 表述纪律：投递 = 至少一次、处理 = 幂等、同一事件有效应用次数 = 1（以消费者 PG 效果计）；**不宣称跨系统恰好一次**；Debezium/CDC 未引入（§5）。
+
+### §3 基准执行记录
+
+- 报告已产出：`docs/evidence/013/benchmark_report.md`（绑定测量提交 `89ef787`，标签修正 `65b2f07`）；同负载同故障 A/B 对照（PG-only vs 全栈）含分位数/方差、故障期降级、追赶时间、资源与置信限制；未测项 0 次表述为达标。
+- 限制（随引用携带）：本地单主机、短窗口、合成负载，**不构成生产容量结论**；容量/限流/告警/追赶阈值仍为待测/待裁决。
+- **PD-3**：Kafka 保持在 013 范围内，本 ADR 不预判也不取消其收益；任何范围调整 MUST 另行提交具体变更供用户决定，不自动删减。
+- Review triggers（§ADR-013-01/02）保持有效；013 分支未合并/未部署，T000-P 保持 OPEN，不宣称生产就绪。

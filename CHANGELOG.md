@@ -1,7 +1,46 @@
 # Changelog
 
 本文件记录 TxHarbor 已合并到 main 的变更。条目附合并提交或规格路径；
-未合并、未部署的内容不在此列。
+未合并、未部署的内容不在此列。分支上已完成但尚未合并的变更记录在
+`Unreleased` 节，并显式标注「未合并/未部署」与验收状态。
+
+## [Unreleased]
+
+### Added
+
+- 013 Reliable Event Infrastructure（分支 `013-reliable-event-infrastructure`，
+  **未合并/未部署**；B1–B10 提交 `23561da`…`65b2f07`，B11 收口提交见分支）：
+  - 迁移 `migrations/000015_event_infrastructure.sql`：outbox_events（身份 UNIQUE/
+    状态一致性/修订约束）、consumer_progress/inbox/versions/quarantine、
+    event_ops_audit、event_system_state（catalog_version=1、cutover 种子）。
+  - 事务性 Outbox（`internal/events`）：业务状态与事件同事务 Append、事件身份
+    UUIDv5 派生、至少一次发布（SKIP LOCKED + 租约 + acks=all）、blocked 可见可审计；
+    **不宣称跨系统恰好一次**。
+  - 幂等消费者：inbox 去重、版本守卫、持久进度、有界重试、持久隔离与人工重放
+    （PD-4：审计/幂等/不得重付；重放 0 新意图/nonce/签名/广播）。
+  - 重组修订事件（`deposit.revision.applied`/`reinstated`、
+    `withdrawal.execution.revised`）：旧身份/新状态或 Orphaned/原因/恢复版本。
+  - Redis 非权威缓存与 fail-closed 分布式限流（PD-1：限流不可用时新提款创建
+    拒绝且可重试，存量资金流程继续）。
+  - 容量保护与恢复追赶（PD-2：停新保在途、链上事实不拒绝、无法持久化则按可靠
+    进度暂停补扫、绝不静默丢弃）；`internal/faultdrill` 五态故障矩阵演练
+    （独立 Fault 层）与 `internal/perf` PG-only vs 全栈对照基准（独立 Performance 层）。
+  - CI 分层接入（`ci.yml`：受影响 Unit/Contract/Integration-PG/Redis/Kafka/E2E +
+    `ci-required` 门禁；`fault-perf.yml`：定时/手动/可调用，不阻塞普通 PR）与
+    分层审计 `internal/app/layering_audit_test.go`；Docker 不可用记 NOT RUN +
+    `ci:integration-pending` 阻断合并纪律。
+- 验收状态（截至 B11）：90/90 任务勾选；**本地验收**（真实中间件/迁移）通过；
+  **远程 CI 运行待核验**；**不宣称生产就绪**（T000-P 保持 OPEN）。
+  证据索引：`docs/evidence/013/quickstart_evidence_index.md`、
+  `docs/evidence/013/coverage_audit.md`、`docs/evidence/013/benchmark_report.md`、
+  `docs/evidence/013/ci_budget.md`。
+
+### Known limitations（013，分支）
+
+- 容量/限流/告警/追赶窗口等阈值一律「待测/待裁决」，未校准前不得宣称达标。
+- 对照基准为本地单主机、短窗口、合成负载观测，不构成生产容量结论；Kafka 范围按
+  PD-3 保持，调整须另行提交用户决定。
+- 远程 GitHub runner 上的 CI/fault-perf 实际运行尚未发生（未推送），运行证据待核验。
 
 ## [v1.0.0] - 2026-09-23
 

@@ -102,3 +102,19 @@
 2. 无实测数据的数值目标 MUST NOT 表述为「已达标」；未测一律标「待测/待裁决」。
 3. Kafka 价值结论只在 V-BENCH 报告产出后成立；范围调整按 PD-3 另行提交用户裁决。
 4. 所有验收证据绑定 commit 与环境规格；文档升级（README/CHANGELOG）须等证据产出后另行批次（本步不修改）。
+
+## 6. 实施与校准状态（B11 收口记录，2026-09-24）
+
+- **实现状态**：013 的 B1–B11 全部任务勾选（90/90）；本地验收证据索引见
+  [quickstart_evidence_index.md](../../docs/evidence/013/quickstart_evidence_index.md)，
+  覆盖审计见 [coverage_audit.md](../../docs/evidence/013/coverage_audit.md)。
+- **阈值校准**：容量 soft/hard/reserve/retention、限流速率、退避/超时、追赶窗口、
+  告警阈值**尚未校准**（无生产测量）；一律维持「待测/待裁决」，0 次表述为已达标。
+- **CI 耗时预算**：本地各层基线已实测并记录于
+  [ci_budget.md](../../docs/evidence/013/ci_budget.md)；目标 runner 基线与预算
+  **待核验**（未推送、未触发远程 CI）。
+- **远程 CI**：`.github/workflows/ci.yml`（T082）与 `.github/workflows/fault-perf.yml`
+  （T083）已完成本地静态校验（YAML/`bash -n`/触发矩阵断言），GitHub runner 实际运行
+  证据待核验；未运行项不得标通过。
+- **状态边界**：分支 `013-reliable-event-infrastructure` 未合并/未部署；T000-P 保持
+  OPEN；不宣称生产就绪。三态口径（本地验收 / 远程 CI / 生产就绪）不得混同。

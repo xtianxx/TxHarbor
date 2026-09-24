@@ -12,14 +12,16 @@ PostgreSQL / Redis / Kafka / EVM RPC。详见 `agent.md` 与
 | 010 transaction-lifecycle | 已合并至 main（PR #15，merge `3ea6eb1`，main CI `35326220521` 四项全绿）。specify（`7d2022b`）与 clarify（`bd59754`）已完成；实现与真实联合验收在联合工作区完成——J1–J5 全部执行且全绿（记录见 `docs/workflow-010-011-parallel.md`）；T052–T058（Phase 10 polish：V10/V11 验收、边界/可观测性/文档同步）已随候选合入（`6cd6178`） |
 | 011 withdrawal-executor | 已合并至 main（PR #15，merge `3ea6eb1`，main CI `35326220521` 四项全绿）。T001–T053 完成；`migrations/000012_withdrawal_execution.sql`（sha256 `29613714…`）按 000011→000012→000013（+000014 intent-FK 修复）合并顺序核验；`execution_claims` 列与 data-model Table 2 一致；两条 intent-FK 均已验证。生产进程入口（`withdrawal-worker` → `jointwire.Worker`）与 completed 后持续追踪、B1/B2 已随 PR #16（merge `df5a280`，main CI `35401917939` 四项全绿）合入；V13-2b 撤销/到期×发送门禁双锁序交错与 V13-4b 同 grant 条件复用已随 PR #17（merge `f51cde5`，main CI `35410128327` 四项全绿）合入，**A-13 已 CLOSED**（2026-09-19，关闭登记见 `specs/011-withdrawal-executor/integration-readiness.md` 的 “A-13 formal closure”）；**T000-P 独立保持 OPEN**（未部署，不宣称生产就绪） |
 | 010/011 并行 | 限定例外见 `docs/workflow-010-011-parallel.md`（2026-09-17 用户决定）；008/009 例外保持不变 |
+| 013 reliable-event-infrastructure | 分支 `013-reliable-event-infrastructure` 实现与本地验收完成（B1–B11；迁移 `000015_event_infrastructure.sql`；90/90 任务勾选）。**未合并/未部署；远程 CI 运行待核验；T000-P 独立保持 OPEN**。证据：`docs/evidence/013/quickstart_evidence_index.md`、`coverage_audit.md`、`benchmark_report.md`、`ci_budget.md`；阈值一律待测/待裁决 |
 
 ## 实际协作文件索引
 
 - 总览入口：`README.md`（能力总览、快速启动、限制与 T000-P 状态）；变更记录：`CHANGELOG.md`
 - 根指南：`agent.md`（根目录无 `AGENTS.md`）
 - 章程：`.specify/memory/constitution.md`
-- 单一活动 feature 指针：`.specify/feature.json`（当前 `specs/007-withdrawal-creation`；
-  每次 specify 会覆盖；下游命令无显式目录时以它定位）
+- 单一活动 feature 指针：`.specify/feature.json`（当前
+  `specs/013-reliable-event-infrastructure`；每次 specify 会覆盖；下游命令无显式
+  目录时以它定位）
 - 工作流配置：`.specify/workflows/workflow-registry.json`、
   `.specify/extensions.yml`（`before_specify` 自动建分支，强制启用）、
   `.opencode/commands/speckit.*.md`、`.specify/init-options.json`（sequential 编号）
