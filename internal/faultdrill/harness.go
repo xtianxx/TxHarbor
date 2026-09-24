@@ -33,8 +33,10 @@ import (
 	"runtime"
 	"strings"
 	"sync"
+	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	goredis "github.com/redis/go-redis/v9"
 	"github.com/testcontainers/testcontainers-go"
@@ -66,6 +68,7 @@ type Env struct {
 	Pool     *pgxpool.Pool
 	Kafka    *testutil.Kafka
 	Redis    *testutil.Redis
+	Anvil    *Anvil
 	Metrics  *metrics.Metrics
 	Evidence *EvidenceWriter
 
@@ -151,6 +154,10 @@ func (e *Env) Close(ctx context.Context) error {
 		e.Pool.Close()
 		e.Pool = nil
 	}
+	if e.Anvil != nil {
+		_ = e.Anvil.Terminate(ctx)
+		e.Anvil = nil
+	}
 	if e.Kafka != nil {
 		_ = e.Kafka.Close(ctx)
 		e.Kafka = nil
@@ -170,6 +177,22 @@ func (e *Env) Close(ctx context.Context) error {
 		return e.Evidence.Close()
 	}
 	return nil
+}
+
+// StartAnvil boots the pinned local chain once per environment (idempotent).
+// The five-state drills need real on-chain deposits; the harness never
+// fabricates an observation.
+func (e *Env) StartAnvil(ctx context.Context) (*Anvil, error) {
+	if e.Anvil != nil {
+		return e.Anvil, nil
+	}
+	anvil, err := startAnvil(ctx)
+	if err != nil {
+		return nil, err
+	}
+	e.Anvil = anvil
+	e.addCloser("anvil", func() { _ = anvil.Terminate(context.Background()) })
+	return anvil, nil
 }
 
 func (e *Env) addCloser(_ string, fn func()) {
@@ -776,4 +799,469 @@ func detectCommit() string {
 		return "unknown"
 	}
 	return commit
+}
+
+// --- T019: five-state orchestration ------------------------------------------
+
+// StateKind names one of the five service states of the FR-04 matrix.
+type StateKind string
+
+const (
+	// StateNormal: Redis and Kafka both reachable.
+	StateNormal StateKind = "normal"
+	// StateRedisDown: Redis unavailable, Kafka reachable.
+	StateRedisDown StateKind = "redis_down"
+	// StateKafkaDown: Kafka unavailable (broker processes suspended: its log
+	// and committed offsets survive), Redis reachable.
+	StateKafkaDown StateKind = "kafka_down"
+	// StateDual: Redis unavailable and Kafka unavailable, PostgreSQL and the
+	// local chain stay up (the only dual fault in scope).
+	StateDual StateKind = "dual"
+	// StateCatchup: both dependencies reachable after a fault; the publisher
+	// drains and the consumer catches up from durable progress.
+	StateCatchup StateKind = "catchup"
+)
+
+// StateSequence is the canonical drill order (normal → faults → recovery).
+var StateSequence = []StateKind{StateNormal, StateRedisDown, StateKafkaDown, StateDual, StateCatchup}
+
+// StateLabel maps the state to the approved spec matrix column.
+var StateLabel = map[StateKind]string{
+	StateNormal:    "正常",
+	StateRedisDown: "仅 Redis 故障",
+	StateKafkaDown: "仅 Kafka 故障",
+	StateDual:      "双故障",
+	StateCatchup:   "恢复追赶",
+}
+
+// KafkaReachable reports whether a bounded broker probe answers.
+func (e *Env) KafkaReachable(ctx context.Context) bool {
+	if e.Kafka == nil {
+		return false
+	}
+	probeCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
+	defer cancel()
+	_, err := e.KafkaHighWatermark(probeCtx)
+	return err == nil
+}
+
+// EnsureKafkaUp restores a reachable broker: SIGCONT when the broker was
+// suspended (log and offsets preserved), Start + explicit topic when it was
+// stopped. It waits until the broker answers.
+func (e *Env) EnsureKafkaUp(ctx context.Context) error {
+	if e.KafkaReachable(ctx) {
+		return nil
+	}
+	if err := e.ResumeKafka(ctx); err != nil {
+		if startErr := e.StartKafka(ctx); startErr != nil {
+			return fmt.Errorf("restore kafka: resume: %v; start: %w", err, startErr)
+		}
+	}
+	return WaitFor(ctx, 90*time.Second, func() (bool, error) {
+		return e.KafkaReachable(ctx), nil
+	})
+}
+
+// EnsureRedisUp starts Redis when it does not answer and waits for readiness.
+func (e *Env) EnsureRedisUp(ctx context.Context) error {
+	if e.RedisPing(ctx) {
+		return nil
+	}
+	if err := e.StartRedis(ctx); err != nil {
+		return fmt.Errorf("restore redis: %w", err)
+	}
+	return WaitFor(ctx, 60*time.Second, func() (bool, error) {
+		return e.RedisPing(ctx), nil
+	})
+}
+
+// ApplyState moves the environment into one of the five states. Faults are
+// injected through the real primitives: Redis container stop and Kafka broker
+// SIGSTOP (the broker keeps its log and committed offsets, so a consumer's
+// durable resume offset stays valid).
+func (e *Env) ApplyState(ctx context.Context, state StateKind) error {
+	switch state {
+	case StateNormal, StateCatchup:
+		if err := e.EnsureRedisUp(ctx); err != nil {
+			return err
+		}
+		return e.EnsureKafkaUp(ctx)
+	case StateRedisDown:
+		if err := e.EnsureKafkaUp(ctx); err != nil {
+			return err
+		}
+		return e.StopRedis(ctx)
+	case StateKafkaDown:
+		if err := e.EnsureRedisUp(ctx); err != nil {
+			return err
+		}
+		return e.SuspendKafka(ctx)
+	case StateDual:
+		if err := e.SuspendKafka(ctx); err != nil {
+			return err
+		}
+		return e.StopRedis(ctx)
+	default:
+		return fmt.Errorf("faultdrill: unknown state %q", state)
+	}
+}
+
+// VerifyState waits until the observed dependency reachability matches the
+// state and fails loudly on a timeout. A state that was not actually injected
+// must never be recorded as evidence.
+func (e *Env) VerifyState(ctx context.Context, state StateKind) error {
+	wantRedis, wantKafka := false, false
+	switch state {
+	case StateNormal, StateCatchup:
+		wantRedis, wantKafka = true, true
+	case StateRedisDown:
+		wantRedis, wantKafka = false, true
+	case StateKafkaDown:
+		wantRedis, wantKafka = true, false
+	case StateDual:
+		wantRedis, wantKafka = false, false
+	default:
+		return fmt.Errorf("faultdrill: unknown state %q", state)
+	}
+	return WaitFor(ctx, 90*time.Second, func() (bool, error) {
+		return e.RedisPing(ctx) == wantRedis && e.KafkaReachable(ctx) == wantKafka, nil
+	})
+}
+
+// --- T019: seven-class matrix vocabulary -------------------------------------
+
+// The seven operation classes of the FR-04 matrix.
+const (
+	ClassDepositProcessing = "deposit_processing"
+	ClassConfirmationReorg = "confirmation_reorg"
+	ClassWithdrawalCreate  = "withdrawal_create"
+	ClassExistingExecution = "existing_execution"
+	ClassQuery             = "query"
+	ClassEventSubscription = "event_subscription"
+	ClassNonCritical       = "non_critical"
+)
+
+// MatrixClasses is the canonical column order.
+var MatrixClasses = []string{
+	ClassDepositProcessing, ClassConfirmationReorg, ClassWithdrawalCreate,
+	ClassExistingExecution, ClassQuery, ClassEventSubscription, ClassNonCritical,
+}
+
+// Verdict vocabulary: the observed behavior reduced to the matrix cell.
+const (
+	// VerdictContinue: the operation proceeds under its existing gates.
+	VerdictContinue = "continue"
+	// VerdictDegraded: the operation proceeds with an explicit degradation
+	// annotation (query/status surfaces).
+	VerdictDegraded = "degraded"
+	// VerdictRefused: the operation is refused with a clear retryable error.
+	VerdictRefused = "refused"
+	// VerdictBacklog: delivery stops while committed events stay in the
+	// Outbox (observable backlog); nothing is lost.
+	VerdictBacklog = "backlog"
+	// VerdictCatchup: delivery resumes and the consumer catches up from
+	// durable facts.
+	VerdictCatchup = "catchup"
+)
+
+// MatrixExpected is the approved spec matrix (FR-04 table) reduced to machine
+// verdicts. It is the comparison target of the drill assertions; changing it
+// would be a business-semantics change and MUST NOT be done silently.
+var MatrixExpected = map[StateKind]map[string]string{
+	StateNormal: {
+		ClassDepositProcessing: VerdictContinue,
+		ClassConfirmationReorg: VerdictContinue,
+		ClassWithdrawalCreate:  VerdictContinue,
+		ClassExistingExecution: VerdictContinue,
+		ClassQuery:             VerdictContinue,
+		ClassEventSubscription: VerdictContinue,
+		ClassNonCritical:       VerdictContinue,
+	},
+	StateRedisDown: {
+		ClassDepositProcessing: VerdictContinue,
+		ClassConfirmationReorg: VerdictContinue,
+		ClassWithdrawalCreate:  VerdictRefused, // PD-1
+		ClassExistingExecution: VerdictContinue,
+		ClassQuery:             VerdictDegraded,
+		ClassEventSubscription: VerdictContinue,
+		ClassNonCritical:       VerdictDegraded,
+	},
+	StateKafkaDown: {
+		ClassDepositProcessing: VerdictContinue,
+		ClassConfirmationReorg: VerdictContinue,
+		ClassWithdrawalCreate:  VerdictContinue, // refused only at the capacity boundary (PD-2)
+		ClassExistingExecution: VerdictContinue,
+		ClassQuery:             VerdictDegraded,
+		ClassEventSubscription: VerdictBacklog,
+		ClassNonCritical:       VerdictDegraded,
+	},
+	StateDual: {
+		ClassDepositProcessing: VerdictContinue,
+		ClassConfirmationReorg: VerdictContinue,
+		ClassWithdrawalCreate:  VerdictRefused, // PD-1 + PD-2
+		ClassExistingExecution: VerdictContinue,
+		ClassQuery:             VerdictDegraded,
+		ClassEventSubscription: VerdictBacklog,
+		ClassNonCritical:       VerdictDegraded,
+	},
+	StateCatchup: {
+		ClassDepositProcessing: VerdictContinue,
+		ClassConfirmationReorg: VerdictContinue,
+		ClassWithdrawalCreate:  VerdictContinue,
+		ClassExistingExecution: VerdictContinue,
+		ClassQuery:             VerdictContinue,
+		ClassEventSubscription: VerdictCatchup,
+		ClassNonCritical:       VerdictContinue,
+	},
+}
+
+// AssertMatrixRow compares one observed state row with the approved matrix and
+// fails loudly on any missing or mismatching cell (一致性率 must be 100%).
+func AssertMatrixRow(t *testing.T, state StateKind, observed map[string]string) {
+	t.Helper()
+	expected := MatrixExpected[state]
+	if expected == nil {
+		t.Fatalf("no matrix expectation for state %q", state)
+	}
+	for _, class := range MatrixClasses {
+		want, ok := expected[class]
+		if !ok {
+			t.Fatalf("matrix expectation for state %q is missing class %q", state, class)
+		}
+		got, ok := observed[class]
+		if !ok {
+			t.Fatalf("state %q: class %q was not observed (matrix cell missing)", state, class)
+		}
+		if got != want {
+			t.Fatalf("state %q (%s) class %q: observed %q, matrix requires %q",
+				state, StateLabel[state], class, got, want)
+		}
+	}
+}
+
+// MatrixConsistency counts matching cells across every observed state row.
+func MatrixConsistency(observed map[StateKind]map[string]string) (consistent, total int) {
+	for state, row := range observed {
+		expected := MatrixExpected[state]
+		for _, class := range MatrixClasses {
+			total++
+			if expected[class] == row[class] {
+				consistent++
+			}
+		}
+	}
+	return consistent, total
+}
+
+// --- T019: FR-06 invariant collection ----------------------------------------
+
+// OutboxTotals is the durable outbox state.
+type OutboxTotals struct {
+	Pending   int64 `json:"pending"`
+	Published int64 `json:"published"`
+	Blocked   int64 `json:"blocked"`
+	Total     int64 `json:"total"`
+}
+
+// OutboxTotals reads the outbox counts (PostgreSQL only).
+func (e *Env) OutboxTotals(ctx context.Context) (OutboxTotals, error) {
+	var totals OutboxTotals
+	err := e.Pool.QueryRow(ctx, `
+SELECT count(*) FILTER (WHERE publish_state = 'pending'),
+       count(*) FILTER (WHERE publish_state = 'published'),
+       count(*) FILTER (WHERE publish_state = 'blocked'),
+       count(*)
+FROM outbox_events`).Scan(&totals.Pending, &totals.Published, &totals.Blocked, &totals.Total)
+	if err != nil {
+		return OutboxTotals{}, fmt.Errorf("outbox totals: %w", err)
+	}
+	return totals, nil
+}
+
+// AuthorityFingerprint counts every send-side authority table. Event
+// delivery, consumption, replay and catch-up MUST leave every count
+// unchanged: a processed event is never a send permission (FR-05). The
+// receive-side withdrawal_requests table is deliberately not part of the
+// fingerprint: it changes through the explicit create API, never through the
+// event path.
+func (e *Env) AuthorityFingerprint(ctx context.Context) (map[string]int64, error) {
+	tables := []string{
+		"payment_intents", "nonce_bindings",
+		"tx_attempts", "tx_attempt_signings", "tx_send_attempts",
+	}
+	fingerprint := make(map[string]int64, len(tables))
+	for _, table := range tables {
+		var count int64
+		if err := e.Pool.QueryRow(ctx, "SELECT count(*) FROM "+table).Scan(&count); err != nil {
+			return nil, fmt.Errorf("count %s: %w", table, err)
+		}
+		fingerprint[table] = count
+	}
+	return fingerprint, nil
+}
+
+// InvariantReport is the FR-06 five-zero evidence collectable from durable
+// facts after the drill.
+type InvariantReport struct {
+	DuplicateIntents      int64 `json:"duplicate_intents"`
+	DuplicateNonces       int64 `json:"duplicate_nonces"`
+	DuplicateSendSlots    int64 `json:"duplicate_send_slots"`
+	OrphanedLedgerCredits int64 `json:"orphaned_ledger_credits"`
+	MissingEventsForUnits int64 `json:"missing_events_for_committed_units"`
+	BlockedRows           int64 `json:"blocked_rows"`
+	OpenQuarantine        int64 `json:"open_quarantine"`
+	OutboxTotal           int64 `json:"outbox_total"`
+	SubmittedRequests     int64 `json:"submitted_requests"`
+	SubmittedObservations int64 `json:"submitted_observations"`
+}
+
+// AssertInvariants fails the drill when any FR-06 zero-invariant is violated.
+func AssertInvariants(t *testing.T, report InvariantReport) {
+	t.Helper()
+	if report.DuplicateIntents != 0 {
+		t.Fatalf("duplicate withdrawal intents = %d, want 0", report.DuplicateIntents)
+	}
+	if report.DuplicateNonces != 0 {
+		t.Fatalf("duplicate nonce allocations = %d, want 0", report.DuplicateNonces)
+	}
+	if report.DuplicateSendSlots != 0 {
+		t.Fatalf("duplicate broadcast/send slots = %d, want 0", report.DuplicateSendSlots)
+	}
+	if report.OrphanedLedgerCredits != 0 {
+		t.Fatalf("orphaned deposits credited by the reference consumer = %d, want 0", report.OrphanedLedgerCredits)
+	}
+	if report.MissingEventsForUnits != 0 {
+		t.Fatalf("committed units without their event = %d, want 0 (silent event loss)", report.MissingEventsForUnits)
+	}
+	if report.BlockedRows != 0 {
+		t.Fatalf("blocked outbox rows = %d, want 0", report.BlockedRows)
+	}
+	if report.OpenQuarantine != 0 {
+		t.Fatalf("open quarantine rows = %d, want 0", report.OpenQuarantine)
+	}
+}
+
+// --- T019: persistence-failure primitive -------------------------------------
+
+// OutboxWriteLock holds an ACCESS EXCLUSIVE lock on outbox_events: a real
+// "persistence is not safe" condition for the T090 capacity pause drill. The
+// 003/004 write transactions carry their own 5s statement timeout, so a write
+// attempted while the lock is held fails as a real persistence error instead
+// of waiting forever. The lock is released explicitly (or when the connection
+// drops).
+type OutboxWriteLock struct {
+	conn      *pgx.Conn
+	release   sync.Once
+	releaseFn func()
+}
+
+// LockOutboxWrites opens a dedicated connection and holds an ACCESS EXCLUSIVE
+// lock on outbox_events until Release.
+func (e *Env) LockOutboxWrites(ctx context.Context) (*OutboxWriteLock, error) {
+	conn, err := pgx.Connect(ctx, e.DSN)
+	if err != nil {
+		return nil, fmt.Errorf("lock outbox writes: connect: %w", err)
+	}
+	if _, err := conn.Exec(ctx, "BEGIN"); err != nil {
+		_ = conn.Close(ctx)
+		return nil, fmt.Errorf("lock outbox writes: begin: %w", err)
+	}
+	if _, err := conn.Exec(ctx, "LOCK TABLE outbox_events IN ACCESS EXCLUSIVE MODE"); err != nil {
+		_ = conn.Close(ctx)
+		return nil, fmt.Errorf("lock outbox writes: lock: %w", err)
+	}
+	lock := &OutboxWriteLock{conn: conn}
+	lock.releaseFn = func() {
+		bg := context.Background()
+		_, _ = conn.Exec(bg, "ROLLBACK")
+		_ = conn.Close(bg)
+	}
+	return lock, nil
+}
+
+// Release drops the lock (idempotent).
+func (l *OutboxWriteLock) Release() {
+	if l == nil {
+		return
+	}
+	l.release.Do(l.releaseFn)
+}
+
+// TerminateBlockedOutboxWriter waits for the first backend blocked on a lock
+// while writing outbox_events (the 003/004 persistence failure) and terminates
+// it, so the in-flight commit fails immediately instead of waiting out its own
+// statement timeout. It uses a dedicated connection (the shared pool's
+// connections are themselves blocked on the held lock). Returns the terminated
+// backend pid; an error when no writer appeared within the window.
+func (e *Env) TerminateBlockedOutboxWriter(ctx context.Context, timeout time.Duration, debug func(string)) (int32, error) {
+	watcher, err := pgx.Connect(ctx, e.DSN)
+	if err != nil {
+		return 0, fmt.Errorf("blocked-writer watcher connect: %w", err)
+	}
+	defer func() { _ = watcher.Close(context.Background()) }()
+
+	deadline := time.Now().Add(timeout)
+	lastDebug := time.Now()
+	var pid int32
+	for {
+		err := watcher.QueryRow(ctx, `
+SELECT pid FROM pg_stat_activity
+WHERE datname = current_database()
+  AND wait_event_type = 'Lock'
+  AND (query ILIKE '%aggregate_version%' OR query ILIKE '%INSERT INTO outbox_events%')
+ORDER BY query_start
+LIMIT 1`).Scan(&pid)
+		if err == nil && pid != 0 {
+			break
+		}
+		if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+			return 0, fmt.Errorf("find blocked outbox writer: %w", err)
+		}
+		if debug != nil && time.Since(lastDebug) >= 3*time.Second {
+			lastDebug = time.Now()
+			debug(e.describeWaiters(ctx, watcher))
+		}
+		if time.Now().After(deadline) {
+			return 0, fmt.Errorf("no outbox writer blocked on the lock within %s%s", timeout, e.describeWaiters(ctx, watcher))
+		}
+		select {
+		case <-ctx.Done():
+			return 0, ctx.Err()
+		case <-time.After(25 * time.Millisecond):
+		}
+	}
+	var terminated bool
+	if err := watcher.QueryRow(ctx, `SELECT pg_terminate_backend($1)`, pid).Scan(&terminated); err != nil {
+		return 0, fmt.Errorf("terminate backend %d: %w", pid, err)
+	}
+	if !terminated {
+		return 0, fmt.Errorf("pg_terminate_backend(%d) returned false", pid)
+	}
+	return pid, nil
+}
+
+// describeWaiters renders the current lock waiters/writers for diagnostics.
+func (e *Env) describeWaiters(ctx context.Context, watcher *pgx.Conn) string {
+	if watcher == nil {
+		return ""
+	}
+	rows, err := watcher.Query(ctx, `
+SELECT pid, state, coalesce(wait_event_type, ''), coalesce(wait_event, ''), left(query, 90)
+FROM pg_stat_activity WHERE datname = current_database() ORDER BY pid`)
+	if err != nil {
+		return " (waiter dump failed: " + err.Error() + ")"
+	}
+	defer rows.Close()
+	var b strings.Builder
+	for rows.Next() {
+		var pid int32
+		var state, waitType, waitEvent, query string
+		if err := rows.Scan(&pid, &state, &waitType, &waitEvent, &query); err != nil {
+			continue
+		}
+		if waitType != "" || strings.Contains(query, "outbox") || strings.Contains(query, "indexer_lease") {
+			fmt.Fprintf(&b, "\n  pid=%d state=%s wait=%s/%s query=%q", pid, state, waitType, waitEvent, query)
+		}
+	}
+	return b.String()
 }

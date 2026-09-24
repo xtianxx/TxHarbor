@@ -415,6 +415,24 @@ func Serve(ctx context.Context, d Deps) int {
 		return fail("startup failed (recovery): %s", logx.Redact(err.Error()))
 	}
 
+	// 5d. 013 capacity guard production assembly (T089; PD-2;
+	// contracts/capacity.md): one guard is constructed from the T001
+	// configuration, observes PostgreSQL only (Redis never participates) and
+	// is shared by the withdrawal receive path (admission for new
+	// controllable writes; T070) and the 003/004 streams (hard-boundary pause
+	// trigger; T090). A configured but invalid limit set refuses startup; an
+	// unconfigured set leaves the PG-only baseline unchanged.
+	capacityGuard, err := buildCapacityGuard(pool, cfg, m)
+	if err != nil {
+		ethClient.Close()
+		pool.Close()
+		return fail("startup failed (capacity): %s", logx.Redact(err.Error()))
+	}
+	if capacityGuard != nil {
+		logScanner.SetCapacityPauseGate(capacityGuard)
+		depositScanner.SetCapacityPauseGate(capacityGuard)
+	}
+
 	// 008 rebuild gate (R5/FR-13): the read-only per-known-scope integrity
 	// verification runs once at startup, before the listener opens. Success is
 	// the only condition that opens the allocation admission gate; a failure
@@ -434,9 +452,10 @@ func Serve(ctx context.Context, d Deps) int {
 	// policy read is wired into startup: the row is written by the privileged
 	// out-of-loop authorization and may not exist yet.
 	withdrawH := &WithdrawalHandler{
-		Pool:    pool,
-		ChainID: chainID,
-		Metrics: m,
+		Pool:         pool,
+		ChainID:      chainID,
+		Metrics:      m,
+		CapacityGate: capacityGuard,
 	}
 	// T018/T063: the 013 middleware wraps every funding/query route — the
 	// limiter admission (PD-1 fail-closed for new withdrawal creation) outside
@@ -541,6 +560,20 @@ func Serve(ctx context.Context, d Deps) int {
 	}
 	observeRecoveryMetrics(runCtx)
 
+	// 013 capacity observation lifecycle (T089): refreshes the pending gauges
+	// and the soft/hard breach counters through the shared registry. It is
+	// informational only and never gates a request; the admission path always
+	// re-observes on its own read and fails closed there.
+	observeCapacity := func(ctx context.Context) {
+		if capacityGuard == nil {
+			return
+		}
+		if _, err := capacityGuard.Observe(ctx); err != nil {
+			slog.Warn("capacity observation failed", "error", logx.Redact(err.Error()))
+		}
+	}
+	observeCapacity(runCtx)
+
 	go runner.Run(runCtx)
 	if len(depRunner.Probes) > 0 {
 		go depRunner.Run(runCtx)
@@ -600,6 +633,7 @@ serveLoop:
 			confirmationObserver.observe()
 			recoveryObserver.observe(runCtx)
 			observeRecoveryMetrics(runCtx)
+			observeCapacity(runCtx)
 			if err != nil && !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) {
 				fmt.Fprintf(stderr, "txharbor serve: indexer stopped: %s\n", logx.Redact(err.Error()))
 				exitCode = 1
@@ -612,6 +646,7 @@ serveLoop:
 			confirmationObserver.observe()
 			recoveryObserver.observe(runCtx)
 			observeRecoveryMetrics(runCtx)
+			observeCapacity(runCtx)
 		}
 	}
 	cancel() // stop probe loop and indexer before releasing resources

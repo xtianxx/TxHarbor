@@ -26,6 +26,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 
@@ -232,4 +233,114 @@ func RescanContinuity(plan RescanPlan, processed []uint64) (missing, duplicates 
 		}
 	}
 	return missing, duplicates
+}
+
+// --- T090 loop-facing controller ---------------------------------------------
+
+// DefaultCapacityPausePoll is the observation cadence while a stream is paused
+// at the hard boundary (initial value, to be calibrated after measurement; it
+// is a cadence, never a business threshold).
+const DefaultCapacityPausePoll = time.Second
+
+// CapacityPauseGate is the read-only backlog observation the 003/004 loops
+// evaluate at a persistence failure. events.CapacityGuard satisfies it (the
+// production assembly is T089); the loops never build a second observation
+// path and never consult Redis.
+type CapacityPauseGate interface {
+	Observe(ctx context.Context) (events.CapacitySnapshot, error)
+}
+
+// CapacityPauseRecord is the recorded, secret-free evidence of one pause: the
+// decision (reason, level, durable progress, detail) and the rescan plan the
+// stream will follow after recovery.
+type CapacityPauseRecord struct {
+	Decision CapacityPauseDecision `json:"decision"`
+	Plan     RescanPlan            `json:"plan"`
+	At       time.Time             `json:"at"`
+}
+
+// CapacityPauseStatus is the observable per-stream pause state: whether the
+// stream is currently paused, the last pause evidence and how many times it
+// has resumed (rescanned from the durable progress) after a pause.
+type CapacityPauseStatus struct {
+	Paused      bool                `json:"paused"`
+	LastPause   CapacityPauseRecord `json:"last_pause"`
+	ResumeCount int64               `json:"resume_count"`
+}
+
+// CapacityPauseController evaluates the T071 pause decision inside the real
+// 003/004 loops and waits for capacity recovery before the stream rescans. It
+// only reads: it never writes, never advances or rewinds a checkpoint, never
+// creates payment work and never changes an upstream gate.
+type CapacityPauseController struct {
+	gate CapacityPauseGate
+	poll time.Duration
+}
+
+// NewCapacityPauseController builds the controller over one read-only gate. A
+// nil gate refuses construction (the caller keeps the pre-013 retry path by
+// simply not wiring a controller).
+func NewCapacityPauseController(gate CapacityPauseGate, poll time.Duration) (*CapacityPauseController, error) {
+	if gate == nil {
+		return nil, errors.New("capacity pause controller requires a gate")
+	}
+	if poll <= 0 {
+		poll = DefaultCapacityPausePoll
+	}
+	return &CapacityPauseController{gate: gate, poll: poll}, nil
+}
+
+// Evaluate observes the backlog and decides whether the persistence failure
+// persistErr must pause the stream. It reads the durable progress of source
+// through q (read-only, no transaction of its own). A pause is only possible
+// when the observed level is hard AND the write could not be persisted; every
+// other combination keeps the stream's ordinary behavior. An observation or
+// progress-read failure returns an error and never pauses: the caller keeps
+// its existing retry path (this file never guesses a level).
+func (c *CapacityPauseController) Evaluate(ctx context.Context, q progressQuerier, chainID int64, source string, persistErr error) (CapacityPauseRecord, bool, error) {
+	if c == nil || c.gate == nil {
+		return CapacityPauseRecord{}, false, nil
+	}
+	snapshot, err := c.gate.Observe(ctx)
+	if err != nil {
+		return CapacityPauseRecord{}, false, fmt.Errorf("observe capacity before pausing: %w", err)
+	}
+	if snapshot.Level != events.CapacityHard || persistErr == nil {
+		return CapacityPauseRecord{}, false, nil
+	}
+	progress, err := ReadReliableProgress(ctx, q, chainID, source)
+	if err != nil {
+		return CapacityPauseRecord{}, false, fmt.Errorf("read reliable progress before pausing: %w", err)
+	}
+	decision := EvaluateCapacityPause(snapshot.Level, persistErr, progress)
+	if !decision.Pause {
+		return CapacityPauseRecord{}, false, nil
+	}
+	return CapacityPauseRecord{
+		Decision: decision,
+		Plan:     RescanFrom(decision),
+		At:       time.Now().UTC(),
+	}, true, nil
+}
+
+// WaitRecovery blocks until the observed backlog leaves the hard boundary
+// (capacity recovered) or ctx ends; it returns false when ctx ended while
+// paused. An unreadable observation is never treated as recovery: the stream
+// stays paused (fail closed for the chain-processing writes) and retries the
+// observation on the poll cadence.
+func (c *CapacityPauseController) WaitRecovery(ctx context.Context) bool {
+	if c == nil || c.gate == nil {
+		return true
+	}
+	for {
+		snapshot, err := c.gate.Observe(ctx)
+		if err == nil && snapshot.Level != events.CapacityHard {
+			return true
+		}
+		select {
+		case <-ctx.Done():
+			return false
+		case <-time.After(c.poll):
+		}
+	}
 }

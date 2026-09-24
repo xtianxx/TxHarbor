@@ -40,11 +40,11 @@
 | B6 修订 | 2 | T052–T058 | B3（生产者）+ B5（消费者） | V-REVISION（生产者×2 + 消费者）绿；8/8 目录矩阵收口；修订 0 新付款 | `feat(events): emit and converge reorg revision events` |
 | B7 Redis 缓存与限流 | 5 | T059–T068（消费 T017/T018） | B1/B2；可与 B3–B6 并行 | V-CACHE/V-RATELIMIT（组件+HTTP）绿；PD-1 拒绝新创建与存量继续分别验收；单独故障组件证据 | `feat(cache): add non-authoritative cache and fail-closed rate limiting` |
 | B8 容量保护与追赶 | 6 | T069–T074 + T018 | B4 + B7（错误通道） | V-CAPACITY/V-CATCHUP 绿；停新保在途、补扫、在途完成、再故障 0 丢失/0 重复；`internal/faultdrill` 基建可构建（T073：`go build ./...`） | `feat(events): add outbox capacity guard and catch-up rescan` |
-| B9 五态故障矩阵与最终验收 | 1, 7 | T019–T025 + T080 | B3–B8 全部合流；故障环境就绪（faultdrill 基建来自 B8 T073） | 矩阵一致率 100%、门禁绕过 0、五项 0 不变量、证据包含 FR-16 边界声明 | `test(fault): add five-state failure matrix drills` |
+| B9 五态故障矩阵与最终验收 | 1, 7 | T019–T025 + T080 + T089–T090（容量门禁生产接线，执行前置） | B3–B8 全部合流；故障环境就绪（faultdrill 基建来自 B8 T073）；T089/T090 生产接线完成 | 矩阵一致率 100%、门禁绕过 0、五项 0 不变量、容量暂停/补扫 0 跳过/0 重复、证据包含 FR-16 边界声明 | `test(fault): add five-state failure matrix drills` |
 | B10 观测与基准 | 7 | T075–T077 + T081 | B9 | 指标/告警齐备且有来源标注；V-BENCH 报告 100% 产出（数值待测不编造）；账本证据含边界声明 | `perf(events): add PG-only baseline and full-stack benchmark` |
 | B11 CI 接入与收口 | 8 + 全部 | T082–T088 | B10 | PR 必需检查映射、独立 Fault/Perf 工作流不阻塞 PR、耗时预算实测、分层/DeDo 审计、quickstart 证据索引、文档同步、覆盖审计 | `ci(events): add layered checks and closeout records` |
 
-**跨批次成员说明**：T017/T018 为故障态与降级面载体，B7/B8 消费；T073 于 B8 创建 `internal/faultdrill` 基建（`doc.go`＋`harness.go` 骨架，保证 B8 完成后 `go build ./...` 通过）并执行追赶测试；T019 于 B9 扩展 harness 编排（B9 首任务，T020–T025/T080 依赖）；T078/T079 于 B5 执行（消费者就绪后），T080 于 B9 执行；T075–T077/T081 于 B10 执行。批次完成后由 orchestrator 执行批次验证并本地提交；**不推送/PR/合并/部署**。
+**跨批次成员说明**：T017/T018 为故障态与降级面载体，B7/B8 消费；T073 于 B8 创建 `internal/faultdrill` 基建（`doc.go`＋`harness.go` 骨架，保证 B8 完成后 `go build ./...` 通过）并执行追赶测试；T019 于 B9 扩展 harness 编排（B9 首任务，T020–T025/T080 依赖）；T089/T090 为 B9 容量门禁生产接线补列（依赖 B8，执行先于 T022/T023——T089 在 `internal/app` 装配 `CapacityGuard` 并接入提款接收路径与 003/004 流，T090 在 003/004 循环内求值 T071 暂停决策；两者不改变上游门禁语义、不新建付款意图）；T078/T079 于 B5 执行（消费者就绪后），T080 于 B9 执行；T075–T077/T081 于 B10 执行。批次完成后由 orchestrator 执行批次验证并本地提交；**不推送/PR/合并/部署**。
 
 ---
 
@@ -92,13 +92,15 @@
 
 - [x] T017 [P] [US1] 新建 `internal/health/dependencies.go` 与 `internal/health/dependencies_test.go`：Redis/Kafka 可用性探针（停/起可判定），暴露为非权威健康信号（`redis_available`/`kafka_available`，复用 T003 指标）；**MUST NOT** 被任何资金门禁、授权、幂等、对账判定读取（静态断言）。完成条件：探针单测 + 无门禁引用断言；serve 冒烟可用。（FR-04/24；D9；contracts/redis.md §1；层：Unit + Integration 冒烟；证据：探针状态输出）
 - [x] T018 [P] [US1] 扩展 `internal/app/serve.go`（单写者链 T018→T063）：非关键功能降级开关（由依赖健康驱动、可配置）与查询/事件投递状态降级标注（积压未清时表达为降级信息，不伪装实时）；关键路径（充值/确认/修订/在途提款/已接受提款）不受非关键降级影响；降级状态可观测。完成条件：serve 集成断言降级不阻塞关键 handler、标注字段存在、0 门禁读取健康信号。（FR-04；D8；spec 矩阵「查询/非关键功能」行；层：Integration-PG；证据：降级开关测试）
-- [ ] T019 [US1] 扩展 `internal/faultdrill/harness.go`（单写者链 T073→T019；**B9 首任务**）：在 B8 骨架（T073）上补齐五态（正常/仅 Redis/仅 Kafka/双故障/恢复追赶）故障注入与场景编排、逐态指标快照采集、证据落盘（日志/导出/环境规格 + commit）；场景可重复、失败不吞错；**不进入生产构建**。完成条件：`make test-fault` 可运行五态骨架场景；T020–T025/T080 依赖本任务（同包 harness 与故障环境）。
-- [ ] T020 [US1] 新建 `internal/faultdrill/matrix_contract_test.go`（`fault` tag；依赖 T019 harness）：结构断言——资金决策路径不 import `internal/cache`/`internal/ratelimit`；门禁不读 Redis/Kafka/健康信号；事件/投递状态从不被解读为授权或许可；重复投递路径不存在新提款意图/nonce/签名/广播调用。完成条件：全部断言通过。（FR-02/05/06；contracts/consumer.md §9；层：Fault/结构；证据：扫描报告）
-- [ ] T021 [US1] 新建 `internal/faultdrill/state_normal_redis_test.go`（`fault` tag；进入条件 B7 完成 + T019 harness）：正常态与仅 Redis 故障态逐项验证矩阵七类操作——充值处理继续（缓存旁路、RPC 有界降级）、确认与重组恢复继续（读 PG）、提款创建仅 Redis 故障时 100% 拒绝且错误明确可重试（0 无限制放行）、已有提款执行继续（资格/绑定读 PG）、查询降级直读 PG 且 0 陈旧财务权威、事件订阅继续、非关键功能降级；安全前提 0 门禁绕过。（FR-04/18/26；PD-1；quickstart Q6/Q8；V-DRILL；SC-01/08；层：Fault；证据：逐项断言 + 指标快照）
-- [ ] T022 [US1] 新建 `internal/faultdrill/state_kafka_test.go`（`fault` tag；进入条件 B4/B5 + T019 harness）：仅 Kafka 故障态——业务按 PG 继续且事件入 Outbox 积压（0 丢失、0 覆盖）、提款创建接收语义不变（接近容量边界按 PD-2 先拒可控新写入）、已有提款执行在途继续、事件订阅停止投递但积压有界可观测、非关键功能降级；「订阅端未收到」不被读作业务未发生。（FR-04/20/21；PD-2；quickstart Q7/Q8；层：Fault；证据：积压指标 + 断言）
-- [ ] T023 [US1] 新建 `internal/faultdrill/state_dual_test.go`（`fault` tag；进入条件 B7/B8 + T019 harness）：双故障（关 Redis+Kafka，保 PG+本地链）——七类操作按矩阵；提款创建拒绝（PD-1）与 Outbox 积压（PD-2）分别验收；恢复后事件补齐、进度恢复；0 重复提款意图、0 重复链上付款、0 孤儿永久入账、0 权威状态丢失、0 门禁绕过、0 静默丢失。完成条件：断言通过；证据含模拟消费者入账幂等与 FR-16 边界声明。（FR-04/05/06/26；SC-01/02/12；quickstart Q8；层：Fault；证据：演练报告）
-- [ ] T024 [US1] 新建 `internal/faultdrill/state_catchup_refailure_test.go`（`fault` tag；进入条件 B8 + T019 harness）：恢复追赶态七类行为（继续 + 事件补齐；积压状态可见、不伪装实时）；追赶期间再次故障 → 安全重暂停、0 丢失、0 重复财务效果、进度可续；缓存/限流恢复为惰性/受控重建，不瞬间无界。完成条件：断言通过；追赶时间可观测（数值待测，不编造）。（FR-22/23；SC-10；quickstart Q9；V-CATCHUP；层：Fault；证据：时间线与指标）
-- [ ] T025 [US1] 新建 `internal/faultdrill/matrix_invariants_test.go`（`fault` tag；依赖 T019 harness）：汇总断言五态 × 七类矩阵一致率 100%（与 spec 矩阵逐格比对表）、门禁绕过 0、重复提款意图 0、重复链上付款 0、孤儿永久入账 0、权威状态丢失 0、静默事件丢失 0；产出证据包（演练日志、指标导出、审计摘录、环境规格 + commit）与 FR-16 边界声明。完成条件：证据包完整、与 verification.md §2 对齐。（FR-05/06/26；SC-01/02/12；D8；层：Fault；证据：`docs/evidence/013/` 证据包）
+- [x] T019 [US1] 扩展 `internal/faultdrill/harness.go`（单写者链 T073→T019；**B9 首任务**）：在 B8 骨架（T073）上补齐五态（正常/仅 Redis/仅 Kafka/双故障/恢复追赶）故障注入与场景编排、逐态指标快照采集、证据落盘（日志/导出/环境规格 + commit）；场景可重复、失败不吞错；**不进入生产构建**。完成条件：`make test-fault` 可运行五态骨架场景；T020–T025/T080 依赖本任务（同包 harness 与故障环境）。
+- [x] T089 [US1] 013 容量门禁生产接线（**B9 接线补列，依赖 B8；执行先于 T022/T023**）：在 `internal/app` 新增 `capacity.go`（`buildCapacityGuard`：按 T001 容量配置构造唯一 `events.CapacityGuard`；未配置→nil，保持 PG-only 基线；已配置则 fail-closed 校验），在 `serve.go` 构造并以共享 metrics 为 observer、按 serve 生命周期刷新 `Observe`（启动/指标节拍/退出；观测失败仅记录、绝不门禁），将 `CapacityGate` 传入提款接收路径（`withdrawalhttp.go` 透传至 `SubmitWithdrawal`）并经 `SetCapacityPauseGate` 接入 003/004 流（供 T090）。不得改变上游门禁语义、不得让 Redis 参与判定。完成条件：Unit（构造/公式拒绝/透传断言）+ Integration-PG（真实 handler+guard：soft 边界 503 且 0 落库、边界下 201、已接受请求重放不受容量拒绝、`capacity_refusals_total` 观测）通过。（FR-20；PD-2；T070/T001/T003；contracts/capacity.md §1–§3；层：Unit + Integration-PG；证据：`internal/app/capacity_test.go`、`internal/app/capacity_wiring_integration_test.go`、B9 演练 T022/T023/T080）
+- [x] T090 [US1] 003/004 循环容量暂停求值（**B9 接线补列，依赖 B8；执行先于 T022/T023**）：在 `internal/indexer/capacitypause.go` 增加 `CapacityPauseGate`/`CapacityPauseController`/`WaitRecovery`（读 PG 观测 + 可靠进度，绝不写），在 `logscanner.go`/`depositscanner.go` 的持久化失败路径求值 T071 决策：hard 且无法安全持久化时从可靠进度暂停并记录可恢复证据（结构化日志含 reason/level/resume height；`CapacityPauseStatus` 可读），容量恢复后继续并从同一 checkpoint 补扫；观测不可读绝不暂停（保持既有重试路径）。不得改变上游门禁语义、不得新建付款意图。完成条件：Unit（决策矩阵/不可读观测不暂停/恢复等待/接线规则）通过；B9 演练以真实持久化失败验证 pause→恢复→补扫 0 跳过/0 重复。（FR-20；PD-2；T071；contracts/capacity.md §3；层：Unit + Fault；证据：`internal/indexer/capacityloop_test.go`、T080 演练暂停/补扫证据）
+- [x] T020 [US1] 新建 `internal/faultdrill/matrix_contract_test.go`（`fault` tag；依赖 T019 harness）：结构断言——资金决策路径不 import `internal/cache`/`internal/ratelimit`；门禁不读 Redis/Kafka/健康信号；事件/投递状态从不被解读为授权或许可；重复投递路径不存在新提款意图/nonce/签名/广播调用。完成条件：全部断言通过。（FR-02/05/06；contracts/consumer.md §9；层：Fault/结构；证据：扫描报告）
+- [x] T021 [US1] 新建 `internal/faultdrill/state_normal_redis_test.go`（`fault` tag；进入条件 B7 完成 + T019 harness）：正常态与仅 Redis 故障态逐项验证矩阵七类操作——充值处理继续（缓存旁路、RPC 有界降级）、确认与重组恢复继续（读 PG）、提款创建仅 Redis 故障时 100% 拒绝且错误明确可重试（0 无限制放行）、已有提款执行继续（资格/绑定读 PG）、查询降级直读 PG 且 0 陈旧财务权威、事件订阅继续、非关键功能降级；安全前提 0 门禁绕过。（FR-04/18/26；PD-1；quickstart Q6/Q8；V-DRILL；SC-01/08；层：Fault；证据：逐项断言 + 指标快照）
+- [x] T022 [US1] 新建 `internal/faultdrill/state_kafka_test.go`（`fault` tag；进入条件 B4/B5 + T019 harness）：仅 Kafka 故障态——业务按 PG 继续且事件入 Outbox 积压（0 丢失、0 覆盖）、提款创建接收语义不变（接近容量边界按 PD-2 先拒可控新写入）、已有提款执行在途继续、事件订阅停止投递但积压有界可观测、非关键功能降级；「订阅端未收到」不被读作业务未发生。（FR-04/20/21；PD-2；quickstart Q7/Q8；层：Fault；证据：积压指标 + 断言）
+- [x] T023 [US1] 新建 `internal/faultdrill/state_dual_test.go`（`fault` tag；进入条件 B7/B8 + T019 harness）：双故障（关 Redis+Kafka，保 PG+本地链）——七类操作按矩阵；提款创建拒绝（PD-1）与 Outbox 积压（PD-2）分别验收；恢复后事件补齐、进度恢复；0 重复提款意图、0 重复链上付款、0 孤儿永久入账、0 权威状态丢失、0 门禁绕过、0 静默丢失。完成条件：断言通过；证据含模拟消费者入账幂等与 FR-16 边界声明。（FR-04/05/06/26；SC-01/02/12；quickstart Q8；层：Fault；证据：演练报告）
+- [x] T024 [US1] 新建 `internal/faultdrill/state_catchup_refailure_test.go`（`fault` tag；进入条件 B8 + T019 harness）：恢复追赶态七类行为（继续 + 事件补齐；积压状态可见、不伪装实时）；追赶期间再次故障 → 安全重暂停、0 丢失、0 重复财务效果、进度可续；缓存/限流恢复为惰性/受控重建，不瞬间无界。完成条件：断言通过；追赶时间可观测（数值待测，不编造）。（FR-22/23；SC-10；quickstart Q9；V-CATCHUP；层：Fault；证据：时间线与指标）
+- [x] T025 [US1] 新建 `internal/faultdrill/matrix_invariants_test.go`（`fault` tag；依赖 T019 harness）：汇总断言五态 × 七类矩阵一致率 100%（与 spec 矩阵逐格比对表）、门禁绕过 0、重复提款意图 0、重复链上付款 0、孤儿永久入账 0、权威状态丢失 0、静默事件丢失 0；产出证据包（演练日志、指标导出、审计摘录、环境规格 + commit）与 FR-16 边界声明。完成条件：证据包完整、与 verification.md §2 对齐。（FR-05/06/26；SC-01/02/12；D8；层：Fault；证据：`docs/evidence/013/` 证据包）
 
 **Checkpoint**: 用户故事 1 的机制载体由 B3–B8 提供，矩阵演练于 B9 独立执行并通过。
 
@@ -219,7 +221,7 @@
 - [ ] T077 [US7] 新建 `internal/perf/bench_test.go`（`perf` tag）与 `docs/evidence/013/benchmark_report_template.md`：执行 A/B 同负载同故障对照并产出报告（中位数/分位数/方差、故障期降级对比、追赶时间、资源占用、结论与置信限制）；未测数值 0 次表述为「已达标」，一律标「待测/待裁决」；Kafka 价值结论只在此报告产出后成立；若结果支持调整范围，MUST 另行提交用户决定（PD-3，不自动删减）。完成条件：报告 100% 产出且字段齐全、绑定 commit 与环境规格。（FR-25；SC-11；adr.md §3/§4；层：Performance；证据：`docs/evidence/013/` 报告）
 - [x] T078 [P] [US7] 新建 `internal/app/e2e_deposit_test.go`（`e2e` tag，全栈 + Anvil；执行批次 B5）：核心充值流 `链上交易 → 索引 → 观测 → 确认 → 事件发射/投递/消费` 全链通过；与 PG-only 基线同核心语义；事件与业务状态一致（同事务）；无 mock 替代验收证据。完成条件：全链通过。（FR-26/28；constitution X/XI；verification.md §3；SC-03；层：E2E；证据：全链运行记录）
 - [x] T079 [P] [US7] 新建 `internal/app/e2e_withdrawal_test.go`（`e2e` tag，全栈 + Anvil；执行批次 B5）：核心提现流 `API 请求 → 持久化接收 → … → 执行 → 事件` 通过；重复请求不产生第二请求/事件；`withdrawal.request.received` 不改变 Accepted 语义。完成条件：全链通过。（FR-05/26；verification.md §3；层：E2E；证据：全链运行记录）
-- [ ] T080 [US7] 新建 `internal/faultdrill/drill_test.go`（`fault` tag；执行批次 B9；依赖 T019 harness）：双故障演练主场景——正常 → 仅 Redis → 仅 Kafka → 双故障（关 Redis+Kafka，保 PG+本地链）→ 恢复追赶；七类操作逐项核对 + 恢复后事件补齐/进度恢复/0 重复提款意图/0 重复链上付款/0 孤儿永久入账/0 权威状态丢失；证据包覆盖矩阵、模拟消费者入账幂等证据与 FR-16 边界声明；门禁绕过 0。完成条件：通过。（FR-04/05/06/26；SC-01/02/12；quickstart Q8；V-DRILL；层：Fault；证据：演练报告 + 审计摘录）
+- [x] T080 [US7] 新建 `internal/faultdrill/drill_test.go`（`fault` tag；执行批次 B9；依赖 T019 harness）：双故障演练主场景——正常 → 仅 Redis → 仅 Kafka → 双故障（关 Redis+Kafka，保 PG+本地链）→ 恢复追赶；七类操作逐项核对 + 恢复后事件补齐/进度恢复/0 重复提款意图/0 重复链上付款/0 孤儿永久入账/0 权威状态丢失；证据包覆盖矩阵、模拟消费者入账幂等证据与 FR-16 边界声明；门禁绕过 0。完成条件：通过。（FR-04/05/06/26；SC-01/02/12；quickstart Q8；V-DRILL；层：Fault；证据：演练报告 + 审计摘录）
 - [ ] T081 [P] [US7] 新建 `internal/faultdrill/ledger_evidence_test.go`（`fault` tag）：「不重复入账」证据——重复投递下模拟上游消费者账本恰好一次入账；证据明确声明只覆盖本项目事件身份/版本/投递语义 + 消费者幂等契约 + 参考消费者，**不保证外部真实账本**；0 次对外部账本的保证声明。完成条件：入账计数与边界声明齐备。（FR-16；SC-12；verification.md §5；层：Fault/证据审查；证据：入账计数 + 边界声明）
 
 **Checkpoint**: US7 独立可验证（Q8/Q10）；对照报告与演练证据齐备且无未测宣称。
@@ -248,8 +250,9 @@
 | 事件契约（`internal/events/catalog.go`、`append.go`、信封/兼容测试） | T010 → T011；`events_contract_test.go` T014 | T014 × T009 × T015 × T016 四方同绿 | B3+；任何语义变更须新版本 + 兼容窗口 |
 | 资金状态文件（生产者集成） | `internal/indexer/reorgcommit.go`：T028 → T052（US4 修订）；`internal/indexer/depositcommit.go`：T026；`internal/indexer/confirmcommit.go`：T027；`internal/withdrawal/intake.go`：T029 → T070；`internal/execution/intent.go`+`advance.go`：T030；`internal/execution/revision.go`：T053 | T038/T039/T040（域原子性探针）+ T085（import 边界） | 每域探针绿后方可合并到主线批次 |
 | 事件运行时 | `internal/events/publisher.go` T033；`internal/events/consumer.go` T041 → T054；`internal/events/quarantine.go` T042 → T045；`internal/events/audit.go` T035；`internal/events/capacity.go` T069 | T036/T046/T048/T072 对应层验证 | 对应故事 checkpoint |
-| 故障演练基建 | `internal/faultdrill/doc.go`、`harness.go`：T073（B8 创建骨架）→ T019（B9 扩展编排） | T073 完成条件：`go build ./...` 通过、`make test-fault` 骨架可运行 | B9 矩阵任务 T020–T025/T080 |
-| 应用接线 | `cmd/txharbor/main.go`：T007（唯一 owner）；`internal/app/eventpublisher.go` T034；`internal/app/eventconsumer.go` T044；`internal/app/eventsadmin.go` T031 → T045；`internal/app/serve.go` T018 → T063 | 各 batch 退出证据 | 后续批次只扩展 `internal/app`，不回改 main.go |
+| 故障演练基建 | `internal/faultdrill/doc.go`、`harness.go`：T073（B8 创建骨架）→ T019（B9 扩展编排）；B9 场景/探针 `scene.go`/`probes.go`/`anvil.go` T019 | T073 完成条件：`go build ./...` 通过、`make test-fault` 骨架可运行 | B9 矩阵任务 T020–T025/T080 |
+| 容量门禁生产接线 | `internal/app/capacity.go` T089；`internal/app/serve.go` T018 → T063 → T089；`internal/app/withdrawalhttp.go` T089；`internal/indexer/capacitypause.go` T071 → T090；`internal/indexer/logscanner.go`、`internal/indexer/depositscanner.go` T090 | T089/T090 Unit + Integration-PG（T089）；B9 演练暂停/补扫（T090/T080） | B9 矩阵任务 T021–T025/T080 |
+| 应用接线 | `cmd/txharbor/main.go`：T007（唯一 owner）；`internal/app/eventpublisher.go` T034；`internal/app/eventconsumer.go` T044；`internal/app/eventsadmin.go` T031 → T045；`internal/app/serve.go` T018 → T063 → T089 | 各 batch 退出证据 | 后续批次只扩展 `internal/app`，不回改 main.go |
 | 环境/构建 | `compose.yaml` T004；`Makefile` T005；`go.mod` T002；`internal/config/config.go` T001 → T075（仅新增告警键）；`internal/metrics/*` T003 → T075 | T085 分层审计 | CI 批次 B11 |
 
 **规则**：任一共享文件的编辑必须按上表链顺序进行；前序任务未完成时，后续任务不得与其并行编辑同一文件。合流检查未通过时，批次不得推进（任务保持未勾选）。
@@ -284,7 +287,7 @@ B5: T041 ─▶ T044 ─▶ T046..T051；T042 ─▶ T045；T043；T078/T079（E
 B6: T052/T053/T054 ─▶ T055/T056/T057/T058（8/8 目录收口）
 B7: T059/T061 ─▶ T060/T062 ─▶ T063/T064 ─▶ T065..T068；消费 T017/T018
 B8: T069 ─▶ T070/T071 ─▶ T072; T073（faultdrill 基建 + 追赶）/T074；消费 T018
-B9: T019（harness 补齐，先行）─▶ T020..T025（五态矩阵）+ T080（V-DRILL 终验）；依赖 B8 T073
+B9: T019（harness 补齐，先行）─▶ T089/T090（容量门禁生产装配 + 003/004 暂停求值）─▶ T020..T025（五态矩阵）+ T080（V-DRILL 终验）；依赖 B8 T073
 B10: T075/T076 ─▶ T077；T081（账本边界证据）
 B11: T082/T083/T084（CI）/ T085/T086/T087/T088（收口）
 ```
@@ -393,8 +396,8 @@ Setup + Foundational → US2（MVP）→ US3 → US4 → US5（可与 US2–US4 
 | FR-01 PG 唯一权威 | T009, T014, T016, T020, T059, T068, T085 | V-BASE、决策路径不读缓存断言 |
 | FR-02 Redis/Kafka 用途限定 | T003, T020, T059–T064, T085 | import 边界 + 无权威写入断言 |
 | FR-03 不引入其他基础设施/不重定义 | T002, T020, T085 | 依赖/编排审计 + Debezium 排除 |
-| FR-04 故障矩阵 | T017–T025, T080 | 五态×七类逐格断言 |
-| FR-05 门禁继承/重复投递不触发新效果 | T030, T041, T049, T054, T080 | V-IDEMPOTENCY/V-DRILL/E2E |
+| FR-04 故障矩阵 | T017–T025, T080, T089, T090 | 五态×七类逐格断言（T089/T090 提供真实容量门禁/暂停接线） |
+| FR-05 门禁继承/重复投递不触发新效果 | T030, T041, T049, T054, T080, T089 | V-IDEMPOTENCY/V-DRILL/E2E；T089 容量门禁不改变上游门禁 |
 | FR-06 故障不变量 | T025, T080 | 五项 0 不变量断言组 |
 | FR-07 同事务 Outbox + 目录 | T008, T011, T026–T032, T038–T040 | 原子性探针 + 目录一致性 |
 | FR-08 至少一次发布/崩溃恢复/有界尝试 | T033–T037 | V-PUBLISHER 崩溃点矩阵 |
@@ -409,13 +412,13 @@ Setup + Foundational → US2（MVP）→ US3 → US4 → US5（可与 US2–US4 
 | FR-17 缓存查询行为 | T059, T060, T063, T065, T068 | V-CACHE |
 | FR-18 PD-1 限流失效 | T062, T063, T066, T067 | V-RATELIMIT 双验收线 |
 | FR-19 RPC 降级不破坏契约 | T064, T067 | 分类/完整性不跳过断言 |
-| FR-20 PD-2 容量保护 | T069–T074 | V-CAPACITY + I-CAP 不变量 |
+| FR-20 PD-2 容量保护 | T069–T074, T089, T090 | V-CAPACITY + I-CAP 不变量；T089 生产装配、T090 暂停/补扫 |
 | FR-21 发布器恢复排空 | T033, T034, T074 | V-CATCHUP 发布侧 |
 | FR-22 消费者追赶/再故障 | T073, T080 | V-CATCHUP |
 | FR-23 追赶期缓存/限流重建 | T060, T063, T068 | V-RECOVERY/V-CACHE |
 | FR-24 观测 | T003, T075, T085 | 指标/日志/告警来源与脱敏 |
 | FR-25 对照基准与 ADR | T076, T077, T087 | V-BENCH + 表述纪律 |
-| FR-26 故障演练验收 | T019–T025, T080 | V-DRILL 证据包 |
+| FR-26 故障演练验收 | T019–T025, T080, T089, T090 | V-DRILL 证据包（含容量暂停/补扫） |
 | FR-27 范围留白纪律 | T001, T002, T085, T088 | 审计 + 数值纪律 |
 | FR-28 测试分层与 CI 成本 | T005, T006, T082–T085 | 分层可独立运行 + PR 触发矩阵 |
 
@@ -423,7 +426,7 @@ Setup + Foundational → US2（MVP）→ US3 → US4 → US5（可与 US2–US4 
 
 | SC | 证据/断言 | 任务 |
 |---|---|---|
-| SC-01 矩阵一致率 100%、门禁绕过 0 | V-FAULT-MATRIX | T021–T025, T080 |
+| SC-01 矩阵一致率 100%、门禁绕过 0 | V-FAULT-MATRIX | T021–T025, T080, T089, T090 |
 | SC-02 0 重复意图/付款/孤儿入账/权威丢失 | V-DRILL + 反例 | T025, T049, T080 |
 | SC-03 状态↔事件 100%/0、重复投递财务重复 0 | V-ATOMICITY + 参考消费者 | T014, T015, T038–T040, T046 |
 | SC-04 有效应用 1、旧不覆盖新、缺口不静默 | V-IDEMPOTENCY | T046, T050 |
@@ -431,7 +434,7 @@ Setup + Foundational → US2（MVP）→ US3 → US4 → US5（可与 US2–US4 
 | SC-06 进度 100% 恢复、重放重复效果 0 | V-PROGRESS | T047, T050 |
 | SC-07 修订幂等、Orphaned 误用 0、新付款 0 | V-REVISION | T055–T058 |
 | SC-08 陈旧权威 0、无限制放行 0、恢复后陈旧 0 | V-CACHE + V-RATELIMIT | T065–T068 |
-| SC-09 停机 0 丢失、可观测 100%、PD-2、排空有界 | V-CAPACITY + V-CATCHUP | T069–T074 |
+| SC-09 停机 0 丢失、可观测 100%、PD-2、排空有界 | V-CAPACITY + V-CATCHUP | T069–T074, T089, T090 |
 | SC-10 再故障 0 丢失/0 重复、进度可续 | V-CATCHUP | T073, T080 |
 | SC-11 对照报告 100%、未测不宣称 | V-BENCH | T076, T077 |
 | SC-12 证据覆盖矩阵、边界声明、外部保证 0 | V-DRILL/V-BENCH 证据审查 | T080, T081, T086 |
@@ -448,7 +451,7 @@ Setup + Foundational → US2（MVP）→ US3 → US4 → US5（可与 US2–US4 
 | 事件订阅 | T033–T037 | T021（继续） | T022, T034（停止投递、积压有界） | T023 | T024, T073, T074 |
 | 非关键功能 | T018 | T021（降级） | T022（降级） | T023（降级/暂禁） | T024（恢复） |
 
-**安全前提行**：0 门禁绕过（T020/T025/T080）；不跳过链身份/完整性校验（T064/T067）；链上已发生充值不拒绝、无法持久化则暂停补扫（T071/T072）；在途提款不新建意图（T049/T071）；不静默丢弃/不覆盖未发布（T069/T072）。
+**安全前提行**：0 门禁绕过（T020/T025/T080）；不跳过链身份/完整性校验（T064/T067）；链上已发生充值不拒绝、无法持久化则暂停补扫（T071/T072/T090）；在途提款不新建意图（T049/T071/T090）；不静默丢弃/不覆盖未发布（T069/T072）。**B9 接线**：T089（`CapacityGuard` 生产装配→提款接收路径门禁 + 003/004 流）+ T090（003/004 暂停求值）。
 
 ### ADR / PD → tasks
 
@@ -459,7 +462,7 @@ Setup + Foundational → US2（MVP）→ US3 → US4 → US5（可与 US2–US4 
 | ADR §3 同负载对照基准设计 | T076, T077 |
 | ADR §5 Debezium 明确不引入 | T002, T085 |
 | PD-1 限流失效处置 | T062, T063, T066, T067, T021, T023 |
-| PD-2 容量保护 | T069–T074, T022, T023 |
+| PD-2 容量保护 | T069–T074, T089, T090, T022, T023 |
 | PD-3 Kafka 价值证明与范围保持 | T076, T077, T087 |
 | PD-4 人工重放边界（审计/幂等/不得重付） | T045, T048, T049, T050 |
 
