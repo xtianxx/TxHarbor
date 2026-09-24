@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
+	"strings"
 	"time"
 
 	"github.com/testcontainers/testcontainers-go"
@@ -186,6 +188,39 @@ func (k *Kafka) Close(ctx context.Context) error {
 		return nil
 	}
 	return k.Stop(ctx)
+}
+
+// Suspend freezes every Java process inside the running broker container
+// (SIGSTOP): the broker stops answering clients while its log segments,
+// committed offsets and in-memory state are preserved. This is the fault
+// injection for an outage that must not lose the broker log — a container
+// Stop/Start boots a fresh broker on the same address (see the Kafka type
+// comment), which is fine for publisher-only drills but would invalidate a
+// consumer's durable resume offset. Resume undoes it (SIGCONT); the broker
+// continues exactly where it stopped.
+func (k *Kafka) Suspend(ctx context.Context) error { return k.signalBroker(ctx, "STOP") }
+
+// Resume unfreezes the broker processes (SIGCONT) after Suspend.
+func (k *Kafka) Resume(ctx context.Context) error { return k.signalBroker(ctx, "CONT") }
+
+// signalBroker sends one signal to every java PID of the container. The Kafka
+// image carries no ps/pgrep, so /proc is the portable process source.
+func (k *Kafka) signalBroker(ctx context.Context, signal string) error {
+	if k.container == nil {
+		return errors.New("kafka container not running")
+	}
+	script := fmt.Sprintf(
+		`for p in /proc/[0-9]*; do pid=${p#/proc/}; if [ "$(cat "$p/comm" 2>/dev/null)" = "java" ]; then kill -%s "$pid" || exit 1; fi; done`,
+		signal)
+	code, reader, err := k.container.Exec(ctx, []string{"bash", "-c", script})
+	if err != nil {
+		return fmt.Errorf("kafka %s exec: %w", signal, err)
+	}
+	out, _ := io.ReadAll(reader)
+	if code != 0 {
+		return fmt.Errorf("kafka %s exited %d: %s", signal, code, strings.TrimSpace(string(out)))
+	}
+	return nil
 }
 
 // withTestName randomizes the container name so concurrent runs never

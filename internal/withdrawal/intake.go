@@ -58,6 +58,17 @@ const (
 	// tells the caller to retry with the SAME key and parameters.
 	intakeUnavailableMessage = "withdrawal storage unavailable or the submission outcome is unknown;" +
 		" retry with the same idempotency key and the same parameters (never rotate the key)"
+	// intakeCapacityRefusedMessage is the PD-2 refusal (T070): the same
+	// retryable 503 channel as the T062 limiter-unavailable path, with the
+	// capacity-boundary cause. It never claims the request was created and
+	// never suggests rotating the idempotency key.
+	intakeCapacityRefusedMessage = "withdrawal intake is temporarily paused while the event backlog is at the capacity boundary;" +
+		" retry with the same idempotency key and the same parameters (never rotate the key)"
+	// intakeCapacityUnavailableMessage is the fail-closed refusal when the
+	// capacity state itself cannot be observed: an unreadable state never
+	// admits a new controllable write.
+	intakeCapacityUnavailableMessage = "withdrawal intake is temporarily unavailable while the event backlog state is unknown;" +
+		" retry with the same idempotency key and the same parameters (never rotate the key)"
 )
 
 // SQL statement scripts. intakeSelectGrantForShareSQL is the receipt path's
@@ -103,6 +114,15 @@ VALUES ($1, $2, $3, $4)`
 // permanent-replay invariant: only steps (1)–(2) are re-evaluated on replay).
 // The core never inherits a list silently and never falls back to an
 // empty/full-chain default.
+//
+// CapacityGate is the optional 013 PD-2 capacity admission surface (T070).
+// When non-nil it is consulted exactly once per FIRST create, after the
+// replay fast path and the allowlist gate, immediately before the receipt
+// transaction: a soft/hard backlog refuses the new controllable funding write
+// with the retryable 503 channel and capacity_refusals_total{op_class}. It
+// never runs for replays or existing requests, never touches Redis, and never
+// replaces, loosens or tightens any existing gate (all of them still run
+// below for an admitted request). Nil keeps the PG-only baseline unchanged.
 type SubmitRequest struct {
 	PresentedKey     string
 	IdempotencyKey   string
@@ -114,6 +134,17 @@ type SubmitRequest struct {
 	AuthorizationID  string
 	Allowlist        []string
 	ResolveAllowlist func(context.Context) ([]string, error)
+	CapacityGate     CapacityAdmitter
+}
+
+// CapacityAdmitter is the narrow PD-2 admission surface the intake consumes
+// (T070); the concrete implementation is events.CapacityGuard. It evaluates
+// the backlog before a new controllable work item is admitted and returns
+// events.CapacityAdmission{Refused,...}. A non-nil error means the capacity
+// state was unreadable: the intake fails closed for the NEW write (retryable
+// 503) and must never treat an unreadable state as capacity available.
+type CapacityAdmitter interface {
+	AdmitNewControllable(ctx context.Context, opClass string) (events.CapacityAdmission, error)
 }
 
 // SubmitResult is the classified outcome of one attempt. Status is the HTTP
@@ -324,8 +355,52 @@ func SubmitWithdrawal(ctx context.Context, pool *pgxpool.Pool, req SubmitRequest
 		}, nil
 	}
 
+	// (4c) 013 capacity gate (T070; PD-2; contracts/capacity.md §3). It runs
+	// ONLY for a first create (the step-4 replay fast path already returned
+	// 200/409 above, so an accepted request and every replay of it are never
+	// refused here), and BEFORE the receipt transaction, so nothing is
+	// admitted and no existing gate below is skipped or weakened. The
+	// decision reads PostgreSQL only (Redis never participates); a soft or
+	// hard backlog refuses with the same retryable 503 channel as T062, an
+	// unreadable state refuses too (fail closed) and never admits.
+	if refusal := capacityAdmissionRefusal(ctx, callerID, req.CapacityGate); refusal != nil {
+		return refusal, nil
+	}
+
 	// (5) Receipt transaction.
 	return submitInTx(ctx, pool, callerID, req, norm)
+}
+
+// capacityAdmissionRefusal evaluates the optional PD-2 gate for one first
+// create. It returns nil when the request may proceed (no gate configured, or
+// the backlog is below the soft boundary) and the retryable 503 outcome when
+// the new controllable write must be refused. It is pure apart from the
+// injected gate call, so the refusal mapping is unit-testable without a
+// database.
+func capacityAdmissionRefusal(ctx context.Context, callerID int64, gate CapacityAdmitter) *SubmitResult {
+	if gate == nil {
+		return nil
+	}
+	admission, err := gate.AdmitNewControllable(ctx, events.CapacityOpWithdrawalCreate)
+	if err != nil {
+		return &SubmitResult{
+			Status:  503,
+			Code:    CodeTemporarilyUnavailable,
+			Message: intakeCapacityUnavailableMessage,
+			Audit:   auditIntent(callerID, "", auditActionUnavailable, "capacity state unreadable while admitting a new withdrawal"),
+		}
+	}
+	if !admission.Refused {
+		return nil
+	}
+	return &SubmitResult{
+		Status:  503,
+		Code:    CodeTemporarilyUnavailable,
+		Message: intakeCapacityRefusedMessage,
+		Audit: auditIntent(callerID, "", auditActionUnavailable,
+			fmt.Sprintf("capacity boundary reached (level=%s pending=%d); new controllable write refused (PD-2)",
+				admission.Level, admission.PendingTotal)),
+	}
 }
 
 // submitInTx owns BEGIN..COMMIT for one receipt (T-accept): writeGuard →
