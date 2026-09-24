@@ -10,10 +10,16 @@
 //   - deposit.confirmation.confirmed: the committed conversion carries the
 //     005 policy version and the confirmed block identity, a refused conversion
 //     writes no event;
-//   - deposit.observation.status_changed: the 006 orphan conversion and the
-//     in-place revival each emit exactly one event with the true from_state and
-//     a continuous aggregate version; repeat execution converges with zero new
-//     events and zero wrong versions.
+//   - deposit.observation.status_changed: the 006 orphan conversion emits
+//     exactly one event with the true from_state and a continuous aggregate
+//     version; the in-place revival emits the dedicated
+//     deposit.observation.reinstated fact instead of a generic status change
+//     (T052 re-point: the revival is NOT a created and NOT a second
+//     conversion). Each reorg conversion additionally emits its
+//     deposit.revision.applied revision fact (Orphaned disposition / new
+//     canonical pending state) in the same transaction, superseding the
+//     pre-reorg event. Repeat execution converges with zero new events and
+//     zero wrong versions.
 //
 // It reuses the package integration fixtures (startIndexerPostgres and the
 // deposit/confirmation/reorg seed helpers) against the real 000015 schema.
@@ -47,6 +53,8 @@ type outboxEventRow struct {
 	BlockHash        string
 	TxHash           string
 	LogIndex         int
+	RecoveryVersion  *int64
+	RevisesEventID   *string
 	PublishState     string
 	Payload          map[string]any
 }
@@ -58,7 +66,8 @@ func outboxRowsForAggregate(t *testing.T, ctx context.Context, pool *pgxpool.Poo
 	rows, err := pool.Query(ctx, `
 SELECT event_id::text, event_type, schema_version, identity_kind, aggregate_type, aggregate_id,
        aggregate_version, COALESCE(chain_id, 0), COALESCE(block_number, 0), COALESCE(block_hash, ''),
-       COALESCE(tx_hash, ''), COALESCE(log_index, 0), publish_state, payload
+       COALESCE(tx_hash, ''), COALESCE(log_index, 0), recovery_version, revises_event_id::text,
+       publish_state, payload
 FROM outbox_events
 WHERE aggregate_id = $1
 ORDER BY aggregate_version`, aggregateID)
@@ -74,7 +83,8 @@ ORDER BY aggregate_version`, aggregateID)
 		)
 		if err := rows.Scan(&row.EventID, &row.EventType, &row.SchemaVersion, &row.IdentityKind,
 			&row.AggregateType, &row.AggregateID, &row.AggregateVersion, &row.ChainID,
-			&row.BlockNumber, &row.BlockHash, &row.TxHash, &row.LogIndex, &row.PublishState, &payload); err != nil {
+			&row.BlockNumber, &row.BlockHash, &row.TxHash, &row.LogIndex,
+			&row.RecoveryVersion, &row.RevisesEventID, &row.PublishState, &payload); err != nil {
 			t.Fatalf("scan outbox row: %v", err)
 		}
 		if err := json.Unmarshal(payload, &row.Payload); err != nil {
@@ -336,8 +346,8 @@ VALUES ($1, 10, $2, 20)`, chainID, strings.Repeat("aa", 32)); err != nil {
 	}
 	aggregateID := depositObservationID(chainID, obsBH, obsTx, 0)
 	rows := outboxRowsForAggregate(t, ctx, pool, aggregateID)
-	if len(rows) != 2 {
-		t.Fatalf("outbox rows after orphan = %d, want 2 (created + status_changed)", len(rows))
+	if len(rows) != 3 {
+		t.Fatalf("outbox rows after orphan = %d, want 3 (created + status_changed + revision.applied)", len(rows))
 	}
 	orphanEvent := rows[1]
 	if orphanEvent.EventType != events.EventTypeDepositObservationStatusChanged || orphanEvent.AggregateVersion != 2 {
@@ -354,17 +364,46 @@ VALUES ($1, 10, $2, 20)`, chainID, strings.Repeat("aa", 32)); err != nil {
 	}
 	outboxWantForbiddenFree(t, orphanEvent.EventID, orphanEvent.Payload)
 
+	// T052: the same conversion carries the revision fact — Orphaned
+	// disposition, the pre-reorg event superseded, the 006 recovery version
+	// and the old block identity.
+	orphanRevision := rows[2]
+	if orphanRevision.EventType != events.EventTypeDepositRevisionApplied || orphanRevision.AggregateVersion != 3 {
+		t.Fatalf("orphan revision = %+v, want deposit.revision.applied v3", orphanRevision)
+	}
+	if orphanRevision.Payload["to_state"] != observationStateOrphaned ||
+		orphanRevision.Payload["reason"] != observationReasonReorgInvalidated {
+		t.Fatalf("orphan revision payload = %v, want to_state orphaned reorg_invalidated", orphanRevision.Payload)
+	}
+	if orphanRevision.RevisesEventID == nil || *orphanRevision.RevisesEventID != rows[0].EventID {
+		t.Fatalf("orphan revision revises_event_id = %v, want the pre-reorg created event %s",
+			orphanRevision.RevisesEventID, rows[0].EventID)
+	}
+	if orphanRevision.RecoveryVersion == nil || *orphanRevision.RecoveryVersion != res.Seq {
+		t.Fatalf("orphan revision recovery_version = %v, want %d", orphanRevision.RecoveryVersion, res.Seq)
+	}
+	superseded, ok := orphanRevision.Payload["superseded_identity"].(map[string]any)
+	if !ok || superseded["event_id"] != rows[0].EventID || superseded["event_type"] != events.EventTypeDepositObservationCreated {
+		t.Fatalf("orphan revision superseded_identity = %v, want the created event %s", orphanRevision.Payload["superseded_identity"], rows[0].EventID)
+	}
+	if superseded["block_hash"] != obsBH || superseded["block_number"] != float64(17) {
+		t.Fatalf("orphan revision superseded_identity block identity = %v, want %s/%d", superseded, obsBH, 17)
+	}
+	outboxWantForbiddenFree(t, orphanRevision.EventID, orphanRevision.Payload)
+
 	// Repeat execution converges: zero new transitions, zero new events and no
 	// version bump (a retry can never fabricate a duplicate business
 	// transition or a wrong version).
 	if repeat, err := InvalidateRecoveryObservations(ctx, pool, lease, chainID, owned); err != nil || repeat != 0 {
 		t.Fatalf("repeat invalidate = %d (err %v), want 0", repeat, err)
 	}
-	if n := outboxCountForAggregate(t, ctx, pool, aggregateID); n != 2 {
-		t.Fatalf("outbox rows after repeat invalidate = %d, want 2", n)
+	if n := outboxCountForAggregate(t, ctx, pool, aggregateID); n != 3 {
+		t.Fatalf("outbox rows after repeat invalidate = %d, want 3", n)
 	}
 
-	// Revival: re-canonicalize the old fork height, then revive in place.
+	// Revival: re-canonicalize the old fork height, then revive in place. The
+	// dedicated reinstated fact reuses the original observation (never a
+	// second created) and the revision fact supersedes the invalidation.
 	if err := RecanonicalizeRecoveryBlock(ctx, pool, lease, chainID, owned, 17, obsBH); err != nil {
 		t.Fatalf("recanonicalize 17: %v", err)
 	}
@@ -373,29 +412,54 @@ VALUES ($1, 10, $2, 20)`, chainID, strings.Repeat("aa", 32)); err != nil {
 		t.Fatalf("revive = %v (err %v), want converted", converted, err)
 	}
 	rows = outboxRowsForAggregate(t, ctx, pool, aggregateID)
-	if len(rows) != 3 {
-		t.Fatalf("outbox rows after revive = %d, want 3 (created + orphan + revive)", len(rows))
+	if len(rows) != 5 {
+		t.Fatalf("outbox rows after revive = %d, want 5 (created + orphan + revision + reinstated + revision)", len(rows))
 	}
-	reviveEvent := rows[2]
-	if reviveEvent.EventType != events.EventTypeDepositObservationStatusChanged || reviveEvent.AggregateVersion != 3 {
-		t.Fatalf("revive event = %+v, want status_changed v3", reviveEvent)
+	reviveEvent := rows[3]
+	if reviveEvent.EventType != events.EventTypeDepositObservationReinstated || reviveEvent.AggregateVersion != 4 {
+		t.Fatalf("revive event = %+v, want deposit.observation.reinstated v4", reviveEvent)
 	}
-	if reviveEvent.Payload["from_state"] != observationStateOrphaned ||
-		reviveEvent.Payload["to_state"] != depositObservationStatusPending ||
-		reviveEvent.Payload["reason"] != observationReasonReorgRevived {
-		t.Fatalf("revive payload = %v, want orphaned->pending reorg_revived", reviveEvent.Payload)
+	if reviveEvent.Payload["observation_id"] != aggregateID ||
+		reviveEvent.Payload["reason"] != observationReasonReorgRevived ||
+		reviveEvent.Payload["revive_basis"] != observationReviveBasisRecanonicalized {
+		t.Fatalf("reinstated payload = %v, want observation_id %s reason %s", reviveEvent.Payload, aggregateID, observationReasonReorgRevived)
 	}
+	if reviveEvent.Payload["block_hash"] != obsBH || reviveEvent.Payload["chain_id"] != float64(chainID) {
+		t.Fatalf("reinstated chain identity = %v, want chain %d block %s", reviveEvent.Payload, chainID, obsBH)
+	}
+	if reviveEvent.EventType == events.EventTypeDepositObservationCreated {
+		t.Fatal("the revival reused the created type instead of the dedicated reinstated fact")
+	}
+	outboxWantForbiddenFree(t, reviveEvent.EventID, reviveEvent.Payload)
+
+	reviveRevision := rows[4]
+	if reviveRevision.EventType != events.EventTypeDepositRevisionApplied || reviveRevision.AggregateVersion != 5 {
+		t.Fatalf("revive revision = %+v, want deposit.revision.applied v5", reviveRevision)
+	}
+	if reviveRevision.Payload["to_state"] != depositObservationStatusPending ||
+		reviveRevision.Payload["reason"] != observationReasonReorgRevived {
+		t.Fatalf("revive revision payload = %v, want to_state pending reorg_revived", reviveRevision.Payload)
+	}
+	if reviveRevision.RevisesEventID == nil || *reviveRevision.RevisesEventID != orphanRevision.EventID {
+		t.Fatalf("revive revision revises_event_id = %v, want the invalidation revision %s",
+			reviveRevision.RevisesEventID, orphanRevision.EventID)
+	}
+	if reviveRevision.RecoveryVersion == nil || *reviveRevision.RecoveryVersion != res.Seq {
+		t.Fatalf("revive revision recovery_version = %v, want %d", reviveRevision.RecoveryVersion, res.Seq)
+	}
+	outboxWantForbiddenFree(t, reviveRevision.EventID, reviveRevision.Payload)
+
 	// Repeat revival converges on the transition log with zero new events.
 	if repeat, err := ReviveRecoveryObservation(ctx, pool, lease, chainID, owned, obsBH, obsTx, 0, "t038 revive repeat"); err != nil || repeat {
 		t.Fatalf("repeat revive = %v (err %v), want converged false", repeat, err)
 	}
-	if n := outboxCountForAggregate(t, ctx, pool, aggregateID); n != 3 {
-		t.Fatalf("outbox rows after repeat revive = %d, want 3", n)
+	if n := outboxCountForAggregate(t, ctx, pool, aggregateID); n != 5 {
+		t.Fatalf("outbox rows after repeat revive = %d, want 5", n)
 	}
 	// The event stream versions are continuous from 1 for the object.
 	for i, row := range outboxRowsForAggregate(t, ctx, pool, aggregateID) {
 		if row.AggregateVersion != int64(i+1) {
-			t.Fatalf("aggregate version sequence = %v, want 1..3", row.AggregateVersion)
+			t.Fatalf("aggregate version sequence = %v, want 1..5", row.AggregateVersion)
 		}
 	}
 }

@@ -12,9 +12,11 @@ package indexer
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 
 	"github.com/xtianxx/txharbor/internal/events"
@@ -36,10 +38,15 @@ const (
 	// observationReasonReorgInvalidated mirrors 006's orphan_reason persisted
 	// on the source row (deposit_observations.orphan_reason).
 	observationReasonReorgInvalidated = "reorg_invalidated"
-	// observationReasonReorgRevived names the 006 FR-08 in-place revival in
-	// the status_changed fact; the dedicated `reinstated` semantics are US4
-	// (T052) and are not emitted by this batch.
+	// observationReasonReorgRevived names the 006 FR-08 in-place revival
+	// semantics (orphaned -> pending when the same old block hash becomes
+	// canonical again) in the reinstated and revision facts (T052).
 	observationReasonReorgRevived = "reorg_revived"
+
+	// observationReviveBasisRecanonicalized is the rebirth basis carried by
+	// deposit.observation.reinstated: the same old block_hash was restored to
+	// canonical (006 FR-08), never a new source observation.
+	observationReviveBasisRecanonicalized = "same_block_hash_recanonicalized"
 
 	// observationSourceKind tags every indexer-domain outbox row for the
 	// reconciliation audit (data-model §4).
@@ -182,6 +189,166 @@ func appendDepositConfirmationConfirmedEvent(
 	}
 	if _, err := events.Append(ctx, tx, ev); err != nil {
 		return fmt.Errorf("append deposit confirmation confirmed event %s: %w", observationID, err)
+	}
+	return nil
+}
+
+// supersededEventRef identifies the aggregate's most recent committed event
+// before a reorg revision: it becomes the revision event's revises_event_id
+// and the payload's superseded_identity reference (T052; contracts/events.md
+// §5.1; data-model §3.4).
+type supersededEventRef struct {
+	EventID          uuid.UUID
+	EventType        string
+	AggregateVersion int64
+}
+
+// readDepositObservationHeadEvent reads the observation aggregate's latest
+// committed outbox event inside the caller's transaction and BEFORE any event
+// of this transaction is appended, so the reference is the pre-reorg fact
+// being revised. found=false means the object's fact stream predates the
+// cutover (events.md §7: revision semantics apply only to post-cutover
+// facts); the caller then emits no revision event rather than fabricating a
+// superseded identity. The read is transaction-local and read-only.
+func readDepositObservationHeadEvent(ctx context.Context, tx pgx.Tx, observationID string) (supersededEventRef, bool, error) {
+	var ref supersededEventRef
+	err := tx.QueryRow(ctx, readObservationHeadEventSQL, depositObservationAggregateType, observationID).
+		Scan(&ref.EventID, &ref.EventType, &ref.AggregateVersion)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return supersededEventRef{}, false, nil
+	}
+	if err != nil {
+		return supersededEventRef{}, false, fmt.Errorf("read deposit observation head event: %w", err)
+	}
+	return ref, true, nil
+}
+
+// readObservationHeadEventSQL reads the highest-version committed event of one
+// aggregate. identity_kind is not filtered: the first emitted fact of an
+// observation is its evm_log created event, and a revision of a pending
+// observation supersedes exactly that fact.
+const readObservationHeadEventSQL = `
+SELECT event_id, event_type, aggregate_version
+FROM outbox_events
+WHERE aggregate_type = $1 AND aggregate_id = $2
+ORDER BY aggregate_version DESC, id DESC
+LIMIT 1`
+
+// appendDepositObservationReinstatedEvent emits
+// deposit.observation.reinstated for the 006 FR-08 in-place revival (T052):
+// the same old block_hash became canonical again and the ORIGINAL observation
+// is reused. It is strictly distinguished from deposit.observation.created (a
+// new source observation) and never converts a second time; the payload
+// carries the original observation id, the revival basis and the chain
+// identity (contracts/events.md §3/§5.4). The event is a fact, never a new
+// deposit or confirmation.
+func appendDepositObservationReinstatedEvent(
+	ctx context.Context,
+	tx pgx.Tx,
+	chainID int64,
+	blockNumber uint64,
+	blockHash, txHash string,
+	logIndex uint64,
+) error {
+	observationID := depositObservationID(chainID, blockHash, txHash, logIndex)
+	ev := events.Event{
+		EventType:     events.EventTypeDepositObservationReinstated,
+		SchemaVersion: events.SchemaVersionV1,
+		IdentityKind:  events.IdentityKindBusinessObject,
+		AggregateType: depositObservationAggregateType,
+		AggregateID:   observationID,
+		Payload: map[string]any{
+			"observation_id": observationID,
+			"reason":         observationReasonReorgRevived,
+			"revive_basis":   observationReviveBasisRecanonicalized,
+			"chain_id":       chainID,
+			"block_number":   int64(blockNumber),
+			"block_hash":     blockHash,
+			"tx_hash":        txHash,
+			"log_index":      int64(logIndex),
+		},
+		OccurredAt:  time.Now().UTC(),
+		ChainID:     chainID,
+		BlockNumber: int64(blockNumber),
+		BlockHash:   blockHash,
+		TxHash:      txHash,
+		LogIndex:    int(logIndex),
+		SourceKind:  observationSourceKind,
+		SourceID:    observationID,
+	}
+	if _, err := events.Append(ctx, tx, ev); err != nil {
+		return fmt.Errorf("append deposit observation reinstated event %s: %w", observationID, err)
+	}
+	return nil
+}
+
+// appendDepositRevisionAppliedEvent emits deposit.revision.applied for one
+// reorg revision of an existing observation fact (T052): superseded is the
+// pre-reorg event the revision supersedes (written to revises_event_id and to
+// superseded_identity together with the old block identity), toState is the
+// new canonical state or the Orphaned disposition, reason names the 006 fact,
+// and recoveryVersion is the 006 recovery version that owns the revision
+// (contracts/events.md §5.1; data-model §3.4). The event is idempotent by
+// construction: it is appended only when the 006 conversion actually commits,
+// and repeat execution converts zero rows and appends zero events.
+func appendDepositRevisionAppliedEvent(
+	ctx context.Context,
+	tx pgx.Tx,
+	chainID int64,
+	blockNumber uint64,
+	blockHash, txHash string,
+	logIndex uint64,
+	recoveryVersion int64,
+	superseded supersededEventRef,
+	toState, reason string,
+) error {
+	observationID := depositObservationID(chainID, blockHash, txHash, logIndex)
+	chainIdentity := map[string]any{
+		"chain_id":     chainID,
+		"block_number": int64(blockNumber),
+		"block_hash":   blockHash,
+		"tx_hash":      txHash,
+		"log_index":    int64(logIndex),
+	}
+	supersededIdentity := map[string]any{
+		"event_id":          superseded.EventID.String(),
+		"event_type":        superseded.EventType,
+		"aggregate_version": superseded.AggregateVersion,
+		"chain_id":          chainID,
+		"block_number":      int64(blockNumber),
+		"block_hash":        blockHash,
+		"tx_hash":           txHash,
+		"log_index":         int64(logIndex),
+	}
+	payload := map[string]any{
+		"superseded_identity": supersededIdentity,
+		"to_state":            toState,
+		"reason":              reason,
+		"observation_id":      observationID,
+	}
+	for key, value := range chainIdentity {
+		payload[key] = value
+	}
+	ev := events.Event{
+		EventType:       events.EventTypeDepositRevisionApplied,
+		SchemaVersion:   events.SchemaVersionV1,
+		IdentityKind:    events.IdentityKindBusinessObject,
+		AggregateType:   depositObservationAggregateType,
+		AggregateID:     observationID,
+		Payload:         payload,
+		OccurredAt:      time.Now().UTC(),
+		ChainID:         chainID,
+		BlockNumber:     int64(blockNumber),
+		BlockHash:       blockHash,
+		TxHash:          txHash,
+		LogIndex:        int(logIndex),
+		RecoveryVersion: recoveryVersion,
+		RevisesEventID:  superseded.EventID,
+		SourceKind:      observationSourceKind,
+		SourceID:        observationID,
+	}
+	if _, err := events.Append(ctx, tx, ev); err != nil {
+		return fmt.Errorf("append deposit revision applied event %s: %w", observationID, err)
 	}
 	return nil
 }

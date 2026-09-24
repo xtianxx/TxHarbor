@@ -5,8 +5,13 @@ import (
 	"errors"
 	"fmt"
 	"sort"
+	"time"
 
+	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+
+	"github.com/xtianxx/txharbor/internal/events"
 )
 
 // T-revision (contracts/lifecycle.md §6, data-model T-revision): consume 010's
@@ -118,6 +123,20 @@ func (c *RevisionConsumer) Apply(ctx context.Context, fact RevisionFact) (Revisi
 		return RevisionResult{}, fmt.Errorf("begin revision apply: %w", err)
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
+	// T053: read the superseded event and the 010 chain evidence before the
+	// transition appends anything, so revises_event_id references the
+	// pre-revision fact. A revision whose object has no post-cutover event or
+	// whose attempt has no chain block fact emits no revision event (there is
+	// no truthful superseded/chain identity to carry; events.md §7); the
+	// existing 011 revision semantics are unchanged.
+	superseded, supersedes, err := readWithdrawalHeadEvent(ctx, tx, intent.IntentID)
+	if err != nil {
+		return RevisionResult{}, err
+	}
+	evidence, hasEvidence, err := readWithdrawalChainEvidence(ctx, tx, intent.IntentID, fact.AttemptID)
+	if err != nil {
+		return RevisionResult{}, err
+	}
 	if err := TransitionIntent(ctx, tx, intent.IntentID, intent.State, intent.StateVersion, target, 0); err != nil {
 		if errors.Is(err, ErrTransitionRefused) || errors.Is(err, ErrIllegalTransition) {
 			return RevisionResult{IntentID: fact.IntentID, RevisionVersion: fact.RevisionVersion, Basis: "cas refused"}, nil
@@ -131,6 +150,12 @@ func (c *RevisionConsumer) Apply(ctx context.Context, fact RevisionFact) (Revisi
 		Detail: "basis=" + fact.Basis,
 	}); err != nil {
 		return RevisionResult{}, err
+	}
+	if supersedes && hasEvidence {
+		if err := appendWithdrawalExecutionRevisedEvent(ctx, tx, intent.IntentID,
+			intent.State, target, fact, evidence, superseded); err != nil {
+			return RevisionResult{}, err
+		}
 	}
 	if _, err := applyLifecycleProjection(ctx, tx, intent.RequestID, fact.AttemptID, fact.RevisionVersion); err != nil {
 		return RevisionResult{}, err
@@ -229,3 +254,150 @@ func (c *RevisionConsumer) ApplyAll(ctx context.Context, facts []RevisionFact) (
 	}
 	return out, nil
 }
+
+// executionSupersededRef identifies the intent's most recent committed outbox
+// event before a revision: it becomes the revision event's revises_event_id
+// and the payload's superseded_identity event reference (T053;
+// contracts/events.md §5.1).
+type executionSupersededRef struct {
+	EventID          uuid.UUID
+	EventType        string
+	AggregateVersion int64
+}
+
+// withdrawalChainEvidence is the 010 chain fact that justifies a revision: the
+// attempt's most recent receipt/reconciliation block identity, read-only from
+// the 010 authority tables. It supplies the chain identity the revision
+// envelope and superseded_identity carry (contracts/events.md §1/§5).
+type withdrawalChainEvidence struct {
+	ChainID     int64
+	BlockNumber int64
+	BlockHash   string
+	TxHash      string
+}
+
+// readWithdrawalHeadEvent reads the intent aggregate's latest committed outbox
+// event inside the caller's transaction and BEFORE the revision transition
+// appends anything, so the reference is the pre-revision fact. found=false
+// means the object's fact stream predates the cutover (events.md §7); the
+// caller then emits no revision event rather than fabricating an identity.
+func readWithdrawalHeadEvent(ctx context.Context, tx pgx.Tx, intentID string) (executionSupersededRef, bool, error) {
+	var ref executionSupersededRef
+	err := tx.QueryRow(ctx, readWithdrawalHeadEventSQL, withdrawalIntentAggregateType, intentID).
+		Scan(&ref.EventID, &ref.EventType, &ref.AggregateVersion)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return executionSupersededRef{}, false, nil
+	}
+	if err != nil {
+		return executionSupersededRef{}, false, fmt.Errorf("read withdrawal head event: %w", err)
+	}
+	return ref, true, nil
+}
+
+// readWithdrawalChainEvidence reads the attempt's most recent chain block fact
+// from the 010 receipt/reconciliation tables (read-only; 010 owns them). A
+// missing attempt or a chain fact without a positive block is reported as
+// found=false: the revision event cannot carry a truthful chain identity and
+// is then not emitted.
+func readWithdrawalChainEvidence(ctx context.Context, tx pgx.Tx, intentID, attemptID string) (withdrawalChainEvidence, bool, error) {
+	if attemptID == "" {
+		return withdrawalChainEvidence{}, false, nil
+	}
+	var ev withdrawalChainEvidence
+	err := tx.QueryRow(ctx, readWithdrawalChainEvidenceSQL, intentID, attemptID).
+		Scan(&ev.ChainID, &ev.BlockNumber, &ev.BlockHash, &ev.TxHash)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return withdrawalChainEvidence{}, false, nil
+	}
+	if err != nil {
+		return withdrawalChainEvidence{}, false, fmt.Errorf("read withdrawal chain evidence: %w", err)
+	}
+	return ev, true, nil
+}
+
+// appendWithdrawalExecutionRevisedEvent emits withdrawal.execution.revised for
+// one applied chain-fact revision (T053): superseded is the pre-revision event
+// (revises_event_id + payload superseded_identity with the old chain block
+// identity), toState is the revision's post state, reason is the authority
+// basis, and the envelope recovery_version carries the driving authority
+// revision version (the revision-chain version this project's 010/011
+// boundary exposes; 013 revision events always carry one; contracts/events.md
+// §1/§5). The event is a fact notification: it is never an execution
+// permission and repeated delivery MUST NOT trigger a new send (FR-05).
+func appendWithdrawalExecutionRevisedEvent(
+	ctx context.Context,
+	tx pgx.Tx,
+	intentID, fromState, toState string,
+	fact RevisionFact,
+	evidence withdrawalChainEvidence,
+	superseded executionSupersededRef,
+) error {
+	payload := map[string]any{
+		"superseded_identity": map[string]any{
+			"event_id":          superseded.EventID.String(),
+			"event_type":        superseded.EventType,
+			"aggregate_version": superseded.AggregateVersion,
+			"chain_id":          evidence.ChainID,
+			"block_number":      evidence.BlockNumber,
+			"block_hash":        evidence.BlockHash,
+			"tx_hash":           evidence.TxHash,
+		},
+		"from_state":       fromState,
+		"to_state":         toState,
+		"reason":           fact.Basis,
+		"intent_id":        intentID,
+		"revision_version": fact.RevisionVersion,
+	}
+	if fact.AttemptID != "" {
+		payload["attempt_id"] = fact.AttemptID
+	}
+	ev := events.Event{
+		EventType:       events.EventTypeWithdrawalExecutionRevised,
+		SchemaVersion:   events.SchemaVersionV1,
+		IdentityKind:    events.IdentityKindBusinessObject,
+		AggregateType:   withdrawalIntentAggregateType,
+		AggregateID:     intentID,
+		Payload:         payload,
+		OccurredAt:      time.Now().UTC(),
+		ChainID:         evidence.ChainID,
+		BlockNumber:     evidence.BlockNumber,
+		BlockHash:       evidence.BlockHash,
+		RecoveryVersion: fact.RevisionVersion,
+		RevisesEventID:  superseded.EventID,
+		SourceKind:      withdrawalExecutionSourceKind,
+		SourceID:        intentID,
+	}
+	if _, err := events.Append(ctx, tx, ev); err != nil {
+		return fmt.Errorf("append withdrawal execution revised event %s: %w", intentID, err)
+	}
+	return nil
+}
+
+// readWithdrawalHeadEventSQL reads the highest-version committed event of one
+// withdrawal intent.
+const readWithdrawalHeadEventSQL = `
+SELECT event_id, event_type, aggregate_version
+FROM outbox_events
+WHERE aggregate_type = $1 AND aggregate_id = $2
+ORDER BY aggregate_version DESC, id DESC
+LIMIT 1`
+
+// readWithdrawalChainEvidenceSQL reads the attempt's most recent chain block
+// fact across the 010 receipt and reconciliation tables (both append-only;
+// the newest observation wins). Only rows with a positive block number are
+// considered: without one the revision has no truthful chain identity.
+const readWithdrawalChainEvidenceSQL = `
+SELECT i.chain_id, e.block_number, e.block_hash, e.tx_hash
+FROM payment_intents i
+JOIN LATERAL (
+    SELECT r.block_number, r.block_hash, r.tx_hash, r.observed_at
+    FROM tx_receipts r
+    WHERE r.attempt_id = $2 AND r.block_number > 0
+    UNION ALL
+    SELECT c.block_number, c.block_hash, c.tx_hash, c.observed_at
+    FROM tx_reconciliations c
+    WHERE c.attempt_id = $2 AND c.block_number > 0
+    ORDER BY observed_at DESC
+    LIMIT 1
+) e ON TRUE
+WHERE i.intent_id = $1`

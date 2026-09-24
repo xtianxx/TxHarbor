@@ -575,11 +575,30 @@ func InvalidateRecoveryObservations(ctx context.Context, pool *pgxpool.Pool, lea
 	// transition INSERT above runs first and is the repeat-execution guard:
 	// a repeat inserts zero transition rows, converts zero rows and emits
 	// zero events, so no duplicate business transition and no wrong version
-	// can be produced by retries.
+	// can be produced by retries. 013 T052 adds the revision fact for the same
+	// conversion: deposit.revision.applied supersedes the observation's
+	// pre-reorg event (read before this transaction appends anything) with the
+	// Orphaned disposition and the 006 recovery version.
 	for _, candidate := range candidates {
+		observationID := depositObservationID(chainID, candidate.blockHash, candidate.txHash, candidate.logIndex)
+		superseded, supersedes, err := readDepositObservationHeadEvent(ctx, tx, observationID)
+		if err != nil {
+			return 0, err
+		}
 		if err := appendDepositObservationStatusChangedEvent(ctx, tx,
 			chainID, candidate.blockNumber, candidate.blockHash, candidate.txHash, candidate.logIndex,
 			candidate.fromStatus, observationStateOrphaned, observationReasonReorgInvalidated); err != nil {
+			return 0, err
+		}
+		if !supersedes {
+			// The observation's fact stream predates the cutover: there is no
+			// post-cutover event to revise (events.md §7), so no revision event
+			// is fabricated; the state conversion above is unaffected.
+			continue
+		}
+		if err := appendDepositRevisionAppliedEvent(ctx, tx,
+			chainID, candidate.blockNumber, candidate.blockHash, candidate.txHash, candidate.logIndex,
+			row.Seq, superseded, observationStateOrphaned, observationReasonReorgInvalidated); err != nil {
 			return 0, err
 		}
 	}
@@ -1273,15 +1292,31 @@ func ReviveRecoveryObservation(ctx context.Context, pool *pgxpool.Pool, lease *L
 	if tag.RowsAffected() != 1 {
 		return false, fmt.Errorf("insert revive transition affected %d rows, want 1", tag.RowsAffected())
 	}
-	// 013 T028: the in-place recovery is one Orphaned -> Pending status
-	// conversion; its deposit.observation.status_changed event commits in the
-	// same transaction (T1). The replay early-return above and the transition
-	// UNIQUE make repeat execution converge with zero new events (the
-	// dedicated `reinstated` semantics land with US4/T052).
-	if err := appendDepositObservationStatusChangedEvent(ctx, tx,
-		chainID, uint64(blockNumber), blockHash, txHash, uint64(logIndex),
-		observationStateOrphaned, depositObservationStatusPending, observationReasonReorgRevived); err != nil {
+	// 013 T052: the in-place revival emits the dedicated
+	// deposit.observation.reinstated fact (same old block_hash canonical again,
+	// the original observation reused — never a second created) plus the
+	// deposit.revision.applied revision of the Orphaned disposition
+	// (orphaned -> pending canonical state, 006 recovery version). Both commit
+	// in the same transaction as the conversion (T1); the replay early-return
+	// above and the transition UNIQUE make repeat execution converge with zero
+	// new events and zero wrong versions. The pre-revival head event is read
+	// before any event of this transaction is appended, so revises_event_id
+	// references the fact being revised (the invalidation revision).
+	revivedObservationID := depositObservationID(chainID, blockHash, txHash, uint64(logIndex))
+	superseded, supersedes, err := readDepositObservationHeadEvent(ctx, tx, revivedObservationID)
+	if err != nil {
 		return false, err
+	}
+	if err := appendDepositObservationReinstatedEvent(ctx, tx,
+		chainID, uint64(blockNumber), blockHash, txHash, uint64(logIndex)); err != nil {
+		return false, err
+	}
+	if supersedes {
+		if err := appendDepositRevisionAppliedEvent(ctx, tx,
+			chainID, uint64(blockNumber), blockHash, txHash, uint64(logIndex),
+			row.Seq, superseded, depositObservationStatusPending, observationReasonReorgRevived); err != nil {
+			return false, err
+		}
 	}
 	detail := fmt.Sprintf("recovery=%s observation=%s/%s/%d version=%d evidence=%s",
 		row.RecoveryID, blockHash, txHash, logIndex, row.Seq, evidence)

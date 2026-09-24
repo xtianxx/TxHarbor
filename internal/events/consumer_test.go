@@ -185,6 +185,72 @@ func TestConsumerChainIdentity(t *testing.T) {
 	}
 }
 
+// TestConsumerRevisionEnvelopeValidation covers the T054 revision-field
+// validation: a revision-required event MUST carry revises_event_id,
+// recovery_version and the chain identity of the revised fact; each missing
+// or zero field fails closed with ErrContract (quarantined non_retryable by
+// Process), and a parsed revision envelope reports its revision role. The
+// FR-08 revival is a distinct, non-revision type and is never conflated with
+// created.
+func TestConsumerRevisionEnvelopeValidation(t *testing.T) {
+	base := envelopeForEvent(t, validEvent(t, EventTypeDepositRevisionApplied), 2)
+
+	cases := []struct {
+		name   string
+		mutate func(wire map[string]any)
+	}{
+		{"missing revises_event_id", func(w map[string]any) { delete(w, "revises_event_id") }},
+		{"empty revises_event_id", func(w map[string]any) { w["revises_event_id"] = "" }},
+		{"missing recovery_version", func(w map[string]any) { delete(w, "recovery_version") }},
+		{"zero recovery_version", func(w map[string]any) { w["recovery_version"] = 0 }},
+		{"missing chain identity", func(w map[string]any) { delete(w, "block_hash") }},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var wire map[string]any
+			if err := json.Unmarshal(base, &wire); err != nil {
+				t.Fatalf("decode base envelope: %v", err)
+			}
+			tc.mutate(wire)
+			body, err := json.Marshal(wire)
+			if err != nil {
+				t.Fatalf("encode mutated envelope: %v", err)
+			}
+			if _, err := ParseEnvelope(body); !errors.Is(err, ErrContract) {
+				t.Fatalf("ParseEnvelope = %v, want ErrContract", err)
+			}
+		})
+	}
+
+	// The complete revision envelope parses and preserves its revision fields.
+	env, err := ParseEnvelope(base)
+	if err != nil {
+		t.Fatalf("complete revision envelope = %v", err)
+	}
+	if !env.IsRevision() {
+		t.Fatal("revision-required envelope did not report IsRevision")
+	}
+	if env.RevisesEventID == nil || env.RecoveryVersion == nil || *env.RecoveryVersion != 1 {
+		t.Fatalf("revision fields not preserved: revises=%v recovery=%v", env.RevisesEventID, env.RecoveryVersion)
+	}
+
+	// The FR-08 revival is not revision-required and never reads as created:
+	// distinct catalog type and distinct identity kind.
+	revivalEnv, err := ParseEnvelope(envelopeForEvent(t, validEvent(t, EventTypeDepositObservationReinstated), 4))
+	if err != nil {
+		t.Fatalf("reinstated envelope = %v", err)
+	}
+	if revivalEnv.IsRevision() {
+		t.Fatal("reinstated must not be a revision-required event")
+	}
+	if !revivalEnv.IsRevival() {
+		t.Fatal("reinstated envelope did not report IsRevival")
+	}
+	if revivalEnv.EventType == EventTypeDepositObservationCreated || revivalEnv.IdentityKind == IdentityKindEVMLog {
+		t.Fatalf("revival was conflated with created: %+v", revivalEnv)
+	}
+}
+
 // TestConsumerVersionGuardDecisions pins the pure guard: no baseline applies,
 // newer applies, equal/older skips, a jump beyond max+1 gaps.
 func TestConsumerVersionGuardDecisions(t *testing.T) {

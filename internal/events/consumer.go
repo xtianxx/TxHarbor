@@ -114,6 +114,24 @@ func ParseEnvelope(data []byte) (Envelope, error) {
 	if err != nil {
 		return Envelope{}, err
 	}
+	// T054 revision field validation (FR-11/FR-12; contracts/events.md §5.1):
+	// a revision-required type MUST carry revises_event_id, recovery_version
+	// and the chain identity of the revised fact. A missing/zero field is a
+	// contract failure and fails closed into a persistent quarantine; a chain
+	// that does not match the local configuration is identity_mismatch (the
+	// later CheckChainIdentity call). The consumer never guesses a revision
+	// reference.
+	if spec.RevisionRequired {
+		if wire.RevisesEventID == nil || *wire.RevisesEventID == "" {
+			return Envelope{}, contractErrorf("revision event %s misses revises_event_id", wire.EventType)
+		}
+		if wire.RecoveryVersion == nil || *wire.RecoveryVersion <= 0 {
+			return Envelope{}, contractErrorf("revision event %s misses recovery_version > 0", wire.EventType)
+		}
+		if wire.ChainID == nil || wire.BlockNumber == nil || wire.BlockHash == nil || *wire.BlockHash == "" {
+			return Envelope{}, contractErrorf("chain-derived revision %s misses chain identity", wire.EventType)
+		}
+	}
 	eventID, err := uuid.Parse(wire.EventID)
 	if err != nil {
 		return Envelope{}, contractErrorf("envelope event_id %q is not a UUID: %v", wire.EventID, err)
@@ -203,6 +221,27 @@ func (e Envelope) CheckChainIdentity(expectedChainID int64) error {
 		return fmt.Errorf("%w: envelope chain %d != local chain %d", ErrIdentityMismatch, *e.ChainID, expectedChainID)
 	}
 	return nil
+}
+
+// IsRevision reports whether the envelope's type is a revision-required
+// catalog type (deposit.revision.applied / withdrawal.execution.revised):
+// every such envelope carries revises_event_id, recovery_version and the
+// chain identity (enforced by ParseEnvelope). Revision events are fact
+// corrections, never new deposits/confirmations/payment instructions
+// (contracts/events.md §5; T054).
+func (e Envelope) IsRevision() bool {
+	spec, ok := LookupEventSpec(e.EventType)
+	return ok && spec.RevisionRequired
+}
+
+// IsRevival reports whether the envelope carries the 006 FR-08 revival fact
+// (deposit.observation.reinstated): the same old block_hash became canonical
+// again and the ORIGINAL observation is reused. It is a distinct catalog type
+// from deposit.observation.created (a new source observation) with a distinct
+// identity kind (business_object vs evm_log) and is never confused with it;
+// neither type is a payment instruction (contracts/events.md §5.4; FR-11).
+func (e Envelope) IsRevival() bool {
+	return e.EventType == EventTypeDepositObservationReinstated
 }
 
 // Message is one delivered event: the Kafka coordinates plus the envelope
