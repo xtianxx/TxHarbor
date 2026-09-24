@@ -13,6 +13,7 @@ import "github.com/prometheus/client_golang/prometheus"
 //	outbox_published_total              -> txharbor_outbox_published_total
 //	outbox_attempts_total               -> txharbor_outbox_attempts_total
 //	outbox_blocked_count                -> txharbor_outbox_blocked_count
+//	outbox_audit_gaps_total             -> txharbor_outbox_audit_gaps_total
 //	consumer_lag_seconds                -> txharbor_consumer_lag_seconds
 //	consumer_lag_messages               -> txharbor_consumer_lag_messages
 //	consumer_applied_total              -> txharbor_consumer_applied_total
@@ -47,6 +48,7 @@ const (
 	OutboxPublishedMetricName        = "txharbor_outbox_published_total"
 	OutboxAttemptsMetricName         = "txharbor_outbox_attempts_total"
 	OutboxBlockedMetricName          = "txharbor_outbox_blocked_count"
+	OutboxAuditGapsMetricName        = "txharbor_outbox_audit_gaps_total"
 
 	ConsumerLagSecondsMetricName     = "txharbor_consumer_lag_seconds"
 	ConsumerLagMessagesMetricName    = "txharbor_consumer_lag_messages"
@@ -86,6 +88,7 @@ type eventsMetrics struct {
 	outboxPublished        *prometheus.CounterVec
 	outboxAttempts         *prometheus.CounterVec
 	outboxBlocked          *prometheus.GaugeVec
+	outboxAuditGaps        *prometheus.CounterVec
 
 	consumerLagSeconds     *prometheus.GaugeVec
 	consumerLagMessages    *prometheus.GaugeVec
@@ -145,6 +148,10 @@ func registerEvents(registry *prometheus.Registry) eventsMetrics {
 			Name: OutboxBlockedMetricName,
 			Help: "Outbox events permanently blocked and awaiting an audited unblock; never silently dropped.",
 		}, nil),
+		outboxAuditGaps: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: OutboxAuditGapsMetricName,
+			Help: "Reconciliation-audit gaps by source kind: committed source transitions with no emitted event (detection only; repair is audited).",
+		}, []string{"source_kind"}),
 
 		consumerLagSeconds: prometheus.NewGaugeVec(prometheus.GaugeOpts{
 			Name: ConsumerLagSecondsMetricName,
@@ -242,7 +249,7 @@ func registerEvents(registry *prometheus.Registry) eventsMetrics {
 	}
 	registry.MustRegister(
 		e.outboxPending, e.outboxPendingOldestAge, e.outboxPublishFailures,
-		e.outboxPublished, e.outboxAttempts, e.outboxBlocked,
+		e.outboxPublished, e.outboxAttempts, e.outboxBlocked, e.outboxAuditGaps,
 		e.consumerLagSeconds, e.consumerLagMessages, e.consumerApplied,
 		e.consumerRetry, e.consumerQuarantine, e.consumerCatchupSeconds,
 		e.consumerReplayClock, e.eventReplayOps,
@@ -291,6 +298,12 @@ func (m *Metrics) ObserveOutboxAttempts(n int) {
 // SetOutboxBlocked records the count of permanently blocked events.
 func (m *Metrics) SetOutboxBlocked(n int) {
 	m.events.outboxBlocked.WithLabelValues().Set(float64(n))
+}
+
+// ObserveOutboxAuditGap counts one reconciliation-audit gap by source kind
+// (T035; detection only, never an automatic writeback).
+func (m *Metrics) ObserveOutboxAuditGap(sourceKind string) {
+	m.events.outboxAuditGaps.WithLabelValues(sourceKind).Inc()
 }
 
 // SetConsumerLag records both lag gauges for one consumer partition.

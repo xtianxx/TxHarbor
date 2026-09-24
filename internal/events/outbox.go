@@ -45,27 +45,37 @@ func CanTransition(from, to PublishState) bool {
 }
 
 // ClaimPendingSQL selects the next claimable batch for the publisher
-// (contracts/outbox-publisher.md §1.1; research R6). Parameters: $1 = batch
-// size. The caller runs it inside the claim transaction; the following claim
-// UPDATE and the commit are part of the same transaction, and the network
-// publish happens strictly after the commit.
+// (contracts/outbox-publisher.md §1.1/§1.4; research R6). Parameters: $1 =
+// batch size. The caller runs it inside the claim transaction; the following
+// claim UPDATE and the commit are part of the same transaction, and the
+// network publish happens strictly after the commit. Rows with a live lease
+// are skipped: a claim can only be taken over after its lease expires (the
+// same-row single-owner rule; T033/T036). The selected columns feed the
+// transport envelope of T033.
 const ClaimPendingSQL = `
-SELECT id
+SELECT id, event_id, event_type, schema_version, identity_kind,
+       aggregate_type, aggregate_id, aggregate_version,
+       payload, occurred_at,
+       chain_id, block_number, block_hash, tx_hash, log_index,
+       recovery_version, revises_event_id
 FROM outbox_events
 WHERE publish_state = 'pending' AND next_attempt_at <= now()
+  AND (claim_owner IS NULL OR claim_expires_at IS NULL OR claim_expires_at <= now())
 ORDER BY id
 LIMIT $1
 FOR UPDATE SKIP LOCKED`
 
-// ClaimMarkSQL stamps the claimed rows with the owner and a bounded lease
-// (contracts/outbox-publisher.md §1.1). Parameters: $1 = id array, $2 = owner
-// instance id, $3 = lease seconds. A row that is no longer pending updates
-// zero rows.
+// ClaimMarkSQL stamps the claimed rows with the owner and a bounded lease and
+// counts the attempt (contracts/outbox-publisher.md §1.1). Parameters: $1 = id
+// array, $2 = owner instance id, $3 = lease seconds. A row that is no longer
+// pending updates zero rows. The returned attempt_count is the
+// post-increment count the publisher uses for the bounded retry backoff.
 const ClaimMarkSQL = `
 UPDATE outbox_events
-SET claim_owner = $2, claim_expires_at = now() + make_interval(secs => $3::double precision)
+SET claim_owner = $2, claim_expires_at = now() + make_interval(secs => $3::double precision),
+    attempt_count = attempt_count + 1
 WHERE id = ANY($1) AND publish_state = 'pending'
-RETURNING id`
+RETURNING id, attempt_count`
 
 // AckPublishedSQL marks broker-acknowledged rows published (T3;
 // contracts/outbox-publisher.md §1.3). Parameters: $1 = id array, $2 = owner
@@ -87,6 +97,17 @@ UPDATE outbox_events
 SET claim_owner = NULL, claim_expires_at = NULL,
     next_attempt_at = now() + make_interval(secs => $3::double precision),
     last_error_class = $4
+WHERE id = ANY($1) AND claim_owner = $2 AND publish_state = 'pending'
+RETURNING id`
+
+// ReleaseClaimImmediateSQL returns claims to pending without scheduling a
+// backoff (T033/T034 graceful shutdown and unaccounted records). Parameters:
+// $1 = id array, $2 = owner instance id. last_error_class is left unchanged: a
+// shutdown is not a publish failure. The row stays pending and is never
+// dropped.
+const ReleaseClaimImmediateSQL = `
+UPDATE outbox_events
+SET claim_owner = NULL, claim_expires_at = NULL, next_attempt_at = now()
 WHERE id = ANY($1) AND claim_owner = $2 AND publish_state = 'pending'
 RETURNING id`
 
@@ -124,6 +145,12 @@ FROM outbox_events
 WHERE publish_state = 'pending'
 GROUP BY 1
 ORDER BY 1`
+
+// BlockedCountSQL observes the permanently blocked backlog for
+// outbox_blocked_count (verification.md §1): blocked rows stay visible and
+// auditable, never silently dropped.
+const BlockedCountSQL = `
+SELECT count(*)::bigint FROM outbox_events WHERE publish_state = 'blocked'`
 
 // PruneWatermarkSQL reads the retention watermark before a prune so
 // events-admin can record it in event_ops_audit (T045). Parameters: $1 =

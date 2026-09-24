@@ -108,10 +108,13 @@ var forbiddenRuntimeTokens = []string{
 	"logical_replication",
 }
 
-// forbiddenPublishTokens are broker/network publish calls: publishing happens
-// in the publisher runtime outside any transaction, never inside this
-// package's Append path (T016 "事务内无网络发布调用"; contracts/
-// outbox-publisher.md §0).
+// forbiddenPublishTokens are broker/network publish calls. They must never
+// appear in the transaction-bound emission path: publishing happens in the
+// publisher runtime outside any transaction, never inside this package's
+// Append path (T016 "事务内无网络发布调用"; contracts/outbox-publisher.md §0).
+// The publisher runtime itself is the single place allowed to carry the broker
+// client (T033); its "publish outside any transaction / never publish an
+// uncommitted row" property is asserted at runtime by T036.
 var forbiddenPublishTokens = []string{
 	"ProduceSync",
 	"franz-go",
@@ -124,12 +127,21 @@ var forbiddenPublishTokens = []string{
 	"grpc.Dial",
 }
 
+// publisherRuntimeSources are the files allowed to carry a broker client. The
+// list is explicit so a publish call added anywhere else still fails this test.
+var publisherRuntimeSources = map[string]bool{
+	"publisher.go": true,
+}
+
 func TestT016NoTriggerCDCOrNetworkPublish(t *testing.T) {
 	for _, file := range productionSources(t) {
 		for _, token := range forbiddenRuntimeTokens {
 			if strings.Contains(file.src, token) {
 				t.Errorf("%s carries a trigger/CDC path (%q)", file.name, token)
 			}
+		}
+		if publisherRuntimeSources[file.name] {
+			continue
 		}
 		for _, token := range forbiddenPublishTokens {
 			if strings.Contains(file.src, token) {
