@@ -8,6 +8,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"runtime"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -240,16 +241,19 @@ func TestClientFallbackSingleflightCollapsesSameKey(t *testing.T) {
 	client := newTestClient(t, store, Config{
 		Epoch: "1", TTL: time.Minute, Timeout: 5 * time.Second, MaxFallbackConcurrency: 4,
 	})
+	const callers = 16
 	var loads atomic.Int64
 	release := make(chan struct{})
+	var releaseOnce sync.Once
+	releaseLoader := func() { releaseOnce.Do(func() { close(release) }) }
 	load := func(context.Context) ([]byte, int64, error) {
 		loads.Add(1)
 		<-release
 		return []byte("v"), 1, nil
 	}
 	var wg sync.WaitGroup
-	for i := 0; i < 16; i++ {
-		wg.Add(1)
+	wg.Add(callers)
+	for i := 0; i < callers; i++ {
 		go func() {
 			defer wg.Done()
 			if _, err := client.GetOrLoad(context.Background(), FamilyDeposit, "same", 0, load); err != nil {
@@ -257,16 +261,65 @@ func TestClientFallbackSingleflightCollapsesSameKey(t *testing.T) {
 			}
 		}()
 	}
-	// Wait until the single leader is inside the loader, then release.
-	deadline := time.Now().Add(2 * time.Second)
-	for loads.Load() == 0 && time.Now().Before(deadline) {
-		time.Sleep(time.Millisecond)
-	}
-	close(release)
+	// Every failure path must still drain the callers parked in the loader.
+	defer func() {
+		releaseLoader()
+		wg.Wait()
+	}()
+
+	// Singleflight merges calls that actually overlap. Release the loader only
+	// once the leader is inside it and every other caller is parked in that
+	// same in-flight call: the first version released as soon as the first
+	// loader entry appeared, so callers that had not reached flightGroup.Do
+	// yet started extra loads after the leader returned and deleted the entry
+	// — the assertion then failed for scheduling reasons, not a merge defect.
+	waitForSingleflightOverlap(t, t.Name(), callers-1, &loads)
+	releaseLoader()
 	wg.Wait()
 	if got := loads.Load(); got != 1 {
 		t.Fatalf("loader calls = %d, want 1 (singleflight)", got)
 	}
+}
+
+// waitForSingleflightOverlap blocks until one loader is running and wantWaiters
+// other callers are parked in that same in-flight call; only then may the
+// loader be released. flightGroup exposes no test seam for this state, so it
+// is observed from goroutine stacks: a caller parked in
+// sync.(*WaitGroup).Wait below Client.GetOrLoad is inside flightGroup.Do with
+// the call still in flight and cannot leave before the loader is released. It
+// fails fast on a second loader (broken merge) and on timeout instead of
+// releasing into an unproven window.
+func waitForSingleflightOverlap(t *testing.T, testName string, wantWaiters int, loads *atomic.Int64) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	buf := make([]byte, 4<<20)
+	for {
+		if got := loads.Load(); got > 1 {
+			t.Fatalf("loader calls = %d while the first is still in flight, want 1 (singleflight)", got)
+		}
+		if n := parkedFlightWaiters(buf, testName); n >= wantWaiters {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("timed out waiting for %d callers to enter the in-flight singleflight call", wantWaiters)
+		}
+		runtime.Gosched()
+	}
+}
+
+// parkedFlightWaiters counts goroutines started by testName that are blocked in
+// sync.(*WaitGroup).Wait inside Client.GetOrLoad.
+func parkedFlightWaiters(buf []byte, testName string) int {
+	n := runtime.Stack(buf, true)
+	count := 0
+	for _, block := range strings.Split(string(buf[:n]), "\n\n") {
+		if strings.Contains(block, testName) &&
+			strings.Contains(block, "sync.(*WaitGroup).Wait") &&
+			strings.Contains(block, "cache.(*Client).GetOrLoad") {
+			count++
+		}
+	}
+	return count
 }
 
 func TestClientFallbackSemaphoreBoundsConcurrency(t *testing.T) {
