@@ -359,6 +359,15 @@ func (c *ConfirmationCommitter) ConfirmDepositUnit(ctx context.Context, lease *L
 		_ = tx.Rollback(ctx)
 		return c.convergeCommitted(ctx, basis)
 	}
+	// 013 T027: the committed confirmation conversion and its
+	// deposit.confirmation.confirmed event land in this same transaction
+	// (T1). A converge path writes nothing and therefore appends nothing; an
+	// Append failure rolls the whole conversion back (no half-committed
+	// status, no fabricated event).
+	if err := appendDepositConfirmationConfirmedEvent(ctx, tx,
+		c.cfg.ChainID, basis.Height, basis.BlockHash, basis.TxHash, basis.LogIndex, basis.PolicySeq); err != nil {
+		return err
+	}
 	// Step 5: COMMIT. On unknown outcome (disconnect) re-read the
 	// observation PK to定性 (mirror 004 uncertain-commit recovery): a
 	// visible confirmed row means the commit landed.

@@ -361,7 +361,15 @@ func (d *StepDriver) converge(ctx context.Context, req StepRequest, stepID strin
 			return StepOutcome{}, err
 		}
 		if found && intent.State == IntentExecuting {
-			if err := TransitionIntent(ctx, tx, req.IntentID, intent.State, intent.StateVersion, IntentReconciling, req.LeaseVersion); err != nil && !errors.Is(err, ErrTransitionRefused) {
+			// 013 T030: the unknown-result transition carries the 010 attempt
+			// reference (and outcome context) into the outbox event so the
+			// transition is traceable back to the attempt fact (T040
+			// attempt-level referential-integrity evidence).
+			if err := TransitionIntentWithContext(ctx, tx, req.IntentID, intent.State, intent.StateVersion, IntentReconciling, req.LeaseVersion, IntentEventContext{
+				AttemptID:    res.attemptID,
+				OutcomeClass: res.class,
+				NoSendResult: res.noSendResult,
+			}); err != nil && !errors.Is(err, ErrTransitionRefused) {
 				return StepOutcome{}, err
 			}
 		}

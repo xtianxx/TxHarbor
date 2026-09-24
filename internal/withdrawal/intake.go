@@ -29,6 +29,8 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+
+	"github.com/xtianxx/txharbor/internal/events"
 )
 
 // Audit action vocabulary of withdrawal_request_audit (data-model Table 5).
@@ -151,6 +153,42 @@ type AuditIntent struct {
 	RequestID string
 	Action    string
 	Detail    string
+}
+
+// 013 event emission vocabulary (T029; contracts/events.md §3). Aggregate
+// type/state mirror the 007 receive-only facts; they never reinterpret them.
+const (
+	withdrawalRequestAggregateType = "withdrawal_request"
+	withdrawalRequestStateAccepted = "accepted"
+	withdrawalRequestSourceKind    = "withdrawal_intake"
+)
+
+// appendWithdrawalRequestReceivedEvent emits withdrawal.request.received for a
+// first receipt (T029) inside the receipt transaction (T1), so the request row
+// and its event commit or roll back together. Accepted means "received", not
+// an execution authorization; the event is a fact notification and is never
+// read as a send permission (FR-05).
+func appendWithdrawalRequestReceivedEvent(ctx context.Context, tx pgx.Tx, requestID string, callerID, chainID int64) error {
+	ev := events.Event{
+		EventType:     events.EventTypeWithdrawalRequestReceived,
+		SchemaVersion: events.SchemaVersionV1,
+		IdentityKind:  events.IdentityKindBusinessObject,
+		AggregateType: withdrawalRequestAggregateType,
+		AggregateID:   requestID,
+		Payload: map[string]any{
+			"request_id": requestID,
+			"caller":     callerID,
+			"state":      withdrawalRequestStateAccepted,
+			"chain_id":   chainID,
+		},
+		OccurredAt: time.Now().UTC(),
+		SourceKind: withdrawalRequestSourceKind,
+		SourceID:   requestID,
+	}
+	if _, err := events.Append(ctx, tx, ev); err != nil {
+		return fmt.Errorf("append withdrawal request received event %s: %w", requestID, err)
+	}
+	return nil
 }
 
 // submitParams is the canonicalized FR-10 comparison set for one attempt
@@ -366,6 +404,16 @@ func submitInTx(ctx context.Context, pool *pgxpool.Pool, callerID int64, req Sub
 	}
 
 	if err := insertReceiptAudit(ctx, tx, requestID, callerID, auditActionCreated, "first receipt"); err != nil {
+		return intakeUnavailableResult(tx, pool, callerID, ctx), nil
+	}
+
+	// 013 T029: the receipt and its withdrawal.request.received event commit
+	// in this same transaction (T1). The event carries Accepted semantics
+	// only: it is not an execution authorization and delivery is not part of
+	// the receive contract (FR-05; contracts/events.md §3). An append failure
+	// rolls the receipt back (retryable 503 with the SAME key, never a
+	// half-committed receipt).
+	if err := appendWithdrawalRequestReceivedEvent(ctx, tx, requestID, callerID, p.chainID); err != nil {
 		return intakeUnavailableResult(tx, pool, callerID, ctx), nil
 	}
 
