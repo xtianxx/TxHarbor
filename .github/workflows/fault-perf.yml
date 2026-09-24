@@ -1,0 +1,144 @@
+# Fault Injection & Performance: independent layers (FR-28; verification.md §4).
+#
+# These layers never run on ordinary pull requests and never block them; they
+# run on a schedule, on manual dispatch, or as a callable release gate. A
+# failure here does not block PRs, but it DOES block the corresponding release
+# claim: without a green run of this workflow there is no evidence to claim
+# FR-25/FR-26 targets are met (no evidence -> no claim).
+#
+# Docker is required: testcontainers provisions its own pinned images
+# (postgres:18.6-trixie, foundry v1.8.1, redis:8.2.10-alpine,
+# confluentinc/confluent-local:7.9.10 from the test sources/compose.yaml);
+# nothing floats and no external service is contacted. Evidence directories
+# are exported as run artifacts so a claim can cite a durable run record.
+#
+# Layer selection: schedule/workflow_call run both layers; workflow_dispatch
+# accepts `layer: fault|perf|both`.
+name: Fault & Performance
+
+on:
+  schedule:
+    # Weekly, off-peak; the cadence is operational, not a budget claim.
+    - cron: "23 3 * * 1"
+  workflow_dispatch:
+    inputs:
+      layer:
+        description: "Independent layer to run"
+        type: choice
+        options: [fault, perf, both]
+        default: both
+  workflow_call:
+    inputs:
+      layer:
+        description: "Independent layer to run"
+        type: string
+        default: both
+
+permissions:
+  contents: read
+
+concurrency:
+  group: fault-perf-${{ github.ref }}
+  cancel-in-progress: false
+
+# Fictional credentials only (same rationale as ci.yml).
+env:
+  TXHARBOR_PG_DSN: postgres://txharbor:txharbor@127.0.0.1:5432/txharbor?sslmode=disable
+  TXHARBOR_RPC_URL: http://127.0.0.1:8545
+  TXHARBOR_CHAIN_ID: "31337"
+
+jobs:
+  plan:
+    name: plan independent layers
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      fault: ${{ steps.plan.outputs.fault }}
+      perf: ${{ steps.plan.outputs.perf }}
+    steps:
+      - name: resolve layer selection
+        id: plan
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          REQUESTED_LAYER: ${{ inputs.layer }}
+        run: |
+          set -euo pipefail
+          layer="${REQUESTED_LAYER:-both}"
+          if [ "$EVENT_NAME" = "schedule" ]; then
+            layer=both
+          fi
+          case "$layer" in
+            fault) echo "fault=true" >> "$GITHUB_OUTPUT"; echo "perf=false" >> "$GITHUB_OUTPUT" ;;
+            perf) echo "fault=false" >> "$GITHUB_OUTPUT"; echo "perf=true" >> "$GITHUB_OUTPUT" ;;
+            both) echo "fault=true" >> "$GITHUB_OUTPUT"; echo "perf=true" >> "$GITHUB_OUTPUT" ;;
+            *) echo "::error::unknown layer '$layer' (want fault|perf|both)"; exit 1 ;;
+          esac
+          echo "selected layer: $layer"
+
+  fault:
+    name: fault injection (V-DRILL, Docker)
+    needs: plan
+    if: needs.plan.outputs.fault == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version: "1.26.5"
+          cache: true
+      - name: verify Docker daemon for testcontainers
+        run: docker info
+        timeout-minutes: 5
+      - name: mask test credentials in logs
+        run: |
+          set -euo pipefail
+          echo "::add-mask::${TXHARBOR_PG_DSN}"
+      - name: fault injection layer (five-state matrix + drills)
+        env:
+          TXHARBOR_FAULT_EVIDENCE_DIR: ${{ runner.temp }}/fault-evidence
+          TXHARBOR_COMMIT: ${{ github.sha }}
+        run: make test-fault
+        timeout-minutes: 45
+      - name: upload fault evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fault-evidence-${{ github.run_id }}
+          path: ${{ runner.temp }}/fault-evidence
+          if-no-files-found: warn
+          retention-days: 30
+
+  perf:
+    name: performance (V-BENCH, Docker)
+    needs: plan
+    if: needs.plan.outputs.perf == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version: "1.26.5"
+          cache: true
+      - name: verify Docker daemon for testcontainers
+        run: docker info
+        timeout-minutes: 5
+      - name: mask test credentials in logs
+        run: |
+          set -euo pipefail
+          echo "::add-mask::${TXHARBOR_PG_DSN}"
+      - name: performance layer (PG-only vs full-stack benchmark)
+        env:
+          TXHARBOR_PERF_EVIDENCE_DIR: ${{ runner.temp }}/perf-evidence
+          TXHARBOR_COMMIT: ${{ github.sha }}
+        run: make test-perf
+        timeout-minutes: 30
+      - name: upload perf evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: perf-evidence-${{ github.run_id }}
+          path: ${{ runner.temp }}/perf-evidence
+          if-no-files-found: warn
+          retention-days: 30

@@ -29,6 +29,8 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+
+	"github.com/xtianxx/txharbor/internal/events"
 )
 
 // Audit action vocabulary of withdrawal_request_audit (data-model Table 5).
@@ -55,6 +57,17 @@ const (
 	// never claims "definitely not created" and never says "Accepted"; it
 	// tells the caller to retry with the SAME key and parameters.
 	intakeUnavailableMessage = "withdrawal storage unavailable or the submission outcome is unknown;" +
+		" retry with the same idempotency key and the same parameters (never rotate the key)"
+	// intakeCapacityRefusedMessage is the PD-2 refusal (T070): the same
+	// retryable 503 channel as the T062 limiter-unavailable path, with the
+	// capacity-boundary cause. It never claims the request was created and
+	// never suggests rotating the idempotency key.
+	intakeCapacityRefusedMessage = "withdrawal intake is temporarily paused while the event backlog is at the capacity boundary;" +
+		" retry with the same idempotency key and the same parameters (never rotate the key)"
+	// intakeCapacityUnavailableMessage is the fail-closed refusal when the
+	// capacity state itself cannot be observed: an unreadable state never
+	// admits a new controllable write.
+	intakeCapacityUnavailableMessage = "withdrawal intake is temporarily unavailable while the event backlog state is unknown;" +
 		" retry with the same idempotency key and the same parameters (never rotate the key)"
 )
 
@@ -101,6 +114,15 @@ VALUES ($1, $2, $3, $4)`
 // permanent-replay invariant: only steps (1)–(2) are re-evaluated on replay).
 // The core never inherits a list silently and never falls back to an
 // empty/full-chain default.
+//
+// CapacityGate is the optional 013 PD-2 capacity admission surface (T070).
+// When non-nil it is consulted exactly once per FIRST create, after the
+// replay fast path and the allowlist gate, immediately before the receipt
+// transaction: a soft/hard backlog refuses the new controllable funding write
+// with the retryable 503 channel and capacity_refusals_total{op_class}. It
+// never runs for replays or existing requests, never touches Redis, and never
+// replaces, loosens or tightens any existing gate (all of them still run
+// below for an admitted request). Nil keeps the PG-only baseline unchanged.
 type SubmitRequest struct {
 	PresentedKey     string
 	IdempotencyKey   string
@@ -112,6 +134,17 @@ type SubmitRequest struct {
 	AuthorizationID  string
 	Allowlist        []string
 	ResolveAllowlist func(context.Context) ([]string, error)
+	CapacityGate     CapacityAdmitter
+}
+
+// CapacityAdmitter is the narrow PD-2 admission surface the intake consumes
+// (T070); the concrete implementation is events.CapacityGuard. It evaluates
+// the backlog before a new controllable work item is admitted and returns
+// events.CapacityAdmission{Refused,...}. A non-nil error means the capacity
+// state was unreadable: the intake fails closed for the NEW write (retryable
+// 503) and must never treat an unreadable state as capacity available.
+type CapacityAdmitter interface {
+	AdmitNewControllable(ctx context.Context, opClass string) (events.CapacityAdmission, error)
 }
 
 // SubmitResult is the classified outcome of one attempt. Status is the HTTP
@@ -151,6 +184,42 @@ type AuditIntent struct {
 	RequestID string
 	Action    string
 	Detail    string
+}
+
+// 013 event emission vocabulary (T029; contracts/events.md §3). Aggregate
+// type/state mirror the 007 receive-only facts; they never reinterpret them.
+const (
+	withdrawalRequestAggregateType = "withdrawal_request"
+	withdrawalRequestStateAccepted = "accepted"
+	withdrawalRequestSourceKind    = "withdrawal_intake"
+)
+
+// appendWithdrawalRequestReceivedEvent emits withdrawal.request.received for a
+// first receipt (T029) inside the receipt transaction (T1), so the request row
+// and its event commit or roll back together. Accepted means "received", not
+// an execution authorization; the event is a fact notification and is never
+// read as a send permission (FR-05).
+func appendWithdrawalRequestReceivedEvent(ctx context.Context, tx pgx.Tx, requestID string, callerID, chainID int64) error {
+	ev := events.Event{
+		EventType:     events.EventTypeWithdrawalRequestReceived,
+		SchemaVersion: events.SchemaVersionV1,
+		IdentityKind:  events.IdentityKindBusinessObject,
+		AggregateType: withdrawalRequestAggregateType,
+		AggregateID:   requestID,
+		Payload: map[string]any{
+			"request_id": requestID,
+			"caller":     callerID,
+			"state":      withdrawalRequestStateAccepted,
+			"chain_id":   chainID,
+		},
+		OccurredAt: time.Now().UTC(),
+		SourceKind: withdrawalRequestSourceKind,
+		SourceID:   requestID,
+	}
+	if _, err := events.Append(ctx, tx, ev); err != nil {
+		return fmt.Errorf("append withdrawal request received event %s: %w", requestID, err)
+	}
+	return nil
 }
 
 // submitParams is the canonicalized FR-10 comparison set for one attempt
@@ -286,8 +355,52 @@ func SubmitWithdrawal(ctx context.Context, pool *pgxpool.Pool, req SubmitRequest
 		}, nil
 	}
 
+	// (4c) 013 capacity gate (T070; PD-2; contracts/capacity.md §3). It runs
+	// ONLY for a first create (the step-4 replay fast path already returned
+	// 200/409 above, so an accepted request and every replay of it are never
+	// refused here), and BEFORE the receipt transaction, so nothing is
+	// admitted and no existing gate below is skipped or weakened. The
+	// decision reads PostgreSQL only (Redis never participates); a soft or
+	// hard backlog refuses with the same retryable 503 channel as T062, an
+	// unreadable state refuses too (fail closed) and never admits.
+	if refusal := capacityAdmissionRefusal(ctx, callerID, req.CapacityGate); refusal != nil {
+		return refusal, nil
+	}
+
 	// (5) Receipt transaction.
 	return submitInTx(ctx, pool, callerID, req, norm)
+}
+
+// capacityAdmissionRefusal evaluates the optional PD-2 gate for one first
+// create. It returns nil when the request may proceed (no gate configured, or
+// the backlog is below the soft boundary) and the retryable 503 outcome when
+// the new controllable write must be refused. It is pure apart from the
+// injected gate call, so the refusal mapping is unit-testable without a
+// database.
+func capacityAdmissionRefusal(ctx context.Context, callerID int64, gate CapacityAdmitter) *SubmitResult {
+	if gate == nil {
+		return nil
+	}
+	admission, err := gate.AdmitNewControllable(ctx, events.CapacityOpWithdrawalCreate)
+	if err != nil {
+		return &SubmitResult{
+			Status:  503,
+			Code:    CodeTemporarilyUnavailable,
+			Message: intakeCapacityUnavailableMessage,
+			Audit:   auditIntent(callerID, "", auditActionUnavailable, "capacity state unreadable while admitting a new withdrawal"),
+		}
+	}
+	if !admission.Refused {
+		return nil
+	}
+	return &SubmitResult{
+		Status:  503,
+		Code:    CodeTemporarilyUnavailable,
+		Message: intakeCapacityRefusedMessage,
+		Audit: auditIntent(callerID, "", auditActionUnavailable,
+			fmt.Sprintf("capacity boundary reached (level=%s pending=%d); new controllable write refused (PD-2)",
+				admission.Level, admission.PendingTotal)),
+	}
 }
 
 // submitInTx owns BEGIN..COMMIT for one receipt (T-accept): writeGuard →
@@ -366,6 +479,16 @@ func submitInTx(ctx context.Context, pool *pgxpool.Pool, callerID int64, req Sub
 	}
 
 	if err := insertReceiptAudit(ctx, tx, requestID, callerID, auditActionCreated, "first receipt"); err != nil {
+		return intakeUnavailableResult(tx, pool, callerID, ctx), nil
+	}
+
+	// 013 T029: the receipt and its withdrawal.request.received event commit
+	// in this same transaction (T1). The event carries Accepted semantics
+	// only: it is not an execution authorization and delivery is not part of
+	// the receive contract (FR-05; contracts/events.md §3). An append failure
+	// rolls the receipt back (retryable 503 with the SAME key, never a
+	// half-committed receipt).
+	if err := appendWithdrawalRequestReceivedEvent(ctx, tx, requestID, callerID, p.chainID); err != nil {
 		return intakeUnavailableResult(tx, pool, callerID, ctx), nil
 	}
 

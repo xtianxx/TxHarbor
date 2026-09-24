@@ -7,6 +7,14 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+
+	"github.com/xtianxx/txharbor/internal/events"
+)
+
+// 013 event emission vocabulary (T030; contracts/events.md §3).
+const (
+	withdrawalIntentAggregateType = "withdrawal_intent"
+	withdrawalExecutionSourceKind = "withdrawal_execution"
 )
 
 // Intent state values (data-model state machine A).
@@ -134,11 +142,83 @@ const transitionIntentSQL = `UPDATE payment_intents
   SET state = $4, state_version = state_version + 1, updated_at = now()
   WHERE intent_id = $1 AND state = $2 AND state_version = $3`
 
+// IntentEventContext carries the optional factual context of one transition
+// for the emitted 013 withdrawal.execution.state_changed event (T030;
+// contracts/events.md §3). It never carries authority: the event is a fact
+// notification, not a send permission, and repeated delivery MUST NOT trigger
+// a new send (FR-05).
+type IntentEventContext struct {
+	// AttemptID references the 010 attempt fact this transition is based on
+	// (for example the attempt whose outcome is unknown and moved the intent
+	// to reconciling). When set it is persisted in the payload so consumers
+	// and audits can trace the transition to the attempt row.
+	AttemptID string
+	// OutcomeClass is the 010 outcome class that drove the transition when it
+	// was outcome-driven ("" otherwise).
+	OutcomeClass string
+	// NoSendResult marks the confirmed "abort with no send result"; the intent
+	// still moves to reconciling (unknown business effect, never failure).
+	NoSendResult bool
+}
+
+// appendIntentStateChangedEvent emits withdrawal.execution.state_changed for
+// one committed intent transition (T030) inside the caller's transaction, so
+// the transition CAS, the 011 evidence row and the 013 outbox row commit or
+// roll back together (T1). The payload carries identity, states and the
+// factual context supplied by the caller; it never carries secrets or raw
+// signature bytes (data-model §9).
+func appendIntentStateChangedEvent(ctx context.Context, tx pgx.Tx, intentID, from, to string, leaseVersion int64, ec IntentEventContext) error {
+	payload := map[string]any{
+		"from_state": from,
+		"to_state":   to,
+		"intent_id":  intentID,
+	}
+	if ec.AttemptID != "" {
+		payload["attempt_id"] = ec.AttemptID
+	}
+	if ec.OutcomeClass != "" {
+		payload["outcome_class"] = ec.OutcomeClass
+	}
+	if ec.NoSendResult {
+		payload["no_send_result"] = true
+	}
+	if leaseVersion > 0 {
+		payload["lease_version"] = leaseVersion
+	}
+	ev := events.Event{
+		EventType:     events.EventTypeWithdrawalExecutionStateChanged,
+		SchemaVersion: events.SchemaVersionV1,
+		IdentityKind:  events.IdentityKindBusinessObject,
+		AggregateType: withdrawalIntentAggregateType,
+		AggregateID:   intentID,
+		Payload:       payload,
+		OccurredAt:    time.Now().UTC(),
+		SourceKind:    withdrawalExecutionSourceKind,
+		SourceID:      intentID,
+	}
+	if _, err := events.Append(ctx, tx, ev); err != nil {
+		return fmt.Errorf("append withdrawal execution state_changed event %s: %w", intentID, err)
+	}
+	return nil
+}
+
 // TransitionIntent applies one legal transition with a (state, state_version)
-// CAS and appends the state_changed event in the same transaction. Callers
-// applying a send-enabling edge MUST have verified the claim and the full gate
-// set first; fact edges need neither (M2).
+// CAS and appends the 011 state_changed evidence row plus the 013 outbox
+// state_changed event in the same transaction. Callers applying a
+// send-enabling edge MUST have verified the claim and the full gate set first;
+// fact edges need neither (M2). A retry that loses the CAS writes and appends
+// nothing; a repeated delivery of an already-committed event can never trigger
+// a new send (FR-05).
 func TransitionIntent(ctx context.Context, tx pgx.Tx, intentID, from string, fromVersion int64, to string, leaseVersion int64) error {
+	return TransitionIntentWithContext(ctx, tx, intentID, from, fromVersion, to, leaseVersion, IntentEventContext{})
+}
+
+// TransitionIntentWithContext is TransitionIntent plus the factual event
+// context of the transition (attempt reference and outcome class). All writes
+// stay in the caller's transaction; a failure of any append rolls the
+// transition back, so there is no half-committed transition and no event
+// without its business fact.
+func TransitionIntentWithContext(ctx context.Context, tx pgx.Tx, intentID, from string, fromVersion int64, to string, leaseVersion int64, ec IntentEventContext) error {
 	if ClassifyTransition(from, to) == TransitionNone {
 		return fmt.Errorf("%w: %s -> %s", ErrIllegalTransition, from, to)
 	}
@@ -149,13 +229,16 @@ func TransitionIntent(ctx context.Context, tx pgx.Tx, intentID, from string, fro
 	if tag.RowsAffected() != 1 {
 		return fmt.Errorf("%w: %s -> %s (version %d)", ErrTransitionRefused, from, to, fromVersion)
 	}
-	return AppendEvent(ctx, tx, Event{
+	if err := AppendEvent(ctx, tx, Event{
 		IntentID:     intentID,
 		Kind:         EventStateChanged,
 		FromState:    from,
 		ToState:      to,
 		LeaseVersion: leaseVersion,
-	})
+	}); err != nil {
+		return err
+	}
+	return appendIntentStateChangedEvent(ctx, tx, intentID, from, to, leaseVersion, ec)
 }
 
 // Event is one append-only execution_events row.

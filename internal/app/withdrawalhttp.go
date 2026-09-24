@@ -62,6 +62,11 @@ type WithdrawalHandler struct {
 	// Wire-shape unit tests construct the handler without a registry, so every
 	// increment is guarded.
 	Metrics *metrics.Metrics
+	// CapacityGate, when non-nil, is the 013 PD-2 admission gate (T089): the
+	// production serve process passes the shared events.CapacityGuard, which
+	// is consulted at most once per first create by the core. Nil keeps the
+	// PG-only baseline unchanged.
+	CapacityGate withdrawal.CapacityAdmitter
 }
 
 // observeWithdrawal bumps the 007 outcome counter for status when a registry
@@ -182,6 +187,7 @@ func (h *WithdrawalHandler) ServePOST(w http.ResponseWriter, r *http.Request) {
 		ResolveAllowlist: func(ctx context.Context) ([]string, error) {
 			return withdrawal.ResolveAssetAllowlist(ctx, h.Pool, h.ChainID)
 		},
+		CapacityGate: h.CapacityGate,
 	})
 	if err != nil {
 		trace := newWithdrawalTraceID()

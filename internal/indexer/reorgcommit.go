@@ -545,6 +545,15 @@ func InvalidateRecoveryObservations(ctx context.Context, pool *pgxpool.Pool, lea
 		return 0, err
 	}
 	from := *row.AncestorNumber + 1
+	// Pre-image the candidate set under the same coordination lock (every
+	// 004/005/006 writer serializes on it): the true from_status and
+	// block_number the status_changed payload needs are only available before
+	// the UPDATE flips them. A repeat execution finds zero candidates and
+	// appends zero events.
+	candidates, err := readOrphanCandidateImages(ctx, tx, chainID, from)
+	if err != nil {
+		return 0, err
+	}
 	tag, err := tx.Exec(ctx, insertOrphanTransitionsSQL, chainID, from, row.RecoveryID)
 	if err != nil {
 		return 0, fmt.Errorf("insert orphan transitions: %w", err)
@@ -558,6 +567,41 @@ func InvalidateRecoveryObservations(ctx context.Context, pool *pgxpool.Pool, lea
 	if n != transitions {
 		return 0, fmt.Errorf("orphan conversion mismatch: %d transitions for %d conversions", transitions, n)
 	}
+	if int(transitions) != len(candidates) {
+		return 0, fmt.Errorf("orphan conversion mismatch: %d transitions for %d candidates", transitions, len(candidates))
+	}
+	// 013 T028: one deposit.observation.status_changed per converted
+	// observation, in the same transaction as the conversion (T1). The
+	// transition INSERT above runs first and is the repeat-execution guard:
+	// a repeat inserts zero transition rows, converts zero rows and emits
+	// zero events, so no duplicate business transition and no wrong version
+	// can be produced by retries. 013 T052 adds the revision fact for the same
+	// conversion: deposit.revision.applied supersedes the observation's
+	// pre-reorg event (read before this transaction appends anything) with the
+	// Orphaned disposition and the 006 recovery version.
+	for _, candidate := range candidates {
+		observationID := depositObservationID(chainID, candidate.blockHash, candidate.txHash, candidate.logIndex)
+		superseded, supersedes, err := readDepositObservationHeadEvent(ctx, tx, observationID)
+		if err != nil {
+			return 0, err
+		}
+		if err := appendDepositObservationStatusChangedEvent(ctx, tx,
+			chainID, candidate.blockNumber, candidate.blockHash, candidate.txHash, candidate.logIndex,
+			candidate.fromStatus, observationStateOrphaned, observationReasonReorgInvalidated); err != nil {
+			return 0, err
+		}
+		if !supersedes {
+			// The observation's fact stream predates the cutover: there is no
+			// post-cutover event to revise (events.md §7), so no revision event
+			// is fabricated; the state conversion above is unaffected.
+			continue
+		}
+		if err := appendDepositRevisionAppliedEvent(ctx, tx,
+			chainID, candidate.blockNumber, candidate.blockHash, candidate.txHash, candidate.logIndex,
+			row.Seq, superseded, observationStateOrphaned, observationReasonReorgInvalidated); err != nil {
+			return 0, err
+		}
+	}
 	detail := fmt.Sprintf("recovery=%s range_from=%d orphaned=%d version=%d", row.RecoveryID, from, n, row.Seq)
 	if err := appendRecoveryEvent(ctx, tx, chainID, row.RecoveryID, row.Seq, "observations_invalidated", detail); err != nil {
 		return 0, err
@@ -566,6 +610,51 @@ func InvalidateRecoveryObservations(ctx context.Context, pool *pgxpool.Pool, lea
 		return 0, fmt.Errorf("commit invalidate observations: %w", err)
 	}
 	return n, nil
+}
+
+// orphanCandidateImage is one pre-conversion observation captured before the
+// Orphaned flip (T028): the identity, chain position and true from_status the
+// deposit.observation.status_changed payload carries. It is a read-only
+// pre-image, never a second writer.
+type orphanCandidateImage struct {
+	blockNumber uint64
+	blockHash   string
+	txHash      string
+	logIndex    uint64
+	fromStatus  string
+}
+
+// readOrphanCandidateImages reads the candidate set with the exact predicate
+// of orphanObservationsSQL before the conversion. The caller holds the
+// chain-wide coordination lock (lockRecoveryChain), so no concurrent writer
+// can change the set between this read, the transition INSERT and the UPDATE.
+func readOrphanCandidateImages(ctx context.Context, tx pgx.Tx, chainID int64, from int64) ([]orphanCandidateImage, error) {
+	rows, err := tx.Query(ctx, readOrphanCandidatesSQL, chainID, from)
+	if err != nil {
+		return nil, fmt.Errorf("read orphan candidates: %w", err)
+	}
+	defer rows.Close()
+	var out []orphanCandidateImage
+	for rows.Next() {
+		var (
+			image       orphanCandidateImage
+			blockNumber int64
+			logIndex    int64
+		)
+		if err := rows.Scan(&image.blockHash, &image.txHash, &logIndex, &blockNumber, &image.fromStatus); err != nil {
+			return nil, fmt.Errorf("scan orphan candidate: %w", err)
+		}
+		if blockNumber < 0 || logIndex < 0 {
+			return nil, fmt.Errorf("orphan candidate has negative chain position %d/%d", blockNumber, logIndex)
+		}
+		image.blockNumber = uint64(blockNumber)
+		image.logIndex = uint64(logIndex)
+		out = append(out, image)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate orphan candidates: %w", err)
+	}
+	return out, nil
 }
 
 // RollbackRecoveryCheckpoint moves one stream checkpoint to its guarded floor
@@ -1203,6 +1292,32 @@ func ReviveRecoveryObservation(ctx context.Context, pool *pgxpool.Pool, lease *L
 	if tag.RowsAffected() != 1 {
 		return false, fmt.Errorf("insert revive transition affected %d rows, want 1", tag.RowsAffected())
 	}
+	// 013 T052: the in-place revival emits the dedicated
+	// deposit.observation.reinstated fact (same old block_hash canonical again,
+	// the original observation reused — never a second created) plus the
+	// deposit.revision.applied revision of the Orphaned disposition
+	// (orphaned -> pending canonical state, 006 recovery version). Both commit
+	// in the same transaction as the conversion (T1); the replay early-return
+	// above and the transition UNIQUE make repeat execution converge with zero
+	// new events and zero wrong versions. The pre-revival head event is read
+	// before any event of this transaction is appended, so revises_event_id
+	// references the fact being revised (the invalidation revision).
+	revivedObservationID := depositObservationID(chainID, blockHash, txHash, uint64(logIndex))
+	superseded, supersedes, err := readDepositObservationHeadEvent(ctx, tx, revivedObservationID)
+	if err != nil {
+		return false, err
+	}
+	if err := appendDepositObservationReinstatedEvent(ctx, tx,
+		chainID, uint64(blockNumber), blockHash, txHash, uint64(logIndex)); err != nil {
+		return false, err
+	}
+	if supersedes {
+		if err := appendDepositRevisionAppliedEvent(ctx, tx,
+			chainID, uint64(blockNumber), blockHash, txHash, uint64(logIndex),
+			row.Seq, superseded, depositObservationStatusPending, observationReasonReorgRevived); err != nil {
+			return false, err
+		}
+	}
 	detail := fmt.Sprintf("recovery=%s observation=%s/%s/%d version=%d evidence=%s",
 		row.RecoveryID, blockHash, txHash, logIndex, row.Seq, evidence)
 	if err := appendRecoveryEvent(ctx, tx, chainID, row.RecoveryID, row.Seq, "observation_revived", detail); err != nil {
@@ -1590,6 +1705,17 @@ SELECT chain_id, block_hash, tx_hash, log_index, status, 'orphaned', $3,
 FROM deposit_observations
 WHERE chain_id = $1 AND block_number >= $2 AND status IN ('pending', 'confirmed')
 ON CONFLICT DO NOTHING`
+
+	// readOrphanCandidatesSQL pre-images the conversion set (T028): the
+	// identity, chain position and true from_status the status_changed event
+	// carries. It shares orphanObservationsSQL's predicate exactly; the caller
+	// holds the chain-wide coordination lock, so the pre-image, the transition
+	// INSERT and the UPDATE see one consistent set.
+	readOrphanCandidatesSQL = `
+SELECT block_hash, tx_hash, log_index, block_number, status
+FROM deposit_observations
+WHERE chain_id = $1 AND block_number >= $2 AND status IN ('pending', 'confirmed')
+ORDER BY block_number, block_hash, tx_hash, log_index`
 
 	// readStreamCheckpointSQL compasses the rollback: position + floor base.
 	// (Three shapes; the block checkpoint carries (height, start_height).)

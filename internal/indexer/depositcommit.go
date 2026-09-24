@@ -334,6 +334,17 @@ func (s *DepositScanner) commitDepositUnit(
 				depositIdentity{blockHash: obs.blockHash, txHash: obs.txHash, logIndex: obs.logIndex}, err)
 		}
 		inserted += int(tag.RowsAffected())
+		if tag.RowsAffected() == 1 {
+			// 013 T026: the newly inserted observation and its
+			// deposit.observation.created event commit in this same
+			// transaction (T1). An existing row (RowsAffected 0) appends
+			// nothing: one Append per committed business transition, never a
+			// second event for an already-emitted fact.
+			if err := appendDepositObservationCreatedEvent(ctx, tx,
+				s.cfg.ChainID, obs.blockNumber, obs.blockHash, obs.txHash, obs.logIndex); err != nil {
+				return err
+			}
+		}
 	}
 
 	// Conflict content comparison: re-read every matched identity and compare

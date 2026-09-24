@@ -56,6 +56,11 @@ const (
 	// KindHashMismatch means eth_sendRawTransaction returned a hash different
 	// from the persisted tx_hash: a fail-safe unknown, never accepted.
 	KindHashMismatch Kind = "hash-mismatch"
+	// KindBudgetPaused means the call was refused before dispatch because its
+	// class is safely paused while the distributed RPC budget is unavailable
+	// (T064/PD-1). It is retryable after recovery and is never a verdict: the
+	// caller keeps its unknown/known classification untouched.
+	KindBudgetPaused Kind = "budget-paused"
 )
 
 // TransferSig is keccak256("Transfer(address,address,uint256)"), the
@@ -84,10 +89,58 @@ func KindOf(err error) Kind {
 	return ""
 }
 
+// ErrBudgetPaused and ErrBudgetLimited are the overlay refusal sentinels. The
+// serve adapter maps ratelimit.ErrRPCPaused / ratelimit.ErrLimited onto them
+// so the chain client keeps no dependency on the limiter package.
+var (
+	ErrBudgetPaused  = errors.New("eth: rpc budget paused")
+	ErrBudgetLimited = errors.New("eth: rpc budget limited")
+)
+
+// BudgetGate is the optional distributed RPC budget overlay (T064;
+// ratelimit.RPCBudget satisfies it through the serve adapter). Admit refuses
+// the call with ratelimit.ErrRPCPaused / ratelimit.ErrLimited when the class
+// is paused or limited; the returned release function is a no-op when nothing
+// was acquired. A nil gate disables the overlay entirely.
+type BudgetGate interface {
+	Admit(ctx context.Context, class string) (release func(), err error)
+}
+
 // Client is a thin ethclient wrapper. It is safe to Close more than once.
 type Client struct {
 	client    *ethclient.Client
 	closeOnce sync.Once
+	// budget is the optional distributed overlay, attached once at startup
+	// before any call (SetBudget); it is never mutated afterwards.
+	budget BudgetGate
+}
+
+// SetBudget attaches the distributed RPC budget overlay. It must be called
+// before the client is shared. The overlay never changes classification,
+// chain-identity or completeness checks: it can only refuse a call before it
+// is dispatched.
+func (c *Client) SetBudget(gate BudgetGate) { c.budget = gate }
+
+// admit applies the optional budget overlay for one call class. A pause or a
+// limit becomes a classified, retryable error (never a fabricated result).
+func (c *Client) admit(ctx context.Context, class string) (func(), error) {
+	if c.budget == nil {
+		return func() {}, nil
+	}
+	release, err := c.budget.Admit(ctx, class)
+	if err == nil {
+		return release, nil
+	}
+	kind := KindTransport
+	switch {
+	case errors.Is(err, ErrBudgetPaused):
+		kind = KindBudgetPaused
+	case errors.Is(err, ErrBudgetLimited):
+		kind = KindRateLimited
+	default:
+		return nil, err
+	}
+	return nil, &Error{Kind: kind, Op: "rpc-budget:" + class, Err: err}
 }
 
 // Dial connects to the JSON-RPC endpoint. The timeout bounds the handshake.
@@ -111,6 +164,11 @@ func (c *Client) Close() {
 
 // ChainID calls eth_chainId; the caller's context carries the deadline.
 func (c *Client) ChainID(ctx context.Context) (*big.Int, error) {
+	release, err := c.admit(ctx, "read")
+	if err != nil {
+		return nil, err
+	}
+	defer release()
 	id, err := c.client.ChainID(ctx)
 	if err != nil {
 		return nil, &Error{Kind: classify(err, ctx), Op: "eth_chainId", Err: err}
@@ -145,6 +203,11 @@ func (c *Client) CheckChainID(ctx context.Context, expected *big.Int, timeout ti
 // ethereum.NotFound wrapped in a KindNotFound Error: callers wait/retry
 // instead of treating it as a fault. errors.Is(err, ethereum.NotFound) holds.
 func (c *Client) HeaderByNumber(ctx context.Context, number *big.Int) (*types.Header, error) {
+	release, err := c.admit(ctx, "read")
+	if err != nil {
+		return nil, err
+	}
+	defer release()
 	header, err := c.client.HeaderByNumber(ctx, number)
 	if err != nil {
 		return nil, &Error{Kind: classify(err, ctx), Op: "eth_getBlockByNumber", Err: err}
@@ -161,6 +224,11 @@ func (c *Client) HeaderByNumber(ctx context.Context, number *big.Int) (*types.He
 // normally); only transport/timeout/rate-limit/incomplete/invalid outcomes
 // are errors. Callers must never treat any error as an empty result.
 func (c *Client) FilterLogs(ctx context.Context, q ethereum.FilterQuery) ([]types.Log, error) {
+	release, err := c.admit(ctx, "read")
+	if err != nil {
+		return nil, err
+	}
+	defer release()
 	logs, err := c.client.FilterLogs(ctx, q)
 	if err != nil {
 		return nil, &Error{Kind: classifyLogFilter(err, ctx), Op: "eth_getLogs", Err: err}
@@ -173,6 +241,11 @@ func (c *Client) FilterLogs(ctx context.Context, q ethereum.FilterQuery) ([]type
 // KindHashMismatch (fail-safe unknown); transport/timeout/rate-limit and the
 // allowlisted deterministic refusals are classified for the caller (010 T002).
 func (c *Client) SendSignedTransaction(ctx context.Context, raw []byte, expected common.Hash) (common.Hash, error) {
+	release, err := c.admit(ctx, "send")
+	if err != nil {
+		return common.Hash{}, err
+	}
+	defer release()
 	var returned common.Hash
 	if err := c.client.Client().CallContext(ctx, &returned, "eth_sendRawTransaction", hexutil.Encode(raw)); err != nil {
 		return common.Hash{}, &Error{Kind: classifySend(err, ctx), Op: "eth_sendRawTransaction", Err: err}
@@ -191,6 +264,11 @@ func (c *Client) SendSignedTransaction(ctx context.Context, raw []byte, expected
 // the node knows the tx but has not included it; ethereum.NotFound is
 // KindNotFound (a wait polarity, never a failure verdict).
 func (c *Client) TransactionByHash(ctx context.Context, hash common.Hash) (*types.Transaction, bool, error) {
+	release, err := c.admit(ctx, "read")
+	if err != nil {
+		return nil, false, err
+	}
+	defer release()
 	tx, isPending, err := c.client.TransactionByHash(ctx, hash)
 	if err != nil {
 		return nil, false, &Error{Kind: classify(err, ctx), Op: "eth_getTransactionByHash", Err: err}
@@ -201,6 +279,11 @@ func (c *Client) TransactionByHash(ctx context.Context, hash common.Hash) (*type
 // TransactionReceipt fetches eth_getTransactionReceipt; a missing receipt is
 // KindNotFound (the caller records not_found_yet and stays unknown).
 func (c *Client) TransactionReceipt(ctx context.Context, hash common.Hash) (*types.Receipt, error) {
+	release, err := c.admit(ctx, "read")
+	if err != nil {
+		return nil, err
+	}
+	defer release()
 	receipt, err := c.client.TransactionReceipt(ctx, hash)
 	if err != nil {
 		return nil, &Error{Kind: classify(err, ctx), Op: "eth_getTransactionReceipt", Err: err}
@@ -213,6 +296,11 @@ func (c *Client) TransactionReceipt(ctx context.Context, hash common.Hash) (*typ
 
 // BlockNumber returns the current head number via eth_blockNumber.
 func (c *Client) BlockNumber(ctx context.Context) (uint64, error) {
+	release, err := c.admit(ctx, "read")
+	if err != nil {
+		return 0, err
+	}
+	defer release()
 	n, err := c.client.BlockNumber(ctx)
 	if err != nil {
 		return 0, &Error{Kind: classify(err, ctx), Op: "eth_blockNumber", Err: err}

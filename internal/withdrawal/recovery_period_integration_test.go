@@ -456,6 +456,15 @@ func recoveryPeriodTableCounts(t *testing.T, ctx context.Context, pool *pgxpool.
 // file of this package imports an RPC client or references a send/sign call.
 // 007's only recovery interaction is the read-only 006 reader reuse in
 // query.go.
+//
+// 013 adjustment (B3/T029, documented, not a weakened guarantee):
+// outbox_events is the one above-007 table allowed to change, because the
+// approved 013 contract commits the receive fact
+// (withdrawal.request.received) in the SAME receipt transaction (FR-07;
+// contracts/events.md §3). The delta is pinned to exactly that one fact for
+// the created request; every 008–011 execution-state table and every other
+// 013 table (consumer_*/event_ops_audit/event_system_state) must stay
+// bit-identical, which is the execution-artefact guarantee this test owns.
 func TestWithdrawalRecoveryPeriodNoExecutionArtefacts(t *testing.T) {
 	// Phase A: 007 historical range — the original absence proof, unchanged.
 	dsnA := withdrawalStartPostgres(t)
@@ -496,15 +505,44 @@ func TestWithdrawalRecoveryPeriodNoExecutionArtefacts(t *testing.T) {
 			above007 = append(above007, tbl)
 		}
 	}
-	before := recoveryPeriodTableCounts(t, ctx, pool, above007)
-	if res, err := SubmitWithdrawal(ctx, pool, intakeReq(key, "idem-recovery-artefacts", authID)); err != nil || res.Status != 201 {
+	// Every above-007 table except outbox_events must stay bit-identical; the
+	// 013 outbox may gain exactly the receive fact below (see the doc note).
+	var executionStateTables []string
+	for _, tbl := range above007 {
+		if tbl != "outbox_events" {
+			executionStateTables = append(executionStateTables, tbl)
+		}
+	}
+	var outboxBefore int64
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM outbox_events`).Scan(&outboxBefore); err != nil {
+		t.Fatalf("count outbox before: %v", err)
+	}
+	before := recoveryPeriodTableCounts(t, ctx, pool, executionStateTables)
+	res, err := SubmitWithdrawal(ctx, pool, intakeReq(key, "idem-recovery-artefacts", authID))
+	if err != nil || res.Status != 201 {
 		t.Fatalf("submit = (%+v, %v), want 201", res, err)
 	}
-	after := recoveryPeriodTableCounts(t, ctx, pool, above007)
-	for _, tbl := range above007 {
+	after := recoveryPeriodTableCounts(t, ctx, pool, executionStateTables)
+	for _, tbl := range executionStateTables {
 		if after[tbl] != before[tbl] {
 			t.Fatalf("above-007 table %s rows changed %d -> %d during recovery create; recovery path must write no execution state", tbl, before[tbl], after[tbl])
 		}
+	}
+	// The 013 delta is exactly the receive fact of the created request.
+	var outboxAfter int64
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM outbox_events`).Scan(&outboxAfter); err != nil {
+		t.Fatalf("count outbox after: %v", err)
+	}
+	if outboxAfter != outboxBefore+1 {
+		t.Fatalf("outbox rows changed %d -> %d during recovery create, want exactly +1 (the receive fact)", outboxBefore, outboxAfter)
+	}
+	var receiveFacts int64
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM outbox_events
+		WHERE event_type = 'withdrawal.request.received' AND aggregate_id = $1`, res.RequestID).Scan(&receiveFacts); err != nil {
+		t.Fatalf("count receive facts: %v", err)
+	}
+	if receiveFacts != 1 {
+		t.Fatalf("receive facts for %s = %d, want exactly 1", res.RequestID, receiveFacts)
 	}
 	afterTables := recoveryPeriodPublicBaseTables(t, ctx, pool)
 	for tbl := range afterTables {

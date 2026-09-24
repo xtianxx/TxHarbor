@@ -1,18 +1,51 @@
-# TxHarbor CI: lint, build and unit checks need no Docker; the integration
-# job uses testcontainers, which manages its own PostgreSQL 18.6-trixie and
-# Foundry v1.8.1 containers (images pinned in the test sources). No deploy
-# steps by design.
+# TxHarbor CI: layered checks for ordinary pull requests (013 B11 / T082;
+# verification.md §3–§4).
+#
+# Layer → PR trigger mapping. The `changes` job classifies the pushed/PR diff
+# and every middleware layer runs only when its paths are affected; push events
+# use the same classification over the pushed range, workflow_dispatch runs
+# every layer (conservative):
+#
+#   | changed paths                              | required layers                            |
+#   |--------------------------------------------|--------------------------------------------|
+#   | internal/events/**, migrations/**          | unit(+race) + contract + integration-pg    |
+#   | event contract semantics (contracts/**)    | contract (incl. reference-consumer compat) |
+#   | internal/cache/**, internal/ratelimit/**   | unit(+race) + integration-redis + e2e core |
+#   | upstream integration points + app wiring   | unit + integration-pg + e2e core           |
+#   | publisher/consumer runtime                 | unit + integration-pg + integration-kafka  |
+#   | docs/specs only                            | lint + build + unit + contract             |
+#
+# The e2e core layer is included for cache/rate-limit changes because the E2E
+# flows wire those layers (the T067 HTTP failure path exercises the rate-limit
+# policy end to end).
+#
+# Fault Injection and Performance never run here: they live in
+# `.github/workflows/fault-perf.yml` (scheduled/manual/release gate) and MUST
+# NOT be started by an ordinary PR (FR-28; verification.md §4).
+#
+# Docker-unavailable discipline (verification.md §4): every middleware layer
+# verifies `docker info` first. When the daemon is missing the layer is
+# reported as NOT RUN — never as a pass, never silently skipped: the job fails
+# with explicit instructions, the PR carries the `ci:integration-pending`
+# label and stays blocked; a later re-run with a real Docker daemon (real
+# middleware + real migrations only; mocks/doubles are not acceptance evidence)
+# turns the layer green and the label is removed. Re-run responsibility:
+# whoever owns the PR must re-run before merge; the `ci-required` gate below
+# keeps the merge blocked until then.
+#
+# Branch-protection required checks (recommended, stable names):
+#   lint (gofmt + vet) | build | unit tests (+ race) |
+#   contract tests (no Docker) | ci-required
+# The conditional middleware jobs stay informational; `ci-required` fails when
+# any executed layer failed and passes when not-affected layers were skipped by
+# the path filter. Repo-side branch protection is configured outside the
+# workflow file, so the live setting is verified when remote CI is first run.
 #
 # Local and CI share the same entry points: every job runs a Makefile target.
-#
-# 006 reorg-recovery validation order (T036, pinned quickstart entries, no new
-# make target): U (`make test`, incl. race) -> I/E (`make test-integration`,
-# Docker daemon, testcontainers self-provision postgres:18 + Anvil foundry
-# chain-31337). Fault injection rides the same entry as test capabilities, not
-# new infra: kill -9 at phase points, proxy RPC faults, DB-now() clock
-# control, dual-executor launch, delayed worker release. Scenario order:
-# V1 (U) -> V2 (I) -> V3/V4/V5/V6/V7/V8/V9/V10/V11 (I/E) -> V12 full
-# regression (pending T034). The `needs` pin below wires U before I/E.
+# Step timeouts follow the measured local budget and formula recorded in
+# docs/evidence/013/ci_budget.md §3; the target-runner baseline is verified on
+# the first remote run and the budget is re-derived from remote measurements if
+# it does not hold (never silently loosened).
 name: CI
 
 on:
@@ -37,6 +70,89 @@ env:
   TXHARBOR_CHAIN_ID: "31337"
 
 jobs:
+  # Path classification for the conditional middleware layers. The job always
+  # runs; when the base commit is unavailable (first push, shallow ref) every
+  # layer is required rather than skipped.
+  changes:
+    name: changes (layer selection)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      pg: ${{ steps.classify.outputs.pg }}
+      redis: ${{ steps.classify.outputs.redis }}
+      kafka: ${{ steps.classify.outputs.kafka }}
+      e2e: ${{ steps.classify.outputs.e2e }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - name: classify changed paths into required layers
+        id: classify
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          PUSH_BASE_SHA: ${{ github.event.before }}
+          HEAD_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          base=""
+          run_all=false
+          case "$EVENT_NAME" in
+            pull_request) base="$PR_BASE_SHA" ;;
+            push) base="$PUSH_BASE_SHA" ;;
+            *) run_all=true ;;
+          esac
+          if [ "$run_all" = false ]; then
+            if [ -z "$base" ] || [ "$base" = "0000000000000000000000000000000000000000" ] || ! git cat-file -e "${base}^{commit}" 2>/dev/null; then
+              echo "::notice::base commit '$base' unavailable — requiring every layer (conservative)"
+              run_all=true
+            fi
+          fi
+          pg=false; redis=false; kafka=false; e2e=false
+          if [ "$run_all" = true ]; then
+            pg=true; redis=true; kafka=true; e2e=true
+          else
+            changed="$(git diff --name-only "$base" "$HEAD_SHA")"
+            while IFS= read -r f; do
+              [ -n "$f" ] || continue
+              # Integration-PG: events runtime, migration 000015 (all
+              # migrations), upstream integration points, app wiring, shared
+              # test/config/metrics infrastructure.
+              case "$f" in
+                internal/events/*|migrations/*|internal/indexer/*|internal/withdrawal/*|internal/execution/*|internal/app/*|internal/db/*|internal/health/*|internal/testutil/*|internal/eth/*|internal/nonce/*|internal/signer/*|internal/txlifecycle/*|internal/jointwire/*|internal/logx/*|internal/config/*|internal/metrics/*|cmd/*|go.mod|go.sum|Makefile|compose.yaml|.github/workflows/*) pg=true ;;
+              esac
+              # Integration-Redis: cache/rate-limit carriers and their wiring.
+              case "$f" in
+                internal/cache/*|internal/ratelimit/*|internal/app/*|internal/config/*|internal/metrics/*|internal/testutil/*|go.mod|go.sum|Makefile|compose.yaml|.github/workflows/*) redis=true ;;
+              esac
+              # Integration-Kafka: publisher/consumer runtime and broker-facing
+              # health/test infrastructure.
+              case "$f" in
+                internal/events/publisher*.go|internal/events/consumer*.go|internal/events/outbox.go|internal/app/eventpublisher*.go|internal/app/eventconsumer*.go|internal/app/eventsadmin*.go|internal/health/*|internal/config/*|internal/metrics/*|internal/testutil/*|go.mod|go.sum|Makefile|compose.yaml|.github/workflows/*) kafka=true ;;
+              esac
+              # E2E core flows: upstream integration points and app wiring.
+              case "$f" in
+                internal/indexer/*|internal/withdrawal/*|internal/execution/*|internal/app/*|internal/cache/*|internal/ratelimit/*|go.mod|go.sum|Makefile|compose.yaml|.github/workflows/*) e2e=true ;;
+              esac
+            done <<< "$changed"
+          fi
+          {
+            echo "pg=$pg"
+            echo "redis=$redis"
+            echo "kafka=$kafka"
+            echo "e2e=$e2e"
+          } >> "$GITHUB_OUTPUT"
+          {
+            echo "### Layered check selection"
+            echo ""
+            echo "| layer | required for this change |"
+            echo "|---|---|"
+            echo "| integration-pg | $pg |"
+            echo "| integration-redis | $redis |"
+            echo "| integration-kafka | $kafka |"
+            echo "| e2e core | $e2e |"
+          } >> "$GITHUB_STEP_SUMMARY"
+
   lint:
     name: lint (gofmt + vet)
     runs-on: ubuntu-latest
@@ -49,7 +165,7 @@ jobs:
           cache: true
       - name: gofmt + go vet (unit and integration tags)
         run: make lint
-        timeout-minutes: 10
+        timeout-minutes: 5
 
   build:
     name: build
@@ -63,7 +179,7 @@ jobs:
           cache: true
       - name: go build ./...
         run: make build
-        timeout-minutes: 10
+        timeout-minutes: 5
 
   unit:
     name: unit tests (+ race)
@@ -77,17 +193,36 @@ jobs:
           cache: true
       - name: unit tests
         run: make test
-        timeout-minutes: 10
+        timeout-minutes: 5
       - name: unit tests (race detector)
         run: make test-race
-        timeout-minutes: 15
+        timeout-minutes: 10
 
-  integration:
-    name: integration tests (Docker)
+  # Contract layer: envelope/catalog/schema-version and consumer-compat
+  # matrices (T014/T051/T058). Pure Go, no Docker, cheap — it runs for every
+  # PR so a contract-semantics change can never merge without the compat
+  # regression. Breaking changes require a new schema version + compatibility
+  # window (FR-12); the tests enforce that, not the workflow.
+  contract:
+    name: contract tests (no Docker)
     runs-on: ubuntu-latest
-    timeout-minutes: 30
-    # 006 order wire (T036): I/E runs only after U is green.
-    needs: [lint, build, unit]
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version: "1.26.5"
+          cache: true
+      - name: contract layer (make test-contract)
+        run: make test-contract
+        timeout-minutes: 5
+
+  integration-pg:
+    name: integration tests (PostgreSQL, Docker)
+    needs: [changes, lint, build, unit]
+    if: needs.changes.outputs.pg == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-go@v7
@@ -95,7 +230,16 @@ jobs:
           go-version: "1.26.5"
           cache: true
       - name: verify Docker daemon for testcontainers
-        run: docker info
+        id: docker
+        run: |
+          set -euo pipefail
+          if docker info >/dev/null 2>&1; then
+            echo "available=true" >> "$GITHUB_OUTPUT"
+            docker info --format 'Docker server: {{.ServerVersion}}'
+          else
+            echo "available=false" >> "$GITHUB_OUTPUT"
+            echo "::warning::Docker daemon unavailable — integration-pg layer NOT RUN (pending)."
+          fi
         timeout-minutes: 5
       # Never echo credentials. The integration tests redact via logx; this
       # masks the fictional DSN should it ever reach the log stream.
@@ -103,6 +247,169 @@ jobs:
         run: |
           set -euo pipefail
           echo "::add-mask::${TXHARBOR_PG_DSN}"
-      - name: migrations, readiness flip and SIGTERM end to end
+      - name: integration tests (PostgreSQL layer)
+        if: steps.docker.outputs.available == 'true'
         run: make test-integration
-        timeout-minutes: 20
+        timeout-minutes: 16
+      - name: record NOT RUN state — Docker unavailable (merge stays blocked)
+        if: steps.docker.outputs.available != 'true'
+        run: |
+          set -euo pipefail
+          echo "::error::integration-pg NOT RUN: Docker daemon unavailable. This check MUST NOT read as passed."
+          echo "Discipline (verification.md §4): add the 'ci:integration-pending' label to this PR; the merge stays blocked."
+          echo "Close condition: re-run this workflow with a real Docker daemon (real middleware + real migrations); a green run removes the label."
+          exit 1
+
+  integration-redis:
+    name: integration tests (Redis, Docker)
+    needs: [changes, lint, build, unit]
+    if: needs.changes.outputs.redis == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version: "1.26.5"
+          cache: true
+      - name: verify Docker daemon for testcontainers
+        id: docker
+        run: |
+          set -euo pipefail
+          if docker info >/dev/null 2>&1; then
+            echo "available=true" >> "$GITHUB_OUTPUT"
+            docker info --format 'Docker server: {{.ServerVersion}}'
+          else
+            echo "available=false" >> "$GITHUB_OUTPUT"
+            echo "::warning::Docker daemon unavailable — integration-redis layer NOT RUN (pending)."
+          fi
+        timeout-minutes: 5
+      - name: mask test credentials in logs
+        run: |
+          set -euo pipefail
+          echo "::add-mask::${TXHARBOR_PG_DSN}"
+      - name: integration tests (Redis layer)
+        if: steps.docker.outputs.available == 'true'
+        run: make test-integration-redis
+        timeout-minutes: 10
+      - name: record NOT RUN state — Docker unavailable (merge stays blocked)
+        if: steps.docker.outputs.available != 'true'
+        run: |
+          set -euo pipefail
+          echo "::error::integration-redis NOT RUN: Docker daemon unavailable. This check MUST NOT read as passed."
+          echo "Discipline (verification.md §4): add the 'ci:integration-pending' label to this PR; the merge stays blocked."
+          echo "Close condition: re-run this workflow with a real Docker daemon (real middleware + real migrations); a green run removes the label."
+          exit 1
+
+  integration-kafka:
+    name: integration tests (Kafka, Docker)
+    needs: [changes, lint, build, unit]
+    if: needs.changes.outputs.kafka == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version: "1.26.5"
+          cache: true
+      - name: verify Docker daemon for testcontainers
+        id: docker
+        run: |
+          set -euo pipefail
+          if docker info >/dev/null 2>&1; then
+            echo "available=true" >> "$GITHUB_OUTPUT"
+            docker info --format 'Docker server: {{.ServerVersion}}'
+          else
+            echo "available=false" >> "$GITHUB_OUTPUT"
+            echo "::warning::Docker daemon unavailable — integration-kafka layer NOT RUN (pending)."
+          fi
+        timeout-minutes: 5
+      - name: mask test credentials in logs
+        run: |
+          set -euo pipefail
+          echo "::add-mask::${TXHARBOR_PG_DSN}"
+      - name: integration tests (Kafka layer)
+        if: steps.docker.outputs.available == 'true'
+        run: make test-integration-kafka
+        timeout-minutes: 10
+      - name: record NOT RUN state — Docker unavailable (merge stays blocked)
+        if: steps.docker.outputs.available != 'true'
+        run: |
+          set -euo pipefail
+          echo "::error::integration-kafka NOT RUN: Docker daemon unavailable. This check MUST NOT read as passed."
+          echo "Discipline (verification.md §4): add the 'ci:integration-pending' label to this PR; the merge stays blocked."
+          echo "Close condition: re-run this workflow with a real Docker daemon (real middleware + real migrations); a green run removes the label."
+          exit 1
+
+  e2e:
+    name: e2e core flows (Docker + Anvil)
+    needs: [changes, lint, build, unit]
+    if: needs.changes.outputs.e2e == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version: "1.26.5"
+          cache: true
+      - name: verify Docker daemon for testcontainers
+        id: docker
+        run: |
+          set -euo pipefail
+          if docker info >/dev/null 2>&1; then
+            echo "available=true" >> "$GITHUB_OUTPUT"
+            docker info --format 'Docker server: {{.ServerVersion}}'
+          else
+            echo "available=false" >> "$GITHUB_OUTPUT"
+            echo "::warning::Docker daemon unavailable — e2e layer NOT RUN (pending)."
+          fi
+        timeout-minutes: 5
+      - name: mask test credentials in logs
+        run: |
+          set -euo pipefail
+          echo "::add-mask::${TXHARBOR_PG_DSN}"
+      - name: e2e core deposit/withdrawal flows
+        if: steps.docker.outputs.available == 'true'
+        run: make test-e2e
+        timeout-minutes: 10
+      - name: record NOT RUN state — Docker unavailable (merge stays blocked)
+        if: steps.docker.outputs.available != 'true'
+        run: |
+          set -euo pipefail
+          echo "::error::e2e NOT RUN: Docker daemon unavailable. This check MUST NOT read as passed."
+          echo "Discipline (verification.md §4): add the 'ci:integration-pending' label to this PR; the merge stays blocked."
+          echo "Close condition: re-run this workflow with a real Docker daemon (real middleware + real migrations); a green run removes the label."
+          exit 1
+
+  # Stable gate for branch protection: always runs and fails when any executed
+  # layer failed/cancelled. Layers skipped by the path filter are the intended
+  # "not affected" state, not a silent pass — the selection is printed in the
+  # `changes` job summary.
+  ci-required:
+    name: ci-required
+    if: always()
+    needs: [changes, lint, build, unit, contract, integration-pg, integration-redis, integration-kafka, e2e]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: evaluate layered checks
+        env:
+          RESULTS: ${{ toJSON(needs) }}
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json, os, sys
+          needs = json.loads(os.environ["RESULTS"])
+          failed = sorted(
+              f"{name}={info.get('result')}"
+              for name, info in needs.items()
+              if info.get("result") in ("failure", "cancelled")
+          )
+          skipped = sorted(name for name, info in needs.items() if info.get("result") == "skipped")
+          if failed:
+              print("::error::required checks not green: " + ", ".join(failed))
+              sys.exit(1)
+          print("ci-required: every executed layer is green; not affected (skipped by path filter): " + (", ".join(skipped) or "none"))
+          PY

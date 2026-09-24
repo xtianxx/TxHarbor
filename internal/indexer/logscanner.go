@@ -20,6 +20,7 @@ import (
 	"math/big"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/ethereum/go-ethereum"
@@ -112,6 +113,12 @@ type LogScanner struct {
 	whitelist map[string]struct{} // normalized lowercase 0x addresses
 	addresses []common.Address
 
+	// capacityPause, when non-nil, is the T090 PD-2 hard-boundary pause
+	// controller (wired by app from the same events.CapacityGuard that gates
+	// new controllable work). Nil keeps the pre-013 retry behavior unchanged.
+	capacityPause  *CapacityPauseController
+	capacityStatus atomic.Pointer[CapacityPauseStatus]
+
 	mu     sync.RWMutex
 	state  State
 	reason string
@@ -193,6 +200,75 @@ func (s *LogScanner) State() State {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	return s.state
+}
+
+// SetCapacityPauseGate wires the T090 PD-2 hard-boundary pause: the 003 loop
+// evaluates the T071 decision before it retries a failed persistence and, when
+// the backlog is hard and the write cannot be persisted, pauses from its
+// durable progress and rescans from that point after capacity recovers. A nil
+// gate disables the wiring (pre-013 retry behavior).
+func (s *LogScanner) SetCapacityPauseGate(gate CapacityPauseGate) {
+	if gate == nil {
+		s.capacityPause = nil
+		return
+	}
+	controller, err := NewCapacityPauseController(gate, 0)
+	if err != nil {
+		// A nil controller keeps the pre-013 behavior; the only way here is a
+		// nil gate, already handled above.
+		s.capacityPause = nil
+		return
+	}
+	s.capacityPause = controller
+}
+
+// CapacityPauseStatus reports the last recorded capacity-pause evidence for
+// this stream and whether the stream is currently paused. It never blocks and
+// is safe for concurrent readers.
+func (s *LogScanner) CapacityPauseStatus() (CapacityPauseStatus, bool) {
+	status := s.capacityStatus.Load()
+	if status == nil {
+		return CapacityPauseStatus{}, false
+	}
+	return *status, true
+}
+
+// capacityPauseIfNeeded evaluates the T071 pause decision for one persistence
+// failure. handled=true means the pause protocol ran: alive=false means the
+// context ended while paused and the loop returns cleanly; alive=true means
+// capacity recovered and the loop must rescan. handled=false means no pause
+// applies and the caller keeps its ordinary retry path.
+func (s *LogScanner) capacityPauseIfNeeded(ctx context.Context, persistErr error) (handled, alive bool) {
+	if s.capacityPause == nil {
+		return false, true
+	}
+	record, paused, err := s.capacityPause.Evaluate(ctx, s.pool, s.chainID, ReliableProgressLogSource, persistErr)
+	if err != nil {
+		s.logger.Warn("capacity observation failed while a persistence error occurred; keeping the ordinary retry path",
+			"chain_id", s.chainID, "error", logx.Redact(err.Error()))
+		return false, true
+	}
+	if !paused {
+		return false, true
+	}
+	s.capacityStatus.Store(&CapacityPauseStatus{Paused: true, LastPause: record})
+	s.logger.Warn("capacity hard boundary: pausing the log stream from reliable progress (PD-2)",
+		"chain_id", s.chainID, "stream", ReliableProgressLogSource,
+		"reason", record.Decision.Reason,
+		"last_height", record.Decision.Progress.LastHeight, "resume_height", record.Decision.Progress.ResumeHeight,
+		"detail", record.Decision.Detail)
+	if !s.capacityPause.WaitRecovery(ctx) {
+		return true, false
+	}
+	resume := CapacityPauseStatus{Paused: false, LastPause: record, ResumeCount: 1}
+	if previous := s.capacityStatus.Load(); previous != nil {
+		resume.ResumeCount = previous.ResumeCount + 1
+	}
+	s.capacityStatus.Store(&resume)
+	s.logger.Info("capacity recovered: rescanning from reliable progress",
+		"chain_id", s.chainID, "stream", ReliableProgressLogSource,
+		"resume_height", record.Decision.Progress.ResumeHeight)
+	return true, true
 }
 
 // Checkpoint returns the mirrored next_block (the next height to scan); ok is
@@ -548,6 +624,17 @@ func (s *LogScanner) ServeLoop(ctx context.Context, checkLost func() error) erro
 			var cv *chainViewError
 			if errors.As(err, &cv) {
 				return s.pauseChainView(ctx, a, first, cv)
+			}
+			// T090 capacity pause (PD-2): at the hard boundary a failed
+			// persistence pauses the stream from its durable progress; after
+			// capacity recovers the loop continues and rescans from the same
+			// checkpoint, so no height is skipped. Every upstream stop above
+			// keeps its own semantics.
+			if handled, alive := s.capacityPauseIfNeeded(ctx, err); handled {
+				if !alive {
+					return nil
+				}
+				continue
 			}
 			// Database failure: stay on this range and retry (FR-09).
 			d := back.next()

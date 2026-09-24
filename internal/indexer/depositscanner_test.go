@@ -656,8 +656,11 @@ var (
 	}
 	depositSinglePendingAllow = map[string]int{
 		"confirmcommit.go": 1, // the conditional UPDATE predicate
-		"reorgcommit.go":   5, // orphan/invalidate predicates, revive SET+guard, read-only proofs
-		"confirmscan.go":   2, // read-only candidate + count WHERE filters
+		// orphan/invalidate predicates, revive SET+guard, read-only proofs,
+		// plus the 013 T028 read-only orphan-candidate pre-image
+		// (readOrphanCandidatesSQL, same predicate as orphanObservationsSQL).
+		"reorgcommit.go": 6,
+		"confirmscan.go": 2, // read-only candidate + count WHERE filters
 	}
 )
 

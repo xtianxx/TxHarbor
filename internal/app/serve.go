@@ -24,7 +24,10 @@ import (
 	"github.com/ethereum/go-ethereum"
 	"github.com/ethereum/go-ethereum/core/types"
 	gethrpc "github.com/ethereum/go-ethereum/rpc"
+	"github.com/redis/go-redis/v9"
+	"github.com/twmb/franz-go/pkg/kgo"
 
+	"github.com/xtianxx/txharbor/internal/cache"
 	"github.com/xtianxx/txharbor/internal/config"
 	"github.com/xtianxx/txharbor/internal/db"
 	"github.com/xtianxx/txharbor/internal/eth"
@@ -33,6 +36,7 @@ import (
 	"github.com/xtianxx/txharbor/internal/logx"
 	"github.com/xtianxx/txharbor/internal/metrics"
 	"github.com/xtianxx/txharbor/internal/nonce"
+	"github.com/xtianxx/txharbor/internal/ratelimit"
 )
 
 // Deps carries process dependencies so commands are testable in-process.
@@ -174,7 +178,122 @@ func Serve(ctx context.Context, d Deps) int {
 		Observe: m.ObserveProbe,
 	}
 
-	// 5b. Indexer: startup-unique lease owner plus the header and log scanners,
+	// 5a. 013 non-authoritative dependency signals (T017/T018): Redis and
+	// Kafka availability drive the non-critical degradation state and the
+	// status surface. They are never a readiness check and never read by a
+	// funding gate; an unreachable dependency degrades non-critical features
+	// instead of refusing startup.
+	signals := health.NewDependencySignals()
+	var dependencies []string
+	var redisClient *redis.Client
+	if cfg.Redis.Addr != "" {
+		redisClient = redis.NewClient(&redis.Options{
+			Addr:         cfg.Redis.Addr,
+			DialTimeout:  cfg.Redis.Timeout,
+			ReadTimeout:  cfg.Redis.Timeout,
+			WriteTimeout: cfg.Redis.Timeout,
+		})
+		dependencies = append(dependencies, "redis")
+	}
+	var kafkaClient *kgo.Client
+	if len(cfg.Kafka.Brokers) > 0 {
+		kafkaClient, err = kgo.NewClient(
+			kgo.SeedBrokers(cfg.Kafka.Brokers...),
+			kgo.DialTimeout(cfg.ProbeTimeout),
+		)
+		if err != nil {
+			if redisClient != nil {
+				_ = redisClient.Close()
+			}
+			ethClient.Close()
+			pool.Close()
+			return fail("startup failed (kafka probe): %s", logx.Redact(err.Error()))
+		}
+		dependencies = append(dependencies, "kafka")
+	}
+	degradation := newDegradationState(cfg.Events.Enabled, signals, dependencies...)
+	depRunner := &health.DependencyRunner{
+		Interval: cfg.ProbeInterval,
+		Timeout:  cfg.ProbeTimeout,
+		Signals:  signals,
+		Observe: func(name string, available bool) {
+			switch name {
+			case "redis":
+				m.SetRedisAvailable(available)
+			case "kafka":
+				m.SetKafkaAvailable(available)
+			}
+		},
+	}
+	if redisClient != nil {
+		depRunner.Probes = append(depRunner.Probes, health.DependencyProbe{
+			Name:  "redis",
+			Probe: func(ctx context.Context) error { return redisClient.Ping(ctx).Err() },
+		})
+	}
+	if kafkaClient != nil {
+		depRunner.Probes = append(depRunner.Probes, health.DependencyProbe{
+			Name:  "kafka",
+			Probe: func(ctx context.Context) error { return kafkaClient.Ping(ctx) },
+		})
+	}
+
+	// 5b. 013 Redis cache, per-class limiter and RPC budget overlay (T063).
+	// Redis stays non-authoritative: the cache falls back to PostgreSQL behind
+	// a bounded guard, the limiter's failure policy is PD-1
+	// (ratelimit.Policy), and the RPC budget degrades or safely pauses classes
+	// without touching error classification, chain-identity or completeness
+	// checks. A Redis outage never refuses startup.
+	if redisClient != nil {
+		store, err := cache.NewRedisStore(redisClient)
+		if err != nil {
+			ethClient.Close()
+			pool.Close()
+			return fail("startup failed (cache): %s", logx.Redact(err.Error()))
+		}
+		cacheClient, err := cache.NewClient(store, cache.Config{
+			Epoch:                  cfg.Redis.CacheEpoch,
+			TTL:                    cfg.Redis.CacheTTL,
+			Timeout:                cfg.Redis.Timeout,
+			MaxFallbackConcurrency: cacheFallbackConcurrency,
+		})
+		if err != nil {
+			ethClient.Close()
+			pool.Close()
+			return fail("startup failed (cache): %s", logx.Redact(err.Error()))
+		}
+		cacheClient.SetObserver(m)
+		scriptStore, err := ratelimit.NewRedisScriptStore(redisClient)
+		if err != nil {
+			ethClient.Close()
+			pool.Close()
+			return fail("startup failed (ratelimit): %s", logx.Redact(err.Error()))
+		}
+		limiter, err := buildLimiter(scriptStore, cfg, m)
+		if err != nil {
+			ethClient.Close()
+			pool.Close()
+			return fail("startup failed (ratelimit): %s", logx.Redact(err.Error()))
+		}
+		policy, err := ratelimit.NewPolicy(limiter)
+		if err != nil {
+			ethClient.Close()
+			pool.Close()
+			return fail("startup failed (ratelimit): %s", logx.Redact(err.Error()))
+		}
+		rpcBudget, err := buildRPCBudget(limiter, m)
+		if err != nil {
+			ethClient.Close()
+			pool.Close()
+			return fail("startup failed (rpc budget): %s", logx.Redact(err.Error()))
+		}
+		ethClient.SetBudget(rpcBudgetAdapter{budget: rpcBudget})
+		degradation.cache = cacheClient
+		degradation.policy = policy
+		degradation.rpcBudget = rpcBudget
+	}
+
+	// 5c. Indexer: startup-unique lease owner plus the header and log scanners,
 	// both behind one coordinator (a single acquisition loop and a single
 	// heartbeat, research R1). RPC outcomes feed only the indexer metrics;
 	// readiness stays dependency-probe driven.
@@ -296,6 +415,24 @@ func Serve(ctx context.Context, d Deps) int {
 		return fail("startup failed (recovery): %s", logx.Redact(err.Error()))
 	}
 
+	// 5d. 013 capacity guard production assembly (T089; PD-2;
+	// contracts/capacity.md): one guard is constructed from the T001
+	// configuration, observes PostgreSQL only (Redis never participates) and
+	// is shared by the withdrawal receive path (admission for new
+	// controllable writes; T070) and the 003/004 streams (hard-boundary pause
+	// trigger; T090). A configured but invalid limit set refuses startup; an
+	// unconfigured set leaves the PG-only baseline unchanged.
+	capacityGuard, err := buildCapacityGuard(pool, cfg, m)
+	if err != nil {
+		ethClient.Close()
+		pool.Close()
+		return fail("startup failed (capacity): %s", logx.Redact(err.Error()))
+	}
+	if capacityGuard != nil {
+		logScanner.SetCapacityPauseGate(capacityGuard)
+		depositScanner.SetCapacityPauseGate(capacityGuard)
+	}
+
 	// 008 rebuild gate (R5/FR-13): the read-only per-known-scope integrity
 	// verification runs once at startup, before the listener opens. Success is
 	// the only condition that opens the allocation admission gate; a failure
@@ -319,22 +456,39 @@ func Serve(ctx context.Context, d Deps) int {
 		ChainID: chainID,
 		Metrics: m,
 	}
+	// B10 defect fix (T089 assembly): assign the capacity gate only when the
+	// guard exists. A typed nil *events.CapacityGuard assigned into the
+	// CapacityAdmitter interface becomes a non-nil interface holding a nil
+	// pointer, so the PG-only baseline (no capacity configured) would fail
+	// closed with "capacity state unreadable" on every first create instead
+	// of leaving the pre-013 behavior unchanged — the opposite of what
+	// internal/app/capacity.go documents for the unconfigured case.
+	if capacityGuard != nil {
+		withdrawH.CapacityGate = capacityGuard
+	}
+	// T018/T063: the 013 middleware wraps every funding/query route — the
+	// limiter admission (PD-1 fail-closed for new withdrawal creation) outside
+	// the degradation annotation; handlers and their gate order are untouched.
 	mux := http.NewServeMux()
-	mux.Handle("/withdrawals", withdrawH)
-	mux.Handle("/withdrawals/", withdrawH)
+	mux.Handle("/withdrawals", guardRoute(degradation.policy, degradation, ratelimit.ClassNewWithdrawal, ratelimit.ClassQuery, withdrawH))
+	mux.Handle("/withdrawals/", guardRoute(degradation.policy, degradation, ratelimit.ClassNewWithdrawal, ratelimit.ClassQuery, withdrawH))
 	// 011 execution routes mount on the same listener: the method+pattern
 	// registrations are more specific than the /withdrawals/ subtree and win
 	// without touching 007's handler (contracts/api.md §1-§2).
 	executionH := &WithdrawalExecutionHandler{Pool: pool, ChainID: chainID, Metrics: m}
-	mux.Handle("POST /withdrawals/{request_id}/execution", executionH)
-	mux.Handle("GET /withdrawals/{request_id}/execution", executionH)
+	mux.Handle("POST /withdrawals/{request_id}/execution", guardRoute(degradation.policy, degradation, ratelimit.ClassWrite, ratelimit.ClassQuery, executionH))
+	mux.Handle("GET /withdrawals/{request_id}/execution", guardRoute(degradation.policy, degradation, ratelimit.ClassWrite, ratelimit.ClassQuery, executionH))
 	// 008 read endpoints mount on the same listener next to /withdrawals: no
 	// new listener or address. The bearer credential comes from config and is
 	// never logged; an unconfigured token admits nothing (fail closed).
 	// readapi.go is transport-free, so this handler owns the auth check and
 	// the two contract routes. The startup rebuild gate rides the provider so
 	// a gate that is not open fails every read closed as `unavailable`.
-	mux.Handle("/nonce/bindings/", &nonceReadHandler{provider: nonce.NewReadProvider(pool, cfg.NonceReadToken, rebuildGate)})
+	nonceReadH := &nonceReadHandler{provider: nonce.NewReadProvider(pool, cfg.NonceReadToken, rebuildGate)}
+	mux.Handle("/nonce/bindings/", guardRoute(degradation.policy, degradation, ratelimit.ClassQuery, ratelimit.ClassQuery, nonceReadH))
+	// Non-critical status surface: dependency availability and event delivery
+	// posture, annotated honestly (never a readiness or funding signal).
+	mux.Handle("GET /status/degradation", &degradationStatusHandler{state: degradation, pool: pool})
 	mux.Handle("/", health.NewServer(agg, m.Handler()).Handler())
 
 	srv := &http.Server{
@@ -415,7 +569,24 @@ func Serve(ctx context.Context, d Deps) int {
 	}
 	observeRecoveryMetrics(runCtx)
 
+	// 013 capacity observation lifecycle (T089): refreshes the pending gauges
+	// and the soft/hard breach counters through the shared registry. It is
+	// informational only and never gates a request; the admission path always
+	// re-observes on its own read and fails closed there.
+	observeCapacity := func(ctx context.Context) {
+		if capacityGuard == nil {
+			return
+		}
+		if _, err := capacityGuard.Observe(ctx); err != nil {
+			slog.Warn("capacity observation failed", "error", logx.Redact(err.Error()))
+		}
+	}
+	observeCapacity(runCtx)
+
 	go runner.Run(runCtx)
+	if len(depRunner.Probes) > 0 {
+		go depRunner.Run(runCtx)
+	}
 	serveErr := make(chan error, 1)
 	go func() { serveErr <- srv.Serve(listener) }()
 	// The reconcile observer runs beside the coordinator, not inside it: it
@@ -471,6 +642,7 @@ serveLoop:
 			confirmationObserver.observe()
 			recoveryObserver.observe(runCtx)
 			observeRecoveryMetrics(runCtx)
+			observeCapacity(runCtx)
 			if err != nil && !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) {
 				fmt.Fprintf(stderr, "txharbor serve: indexer stopped: %s\n", logx.Redact(err.Error()))
 				exitCode = 1
@@ -483,6 +655,7 @@ serveLoop:
 			confirmationObserver.observe()
 			recoveryObserver.observe(runCtx)
 			observeRecoveryMetrics(runCtx)
+			observeCapacity(runCtx)
 		}
 	}
 	cancel() // stop probe loop and indexer before releasing resources
@@ -508,7 +681,17 @@ serveLoop:
 				return shCtx.Err()
 			}
 		},
-		func(context.Context) error { reconcileRPC.Close(); ethClient.Close(); return nil },
+		func(context.Context) error {
+			if kafkaClient != nil {
+				kafkaClient.Close()
+			}
+			if redisClient != nil {
+				_ = redisClient.Close()
+			}
+			reconcileRPC.Close()
+			ethClient.Close()
+			return nil
+		},
 		func(context.Context) error { pool.Close(); return nil },
 	); err != nil {
 		fmt.Fprintf(stderr, "txharbor serve: shutdown error: %s\n", logx.Redact(err.Error()))

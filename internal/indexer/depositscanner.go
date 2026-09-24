@@ -15,6 +15,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -25,6 +26,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/xtianxx/txharbor/internal/config"
+	"github.com/xtianxx/txharbor/internal/logx"
 )
 
 // DepositConfig is the frozen input of one deposit scanner. Identity fields
@@ -83,6 +85,11 @@ type DepositScanner struct {
 	depState       atomic.Int32
 	depNext        atomic.Uint64
 	depHasProgress atomic.Bool
+	// capacityPause, when non-nil, is the T090 PD-2 hard-boundary pause
+	// controller (wired by app from the same events.CapacityGuard that gates
+	// new controllable work). Nil keeps the pre-013 retry behavior unchanged.
+	capacityPause  *CapacityPauseController
+	capacityStatus atomic.Pointer[CapacityPauseStatus]
 }
 
 // NewDepositScanner validates the deposit configuration without any I/O. A
@@ -137,6 +144,75 @@ func (s *DepositScanner) observeResult(result string) {
 	if s.resultObserver != nil {
 		s.resultObserver(result)
 	}
+}
+
+// SetCapacityPauseGate wires the T090 PD-2 hard-boundary pause: the 004 loop
+// evaluates the T071 decision before it retries a failed persistence and, when
+// the backlog is hard and the write cannot be persisted, pauses from its
+// durable progress and rescans from that point after capacity recovers. A nil
+// gate disables the wiring (pre-013 retry behavior).
+func (s *DepositScanner) SetCapacityPauseGate(gate CapacityPauseGate) {
+	if gate == nil {
+		s.capacityPause = nil
+		return
+	}
+	controller, err := NewCapacityPauseController(gate, 0)
+	if err != nil {
+		// A nil controller keeps the pre-013 behavior; the only way here is a
+		// nil gate, already handled above.
+		s.capacityPause = nil
+		return
+	}
+	s.capacityPause = controller
+}
+
+// CapacityPauseStatus reports the last recorded capacity-pause evidence for
+// this stream and whether the stream is currently paused. It never blocks and
+// is safe for concurrent readers.
+func (s *DepositScanner) CapacityPauseStatus() (CapacityPauseStatus, bool) {
+	status := s.capacityStatus.Load()
+	if status == nil {
+		return CapacityPauseStatus{}, false
+	}
+	return *status, true
+}
+
+// capacityPauseIfNeeded evaluates the T071 pause decision for one persistence
+// failure. handled=true means the pause protocol ran: alive=false means the
+// context ended while paused and the loop returns cleanly; alive=true means
+// capacity recovered and the loop must rescan. handled=false means no pause
+// applies and the caller keeps its ordinary retry path.
+func (s *DepositScanner) capacityPauseIfNeeded(ctx context.Context, persistErr error) (handled, alive bool) {
+	if s.capacityPause == nil {
+		return false, true
+	}
+	record, paused, err := s.capacityPause.Evaluate(ctx, s.pool, s.cfg.ChainID, ReliableProgressDepositSource, persistErr)
+	if err != nil {
+		slog.Warn("capacity observation failed while a persistence error occurred; keeping the ordinary retry path",
+			"chain_id", s.cfg.ChainID, "error", logx.Redact(err.Error()))
+		return false, true
+	}
+	if !paused {
+		return false, true
+	}
+	s.capacityStatus.Store(&CapacityPauseStatus{Paused: true, LastPause: record})
+	slog.Warn("capacity hard boundary: pausing the deposit stream from reliable progress (PD-2)",
+		"chain_id", s.cfg.ChainID, "stream", ReliableProgressDepositSource,
+		"reason", record.Decision.Reason,
+		"last_height", record.Decision.Progress.LastHeight, "resume_height", record.Decision.Progress.ResumeHeight,
+		"detail", record.Decision.Detail)
+	if !s.capacityPause.WaitRecovery(ctx) {
+		return true, false
+	}
+	resume := CapacityPauseStatus{Paused: false, LastPause: record, ResumeCount: 1}
+	if previous := s.capacityStatus.Load(); previous != nil {
+		resume.ResumeCount = previous.ResumeCount + 1
+	}
+	s.capacityStatus.Store(&resume)
+	slog.Info("capacity recovered: rescanning from reliable progress",
+		"chain_id", s.cfg.ChainID, "stream", ReliableProgressDepositSource,
+		"resume_height", record.Decision.Progress.ResumeHeight)
+	return true, true
 }
 
 // validateDepositConfig checks the deposit configuration and returns the
@@ -1468,6 +1544,17 @@ func (s *DepositScanner) ServeLoop(ctx context.Context, lease *Lease, checkLost 
 				}
 				s.persistDepositPause(ctx, lease, pauseEvidenceForStop(err, a, b), progress, depositPauseViaCommit)
 				return err
+			}
+			// T090 capacity pause (PD-2): at the hard boundary a failed
+			// persistence pauses the stream from its durable progress; after
+			// capacity recovers the loop continues and rescans from the same
+			// checkpoint, so no observation is skipped. Every durable stop
+			// above keeps its own semantics.
+			if handled, alive := s.capacityPauseIfNeeded(ctx, err); handled {
+				if !alive {
+					return nil
+				}
+				continue
 			}
 			// Unknown failure (for example a transient DB error): bounded
 			// backoff with zero advance; the unit commit is atomic, so

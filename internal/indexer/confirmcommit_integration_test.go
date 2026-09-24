@@ -186,29 +186,69 @@ func TestConfirmCommitPolicyDrift(t *testing.T) {
 	confirmAssertZeroWrite(t, ctx, pool, chainID, bh, txHash, 2)
 }
 
-// TestConfirmCommitTipMismatch: tip advanced past the capture (case 1) ->
-// chain-view refusal with zero writes.
+// TestConfirmCommitTipMismatch: the two tip-mismatch shapes are distinct
+// (B10 defect fix; data-model §候选分类). A pure forward advance (case 1: the
+// captured tip block is still canonical and only the canonical tip moved up)
+// is the row-level selection race -> errStaleState with zero writes. A tip
+// replacement (the captured tip row left the canonical chain) stays a
+// chain-view refusal -> *ConfirmationChainViewError with zero writes.
 func TestConfirmCommitTipMismatch(t *testing.T) {
-	dsn := startIndexerPostgres(t)
-	pool := openIndexerPool(t, dsn)
-	defer pool.Close()
-	ctx := context.Background()
+	t.Run("pure advance is the row-level race", func(t *testing.T) {
+		dsn := startIndexerPostgres(t)
+		pool := openIndexerPool(t, dsn)
+		defer pool.Close()
+		ctx := context.Background()
 
-	const chainID, h, tip, n = int64(74), uint64(100), uint64(109), uint64(10)
-	depositSeedCanonical(t, ctx, pool, chainID, h, tip+1, true)
-	bh, txHash := confirmSeedPending(t, ctx, pool, chainID, h)
-	confirmSeedPolicyRow(t, ctx, pool, chainID, 1, int64(n), nil, "bootstrap", nil)
+		const chainID, h, tip, n = int64(74), uint64(100), uint64(109), uint64(10)
+		depositSeedCanonical(t, ctx, pool, chainID, h, tip+1, true)
+		bh, txHash := confirmSeedPending(t, ctx, pool, chainID, h)
+		confirmSeedPolicyRow(t, ctx, pool, chainID, 1, int64(n), nil, "bootstrap", nil)
 
-	c, lease := confirmCommitter(t, pool, chainID, n)
-	rcap := testRecoveryCap(t, ctx, pool, chainID)
-	basis := ConfirmBasis{BlockHash: bh, TxHash: txHash, Height: h,
-		TipNumber: tip, TipHash: depositBlockHash(tip), PolicySeq: 1, ThresholdN: n}
-	err := c.ConfirmDepositUnit(ctx, lease, basis, rcap)
-	var chainView *ConfirmationChainViewError
-	if !errors.As(err, &chainView) {
-		t.Fatalf("ConfirmDepositUnit() = %v (%T), want *ConfirmationChainViewError", err, err)
-	}
-	confirmAssertZeroWrite(t, ctx, pool, chainID, bh, txHash, 1)
+		c, lease := confirmCommitter(t, pool, chainID, n)
+		rcap := testRecoveryCap(t, ctx, pool, chainID)
+		basis := ConfirmBasis{BlockHash: bh, TxHash: txHash, Height: h,
+			TipNumber: tip, TipHash: depositBlockHash(tip), PolicySeq: 1, ThresholdN: n}
+		err := c.ConfirmDepositUnit(ctx, lease, basis, rcap)
+		if !errors.Is(err, errStaleState) {
+			t.Fatalf("ConfirmDepositUnit() = %v (%T), want errStaleState (pure advance is a retry, not a halt)", err, err)
+		}
+		confirmAssertZeroWrite(t, ctx, pool, chainID, bh, txHash, 1)
+	})
+
+	t.Run("tip replacement halts chain-view", func(t *testing.T) {
+		dsn := startIndexerPostgres(t)
+		pool := openIndexerPool(t, dsn)
+		defer pool.Close()
+		ctx := context.Background()
+
+		const chainID, h, tip, n = int64(78), uint64(100), uint64(109), uint64(10)
+		depositSeedCanonical(t, ctx, pool, chainID, h, tip, true)
+		bh, txHash := confirmSeedPending(t, ctx, pool, chainID, h)
+		confirmSeedPolicyRow(t, ctx, pool, chainID, 1, int64(n), nil, "bootstrap", nil)
+		// The captured tip block leaves the canonical chain (same height,
+		// different canonical hash): a chain-view anomaly, not a race.
+		if _, err := pool.Exec(ctx,
+			`UPDATE chain_blocks SET canonical = false WHERE chain_id = $1 AND number = $2`, chainID, int64(tip)); err != nil {
+			t.Fatalf("de-canonicalize captured tip: %v", err)
+		}
+		if _, err := pool.Exec(ctx, `
+INSERT INTO chain_blocks (chain_id, number, hash, parent_hash, canonical)
+VALUES ($1, $2, $3, $4, true)`,
+			chainID, int64(tip), depositBlockHash(tip+1000), depositBlockHash(tip-1)); err != nil {
+			t.Fatalf("insert replacement tip: %v", err)
+		}
+
+		c, lease := confirmCommitter(t, pool, chainID, n)
+		rcap := testRecoveryCap(t, ctx, pool, chainID)
+		basis := ConfirmBasis{BlockHash: bh, TxHash: txHash, Height: h,
+			TipNumber: tip, TipHash: depositBlockHash(tip), PolicySeq: 1, ThresholdN: n}
+		err := c.ConfirmDepositUnit(ctx, lease, basis, rcap)
+		var chainView *ConfirmationChainViewError
+		if !errors.As(err, &chainView) {
+			t.Fatalf("ConfirmDepositUnit() = %v (%T), want *ConfirmationChainViewError (tip replacement)", err, err)
+		}
+		confirmAssertZeroWrite(t, ctx, pool, chainID, bh, txHash, 1)
+	})
 }
 
 // TestConfirmCommitPauseStops: a present deposit_pause row stops the commit

@@ -148,9 +148,10 @@ func TestIntentFKRepairIncrementalGuardedNoOpThenRepair(t *testing.T) {
 	dsn := startPostgres(t)
 	ctx := context.Background()
 
-	// Stage 1: the defected database: {1..11} + guarded 000013, no 000012/000014.
+	// Stage 1: the defected database: {1..11} + guarded 000013, no
+	// 000012/000014 and no 013 000015 (the era fixture must not absorb it).
 	pre := testMigrateOptions(dsn)
-	pre.FS = repairSetFS(t, 12, 14)
+	pre.FS = repairSetFS(t, 12, 14, 15)
 	var out bytes.Buffer
 	if err := MigrateUp(ctx, pre, &out); err != nil {
 		t.Fatalf("stage 1 MigrateUp() error = %v (output %q)", err, out.String())
@@ -178,8 +179,8 @@ func TestIntentFKRepairIncrementalGuardedNoOpThenRepair(t *testing.T) {
 		t.Fatalf("stage 2 MigrateUp() error = %v (output %q)", err, out.String())
 	}
 	t.Logf("stage 2 (000012 + repair 000014): %s", strings.TrimSpace(out.String()))
-	if !strings.Contains(out.String(), "applied=2 skipped=12 pending=0") {
-		t.Fatalf("stage 2 output = %q, want applied=2 skipped=12 pending=0", out.String())
+	if !strings.Contains(out.String(), "applied=3 skipped=12 pending=0") {
+		t.Fatalf("stage 2 output = %q, want applied=3 skipped=12 pending=0 (000012, 000014, 000015)", out.String())
 	}
 	exists, validated := intentFKState(t, sqlDB)
 	if !exists || !validated {
@@ -234,8 +235,8 @@ func TestIntentFKRepairRerunIsNoOpSuccess(t *testing.T) {
 	if err := MigrateUp(ctx, testMigrateOptions(dsn), &out); err != nil {
 		t.Fatalf("re-run MigrateUp() error = %v (output %q)", err, out.String())
 	}
-	if !strings.Contains(out.String(), "applied=0 skipped=14 pending=0") {
-		t.Fatalf("re-run output = %q, want applied=0 skipped=14 pending=0", out.String())
+	if !strings.Contains(out.String(), "applied=0 skipped=15 pending=0") {
+		t.Fatalf("re-run output = %q, want applied=0 skipped=15 pending=0", out.String())
 	}
 	exists, validated := intentFKState(t, sqlDB)
 	if !exists || !validated {
@@ -353,14 +354,23 @@ func TestIntentFKRepairMissing012Raises(t *testing.T) {
 }
 
 // TestIntentFKRepairDownAndReUp is path (vi): the repair's Down drops the FK
-// and the next migrate up rebuilds it.
+// and the next migrate up rebuilds it. The subset FS is pinned at 14 so the
+// down/up cycle exercises exactly 000014 (migrationSubsetFS' documented
+// purpose: keep single-migration downgrade tests isolated as later migrations
+// are added — 013's 000015 is the current embedded tip).
 func TestIntentFKRepairDownAndReUp(t *testing.T) {
 	dsn := startPostgres(t)
-	migrateUpAll(t, dsn)
 	ctx := context.Background()
+	opts := testMigrateOptions(dsn)
+	opts.FS = migrationSubsetFS(t, 14)
+
+	var out bytes.Buffer
+	if err := MigrateUp(ctx, opts, &out); err != nil {
+		t.Fatalf("MigrateUp(through 14) error = %v (output %q)", err, out.String())
+	}
 	sqlDB := openTestSQL(t, dsn)
 
-	provider, err := newProvider(sqlDB, testMigrateOptions(dsn))
+	provider, err := newProvider(sqlDB, opts)
 	if err != nil {
 		t.Fatalf("newProvider: %v", err)
 	}
@@ -379,8 +389,8 @@ func TestIntentFKRepairDownAndReUp(t *testing.T) {
 	}
 	assertVersionApplied(t, sqlDB, 14, false)
 
-	var out bytes.Buffer
-	if err := MigrateUp(ctx, testMigrateOptions(dsn), &out); err != nil {
+	out.Reset()
+	if err := MigrateUp(ctx, opts, &out); err != nil {
 		t.Fatalf("re-up MigrateUp() error = %v (output %q)", err, out.String())
 	}
 	t.Logf("re-up (repair rebuild): %s", strings.TrimSpace(out.String()))
