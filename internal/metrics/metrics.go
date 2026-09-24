@@ -207,6 +207,11 @@ type Metrics struct {
 	workerAdvance           *prometheus.CounterVec
 	workerAdvanceSeconds    *prometheus.GaugeVec
 
+	// 013 reliable-event-infrastructure surface (internal/metrics/events.go;
+	// T003): outbox, consumer, cache, rate-limit, capacity and dependency
+	// signals. Fixed-vocabulary labels only; never credentials or payloads.
+	events eventsMetrics
+
 	handler http.Handler
 }
 
@@ -604,6 +609,7 @@ func New(ready func() bool) *Metrics {
 		handler:                      promhttp.HandlerFor(registry, promhttp.HandlerOpts{}),
 	}
 	m.registerSigner(registry)
+	m.events = registerEvents(registry)
 	return m
 }
 

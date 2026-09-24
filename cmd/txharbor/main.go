@@ -11,6 +11,9 @@
 //	txharbor nonce-admin      operate 008 nonce holds/registry (mint/release/status)
 //	txharbor withdrawal-exec  operate 011 execution permissions/claims/projection
 //	txharbor withdrawal-worker run the 011 execution worker
+//	txharbor event-publisher  run the 013 outbox publisher loop (skeleton)
+//	txharbor event-consumer   run the 013 reference consumer loop (skeleton)
+//	txharbor events-admin     operate 013 events (replay/unblock/prune; skeleton)
 package main
 
 import (
@@ -60,6 +63,12 @@ func run(args []string) int {
 		return app.WithdrawalExec(ctx, args[1:], d)
 	case "withdrawal-worker":
 		return app.WithdrawalWorkerCommand(ctx, args[1:], d)
+	case "event-publisher":
+		return app.EventPublisher(ctx, args[1:], d)
+	case "event-consumer":
+		return app.EventConsumer(ctx, args[1:], d)
+	case "events-admin":
+		return app.EventsAdmin(ctx, args[1:], d)
 	case "help", "-h", "--help":
 		usage(os.Stdout)
 		return 0
@@ -85,6 +94,9 @@ commands:
   nonce-admin       operate 008 nonce holds/registry (mint/release/status)
   withdrawal-exec   operate 011 execution permissions/claims/projection
   withdrawal-worker run the 011 execution worker (claim/renew/advance/reconcile)
+  event-publisher   run the 013 outbox publisher loop (skeleton)
+  event-consumer    run the 013 reference consumer loop (skeleton)
+  events-admin      operate 013 events (replay/unblock/prune; skeleton)
   help              show this help
 `)
 }

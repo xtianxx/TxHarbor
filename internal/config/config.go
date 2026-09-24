@@ -94,6 +94,44 @@ const (
 	EnvWorkerBackoffMaxMS     = "TXHARBOR_WORKER_BACKOFF_MAX_MS"
 	EnvWorkerScanIntervalMS   = "TXHARBOR_WORKER_SCAN_INTERVAL_MS"
 	EnvWorkerLabel            = "TXHARBOR_WORKER_LABEL"
+	// 013 reliable event infrastructure (T001). Every 013 knob is optional
+	// while TXHARBOR_EVENTS_ENABLED is false, so existing serve/migrate flows
+	// keep their semantics. With the switch on, the runtime configuration must
+	// be complete and valid or Load refuses startup (fail-closed, no
+	// "unbounded" default semantics). Publisher/consumer batch, poll, lease
+	// and backoff carry annotated technical initial values (to be calibrated
+	// after measurement); rate-limit rates/bursts and capacity limits have no
+	// defaults and must come from measurement or an explicit ruling.
+	EnvEventsEnabled               = "TXHARBOR_EVENTS_ENABLED"
+	EnvEventsPublisherBatch        = "TXHARBOR_EVENTS_PUBLISHER_BATCH"
+	EnvEventsPublisherPollInterval = "TXHARBOR_EVENTS_PUBLISHER_POLL_INTERVAL"
+	EnvEventsPublisherLeaseTTL     = "TXHARBOR_EVENTS_PUBLISHER_LEASE_TTL"
+	EnvEventsPublisherBackoffBase  = "TXHARBOR_EVENTS_PUBLISHER_BACKOFF_BASE"
+	EnvEventsPublisherBackoffMax   = "TXHARBOR_EVENTS_PUBLISHER_BACKOFF_MAX"
+	EnvEventsConsumerBatch         = "TXHARBOR_EVENTS_CONSUMER_BATCH"
+	EnvEventsConsumerPollInterval  = "TXHARBOR_EVENTS_CONSUMER_POLL_INTERVAL"
+	EnvEventsConsumerBackoffBase   = "TXHARBOR_EVENTS_CONSUMER_BACKOFF_BASE"
+	EnvEventsConsumerBackoffMax    = "TXHARBOR_EVENTS_CONSUMER_BACKOFF_MAX"
+	EnvEventsConsumerRetryLimit    = "TXHARBOR_EVENTS_CONSUMER_RETRY_LIMIT"
+	EnvEventsConsumerGapWait       = "TXHARBOR_EVENTS_CONSUMER_GAP_WAIT"
+	EnvRedisAddr                   = "TXHARBOR_REDIS_ADDR"
+	EnvRedisTimeout                = "TXHARBOR_REDIS_TIMEOUT"
+	EnvRedisCacheTTL               = "TXHARBOR_REDIS_CACHE_TTL"
+	EnvRedisCacheEpoch             = "TXHARBOR_REDIS_CACHE_EPOCH"
+	EnvKafkaBrokers                = "TXHARBOR_KAFKA_BROKERS"
+	EnvKafkaTopic                  = "TXHARBOR_KAFKA_TOPIC"
+	EnvKafkaConsumerGroupPrefix    = "TXHARBOR_KAFKA_CONSUMER_GROUP_PREFIX"
+	EnvRateLimitNewWithdrawal      = "TXHARBOR_RATELIMIT_NEW_WITHDRAWAL"
+	EnvRateLimitWrite              = "TXHARBOR_RATELIMIT_WRITE"
+	EnvRateLimitQuery              = "TXHARBOR_RATELIMIT_QUERY"
+	EnvRateLimitOperator           = "TXHARBOR_RATELIMIT_OPERATOR"
+	EnvRateLimitRPC                = "TXHARBOR_RATELIMIT_RPC"
+	EnvEventsCapacitySoftLimit     = "TXHARBOR_EVENTS_CAPACITY_SOFT_LIMIT"
+	EnvEventsCapacityHardLimit     = "TXHARBOR_EVENTS_CAPACITY_HARD_LIMIT"
+	EnvEventsCapacityReserve       = "TXHARBOR_EVENTS_CAPACITY_RESERVE"
+	EnvEventsCapacityRetention     = "TXHARBOR_EVENTS_CAPACITY_RETENTION"
+	EnvEventsCapacityMaxShutdown   = "TXHARBOR_EVENTS_CAPACITY_MAX_SHUTDOWN_WINDOW"
+	EnvEventsCapacityDrainTarget   = "TXHARBOR_EVENTS_CAPACITY_DRAIN_TARGET_WINDOW"
 )
 const (
 	DefaultHTTPAddr           = "127.0.0.1:8080"
@@ -143,6 +181,28 @@ const (
 	DefaultWorkerBackoffBase  = 1 * time.Second
 	DefaultWorkerBackoffMax   = 30 * time.Second
 	DefaultWorkerScanInterval = 1 * time.Second
+
+	// 013 events technical initial values (T001; research R6/R7, contracts/
+	// consumer.md; all "initial value, to be calibrated after measurement").
+	// Threshold values (rate-limit rates/bursts, capacity limits) deliberately
+	// have no defaults: spec forbids inventing business thresholds, so a
+	// missing value refuses startup instead of silently using a guess.
+	DefaultEventsPublisherBatch        = 100
+	DefaultEventsPublisherPollInterval = 1 * time.Second
+	DefaultEventsPublisherLeaseTTL     = 30 * time.Second
+	DefaultEventsPublisherBackoffBase  = 1 * time.Second
+	DefaultEventsPublisherBackoffMax   = 60 * time.Second
+	DefaultEventsConsumerBatch         = 100
+	DefaultEventsConsumerPollInterval  = 1 * time.Second
+	DefaultEventsConsumerBackoffBase   = 500 * time.Millisecond
+	DefaultEventsConsumerBackoffMax    = 30 * time.Second
+	DefaultEventsConsumerRetryLimit    = 8
+	DefaultEventsConsumerGapWait       = 10 * time.Second
+	DefaultRedisTimeout                = 1 * time.Second
+	DefaultRedisCacheTTL               = 30 * time.Second // contracts/redis.md §2.4 initial value
+	DefaultRedisCacheEpoch             = "1"
+	DefaultKafkaTopic                  = "txharbor.events.v1" // research R5
+	DefaultKafkaConsumerGroupPrefix    = "txharbor"           // research R5
 
 	// logConfigVersion prefixes the config identity encoding (clarification
 	// A1). The version is part of the hashed input so future encodings never
@@ -236,6 +296,94 @@ type Config struct {
 	WorkerBackoffMax   time.Duration
 	WorkerScanInterval time.Duration
 	WorkerLabel        string
+	// 013 reliable event infrastructure (T001). Zero-valued while the events
+	// switch is off; populated and validated when TXHARBOR_EVENTS_ENABLED=true.
+	Events    EventsConfig
+	Redis     RedisConfig
+	Kafka     KafkaConfig
+	RateLimit RateLimitConfig
+	Capacity  CapacityConfig
+}
+
+// EventsConfig is the 013 events runtime configuration. Technical cadence
+// values carry annotated initial defaults; thresholds live in Capacity and
+// RateLimit and are required when the feature is enabled.
+type EventsConfig struct {
+	Enabled   bool
+	Publisher EventsPublisherConfig
+	Consumer  EventsConsumerConfig
+}
+
+// EventsPublisherConfig bounds the outbox publisher: claim batch size, poll
+// cadence, claim-lease TTL and the transient-failure exponential backoff
+// window (contracts/outbox-publisher.md §5; initial values, to be calibrated
+// after measurement).
+type EventsPublisherConfig struct {
+	Batch        int
+	PollInterval time.Duration
+	LeaseTTL     time.Duration
+	BackoffBase  time.Duration
+	BackoffMax   time.Duration
+}
+
+// EventsConsumerConfig bounds the consumer: fetch batch, poll cadence, the
+// bounded retry backoff (base/cap/attempt limit) and the version-gap wait
+// window (contracts/consumer.md §3/§4; initial values, to be calibrated after
+// measurement).
+type EventsConsumerConfig struct {
+	Batch        int
+	PollInterval time.Duration
+	BackoffBase  time.Duration
+	BackoffMax   time.Duration
+	RetryLimit   int
+	GapWait      time.Duration
+}
+
+// RedisConfig is the non-authoritative Redis carrier (cache + rate limiting;
+// contracts/redis.md §2/§3). CacheEpoch namespaces cache keys; a Redis
+// clear/rebuild rotates it so stale values become unreachable.
+type RedisConfig struct {
+	Addr       string
+	Timeout    time.Duration
+	CacheTTL   time.Duration
+	CacheEpoch string
+}
+
+// KafkaConfig is the non-authoritative event delivery carrier (research R5).
+type KafkaConfig struct {
+	Brokers             []string
+	Topic               string
+	ConsumerGroupPrefix string
+}
+
+// RateLimitClassConfig is one interface class's token-bucket setting
+// (`rate/burst`). Values are measured inputs, never invented defaults.
+type RateLimitClassConfig struct {
+	RatePerSecond int
+	Burst         int
+}
+
+// RateLimitConfig carries the per-interface-class limiter settings
+// (contracts/redis.md §3.1: new withdrawal creation, general write, query,
+// operator, RPC budget).
+type RateLimitConfig struct {
+	NewWithdrawal RateLimitClassConfig
+	Write         RateLimitClassConfig
+	Query         RateLimitClassConfig
+	Operator      RateLimitClassConfig
+	RPC           RateLimitClassConfig
+}
+
+// CapacityConfig is the outbox capacity guard configuration (PD-2;
+// contracts/capacity.md §1). Limits are measured inputs; Load enforces
+// 0 < Reserve < SoftLimit < HardLimit when the guard is configured.
+type CapacityConfig struct {
+	SoftLimit         int64
+	HardLimit         int64
+	Reserve           int64
+	Retention         time.Duration
+	MaxShutdownWindow time.Duration
+	DrainTargetWindow time.Duration
 }
 
 // DepositEntry is one normalized `address[:effective]` configuration item: a
@@ -411,6 +559,7 @@ func Load(getenv Getenv) (*Config, error) {
 	c.loadSigner(getenv, &errs)
 	c.loadTxLifecycle(getenv, &errs)
 	c.loadWorker(getenv, &errs)
+	c.loadEvents013(getenv, &errs)
 	// Nonce read API (008 FR-19): the bearer token passes through verbatim
 	// and is never formatted into an error. Unset or empty leaves the read
 	// endpoints fail-closed (the read provider authenticates against it).
@@ -451,7 +600,9 @@ func Load(getenv Getenv) (*Config, error) {
 
 // Summary renders the effective configuration with credentials redacted, for
 // one startup echo line (FR-003). The nonce read token is represented by
-// presence + the redaction placeholder, never by its value.
+// presence + the redaction placeholder, never by its value. The 013 events
+// block is appended only while the feature is enabled, so the existing
+// serve/migrate line is unchanged by default.
 func (c *Config) Summary() string {
 	nonceReadToken := ""
 	if c.NonceReadToken != "" {
@@ -461,7 +612,7 @@ func (c *Config) Summary() string {
 	if c.TxSignerCredential != "" {
 		txSignerCredential = logx.Redacted
 	}
-	return fmt.Sprintf(
+	summary := fmt.Sprintf(
 		"pg=%s rpc=%s chain_id=%d start_height=%d http_addr=%s startup_timeout=%s probe_interval=%s probe_timeout=%s shutdown_timeout=%s migrate_lock_timeout=%s index_rpc_timeout=%s index_poll_interval=%s index_retry_initial=%s index_retry_max=%s log_start_height=%d log_contracts=%d log_config_hash=%s log_batch_blocks=%d deposit_start_height=%d deposit_contracts=%d deposit_watch_addresses=%d deposit_config_hash=%s deposit_batch_blocks=%d confirmation_depth=%d reorg_max_depth=%s reorg_replay_batch=%d nonce_read_token=%s signer_http_addr=%s signer_mode=%s signer_key_timeout=%s signer_chains=%d signer_senders=%d signer_assets=%d signer_recipients=%d signer_max_gas_limit=%d tx_signer_url=%s tx_signer_credential=%s tx_send_timeout=%s worker_ttl=%s worker_heartbeat=%s worker_stall=%s worker_backoff_base=%s worker_backoff_max=%s worker_scan_interval=%s worker_label=%q",
 		logx.Redact(c.PGDSN), logx.Redact(c.RPCURL), c.ChainID, c.StartHeight, c.HTTPAddr,
 		c.StartupTimeout, c.ProbeInterval, c.ProbeTimeout, c.ShutdownTimeout, c.MigrateLockTimeout,
@@ -476,6 +627,14 @@ func (c *Config) Summary() string {
 		c.WorkerTTL, c.WorkerHeartbeat, c.WorkerStall, c.WorkerBackoffBase,
 		c.WorkerBackoffMax, c.WorkerScanInterval, c.WorkerLabel,
 	)
+	if c.Events.Enabled {
+		summary += fmt.Sprintf(
+			" events_enabled=true events_publisher_batch=%d events_consumer_batch=%d kafka_brokers=%d kafka_topic=%s redis_addr=%s capacity_soft=%d capacity_hard=%d capacity_reserve=%d",
+			c.Events.Publisher.Batch, c.Events.Consumer.Batch,
+			len(c.Kafka.Brokers), c.Kafka.Topic, c.Redis.Addr,
+			c.Capacity.SoftLimit, c.Capacity.HardLimit, c.Capacity.Reserve)
+	}
+	return summary
 }
 
 // NormalizeWhitelist validates a comma-separated allowlist of EVM contract
@@ -832,6 +991,273 @@ func (c *Config) loadWorker(getenv Getenv, errs *[]error) {
 		*errs = append(*errs, invalid(EnvWorkerStallSeconds,
 			"stall window %s must be > ttl %s (independent value)", c.WorkerStall, c.WorkerTTL))
 	}
+}
+
+// loadEvents013 parses the 013 reliable-event-infrastructure knobs. While
+// TXHARBOR_EVENTS_ENABLED is false every 013 knob stays optional (existing
+// serve/migrate semantics are untouched) and present values are still
+// format-validated. With the switch on, the full runtime set is required and
+// cross-checked fail-closed: Kafka brokers and Redis address must be present,
+// every rate-limit class must carry a measured rate/burst, capacity limits
+// must satisfy 0 < reserve < soft_limit < hard_limit, and every cadence knob
+// stays positive. No knob has an "unbounded" default.
+func (c *Config) loadEvents013(getenv Getenv, errs *[]error) {
+	if raw, ok := getenv(EnvEventsEnabled); ok && raw != "" {
+		v, err := strconv.ParseBool(raw)
+		if err != nil {
+			*errs = append(*errs, invalid(EnvEventsEnabled, "%q is not a boolean", raw))
+		} else {
+			c.Events.Enabled = v
+		}
+	}
+	enabled := c.Events.Enabled
+
+	// Publisher/consumer cadence: technical initial values, to be calibrated
+	// after measurement (research R6/R7). Positive integers/durations only.
+	positiveInt := func(name string, def int) int {
+		raw, ok := getenv(name)
+		if !ok || raw == "" {
+			return def
+		}
+		n, err := strconv.Atoi(raw)
+		if err != nil || n <= 0 {
+			*errs = append(*errs, invalid(name, "%q is not a positive decimal integer", raw))
+			return def
+		}
+		return n
+	}
+	p := &c.Events.Publisher
+	p.Batch = positiveInt(EnvEventsPublisherBatch, DefaultEventsPublisherBatch)
+	p.PollInterval = duration(getenv, EnvEventsPublisherPollInterval, DefaultEventsPublisherPollInterval, errs)
+	p.LeaseTTL = duration(getenv, EnvEventsPublisherLeaseTTL, DefaultEventsPublisherLeaseTTL, errs)
+	p.BackoffBase = duration(getenv, EnvEventsPublisherBackoffBase, DefaultEventsPublisherBackoffBase, errs)
+	p.BackoffMax = duration(getenv, EnvEventsPublisherBackoffMax, DefaultEventsPublisherBackoffMax, errs)
+	if p.BackoffMax < p.BackoffBase {
+		*errs = append(*errs, invalid(EnvEventsPublisherBackoffMax,
+			"backoff max %s must be >= base %s", p.BackoffMax, p.BackoffBase))
+	}
+	cs := &c.Events.Consumer
+	cs.Batch = positiveInt(EnvEventsConsumerBatch, DefaultEventsConsumerBatch)
+	cs.PollInterval = duration(getenv, EnvEventsConsumerPollInterval, DefaultEventsConsumerPollInterval, errs)
+	cs.BackoffBase = duration(getenv, EnvEventsConsumerBackoffBase, DefaultEventsConsumerBackoffBase, errs)
+	cs.BackoffMax = duration(getenv, EnvEventsConsumerBackoffMax, DefaultEventsConsumerBackoffMax, errs)
+	cs.RetryLimit = positiveInt(EnvEventsConsumerRetryLimit, DefaultEventsConsumerRetryLimit)
+	cs.GapWait = duration(getenv, EnvEventsConsumerGapWait, DefaultEventsConsumerGapWait, errs)
+	if cs.BackoffMax < cs.BackoffBase {
+		*errs = append(*errs, invalid(EnvEventsConsumerBackoffMax,
+			"backoff max %s must be >= base %s", cs.BackoffMax, cs.BackoffBase))
+	}
+
+	// Kafka (research R5): brokers are required when the feature is enabled;
+	// topic/group prefix carry the documented defaults and only need a shape
+	// check (no whitespace/commas — a malformed name must never be sent to a
+	// broker or used as a group id).
+	if raw, ok := getenv(EnvKafkaBrokers); ok && strings.TrimSpace(raw) != "" {
+		brokers, err := parseBrokerList(raw)
+		if err != nil {
+			*errs = append(*errs, invalid(EnvKafkaBrokers, "%v", err))
+		} else {
+			c.Kafka.Brokers = brokers
+		}
+	} else if enabled {
+		*errs = append(*errs, invalid(EnvKafkaBrokers, "is required when %s=true", EnvEventsEnabled))
+	}
+	c.Kafka.Topic = DefaultKafkaTopic
+	if raw, ok := getenv(EnvKafkaTopic); ok && raw != "" {
+		if err := validateTokenName(raw); err != nil {
+			*errs = append(*errs, invalid(EnvKafkaTopic, "%v", err))
+		} else {
+			c.Kafka.Topic = raw
+		}
+	}
+	c.Kafka.ConsumerGroupPrefix = DefaultKafkaConsumerGroupPrefix
+	if raw, ok := getenv(EnvKafkaConsumerGroupPrefix); ok && raw != "" {
+		if err := validateTokenName(raw); err != nil {
+			*errs = append(*errs, invalid(EnvKafkaConsumerGroupPrefix, "%v", err))
+		} else {
+			c.Kafka.ConsumerGroupPrefix = raw
+		}
+	}
+
+	// Redis (contracts/redis.md §2/§3): address required when enabled; timeout
+	// and cache TTL are bounded initial values; the epoch is a non-empty
+	// namespace token.
+	if raw, ok := getenv(EnvRedisAddr); ok && raw != "" {
+		if err := validateHostPort(raw); err != nil {
+			*errs = append(*errs, invalid(EnvRedisAddr, "%v", err))
+		} else {
+			c.Redis.Addr = raw
+		}
+	} else if enabled {
+		*errs = append(*errs, invalid(EnvRedisAddr, "is required when %s=true", EnvEventsEnabled))
+	}
+	c.Redis.Timeout = duration(getenv, EnvRedisTimeout, DefaultRedisTimeout, errs)
+	c.Redis.CacheTTL = duration(getenv, EnvRedisCacheTTL, DefaultRedisCacheTTL, errs)
+	c.Redis.CacheEpoch = DefaultRedisCacheEpoch
+	if raw, ok := getenv(EnvRedisCacheEpoch); ok && raw != "" {
+		if err := validateTokenName(raw); err != nil {
+			*errs = append(*errs, invalid(EnvRedisCacheEpoch, "%v", err))
+		} else {
+			c.Redis.CacheEpoch = raw
+		}
+	}
+
+	// Rate limiting (PD-1; contracts/redis.md §3.1): every interface class
+	// needs a measured `rate/burst`; defaults would fabricate a business
+	// threshold, so a missing value refuses startup while the feature is on.
+	parseRateClass := func(name string) RateLimitClassConfig {
+		raw, ok := getenv(name)
+		if !ok || raw == "" {
+			if enabled {
+				*errs = append(*errs, invalid(name,
+					"is required when %s=true (rate/burst from measurement)", EnvEventsEnabled))
+			}
+			return RateLimitClassConfig{}
+		}
+		rate, burst, err := parseRateBurst(raw)
+		if err != nil {
+			*errs = append(*errs, invalid(name, "%v", err))
+			return RateLimitClassConfig{}
+		}
+		return RateLimitClassConfig{RatePerSecond: rate, Burst: burst}
+	}
+	c.RateLimit.NewWithdrawal = parseRateClass(EnvRateLimitNewWithdrawal)
+	c.RateLimit.Write = parseRateClass(EnvRateLimitWrite)
+	c.RateLimit.Query = parseRateClass(EnvRateLimitQuery)
+	c.RateLimit.Operator = parseRateClass(EnvRateLimitOperator)
+	c.RateLimit.RPC = parseRateClass(EnvRateLimitRPC)
+
+	// Capacity guard (PD-2; contracts/capacity.md §1). Limits have no
+	// defaults: a partial or non-ordered set refuses startup. The invariant
+	// 0 < reserve < soft_limit < hard_limit is enforced whenever the guard is
+	// configured (enabled, or any capacity knob present).
+	capInt := func(name string) (int64, bool) {
+		raw, ok := getenv(name)
+		if !ok || raw == "" {
+			return 0, false
+		}
+		n, err := strconv.ParseInt(raw, 10, 64)
+		if err != nil || n <= 0 {
+			*errs = append(*errs, invalid(name, "%q is not a positive decimal integer", raw))
+			return 0, true
+		}
+		return n, true
+	}
+	soft, softOK := capInt(EnvEventsCapacitySoftLimit)
+	hard, hardOK := capInt(EnvEventsCapacityHardLimit)
+	reserve, reserveOK := capInt(EnvEventsCapacityReserve)
+	if enabled || softOK || hardOK || reserveOK {
+		for name, ok := range map[string]bool{
+			EnvEventsCapacitySoftLimit: softOK,
+			EnvEventsCapacityHardLimit: hardOK,
+			EnvEventsCapacityReserve:   reserveOK,
+		} {
+			if !ok {
+				*errs = append(*errs, invalid(name, "is required when the capacity guard is configured"))
+			}
+		}
+		if softOK && hardOK && reserveOK && !(0 < reserve && reserve < soft && soft < hard) {
+			*errs = append(*errs, invalid(EnvEventsCapacityReserve,
+				"require 0 < reserve (%d) < soft_limit (%d) < hard_limit (%d)", reserve, soft, hard))
+		}
+	}
+	c.Capacity.SoftLimit, c.Capacity.HardLimit, c.Capacity.Reserve = soft, hard, reserve
+	capDur := func(name string) (time.Duration, bool) {
+		raw, ok := getenv(name)
+		if !ok || raw == "" {
+			return 0, false
+		}
+		d, err := time.ParseDuration(raw)
+		if err != nil || d <= 0 {
+			*errs = append(*errs, invalid(name, "%q is not a positive duration", raw))
+			return 0, true
+		}
+		return d, true
+	}
+	retention, retentionOK := capDur(EnvEventsCapacityRetention)
+	maxShutdown, maxShutdownOK := capDur(EnvEventsCapacityMaxShutdown)
+	drainTarget, drainTargetOK := capDur(EnvEventsCapacityDrainTarget)
+	if enabled || retentionOK || maxShutdownOK || drainTargetOK {
+		for name, ok := range map[string]bool{
+			EnvEventsCapacityRetention:   retentionOK,
+			EnvEventsCapacityMaxShutdown: maxShutdownOK,
+			EnvEventsCapacityDrainTarget: drainTargetOK,
+		} {
+			if !ok {
+				*errs = append(*errs, invalid(name, "is required when the capacity guard is configured"))
+			}
+		}
+	}
+	c.Capacity.Retention = retention
+	c.Capacity.MaxShutdownWindow = maxShutdown
+	c.Capacity.DrainTargetWindow = drainTarget
+}
+
+// parseBrokerList splits a comma-separated Kafka bootstrap list and validates
+// every entry as host:port (non-empty host, port 1..65535).
+func parseBrokerList(raw string) ([]string, error) {
+	parts := strings.Split(raw, ",")
+	out := make([]string, 0, len(parts))
+	for _, p := range parts {
+		p = strings.TrimSpace(p)
+		if p == "" {
+			return nil, errors.New("broker list contains a blank entry")
+		}
+		if err := validateHostPort(p); err != nil {
+			return nil, fmt.Errorf("broker %q: %v", p, err)
+		}
+		out = append(out, p)
+	}
+	if len(out) == 0 {
+		return nil, errors.New("broker list is empty")
+	}
+	return out, nil
+}
+
+// validateHostPort requires a non-empty host and a port in 1..65535.
+func validateHostPort(raw string) error {
+	host, port, err := net.SplitHostPort(raw)
+	if err != nil {
+		return fmt.Errorf("not in host:port form: %v", err)
+	}
+	if host == "" {
+		return errors.New("host is empty")
+	}
+	p, err := strconv.Atoi(port)
+	if err != nil || p < 1 || p > 65535 {
+		return fmt.Errorf("port %q is not in 1..65535", port)
+	}
+	return nil
+}
+
+// validateTokenName rejects empty/whitespace/commas in broker-facing names
+// (topic, consumer-group prefix, cache epoch).
+func validateTokenName(raw string) error {
+	if raw == "" {
+		return errors.New("must not be empty")
+	}
+	if strings.ContainsAny(raw, " \t\n\r,") {
+		return fmt.Errorf("%q contains whitespace or a comma", raw)
+	}
+	return nil
+}
+
+// parseRateBurst parses the `<rate>/<burst>` form of a limiter class setting:
+// both parts are positive decimal integers.
+func parseRateBurst(raw string) (int, int, error) {
+	parts := strings.Split(raw, "/")
+	if len(parts) != 2 {
+		return 0, 0, fmt.Errorf("%q is not in rate/burst form", raw)
+	}
+	rate, err := strconv.Atoi(strings.TrimSpace(parts[0]))
+	if err != nil || rate <= 0 {
+		return 0, 0, fmt.Errorf("rate %q is not a positive decimal integer", parts[0])
+	}
+	burst, err := strconv.Atoi(strings.TrimSpace(parts[1]))
+	if err != nil || burst <= 0 {
+		return 0, 0, fmt.Errorf("burst %q is not a positive decimal integer", parts[1])
+	}
+	return rate, burst, nil
 }
 
 // SignerPolicyConfig enforces required-ness for the signer paths and builds

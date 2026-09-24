@@ -293,8 +293,8 @@ func TestWithdrawalExecutionMigrationIsAdditiveOnly(t *testing.T) {
 // TestWithdrawalExecutionMigrationNumberIsProvisional verifies the merged
 // version set against the actual embedded set on the joint branch: 000010 is
 // PB, 000011 is 010, 000012 is 011, 000013 is 010's guarded intent-FK
-// follow-up and 000014 is 010's intent-FK repair — no version duplicated and
-// no gap inside 1..14 (C12).
+// follow-up, 000014 is 010's intent-FK repair and 000015 is 013's event
+// infrastructure — no version duplicated and no gap inside 1..15 (C12).
 //
 // The lane-local "000011 must be absent" form was recorded stale at 3d8556e
 // when the joint branch deliberately carries 010's 000011; the 000014 repair
@@ -317,6 +317,7 @@ func TestWithdrawalExecutionMigrationNumberIsProvisional(t *testing.T) {
 		12: "000012_withdrawal_execution.sql",
 		13: "000013_tx_lifecycle_intent_fk.sql",
 		14: "000014_intent_fk_repair.sql",
+		15: "000015_event_infrastructure.sql",
 	}
 	for version, name := range want {
 		if got := byVersion[version]; got != name {
@@ -324,11 +325,11 @@ func TestWithdrawalExecutionMigrationNumberIsProvisional(t *testing.T) {
 		}
 	}
 	if len(files) != len(want)+9 {
-		t.Fatalf("embedded migration count = %d, want %d (versions 1..14)", len(files), len(want)+9)
+		t.Fatalf("embedded migration count = %d, want %d (versions 1..15)", len(files), len(want)+9)
 	}
 	for i, f := range files {
 		if f.Version != int64(i+1) {
-			t.Fatalf("embedded versions %v are not exactly 1..14", files)
+			t.Fatalf("embedded versions %v are not exactly 1..15", files)
 		}
 	}
 }
