@@ -18,11 +18,13 @@
 //  2. BOTH processes actually claim and publish (per-process stderr cycle
 //     logs cross-checked against outbox attempt/publish counters);
 //  3. mutually exclusive partitioning (every claim is owned by exactly one of
-//     the two identities; a row's owner never changes before its lease
-//     expires);
+//     the two identities; the simultaneous two-owner snapshot is asserted to
+//     have an empty row intersection; a row's owner never changes before its
+//     lease red line - claim_expires_at minus a 1s grace);
 //  4. lease-expiry takeover after one process is killed (crash) while holding
-//     claims: the surviving process reclaims the orphaned rows only after
-//     claim_expires_at and publishes them (attempt_count +1);
+//     claims: the surviving process reclaims the orphaned rows no earlier than
+//     the lease red line (claim_expires_at minus a 1s grace) and publishes
+//     them (attempt_count +1);
 //  5. final drain (0 pending / 0 blocked / 0 unowned claims) and graceful stop
 //     of the survivor (SIGTERM -> exit 0, "stopped");
 //  6. consumption effect: every event reaches the broker and the reference
@@ -97,6 +99,14 @@ const (
 
 	dualprocDefaultDuration = 10 * time.Minute
 	dualprocMinDuration     = 15 * time.Second
+
+	// dualprocLeaseGrace is the tolerance applied to the lease verdict: the
+	// red line for a contested row leaving its dead owner is
+	// claim_expires_at - dualprocLeaseGrace. It absorbs the sampler cadence
+	// (25ms) and clock jitter between the child processes, PostgreSQL and the
+	// test host. The verdict detects live-lease theft; it is NOT an
+	// exact-expiry check.
+	dualprocLeaseGrace = 1 * time.Second
 
 	// dualprocChainID is the synthetic chain identity carried by every event.
 	dualprocChainID = int64(31337)
@@ -308,9 +318,10 @@ func dualprocPublisherEnv(dsn string, brokers []string, lease time.Duration) map
 	}
 }
 
-// dualprocChildEnv builds a deterministic child environment: only what the
-// binary needs plus the explicit 013 configuration (the parent TXHARBOR_* env
-// never leaks in and can never make the drill pass on the wrong config).
+// dualprocChildEnv builds a deterministic child environment BY WHITELIST: only
+// what the binary needs plus the explicit 013 configuration. The parent
+// TXHARBOR_* environment never enters this list (a construction guarantee of
+// the test process; this drill makes no parent-environment poisoning claim).
 func dualprocChildEnv(extra map[string]string) []string {
 	env := []string{
 		"PATH=" + os.Getenv("PATH"),
@@ -1054,8 +1065,9 @@ func TestPublisherDualProcessSupplement(t *testing.T) {
 	ev.add(t, "attribution A(claimed=%d acked=%d published=%d) B(claimed=%d acked=%d published=%d) durable_attempts=%d published_rows=%d",
 		claimedA, ackedA, pubA, claimedB, ackedB, pubB, attempts, published)
 
-	// Contested rows: takeover by the survivor only after the lease expired,
-	// with the attempt counter advanced.
+	// Contested rows: the survivor must not take over before the lease red
+	// line (claim_expires_at - dualprocLeaseGrace; see dualprocLeaseGrace for
+	// why the verdict carries a 1s grace), with the attempt counter advanced.
 	for _, c := range contested {
 		v := views[c.id]
 		if v.postAttempt < v.preAttempt+1 {
@@ -1065,16 +1077,17 @@ func TestPublisherDualProcessSupplement(t *testing.T) {
 		if v.clearedAt.IsZero() || v.publishedAt.IsZero() {
 			t.Fatalf("contested row %d has no observed takeover timeline", c.id)
 		}
-		if v.clearedAt.Before(v.expires.Add(-1 * time.Second)) {
-			t.Fatalf("contested row %d left its owner at %s, before lease expiry %s: the live lease was stolen",
-				c.id, v.clearedAt, v.expires)
+		if v.clearedAt.Before(v.expires.Add(-dualprocLeaseGrace)) {
+			t.Fatalf("contested row %d left its owner at %s, before the lease red line %s (claim_expires_at - %s grace): the live lease was stolen",
+				c.id, v.clearedAt, v.expires.Add(-dualprocLeaseGrace), dualprocLeaseGrace)
 		}
-		if v.publishedAt.Before(v.expires.Add(-1 * time.Second)) {
-			t.Fatalf("contested row %d was published at %s, before lease expiry %s",
-				c.id, v.publishedAt, v.expires)
+		if v.publishedAt.Before(v.expires.Add(-dualprocLeaseGrace)) {
+			t.Fatalf("contested row %d was published at %s, before the lease red line %s (claim_expires_at - %s grace)",
+				c.id, v.publishedAt, v.expires.Add(-dualprocLeaseGrace), dualprocLeaseGrace)
 		}
 	}
-	ev.add(t, "lease-takeover verified: %d orphaned claims reclaimed only after claim_expires_at, all published", len(contested))
+	ev.add(t, "lease-takeover verified: %d orphaned claims left their dead owner no earlier than the lease red line (claim_expires_at - %s grace for sampler cadence/clock jitter), all published",
+		len(contested), dualprocLeaseGrace)
 
 	// Phase 6: consumption effect. Every event reaches the broker; the
 	// reference consumer's persistent inbox yields exactly one simulated
@@ -1212,6 +1225,7 @@ attempts:
 	// A resumes against the frozen B: the two owners now hold disjoint claim
 	// sets at the same instant (the partition snapshot). Both are frozen
 	// briefly so the snapshot and the sampler observe one common instant.
+	// The disjointness is asserted explicitly below (empty intersection).
 	resumeA()
 	var partitionA, partitionB []dualprocClaim
 	for attempt := 1; attempt <= 4 && len(partitionA) == 0; attempt++ {
@@ -1257,11 +1271,27 @@ attempts:
 	if len(partitionB) == 0 {
 		t.Fatalf("process B lost its frozen claims before the partition snapshot completed")
 	}
+	// Disjointness is proven, not described: the two frozen snapshots must
+	// have an empty row intersection. A row carries a single claim_owner, so
+	// a non-empty intersection would mean the snapshot observed one row under
+	// both identities at the same instant (the failure the drill exists to
+	// exclude).
+	ownedByA := make(map[int64]string, len(partitionA))
+	for _, c := range partitionA {
+		ownedByA[c.id] = procA.owner
+	}
+	for _, c := range partitionB {
+		if owner, dup := ownedByA[c.id]; dup {
+			t.Fatalf("partition snapshot is not disjoint: row %d appears under both %s and %s at the same instant",
+				c.id, owner, procB.owner)
+		}
+	}
 	return contested, partitionA, partitionB
 }
 
-// dualprocWaitTakeover waits until every orphaned claim is published and
-// asserts each left its dead owner only after the lease expired.
+// dualprocWaitTakeover waits until every orphaned claim is published. The
+// lease-timing verdict (red line: claim_expires_at - dualprocLeaseGrace) is
+// asserted by the caller.
 func dualprocWaitTakeover(t *testing.T, ctx context.Context, pool *pgxpool.Pool, sampler *dualprocSampler, contested []dualprocClaim) {
 	t.Helper()
 	ids := make([]int64, 0, len(contested))
