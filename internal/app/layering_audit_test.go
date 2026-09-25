@@ -8,7 +8,11 @@
 //     Perf — has at least one tagged test file (no vacuous layer) and a
 //     Makefile entry point; the 013-added layer targets carry the
 //     require_tagged_tests guard so an empty layer reports NOT RUN instead of
-//     passing silently (verification.md §4).
+//     passing silently (verification.md §4). The two 013 verification-
+//     supplement harness tags (integration_backlog, integration_dualproc) are
+//     non-unit layers under the same non-vacuity check, but stay deliberately
+//     opt-in: no Makefile target and no CI invocation (a 5k–10k-event drill
+//     and a ~10-minute dual-process run are not ordinary-PR gates).
 //  3. Redis-tagged files never import the Kafka client and Kafka-tagged files
 //     never import the Redis client: the component layers stay independently
 //     runnable.
@@ -37,8 +41,21 @@ import (
 	"testing"
 )
 
-// auditLayerTags are the build tags that select a non-unit test layer.
-var auditLayerTags = []string{"integration", "integration_redis", "integration_kafka", "contract", "e2e", "fault", "perf"}
+// auditLayerTags are the build tags that select a non-unit test layer. The
+// 013 verification-supplement harness tags (integration_backlog,
+// integration_dualproc) are registered here so their Docker-backed files are
+// never misread as unit-eligible; they stay opt-in (no Makefile or CI target).
+var auditLayerTags = []string{
+	"integration",
+	"integration_redis",
+	"integration_kafka",
+	"contract",
+	"e2e",
+	"fault",
+	"perf",
+	"integration_backlog",
+	"integration_dualproc",
+}
 
 func auditRepoRoot(t *testing.T) string {
 	t.Helper()
