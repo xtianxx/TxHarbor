@@ -76,6 +76,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/testcontainers/testcontainers-go"
 	"github.com/testcontainers/testcontainers-go/modules/postgres"
@@ -125,6 +126,23 @@ const (
 	dualprocInitialSeed      = 600
 	dualprocFreezeBurst      = 300
 	dualprocHashBase         = int64(0xD0A100000000)
+
+	// dualprocHoldBudget bounds the database-observable acquisition of a claim
+	// hold: the freeze waits for a PostgreSQL row-lock boundary (atomic: it
+	// either wins live claims or returns none), not for a lucky SIGSTOP inside
+	// a millisecond-wide claim window. Exceeding it fails with the freeze
+	// diagnostics instead of retrying blindly.
+	dualprocHoldBudget = 30 * time.Second
+	// dualprocHoldRefresh re-bursts the producer while a hold is being
+	// acquired, so the owner always has claimable work; it bounds the extra
+	// load the freeze wait may add.
+	dualprocHoldRefresh = 2 * time.Second
+	// dualprocHoldGap is the cadence between hold attempts (each attempt is a
+	// row-lock query, not a sleep-based guess).
+	dualprocHoldGap = 2 * time.Millisecond
+	// dualprocStopWait bounds the O.S.-observable SIGSTOP verification
+	// (state T in /proc/<pid>/status) used for the snapshot freeze.
+	dualprocStopWait = 5 * time.Second
 )
 
 var (
@@ -849,9 +867,14 @@ type dualprocClaim struct {
 	expires time.Time
 }
 
+// dualprocClaimQuerier is the read surface shared by *pgxpool.Pool and pgx.Tx.
+type dualprocClaimQuerier interface {
+	Query(ctx context.Context, sql string, args ...any) (pgx.Rows, error)
+}
+
 // dualprocPendingClaims reads the pending claims of one owner.
-func dualprocPendingClaims(ctx context.Context, pool *pgxpool.Pool, owner string) ([]dualprocClaim, error) {
-	rows, err := pool.Query(ctx,
+func dualprocPendingClaims(ctx context.Context, q dualprocClaimQuerier, owner string) ([]dualprocClaim, error) {
+	rows, err := q.Query(ctx,
 		`SELECT id, attempt_count, claim_expires_at FROM outbox_events
 		 WHERE publish_state = 'pending' AND claim_owner = $1 ORDER BY id`, owner)
 	if err != nil {
@@ -872,6 +895,220 @@ func dualprocPendingClaims(ctx context.Context, pool *pgxpool.Pool, owner string
 		out = append(out, c)
 	}
 	return out, rows.Err()
+}
+
+// dualprocPendingByOwner counts pending rows by claim owner.
+func dualprocPendingByOwner(ctx context.Context, pool *pgxpool.Pool) (map[string]int64, int64, int64, error) {
+	rows, err := pool.Query(ctx,
+		`SELECT coalesce(claim_owner, ''), count(*)::bigint
+		 FROM outbox_events
+		 WHERE publish_state = 'pending'
+		 GROUP BY 1`)
+	if err != nil {
+		return nil, 0, 0, err
+	}
+	defer rows.Close()
+	byOwner := map[string]int64{}
+	var total int64
+	for rows.Next() {
+		var owner string
+		var n int64
+		if err := rows.Scan(&owner, &n); err != nil {
+			return nil, 0, 0, err
+		}
+		byOwner[owner] = n
+		total += n
+	}
+	if err := rows.Err(); err != nil {
+		return nil, 0, 0, err
+	}
+	return byOwner, byOwner[""], total, nil
+}
+
+// dualprocClaimHold is an open test-side transaction holding FOR UPDATE row
+// locks on one owner's committed pending claims. While it is held, the owner's
+// owner-guarded settle UPDATE (ack/release/block) cannot commit for those rows
+// and no other instance can claim them (FOR UPDATE SKIP LOCKED skips locked
+// rows). The frozen partition is therefore a PostgreSQL row-lock property, not
+// a signal-timing race. release is idempotent.
+type dualprocClaimHold struct {
+	conn *pgxpool.Conn
+	tx   pgx.Tx
+	once sync.Once
+}
+
+func (h *dualprocClaimHold) release(ctx context.Context) {
+	if h == nil {
+		return
+	}
+	h.once.Do(func() {
+		if h.tx != nil {
+			_ = h.tx.Rollback(ctx)
+		}
+		if h.conn != nil {
+			h.conn.Release()
+		}
+	})
+}
+
+// dualprocTryHoldOwnerClaims attempts to lock every committed pending row the
+// owner currently holds and that is not already row-locked. A non-nil hold is
+// proof that the owner's settle for those rows cannot commit until release; nil
+// with no error means the owner had no committed-pending claim to win (its
+// claim window had already settled) and the caller should retry.
+func dualprocTryHoldOwnerClaims(ctx context.Context, pool *pgxpool.Pool, owner string) (*dualprocClaimHold, []dualprocClaim, error) {
+	conn, err := pool.Acquire(ctx)
+	if err != nil {
+		return nil, nil, fmt.Errorf("acquire hold connection: %w", err)
+	}
+	tx, err := conn.Begin(ctx)
+	if err != nil {
+		conn.Release()
+		return nil, nil, fmt.Errorf("begin hold transaction: %w", err)
+	}
+	rows, err := tx.Query(ctx,
+		`SELECT id FROM outbox_events
+		 WHERE publish_state = 'pending' AND claim_owner = $1
+		 ORDER BY id
+		 FOR UPDATE SKIP LOCKED`, owner)
+	if err != nil {
+		_ = tx.Rollback(ctx)
+		conn.Release()
+		return nil, nil, fmt.Errorf("hold query: %w", err)
+	}
+	locked := 0
+	for rows.Next() {
+		var id int64
+		if err := rows.Scan(&id); err != nil {
+			rows.Close()
+			_ = tx.Rollback(ctx)
+			conn.Release()
+			return nil, nil, fmt.Errorf("hold scan: %w", err)
+		}
+		locked++
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		_ = tx.Rollback(ctx)
+		conn.Release()
+		return nil, nil, fmt.Errorf("hold rows: %w", err)
+	}
+	if locked == 0 {
+		_ = tx.Rollback(ctx)
+		conn.Release()
+		return nil, nil, nil
+	}
+	claims, err := dualprocPendingClaims(ctx, tx, owner)
+	if err != nil {
+		_ = tx.Rollback(ctx)
+		conn.Release()
+		return nil, nil, err
+	}
+	if len(claims) == 0 {
+		// Unreachable while the locks are held; treat as a lost race.
+		_ = tx.Rollback(ctx)
+		conn.Release()
+		return nil, nil, nil
+	}
+	return &dualprocClaimHold{conn: conn, tx: tx}, claims, nil
+}
+
+// dualprocProcessState reports the O.S. scheduling state from
+// /proc/<pid>/status (Linux); ok is false when it cannot be read.
+func dualprocProcessState(pid int) (string, bool) {
+	body, err := os.ReadFile(fmt.Sprintf("/proc/%d/status", pid))
+	if err != nil {
+		return "", false
+	}
+	for _, line := range strings.Split(string(body), "\n") {
+		if strings.HasPrefix(line, "State:") {
+			fields := strings.Fields(line)
+			if len(fields) >= 2 {
+				return fields[1], true
+			}
+		}
+	}
+	return "", false
+}
+
+// dualprocWaitProcessStopped waits until /proc observably reports the stopped
+// state (T), i.e. the SIGSTOP landed, instead of assuming a fixed sleep is
+// long enough. It returns the last observed state.
+func dualprocWaitProcessStopped(proc *dualprocProcess, timeout time.Duration) (string, bool) {
+	deadline := time.Now().Add(timeout)
+	state := ""
+	for {
+		if exited, _ := proc.pollExit(); exited {
+			return state, false
+		}
+		if s, ok := dualprocProcessState(proc.pid); ok {
+			state = s
+			if s == "T" || s == "t" {
+				return s, true
+			}
+		}
+		if time.Now().After(deadline) {
+			return state, false
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+}
+
+// dualprocLogCounts is one process's logged claim/ack/publish totals.
+type dualprocLogCounts struct {
+	claimed   int64
+	acked     int64
+	published int64
+}
+
+func dualprocLogCountsOf(path string) dualprocLogCounts {
+	claimed, acked, published := dualprocLogTotals(path)
+	return dualprocLogCounts{claimed: claimed, acked: acked, published: published}
+}
+
+// dualprocFreezeDiagnostics reports everything needed to classify a freeze
+// failure without re-running: identities, bounds, the phase timeline, process
+// liveness and O.S. state, per-process counters across the freeze window, the
+// database pending counts by owner, and the owners' stderr tails. Every line is
+// emitted as DUALPROC-EVIDENCE before the caller fails the test.
+func dualprocFreezeDiagnostics(t *testing.T, ev *dualprocEvidence, pool *pgxpool.Pool,
+	procA, procB *dualprocProcess, lease time.Duration,
+	phase2Start, freezeAt, freezeStart time.Time,
+	beforeA, beforeB dualprocLogCounts, reason string) {
+	t.Helper()
+	ctx := context.Background()
+	now := time.Now()
+	ev.add(t, "freeze-diag reason=%s", reason)
+	ev.add(t, "freeze-diag timeline phase2_start=%s freeze_at=%s freeze_started=%s now=%s since_freeze_at=%s since_freeze_start=%s",
+		phase2Start.UTC().Format(time.RFC3339Nano), freezeAt.UTC().Format(time.RFC3339Nano),
+		freezeStart.UTC().Format(time.RFC3339Nano), now.UTC().Format(time.RFC3339Nano),
+		now.Sub(freezeAt).Round(time.Millisecond), now.Sub(freezeStart).Round(time.Millisecond))
+	ev.add(t, "freeze-diag bounds lease=%s batch=%d poll=%s hold_budget=%s",
+		lease, dualprocBatch, dualprocPollInterval, dualprocHoldBudget)
+	for _, p := range []*dualprocProcess{procA, procB} {
+		exited, exitErr := p.pollExit()
+		state, ok := dualprocProcessState(p.pid)
+		if !ok {
+			state = "<unreadable>"
+		}
+		ev.add(t, "freeze-diag process=%s owner=%s pid=%d exited=%t exit_err=%v os_state=%s",
+			p.name, p.owner, p.pid, exited, exitErr, state)
+	}
+	afterA := dualprocLogCountsOf(procA.stderrPath)
+	afterB := dualprocLogCountsOf(procB.stderrPath)
+	ev.add(t, "freeze-diag counters A before(claimed=%d acked=%d published=%d) after(claimed=%d acked=%d published=%d) delta(+%d/+%d/+%d)",
+		beforeA.claimed, beforeA.acked, beforeA.published, afterA.claimed, afterA.acked, afterA.published,
+		afterA.claimed-beforeA.claimed, afterA.acked-beforeA.acked, afterA.published-beforeA.published)
+	ev.add(t, "freeze-diag counters B before(claimed=%d acked=%d published=%d) after(claimed=%d acked=%d published=%d) delta(+%d/+%d/+%d)",
+		beforeB.claimed, beforeB.acked, beforeB.published, afterB.claimed, afterB.acked, afterB.published,
+		afterB.claimed-beforeB.claimed, afterB.acked-beforeB.acked, afterB.published-beforeB.published)
+	if byOwner, unowned, total, err := dualprocPendingByOwner(ctx, pool); err != nil {
+		ev.add(t, "freeze-diag pending query failed: %v", err)
+	} else {
+		ev.add(t, "freeze-diag pending total=%d unowned_or_released=%d by_owner=%v", total, unowned, byOwner)
+	}
+	ev.add(t, "freeze-diag B stderr tail: %s", dualprocFileTail(procB.stderrPath, 2000))
+	ev.add(t, "freeze-diag A stderr tail: %s", dualprocFileTail(procA.stderrPath, 1000))
 }
 
 // ---------------------------------------------------------------------------
@@ -949,7 +1186,8 @@ func TestPublisherDualProcessSupplement(t *testing.T) {
 	// Phase 3: freeze B while it owns claims, capture the simultaneous
 	// partition snapshot, then kill B (crash) and observe lease-expiry
 	// takeover by A.
-	contested, partitionA, partitionB := dualprocFreezeAndCapturePartition(t, pool, producer, procA, procB)
+	contested, partitionA, partitionB, releaseFrozenHolds := dualprocFreezeAndCapturePartition(
+		t, pool, producer, procA, procB, ev, lease, start, freezeAt)
 	ev.add(t, "phase=partition-snapshot ownerA_claims=%d ownerB_claims=%d (disjoint rows, both owners pending simultaneously)",
 		len(partitionA), len(partitionB))
 	for _, c := range partitionA {
@@ -965,10 +1203,23 @@ func TestPublisherDualProcessSupplement(t *testing.T) {
 	if err := procB.waitExit(30 * time.Second); err == nil {
 		t.Fatalf("killed process B exited without an error; want the crash signal")
 	}
+	// The row-lock holds are released only now: while they were open, A could
+	// neither settle its own pinned batch nor reclaim B's orphaned claims, so
+	// the crash injection cannot be pre-empted by a premature takeover.
+	releaseFrozenHolds()
+	ev.add(t, "phase=freeze-holds-released contested_rows=%d ownerA_resumed=true", len(contested))
 	ev.add(t, "phase=crash-kill owner=%s pid=%d contested_rows=%d killed=true", ownerB, procB.pid, len(contested))
 
 	dualprocWaitTakeover(t, ctx, pool, sampler, contested)
-	views := sampler.contestedViews()
+	views := dualprocWaitContestedObserved(sampler, contested, 15*time.Second)
+	observed := 0
+	for _, c := range contested {
+		if v := views[c.id]; !v.clearedAt.IsZero() && !v.publishedAt.IsZero() {
+			observed++
+		}
+	}
+	ev.add(t, "phase=takeover-observed contested_rows=%d sampler_observed=%d samples=%d",
+		len(contested), observed, sampler.summary().samples)
 	for _, c := range contested {
 		v := views[c.id]
 		ev.add(t, "takeover row=%d pre_attempt=%d post_attempt=%d cleared_at=%s published_at=%s expires=%s",
@@ -1158,118 +1409,173 @@ func dualprocWaitUntil(t *testing.T, deadline time.Time, sampler *dualprocSample
 	}
 }
 
-// dualprocFreezeAndCapturePartition stops process B while it owns committed
-// pending claims, then captures the simultaneous two-owner partition. To make
-// B's short claim window observable, A is SIGSTOPped first (B becomes the only
-// drainer), B is stop-polled until it owns claims, and only then is A resumed
-// to claim concurrently against the frozen B. B stays frozen on return; A is
-// running again.
+// dualprocWaitOwnerHold waits, within the freeze hold budget, until one
+// owner's live committed pending claims are pinned behind a row-lock hold.
+// Each iteration is a database-observable decision (the atomic FOR UPDATE
+// result), not a blind retry: it either wins the owner's current claim window
+// or observes that the window has already settled, while a bounded burst keeps
+// claimable work available. fail reports the freeze diagnostics and fails the
+// test.
+func dualprocWaitOwnerHold(t *testing.T, ctx context.Context, pool *pgxpool.Pool, proc *dualprocProcess,
+	producer *dualprocProducer, freezeStart time.Time, fail func(reason, format string, args ...any)) (*dualprocClaimHold, []dualprocClaim) {
+	t.Helper()
+	deadline := freezeStart.Add(dualprocHoldBudget)
+	attempts := 0
+	var lastBurst time.Time
+	for {
+		if time.Since(lastBurst) >= dualprocHoldRefresh {
+			producer.burst(t, dualprocFreezeBurst)
+			lastBurst = time.Now()
+		}
+		if exited, err := proc.pollExit(); exited {
+			fail("process exited while its claim hold was being acquired",
+				"%s exited while its claims were being pinned: %v", proc.name, err)
+		}
+		attempts++
+		hold, claims, err := dualprocTryHoldOwnerClaims(ctx, pool, proc.owner)
+		if err != nil {
+			fail("claim hold query failed", "hold %s claims (owner=%s): %v", proc.name, proc.owner, err)
+		}
+		if hold != nil {
+			return hold, claims
+		}
+		if time.Now().After(deadline) {
+			fail("claim hold not acquired within the freeze hold budget",
+				"could not pin %s (owner=%s) to its committed pending claims within %s (%d row-lock attempts); no live claim window was won while the owner was running",
+				proc.name, proc.owner, dualprocHoldBudget, attempts)
+		}
+		time.Sleep(dualprocHoldGap)
+	}
+}
+
+// dualprocFreezeAndCapturePartition freezes process B while it owns committed
+// pending claims, captures the simultaneous two-owner partition, and returns
+// the contested rows plus a release function for the database holds that keep
+// the frozen partitions pinned.
+//
+// Hardening (2026-09-25): the previous version stop-polled B's live claim
+// window at a 3ms cadence, SIGSTOPped B and re-read after a fixed 30ms. A live
+// claim (claim commit -> settle commit) is only milliseconds wide - the
+// 10-minute run sampler measured owner-B occupancy at 0.87% of 25ms samples,
+// i.e. roughly 2ms per 250ms cycle (dualproc.md §4) - so that freeze was a race
+// between the test's read+signal latency and the settle, which SIGSTOP lost 12
+// consecutive times in one recorded run. This version synchronizes on a
+// database-observable condition: an atomic FOR UPDATE SKIP LOCKED row lock on
+// B's committed pending claims. The owner's owner-guarded settle UPDATE cannot
+// commit those rows while the hold is open, and no other instance can claim
+// them, so "B owns pending claims" is pinned by PostgreSQL, not by signal
+// timing. Release happens in the test body only after B is SIGKILLed, so A
+// cannot take over the orphaned rows (or settle its own pinned batch) before
+// the crash is injected. On failure the diagnostics report owner, lease,
+// pending counts and the phase timeline.
 func dualprocFreezeAndCapturePartition(t *testing.T, pool *pgxpool.Pool, producer *dualprocProducer,
-	procA, procB *dualprocProcess) ([]dualprocClaim, []dualprocClaim, []dualprocClaim) {
+	procA, procB *dualprocProcess, ev *dualprocEvidence, lease time.Duration,
+	phase2Start, freezeAt time.Time) ([]dualprocClaim, []dualprocClaim, []dualprocClaim, func()) {
 	t.Helper()
 	ctx := context.Background()
+	freezeStart := time.Now()
+	beforeA := dualprocLogCountsOf(procA.stderrPath)
+	beforeB := dualprocLogCountsOf(procB.stderrPath)
+
+	fail := func(reason, format string, args ...any) {
+		dualprocFreezeDiagnostics(t, ev, pool, procA, procB, lease, phase2Start, freezeAt, freezeStart, beforeA, beforeB, reason)
+		t.Fatalf(format, args...)
+	}
+
+	ev.add(t, "phase=freeze-start ownerA=%s ownerB=%s lease=%s phase2_start=%s freeze_at=%s now=%s A(claimed=%d acked=%d published=%d) B(claimed=%d acked=%d published=%d)",
+		procA.owner, procB.owner, lease,
+		phase2Start.UTC().Format(time.RFC3339Nano), freezeAt.UTC().Format(time.RFC3339Nano),
+		time.Now().UTC().Format(time.RFC3339Nano),
+		beforeA.claimed, beforeA.acked, beforeA.published, beforeB.claimed, beforeB.acked, beforeB.published)
 
 	// A stops draining: every burst stays claimable by B, whose claim cycles
-	// (batch rows held across Sink.Publish) become observable at a 3ms poll.
-	if err := procA.signal(syscall.SIGSTOP); err != nil {
-		t.Fatalf("SIGSTOP A: %v", err)
-	}
-	aResumed := false
-	resumeA := func() {
-		if !aResumed {
-			if err := procA.signal(syscall.SIGCONT); err != nil {
-				t.Fatalf("SIGCONT A: %v", err)
+	// become the target of the row-lock hold below. stopA/resumeA track the
+	// actual signal state (A is stopped twice: before B's hold and for the
+	// common-instant snapshot).
+	aStopped := false
+	stopA := func() {
+		if !aStopped {
+			if err := procA.signal(syscall.SIGSTOP); err != nil {
+				fail("SIGSTOP A failed", "SIGSTOP A: %v", err)
 			}
-			aResumed = true
+			aStopped = true
 		}
 	}
+	resumeA := func() {
+		if aStopped {
+			if err := procA.signal(syscall.SIGCONT); err != nil {
+				fail("SIGCONT A failed", "SIGCONT A: %v", err)
+			}
+			aStopped = false
+		}
+	}
+	stopA()
 	defer resumeA()
 
-	var contested []dualprocClaim
-attempts:
-	for attempt := 1; attempt <= 12; attempt++ {
-		producer.burst(t, dualprocFreezeBurst)
-		deadline := time.Now().Add(3 * time.Second)
-		for time.Now().Before(deadline) {
-			bClaims, err := dualprocPendingClaims(ctx, pool, procB.owner)
-			if err != nil {
-				t.Fatalf("read B claims: %v", err)
-			}
-			if len(bClaims) == 0 {
-				time.Sleep(3 * time.Millisecond)
-				continue
-			}
-			if err := procB.signal(syscall.SIGSTOP); err != nil {
-				t.Fatalf("SIGSTOP B: %v", err)
-			}
-			time.Sleep(30 * time.Millisecond)
-			stable, err := dualprocPendingClaims(ctx, pool, procB.owner)
-			if err != nil {
-				t.Fatalf("re-read B claims: %v", err)
-			}
-			if len(stable) == 0 {
-				// B completed its cycle before the stop landed; retry.
-				if err := procB.signal(syscall.SIGCONT); err != nil {
-					t.Fatalf("SIGCONT B: %v", err)
-				}
-				break
-			}
-			contested = stable
-			break attempts
+	var holds []*dualprocClaimHold
+	releaseHolds := func() {
+		for _, h := range holds {
+			h.release(ctx)
 		}
 	}
-	if len(contested) == 0 {
-		t.Fatalf("could not freeze process B while it owns pending claims after 12 attempts")
+	t.Cleanup(releaseHolds)
+
+	// Phase 3a: pin B's live claims behind a row lock. Once held, B's settle
+	// UPDATE blocks and the pending set is frozen.
+	holdStart := time.Now()
+	bHold, contested := dualprocWaitOwnerHold(t, ctx, pool, procB, producer, freezeStart, fail)
+	holds = append(holds, bHold)
+	ev.add(t, "phase=freeze-hold owner=%s rows=%d wait=%s via=for-update-skip-locked-row-lock",
+		procB.owner, len(contested), time.Since(holdStart).Round(time.Millisecond))
+
+	// Freeze B at the O.S. level too, and verify the state is observable in
+	// /proc instead of trusting a fixed sleep. The row hold already guarantees
+	// the claims cannot settle; the stopped state keeps them pinned even if a
+	// hold were released early.
+	if err := procB.signal(syscall.SIGSTOP); err != nil {
+		fail("SIGSTOP B failed", "SIGSTOP B: %v", err)
+	}
+	if state, ok := dualprocWaitProcessStopped(procB, dualprocStopWait); !ok {
+		fail("process B did not reach the stopped state",
+			"process B did not stop within %s (last /proc state=%q)", dualprocStopWait, state)
+	}
+	if stable, err := dualprocPendingClaims(ctx, pool, procB.owner); err != nil {
+		fail("pending re-read failed", "re-read B claims: %v", err)
+	} else if len(stable) == 0 {
+		fail("B lost its held pending claims", "process B held no pending claims after the row-lock hold")
 	}
 
-	// A resumes against the frozen B: the two owners now hold disjoint claim
-	// sets at the same instant (the partition snapshot). Both are frozen
-	// briefly so the snapshot and the sampler observe one common instant.
-	// The disjointness is asserted explicitly below (empty intersection).
+	// Phase 3b: resume A and pin its live claims the same way. A's settle
+	// cannot commit while held, so the two-owner snapshot is one common
+	// instant.
 	resumeA()
-	var partitionA, partitionB []dualprocClaim
-	for attempt := 1; attempt <= 4 && len(partitionA) == 0; attempt++ {
-		producer.burst(t, dualprocFreezeBurst)
-		deadline := time.Now().Add(2 * time.Second)
-		foundA := false
-		for time.Now().Before(deadline) {
-			aClaims, err := dualprocPendingClaims(ctx, pool, procA.owner)
-			if err != nil {
-				t.Fatalf("read A claims: %v", err)
-			}
-			if len(aClaims) > 0 {
-				foundA = true
-				break
-			}
-			time.Sleep(3 * time.Millisecond)
-		}
-		if !foundA {
-			continue
-		}
-		if err := procA.signal(syscall.SIGSTOP); err != nil {
-			t.Fatalf("SIGSTOP A: %v", err)
-		}
-		time.Sleep(80 * time.Millisecond)
-		aFrozen, err := dualprocPendingClaims(ctx, pool, procA.owner)
-		if err != nil {
-			t.Fatalf("frozen A claims: %v", err)
-		}
-		bFrozen, err := dualprocPendingClaims(ctx, pool, procB.owner)
-		if err != nil {
-			t.Fatalf("frozen B claims: %v", err)
-		}
-		if len(aFrozen) > 0 && len(bFrozen) > 0 {
-			partitionA, partitionB = aFrozen, bFrozen
-		}
-		if err := procA.signal(syscall.SIGCONT); err != nil {
-			t.Fatalf("SIGCONT A: %v", err)
-		}
+	holdStart = time.Now()
+	aHold, partitionA := dualprocWaitOwnerHold(t, ctx, pool, procA, producer, freezeStart, fail)
+	holds = append(holds, aHold)
+	ev.add(t, "phase=freeze-hold owner=%s rows=%d wait=%s via=for-update-skip-locked-row-lock",
+		procA.owner, len(partitionA), time.Since(holdStart).Round(time.Millisecond))
+
+	stopA()
+	if state, ok := dualprocWaitProcessStopped(procA, dualprocStopWait); !ok {
+		fail("process A did not reach the stopped state",
+			"process A did not stop within %s (last /proc state=%q)", dualprocStopWait, state)
+	}
+
+	// Capture both partitions while both owners are pinned (row locks plus
+	// stopped state).
+	var partitionB []dualprocClaim
+	var err error
+	if partitionA, err = dualprocPendingClaims(ctx, pool, procA.owner); err != nil {
+		fail("snapshot A read failed", "frozen A claims: %v", err)
+	}
+	if partitionB, err = dualprocPendingClaims(ctx, pool, procB.owner); err != nil {
+		fail("snapshot B read failed", "frozen B claims: %v", err)
 	}
 	if len(partitionA) == 0 {
-		t.Fatalf("process A held no claims while B was frozen; no simultaneous partition snapshot")
+		fail("A holds no claims at the snapshot", "process A held no claims while B was frozen; no simultaneous partition snapshot")
 	}
 	if len(partitionB) == 0 {
-		t.Fatalf("process B lost its frozen claims before the partition snapshot completed")
+		fail("B holds no claims at the snapshot", "process B lost its frozen claims before the partition snapshot completed")
 	}
 	// Disjointness is proven, not described: the two frozen snapshots must
 	// have an empty row intersection. A row carries a single claim_owner, so
@@ -1282,11 +1588,18 @@ attempts:
 	}
 	for _, c := range partitionB {
 		if owner, dup := ownedByA[c.id]; dup {
-			t.Fatalf("partition snapshot is not disjoint: row %d appears under both %s and %s at the same instant",
+			fail("partition snapshot is not disjoint",
+				"partition snapshot is not disjoint: row %d appears under both %s and %s at the same instant",
 				c.id, owner, procB.owner)
 		}
 	}
-	return contested, partitionA, partitionB
+	ev.add(t, "phase=freeze-pinned ownerA_claims=%d ownerB_claims=%d both_stopped=true holds=%d",
+		len(partitionA), len(partitionB), len(holds))
+
+	// A runs again; its held batch and B's orphaned-to-be claims stay pinned
+	// until the caller releases the holds after injecting the crash.
+	resumeA()
+	return contested, partitionA, partitionB, releaseHolds
 }
 
 // dualprocWaitTakeover waits until every orphaned claim is published. The
@@ -1315,6 +1628,32 @@ func dualprocWaitTakeover(t *testing.T, ctx context.Context, pool *pgxpool.Pool,
 		time.Sleep(100 * time.Millisecond)
 	}
 	t.Fatalf("orphaned claims were not taken over and published within the deadline")
+}
+
+// dualprocWaitContestedObserved waits until the sampler has recorded the full
+// takeover timeline for every contested row (left owner B, then published with
+// attempt+1), or the timeout elapses. The post-takeover state is terminal
+// (published) and cannot change again, so this is a bounded wait on sampler
+// observability, not a fixed sleep: it removes the race between the takeover
+// detection and the sampler's 25ms cadence. The returned views are the last
+// observation; the caller's assertions remain the verdict.
+func dualprocWaitContestedObserved(sampler *dualprocSampler, contested []dualprocClaim, timeout time.Duration) map[int64]dualprocContested {
+	deadline := time.Now().Add(timeout)
+	for {
+		views := sampler.contestedViews()
+		complete := true
+		for _, c := range contested {
+			v := views[c.id]
+			if v.clearedAt.IsZero() || v.publishedAt.IsZero() || v.postAttempt < v.preAttempt+1 {
+				complete = false
+				break
+			}
+		}
+		if complete || time.Now().After(deadline) {
+			return views
+		}
+		time.Sleep(dualprocSampleInterval)
+	}
 }
 
 // dualprocDrain waits until the outbox has no pending or blocked rows and no
