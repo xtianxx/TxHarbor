@@ -2,7 +2,7 @@
 
 - Feature: `013-reliable-event-infrastructure`（补充批次；分支 `013-verify-supplement`，基线 `origin/main@d2bf559`）
 - 任务: T034「双实例」范围澄清 + V-PUBLISHER 双独立进程补充证据
-- 状态: 用例实现完成；**三次 10 分钟默认时长运行通过**（§4 旧运行 2026-09-24 `654.62s`；§4.1 复运行 2026-09-25 `656.37s`；本轮收口后再次运行 `661.65s`）；缩短时长冒烟、失败复现与逐次结果详见 §4.1
+- 状态: 用例实现完成；**三次 10 分钟默认时长运行通过**（§4 旧运行 2026-09-24 `654.62s`；§4.1 复运行 2026-09-25 `656.37s`；本轮收口后再次运行 `661.65s`）；缩短时长冒烟、失败复现与逐次结果详见 §4.1；另在 `6075094` 单次 20s 补充验收运行通过（旧接管超时未复现、历史原因仍未知；见 §4.2）
 - 结论范围（硬限制，随引用携带）: **单本地主机**、两个真实独立 OS 进程、单 PostgreSQL 容器 + 单 Kafka broker、合成负载。**非多主机/分布式/生产结论**，不替代 Q8/Q9 故障演练与 Q10 基准。用例的冻结/恢复判定依赖 **Linux `/proc/<pid>/status`**（§3、§5）。
 - 投递语义: 至少一次 + 幂等处理；本文件与用例从不断言跨系统恰好一次。消费效应用参考消费者模拟账本度量（FR-16 边界，见 §5）。
 
@@ -79,6 +79,21 @@ go test -tags integration_dualproc -count=1 -timeout 25m \
 4. 旧路径对照（`7a15c04`，SIGSTOP 停点轮询冻结）：本轮 4 次运行中 3 次通过、1 次失败（`old_smoke2.log`："process A held no claims while B was frozen"），失败类正是 `7402706` 行锁硬化所要消除的毫秒级时序竞态。
 
 结论表述纪律：本轮修正后共 6 次通过（1×15s + 4×20s + 1×10m），逐次记录、非重试择优；它证明该夹具在本次环境/主机上可用，**不构成统计稳定性证明**，也不外推到多主机/生产负载。原始日志与结构化证据均在 `/tmp/opencode/013-fix/`（`fix_target15*.log`、`fix_smoke1..4.log`、`fix_full10m.log` 及各自 `dualproc-test-evidence.txt`，未入库）。
+
+### 4.2 补充验收轮：`6075094` 单次 20s 运行与观察器 pending 聚合缺陷（2026-09-25）
+
+- 运行条件: HEAD `6075094`（运行前工作区干净，已核对），命令与 §2 相同，仅以 `TXHARBOR_DUALPROC_DURATION=20s` 缩短窗口；**只运行一次、不重试**。外部只读观察器（/tmp 脚本，未入库）以 0.5s 采样 `/proc` 与容器内 `pg_stat_activity` / `outbox_events`。
+- 结果: **通过** —— `--- PASS: TestPublisherDualProcessSupplement (59.60s)`（wall 含容器启停）。关键证据行（原始日志 `/tmp/opencode/013-verify-supplement/verify_dualproc_20s.log`，未入库）: `scope=single-host; publisher_processes=2; duration=20s; lease=2s; batch=100; poll=250ms`；双身份 A=`b6ec900cac21c66f50fd17075c1fa62e`/B=`315b434c753948549b0e36bfe871ed6b`（两个互异 32hex、独立 PID）；`phase=both-publishing A(claimed=400 acked=400) B(claimed=300 acked=300)`；`phase=partition-snapshot ownerA_claims=80 ownerB_claims=53 (disjoint rows, both owners pending simultaneously)`；`phase=crash-kill owner=315b… contested_rows=53 killed=true`；`lease-takeover verified: 53 orphaned claims … all published`；`phase=drained pending=0 blocked=0 unowned_claims=0`；`phase=graceful-stop … exit=0 stdout=stopped`；`final-outbox events=1423 published=1423 pending=0 blocked=0 attempts=1476`；`consume records=1476 applied=1423 duplicates_absorbed=53 expected_events=1423`；`effect ledger_rows_per_event=1 … upstream_payment_rows=0`；`mutual-exclusion samples=826 ownerA_seen=17 ownerB_seen=93 both_simultaneous=10 unknown_owners=0`。
+- 历史接管超时（§4.1 第 1 条 `new_smoke1.log`）**本次未复现**；这是单次运行，**不构成**对历史超时的解释、修复或「已解决」结论，其历史原因仍未知（§4.1 第 1 条维持不变）。
+- **当次观察器的 pending-by-owner 字段无效，不能作为归因证据**: 观察器该字段在 61 个有效 DB tick 上输出 `pending={}`，而同一运行的用例自身采样在同一时段明确观测到两 owner 各有 pending 分片（`partition-snapshot ownerA_claims=80 ownerB_claims=53`、`mutual-exclusion ownerA_seen=17 ownerB_seen=93 both_simultaneous=10`）。即该字段是「查询失败被打印成空」，不是「无 pending」，既不能证明也不能证伪遗留租约状态；本次运行的可信归因只用用例自身的持久状态/断言证据（上述 `drained`/`lease-takeover`/`final-outbox` 等）。
+- 根因（观察器，非产品）: 查询为 `SELECT 'P', coalesce(claim_owner,'<none>'), count(*)::text FROM outbox_events WHERE publish_state = 'pending' GROUP BY 1 ORDER BY 1`。`GROUP BY 1` 指向选择列表第 1 项，即常量 `'P'`，PostgreSQL 因此拒绝该查询：`column "outbox_events.claim_owner" must appear in the GROUP BY clause or be used in an aggregate function`（SQLSTATE 42803）。psql 以多个 `-c` 调用且未开 `ON_ERROR_STOP`：中间语句失败后仍继续执行后续语句，且最后一条成功时退出码为 0；观察器只检查退出码、丢弃了含该错误的 stderr，于是拿到不含 `P|` 行的 stdout，打印空字段。
+- 修复（仅 /tmp 观察器，不入库）: 改为按 owner 表达式本身分组（`GROUP BY coalesce(claim_owner,'<none>')`，`ORDER BY` 同表达式，不再使用序数）；并给 psql 加 `-v ON_ERROR_STOP=1`，任何语句失败即非零退出 → 观察器输出 `db=<err …>`，不再有空字段冒充「无 pending」。
+- 隔离 PG 定向验证（独立 scratch 容器 `postgres:18.6-trixie`、最小 `outbox_events` 表、真实观察器 CLI 端到端 + 合成日志；逐 tick 与直接 SQL 查询对照）:
+  1. 两 owner 各有 pending（aaaa=3、bbbb=2）: 修复后 4/4 tick 为 `pending={aaaa|3 ; bbbb|2}`，与直接查询一致，且每 tick 分 owner 计数之和 = 直接 `count(*)=5`；contested 行正常解析。原脚本同数据输出 `pending={}`（缺陷端到端复现）。
+  2. 一 owner 无 pending（bbbb 无 pending，另含 1 行未认领 NULL owner）: 修复后 `pending={aaaa|3 ; <none>|1}`，与直接查询一致；bbbb 未被凭空补 0 行。
+  3. pending 变更后聚合（同一运行内）: X `aaaa|2 ; bbbb|2` → Y `aaaa|2`（B 的 pending 转 published）→ Z `aaaa|1 ; <none>|1`（A 一行改为未认领），三个状态的观测出现顺序与各自时刻的直接查询快照逐项一致。
+  4. 查询错误路径: 人为重命名 `claim_owner` 后，原脚本输出 `pending={}` 且无任何错误提示（静默冒充复现）；修复后每 tick 输出 `db=<err ERROR: column "claim_owner" does not exist …>` 且不出现 pending 字段。
+- 本轮范围与纪律: 不重跑 10 分钟双进程、振荡与积压用例；不触碰产品 SQL/资金断言/迁移/CI。观察器修复只提高后续采样的可信度，不改变用例与产品行为，**不得**把「观察器修好」或本次 20s 通过表述为旧接管超时已解决。验证脚本与原始输出均未入库: `/tmp/opencode/013-verify-supplement/{verify_observer_pending.py, timeline_observer.py(.orig), observer_*.out, synth_*.log, observer_timeline.log}`。
 
 ## 5. 边界（必须随引用携带）
 
