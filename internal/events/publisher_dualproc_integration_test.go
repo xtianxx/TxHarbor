@@ -40,6 +40,31 @@
 // LOCAL HOST, one Kafka broker, one PostgreSQL container, synthetic load.
 // It is NOT a multi-host / distributed / production result.
 //
+// Host dependency (Linux /proc): the freeze verification confirms the SIGSTOP
+// and the SIGCONT on the spawned processes by reading /proc/<pid>/status
+// (State field: T/t = stopped). On a host without /proc these probes fail
+// closed (bounded wait, then a fatal test failure); they never silently pass.
+//
+// Observation discipline: the takeover timeline is collected by an actively
+// sampled, bounded wait (dualprocWaitContestedObserved samples the contested
+// rows itself at the sampler cadence instead of relying only on the
+// background ticker). A row whose timeline the sampler never observed is
+// still a hard failure, but the failure now carries that row's durable
+// PostgreSQL state, so a sampler observation gap is distinguishable from a
+// row that was never reclaimed. The lease red-line assertions are unchanged;
+// the takeover wait is bounded (dualprocTakeoverBudget) and on timeout emits
+// the survivor's O.S. state, counters and database backends before failing.
+//
+// Crash injection (deterministic, database-observable): each child carries its
+// own PostgreSQL application_name, so its backends are identifiable in
+// pg_stat_activity. After the SIGKILL the drill terminates the dead process's
+// backends while the row-lock holds still pin the contested rows: a blocked
+// backend can outlive its client and commit the blocked settle once the lock is
+// released, which would leave no orphaned claims to take over. The contested
+// set is exactly the rows the hold locked (not every row a plain read sees
+// under the dead owner), and the injection is checked in the database before
+// the takeover assertions run.
+//
 // Layer discipline: this file carries its own build tag
 // (integration_dualproc) and is deliberately NOT collected by
 // `make test-integration-kafka` or any PR-required CI job (a ~10 minute
@@ -140,9 +165,24 @@ const (
 	// dualprocHoldGap is the cadence between hold attempts (each attempt is a
 	// row-lock query, not a sleep-based guess).
 	dualprocHoldGap = 2 * time.Millisecond
-	// dualprocStopWait bounds the O.S.-observable SIGSTOP verification
-	// (state T in /proc/<pid>/status) used for the snapshot freeze.
+	// dualprocStopWait bounds the O.S.-observable SIGSTOP/SIGCONT verification
+	// (state T in /proc/<pid>/status) used for the snapshot freeze and resume.
 	dualprocStopWait = 5 * time.Second
+	// dualprocBackendAppA/B are the per-process PostgreSQL application_name
+	// values. They make each publisher's backends identifiable in
+	// pg_stat_activity, which the crash injection needs: a killed client's
+	// backend does not die with it (see dualprocTerminateBackends).
+	dualprocBackendAppA = "dualproc-publisher-a"
+	dualprocBackendAppB = "dualproc-publisher-b"
+
+	// dualprocTakeoverBudget bounds the wait for the orphaned claims to leave
+	// the pending state. Exceeding it fails with the takeover diagnostics
+	// instead of waiting forever.
+	dualprocTakeoverBudget = 3 * time.Minute
+	// dualprocTakeoverProgress is the cadence of the bounded progress evidence
+	// emitted while the takeover wait is still pending (survivor liveness and
+	// counters), so a slow takeover leaves a timeline even when it passes.
+	dualprocTakeoverProgress = 10 * time.Second
 )
 
 var (
@@ -334,6 +374,16 @@ func dualprocPublisherEnv(dsn string, brokers []string, lease time.Duration) map
 		config.EnvEventsPublisherBackoffBase:  dualprocBackoffBase.String(),
 		config.EnvEventsPublisherBackoffMax:   dualprocBackoffMax.String(),
 	}
+}
+
+// dualprocDSNWithAppName appends the application_name connection parameter so
+// the process's PostgreSQL backends are identifiable in pg_stat_activity.
+func dualprocDSNWithAppName(dsn, app string) string {
+	sep := "?"
+	if strings.Contains(dsn, "?") {
+		sep = "&"
+	}
+	return dsn + sep + "application_name=" + app
 }
 
 // dualprocChildEnv builds a deterministic child environment BY WHITELIST: only
@@ -867,6 +917,15 @@ type dualprocClaim struct {
 	expires time.Time
 }
 
+// dualprocClaimIDs extracts the outbox row ids of the given claims.
+func dualprocClaimIDs(claims []dualprocClaim) []int64 {
+	ids := make([]int64, 0, len(claims))
+	for _, c := range claims {
+		ids = append(ids, c.id)
+	}
+	return ids
+}
+
 // dualprocClaimQuerier is the read surface shared by *pgxpool.Pool and pgx.Tx.
 type dualprocClaimQuerier interface {
 	Query(ctx context.Context, sql string, args ...any) (pgx.Rows, error)
@@ -877,6 +936,36 @@ func dualprocPendingClaims(ctx context.Context, q dualprocClaimQuerier, owner st
 	rows, err := q.Query(ctx,
 		`SELECT id, attempt_count, claim_expires_at FROM outbox_events
 		 WHERE publish_state = 'pending' AND claim_owner = $1 ORDER BY id`, owner)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []dualprocClaim
+	for rows.Next() {
+		var c dualprocClaim
+		var expires *time.Time
+		if err := rows.Scan(&c.id, &c.attempt, &expires); err != nil {
+			return nil, err
+		}
+		if expires != nil {
+			c.expires = *expires
+		}
+		c.owner = owner
+		out = append(out, c)
+	}
+	return out, rows.Err()
+}
+
+// dualprocPendingClaimsByIDs reads the pending claims of one owner restricted
+// to the given ids: the rows a claim hold actually locked. The hold returns
+// exactly this set, so a row whose settle is concurrently in flight in the
+// owner's own transaction (visible as pending to a plain read, but not locked
+// by the hold and therefore not pinned) never enters the contested set.
+func dualprocPendingClaimsByIDs(ctx context.Context, q dualprocClaimQuerier, owner string, ids []int64) ([]dualprocClaim, error) {
+	rows, err := q.Query(ctx,
+		`SELECT id, attempt_count, claim_expires_at FROM outbox_events
+		 WHERE publish_state = 'pending' AND claim_owner = $1 AND id = ANY($2)
+		 ORDER BY id`, owner, ids)
 	if err != nil {
 		return nil, err
 	}
@@ -955,7 +1044,10 @@ func (h *dualprocClaimHold) release(ctx context.Context) {
 // owner currently holds and that is not already row-locked. A non-nil hold is
 // proof that the owner's settle for those rows cannot commit until release; nil
 // with no error means the owner had no committed-pending claim to win (its
-// claim window had already settled) and the caller should retry.
+// claim window had already settled) and the caller should retry. The returned
+// claims are exactly the locked ids: a plain read can also see rows the owner's
+// own uncommitted settle is concurrently updating (pending to MVCC), but those
+// are not pinned by this hold and must not enter the contested set.
 func dualprocTryHoldOwnerClaims(ctx context.Context, pool *pgxpool.Pool, owner string) (*dualprocClaimHold, []dualprocClaim, error) {
 	conn, err := pool.Acquire(ctx)
 	if err != nil {
@@ -976,7 +1068,7 @@ func dualprocTryHoldOwnerClaims(ctx context.Context, pool *pgxpool.Pool, owner s
 		conn.Release()
 		return nil, nil, fmt.Errorf("hold query: %w", err)
 	}
-	locked := 0
+	var lockedIDs []int64
 	for rows.Next() {
 		var id int64
 		if err := rows.Scan(&id); err != nil {
@@ -985,7 +1077,7 @@ func dualprocTryHoldOwnerClaims(ctx context.Context, pool *pgxpool.Pool, owner s
 			conn.Release()
 			return nil, nil, fmt.Errorf("hold scan: %w", err)
 		}
-		locked++
+		lockedIDs = append(lockedIDs, id)
 	}
 	rows.Close()
 	if err := rows.Err(); err != nil {
@@ -993,12 +1085,12 @@ func dualprocTryHoldOwnerClaims(ctx context.Context, pool *pgxpool.Pool, owner s
 		conn.Release()
 		return nil, nil, fmt.Errorf("hold rows: %w", err)
 	}
-	if locked == 0 {
+	if len(lockedIDs) == 0 {
 		_ = tx.Rollback(ctx)
 		conn.Release()
 		return nil, nil, nil
 	}
-	claims, err := dualprocPendingClaims(ctx, tx, owner)
+	claims, err := dualprocPendingClaimsByIDs(ctx, tx, owner, lockedIDs)
 	if err != nil {
 		_ = tx.Rollback(ctx)
 		conn.Release()
@@ -1052,6 +1144,66 @@ func dualprocWaitProcessStopped(proc *dualprocProcess, timeout time.Duration) (s
 		}
 		time.Sleep(5 * time.Millisecond)
 	}
+}
+
+// dualprocWaitProcessRunning waits until /proc no longer reports the stopped
+// state (T/t) or a zombie (Z), i.e. the SIGCONT landed and the process is
+// schedulable again. It returns the last observed state and whether the
+// process left the stopped state.
+func dualprocWaitProcessRunning(proc *dualprocProcess, timeout time.Duration) (string, bool) {
+	deadline := time.Now().Add(timeout)
+	state := ""
+	for {
+		if exited, _ := proc.pollExit(); exited {
+			return state, false
+		}
+		if s, ok := dualprocProcessState(proc.pid); ok {
+			state = s
+			if s != "T" && s != "t" && s != "Z" {
+				return s, true
+			}
+		}
+		if time.Now().After(deadline) {
+			return state, false
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+}
+
+// dualprocCountBackends counts the PostgreSQL backends carrying the given
+// application_name.
+func dualprocCountBackends(t *testing.T, ctx context.Context, pool *pgxpool.Pool, appName string) int {
+	t.Helper()
+	var n int64
+	if err := pool.QueryRow(ctx,
+		`SELECT count(*) FROM pg_stat_activity
+		 WHERE datname = current_database() AND application_name = $1`, appName).Scan(&n); err != nil {
+		t.Fatalf("count backends app=%s: %v", appName, err)
+	}
+	return int(n)
+}
+
+// dualprocTerminateBackends terminates every PostgreSQL backend whose
+// application_name matches the given publisher, forcing any in-flight
+// transaction of that process to abort. It exists because a SIGKILLed client's
+// backend does not die with it: a backend blocked on the test's row lock is
+// still able to run the blocked settle UPDATE once the lock is released and
+// commit it (post-mortem), which would leave no orphaned claims at all. The
+// termination is database-observable and happens while the holds still pin the
+// rows, so the crash injection deterministically leaves the contested rows
+// pending under the pre-kill owner and lease.
+func dualprocTerminateBackends(t *testing.T, ctx context.Context, pool *pgxpool.Pool, appName string) int {
+	t.Helper()
+	var n int64
+	if err := pool.QueryRow(ctx,
+		`SELECT count(*) FROM (
+		   SELECT pg_terminate_backend(pid) AS terminated
+		   FROM pg_stat_activity
+		   WHERE datname = current_database() AND application_name = $1
+		 ) t`, appName).Scan(&n); err != nil {
+		t.Fatalf("terminate backends app=%s: %v", appName, err)
+	}
+	return int(n)
 }
 
 // dualprocLogCounts is one process's logged claim/ack/publish totals.
@@ -1112,6 +1264,157 @@ func dualprocFreezeDiagnostics(t *testing.T, ev *dualprocEvidence, pool *pgxpool
 }
 
 // ---------------------------------------------------------------------------
+// Durable contested-row state (independent of the sampler)
+// ---------------------------------------------------------------------------
+
+// dualprocContestedState is one contested row's durable PostgreSQL state, read
+// directly instead of from the sampler. It serves two purposes: the bounded
+// observation wait can tell an observation gap (row already reclaimed and
+// published, the sampler did not see the transition) from a row that was never
+// taken over (still pending behind the lease), and failure messages carry the
+// durable attempt count instead of a bare sampler zero.
+type dualprocContestedState struct {
+	id          int64
+	state       string
+	owner       string
+	attempt     int64
+	expires     *time.Time
+	publishedAt *time.Time
+	nextAttempt *time.Time
+	lastError   string
+}
+
+// dualprocReadContestedStates reads the durable state of the given outbox ids.
+func dualprocReadContestedStates(ctx context.Context, pool *pgxpool.Pool, ids []int64) ([]dualprocContestedState, error) {
+	rows, err := pool.Query(ctx, `
+		SELECT id, publish_state, coalesce(claim_owner, ''), attempt_count,
+		       claim_expires_at, published_at, next_attempt_at, coalesce(last_error_class, '')
+		FROM outbox_events
+		WHERE id = ANY($1)
+		ORDER BY id`, ids)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []dualprocContestedState
+	for rows.Next() {
+		var s dualprocContestedState
+		if err := rows.Scan(&s.id, &s.state, &s.owner, &s.attempt,
+			&s.expires, &s.publishedAt, &s.nextAttempt, &s.lastError); err != nil {
+			return nil, err
+		}
+		out = append(out, s)
+	}
+	return out, rows.Err()
+}
+
+// dualprocFmtTime renders a nullable timestamp for diagnostics.
+func dualprocFmtTime(ts *time.Time) string {
+	if ts == nil {
+		return "<null>"
+	}
+	return ts.UTC().Format(time.RFC3339Nano)
+}
+
+// dualprocDurableRowNote renders one contested row's durable state for a
+// failure message; a read error is rendered, never hidden.
+func dualprocDurableRowNote(ctx context.Context, pool *pgxpool.Pool, id int64) string {
+	states, err := dualprocReadContestedStates(ctx, pool, []int64{id})
+	if err != nil {
+		return fmt.Sprintf("durable=<read error: %v>", err)
+	}
+	if len(states) == 0 {
+		return "durable=<row missing>"
+	}
+	s := states[0]
+	return fmt.Sprintf("durable(state=%s owner=%q attempt=%d published_at=%s next_attempt_at=%s last_error=%q)",
+		s.state, s.owner, s.attempt, dualprocFmtTime(s.publishedAt), dualprocFmtTime(s.nextAttempt), s.lastError)
+}
+
+// dualprocTakeoverDiagnostics reports everything needed to classify a
+// takeover-wait failure without re-running: the survivor's liveness, O.S.
+// state and progress counters, the durable state of every contested row
+// (aggregate plus one line per not-yet-published row), the load generator and
+// sampler health, and the database backends observed for this drill (state /
+// wait event / current query). Every line is emitted as DUALPROC-EVIDENCE
+// before the caller fails the test.
+func dualprocTakeoverDiagnostics(t *testing.T, ev *dualprocEvidence, pool *pgxpool.Pool,
+	proc *dualprocProcess, producer *dualprocProducer, before dualprocLogCounts,
+	contested []dualprocClaim, sampler *dualprocSampler, reason string) {
+	t.Helper()
+	ctx := context.Background()
+	ev.add(t, "takeover-diag reason=%s", reason)
+	exited, exitErr := proc.pollExit()
+	state, ok := dualprocProcessState(proc.pid)
+	if !ok {
+		state = "<unreadable>"
+	}
+	now := dualprocLogCountsOf(proc.stderrPath)
+	ev.add(t, "takeover-diag survivor process=%s owner=%s pid=%d exited=%t exit_err=%v os_state=%s",
+		proc.name, proc.owner, proc.pid, exited, exitErr, state)
+	ev.add(t, "takeover-diag survivor counters before(claimed=%d acked=%d published=%d) now(claimed=%d acked=%d published=%d) delta(+%d/+%d/+%d)",
+		before.claimed, before.acked, before.published, now.claimed, now.acked, now.published,
+		now.claimed-before.claimed, now.acked-before.acked, now.published-before.published)
+	ev.add(t, "takeover-diag producer events=%d first_err=%v", producer.count(), producer.firstErr())
+	sum := sampler.summary()
+	ev.add(t, "takeover-diag sampler samples=%d seenA=%d seenB=%d both_simultaneous=%d unknown_owners=%d first_err=%v",
+		sum.samples, sum.seenA, sum.seenB, sum.both, sum.unknownOwners, sampler.firstError())
+
+	ids := dualprocClaimIDs(contested)
+	if states, err := dualprocReadContestedStates(ctx, pool, ids); err != nil {
+		ev.add(t, "takeover-diag durable state query failed: %v", err)
+	} else {
+		byState := map[string]int{}
+		byOwner := map[string]int{}
+		pending := 0
+		for _, s := range states {
+			byState[s.state]++
+			key := s.owner
+			if key == "" {
+				key = "<none>"
+			}
+			byOwner[key]++
+			if s.state == string(PublishStatePending) {
+				pending++
+			}
+		}
+		ev.add(t, "takeover-diag durable total=%d pending=%d by_state=%v by_owner=%v",
+			len(states), pending, byState, byOwner)
+		for _, s := range states {
+			if s.state == string(PublishStatePublished) {
+				continue
+			}
+			ev.add(t, "takeover-diag row=%d state=%s owner=%q attempt=%d expires=%s next_attempt_at=%s last_error=%q",
+				s.id, s.state, s.owner, s.attempt, dualprocFmtTime(s.expires), dualprocFmtTime(s.nextAttempt), s.lastError)
+		}
+	}
+
+	if rows, err := pool.Query(ctx, `
+		SELECT pid, coalesce(application_name, ''), coalesce(state, ''),
+		       coalesce(wait_event_type, ''), coalesce(wait_event, ''),
+		       coalesce(left(query, 120), '')
+		FROM pg_stat_activity
+		WHERE datname = current_database() AND pid <> pg_backend_pid()
+		ORDER BY pid`); err != nil {
+		ev.add(t, "takeover-diag backend query failed: %v", err)
+	} else {
+		for rows.Next() {
+			var pid int
+			var app, bstate, waitType, waitEvent, query string
+			if err := rows.Scan(&pid, &app, &bstate, &waitType, &waitEvent, &query); err != nil {
+				ev.add(t, "takeover-diag backend scan failed: %v", err)
+				break
+			}
+			ev.add(t, "takeover-diag backend pid=%d app=%q state=%s wait=%s/%s query=%q",
+				pid, app, bstate, waitType, waitEvent, query)
+		}
+		rows.Close()
+	}
+
+	ev.add(t, "takeover-diag survivor stderr tail: %s", dualprocFileTail(proc.stderrPath, 4000))
+}
+
+// ---------------------------------------------------------------------------
 // Test
 // ---------------------------------------------------------------------------
 
@@ -1140,15 +1443,16 @@ func TestPublisherDualProcessSupplement(t *testing.T) {
 	dir := t.TempDir()
 	bin := dualprocBuildBinary(t, dir)
 	lease := dualprocLease(duration)
-	env := dualprocPublisherEnv(dsn, kafka.Brokers(), lease)
+	envA := dualprocPublisherEnv(dualprocDSNWithAppName(dsn, dualprocBackendAppA), kafka.Brokers(), lease)
+	envB := dualprocPublisherEnv(dualprocDSNWithAppName(dsn, dualprocBackendAppB), kafka.Brokers(), lease)
 
 	producer := newDualprocProducer(pool)
 	producer.burst(t, dualprocInitialSeed)
 
 	// Two real OS processes with independent identities.
-	procA := dualprocStartProcess(t, bin, env, dir, "publisher-a")
+	procA := dualprocStartProcess(t, bin, envA, dir, "publisher-a")
 	ownerA := procA.waitOwner(t, 3*time.Minute)
-	procB := dualprocStartProcess(t, bin, env, dir, "publisher-b")
+	procB := dualprocStartProcess(t, bin, envB, dir, "publisher-b")
 	ownerB := procB.waitOwner(t, 3*time.Minute)
 	if ownerA == ownerB {
 		t.Fatalf("both processes report the same owner id %q; identities must be independent", ownerA)
@@ -1197,24 +1501,68 @@ func TestPublisherDualProcessSupplement(t *testing.T) {
 		ev.add(t, "partition owner=%s row=%d attempt=%d expires=%s", ownerB, c.id, c.attempt, c.expires.UTC().Format(time.RFC3339Nano))
 	}
 	sampler.trackContested(contested)
+	// B is SIGSTOPped here but still alive: its PostgreSQL backends must be
+	// identifiable by their application_name, otherwise the post-kill
+	// termination could not target B's in-flight transaction. This checks the
+	// injection's own precondition instead of assuming it.
+	bBackends := dualprocCountBackends(t, ctx, pool, dualprocBackendAppB)
+	if bBackends == 0 {
+		t.Fatalf("no PostgreSQL backend carries application_name=%q while process B (pid=%d) is alive; the crash injection cannot deterministically abort B's in-flight transaction",
+			dualprocBackendAppB, procB.pid)
+	}
+	ev.add(t, "phase=freeze-backends owner=%s pid=%d app=%s backends=%d", ownerB, procB.pid, dualprocBackendAppB, bBackends)
 	if err := procB.signal(syscall.SIGKILL); err != nil {
 		t.Fatalf("SIGKILL B: %v", err)
 	}
 	if err := procB.waitExit(30 * time.Second); err == nil {
 		t.Fatalf("killed process B exited without an error; want the crash signal")
 	}
+	ev.add(t, "phase=crash-kill owner=%s pid=%d contested_rows=%d killed=true", ownerB, procB.pid, len(contested))
+	// Force the dead process's PostgreSQL backends to abort their in-flight
+	// transactions before the holds are released. A backend blocked on the
+	// test's row lock does not die with its client: after the release it can
+	// still run the blocked settle UPDATE and COMMIT it, so the contested
+	// rows would be published by their dead owner (attempt_count unchanged)
+	// and no orphaned claims would exist for A to take over. Terminating the
+	// dead owner's backends while the holds still pin the rows makes the
+	// crash injection deterministic and database-observable.
+	terminated := dualprocTerminateBackends(t, ctx, pool, dualprocBackendAppB)
+	ev.add(t, "phase=crash-backends-terminated owner=%s app=%s backends=%d", ownerB, dualprocBackendAppB, terminated)
 	// The row-lock holds are released only now: while they were open, A could
 	// neither settle its own pinned batch nor reclaim B's orphaned claims, so
 	// the crash injection cannot be pre-empted by a premature takeover.
 	releaseFrozenHolds()
+	// Injection precondition, database-observable: no contested row may have
+	// been settled by the dead owner itself (published at or below the
+	// pre-kill attempt count). Such a post-mortem commit means the crash
+	// injection failed and a later takeover verdict would be meaningless. The
+	// rows may already be re-claimed by A (attempt +1), so only the dead
+	// owner's own settle is checked.
+	preMax := 0
+	for _, c := range contested {
+		if c.attempt > preMax {
+			preMax = c.attempt
+		}
+	}
+	var ownSettled int64
+	if err := pool.QueryRow(ctx, `
+		SELECT count(*) FROM outbox_events
+		WHERE id = ANY($1) AND publish_state = 'published' AND attempt_count <= $2`,
+		dualprocClaimIDs(contested), preMax).Scan(&ownSettled); err != nil {
+		t.Fatalf("verify crash injection: %v", err)
+	}
+	if ownSettled > 0 {
+		t.Fatalf("crash injection failed: %d of %d contested rows were published by the dead owner's own settle (attempt_count <= %d); the dead process's transaction committed after the kill",
+			ownSettled, len(contested), preMax)
+	}
 	ev.add(t, "phase=freeze-holds-released contested_rows=%d ownerA_resumed=true", len(contested))
-	ev.add(t, "phase=crash-kill owner=%s pid=%d contested_rows=%d killed=true", ownerB, procB.pid, len(contested))
 
-	dualprocWaitTakeover(t, ctx, pool, sampler, contested)
-	views := dualprocWaitContestedObserved(sampler, contested, 15*time.Second)
+	beforeA := dualprocLogCountsOf(procA.stderrPath)
+	dualprocWaitTakeover(t, ctx, pool, sampler, procA, producer, ev, beforeA, contested)
+	views := dualprocWaitContestedObserved(t, ctx, pool, sampler, ev, contested, 15*time.Second)
 	observed := 0
 	for _, c := range contested {
-		if v := views[c.id]; !v.clearedAt.IsZero() && !v.publishedAt.IsZero() {
+		if v := views[c.id]; !v.clearedAt.IsZero() && !v.publishedAt.IsZero() && v.postAttempt >= v.preAttempt+1 {
 			observed++
 		}
 	}
@@ -1319,15 +1667,24 @@ func TestPublisherDualProcessSupplement(t *testing.T) {
 	// Contested rows: the survivor must not take over before the lease red
 	// line (claim_expires_at - dualprocLeaseGrace; see dualprocLeaseGrace for
 	// why the verdict carries a 1s grace), with the attempt counter advanced.
+	// A row without a complete sampler timeline is a hard failure; the durable
+	// state is read into the message so a sampler observation gap is
+	// distinguishable from a row that was never reclaimed (the durable state
+	// never weakens the assertion - the red-line checks below still run on the
+	// sampler timeline).
 	for _, c := range contested {
 		v := views[c.id]
-		if v.postAttempt < v.preAttempt+1 {
-			t.Fatalf("contested row %d attempt %d -> %d; the surviving owner must reclaim it (attempt +1)",
-				c.id, v.preAttempt, v.postAttempt)
+		if v.postAttempt >= v.preAttempt+1 && !v.clearedAt.IsZero() && !v.publishedAt.IsZero() {
+			continue
 		}
-		if v.clearedAt.IsZero() || v.publishedAt.IsZero() {
-			t.Fatalf("contested row %d has no observed takeover timeline", c.id)
-		}
+		t.Fatalf("contested row %d has no complete takeover timeline: sampler(pre_attempt=%d post_attempt=%d cleared_at=%s published_at=%s expires=%s) %s",
+			c.id, v.preAttempt, v.postAttempt,
+			v.clearedAt.UTC().Format(time.RFC3339Nano), v.publishedAt.UTC().Format(time.RFC3339Nano),
+			v.expires.UTC().Format(time.RFC3339Nano),
+			dualprocDurableRowNote(ctx, pool, c.id))
+	}
+	for _, c := range contested {
+		v := views[c.id]
 		if v.clearedAt.Before(v.expires.Add(-dualprocLeaseGrace)) {
 			t.Fatalf("contested row %d left its owner at %s, before the lease red line %s (claim_expires_at - %s grace): the live lease was stolen",
 				c.id, v.clearedAt, v.expires.Add(-dualprocLeaseGrace), dualprocLeaseGrace)
@@ -1549,6 +1906,11 @@ func dualprocFreezeAndCapturePartition(t *testing.T, pool *pgxpool.Pool, produce
 	// cannot commit while held, so the two-owner snapshot is one common
 	// instant.
 	resumeA()
+	if state, ok := dualprocWaitProcessRunning(procA, dualprocStopWait); !ok {
+		fail("process A did not resume after SIGCONT",
+			"process A did not leave the stopped state within %s after SIGCONT (last /proc state=%q); a survivor left stopped can never take over the orphaned claims",
+			dualprocStopWait, state)
+	}
 	holdStart = time.Now()
 	aHold, partitionA := dualprocWaitOwnerHold(t, ctx, pool, procA, producer, freezeStart, fail)
 	holds = append(holds, aHold)
@@ -1599,20 +1961,45 @@ func dualprocFreezeAndCapturePartition(t *testing.T, pool *pgxpool.Pool, produce
 	// A runs again; its held batch and B's orphaned-to-be claims stay pinned
 	// until the caller releases the holds after injecting the crash.
 	resumeA()
+	if state, ok := dualprocWaitProcessRunning(procA, dualprocStopWait); !ok {
+		fail("process A did not resume before the crash injection",
+			"process A did not leave the stopped state within %s after the partition snapshot (last /proc state=%q)",
+			dualprocStopWait, state)
+	}
 	return contested, partitionA, partitionB, releaseHolds
 }
 
-// dualprocWaitTakeover waits until every orphaned claim is published. The
-// lease-timing verdict (red line: claim_expires_at - dualprocLeaseGrace) is
-// asserted by the caller.
-func dualprocWaitTakeover(t *testing.T, ctx context.Context, pool *pgxpool.Pool, sampler *dualprocSampler, contested []dualprocClaim) {
+// dualprocWaitTakeover waits, within a bounded budget, until every orphaned
+// claim has left the pending state, while checking the survivor's liveness and
+// the load generator's health. The lease-timing verdict (red line:
+// claim_expires_at - dualprocLeaseGrace) is asserted by the caller. On timeout
+// it emits the takeover diagnostics (survivor O.S. state and counters, durable
+// row state, database backends) and fails the test instead of waiting forever.
+func dualprocWaitTakeover(t *testing.T, ctx context.Context, pool *pgxpool.Pool, sampler *dualprocSampler,
+	procA *dualprocProcess, producer *dualprocProducer, ev *dualprocEvidence,
+	beforeA dualprocLogCounts, contested []dualprocClaim) {
 	t.Helper()
-	ids := make([]int64, 0, len(contested))
-	for _, c := range contested {
-		ids = append(ids, c.id)
-	}
-	deadline := time.Now().Add(3 * time.Minute)
+	ids := dualprocClaimIDs(contested)
+	deadline := time.Now().Add(dualprocTakeoverBudget)
+	start := time.Now()
+	nextProgress := start.Add(dualprocTakeoverProgress)
 	for time.Now().Before(deadline) {
+		if exited, err := procA.pollExit(); exited {
+			dualprocTakeoverDiagnostics(t, ev, pool, procA, producer, beforeA, contested, sampler,
+				"survivor exited while orphaned claims were still pending")
+			t.Fatalf("surviving process %s exited during the takeover wait: %v; stderr tail:\n%s",
+				procA.name, err, dualprocFileTail(procA.stderrPath, 4000))
+		}
+		if err := producer.firstErr(); err != nil {
+			dualprocTakeoverDiagnostics(t, ev, pool, procA, producer, beforeA, contested, sampler,
+				"producer failed while orphaned claims were still pending")
+			t.Fatalf("producer failed during the takeover wait: %v", err)
+		}
+		if err := sampler.firstError(); err != nil {
+			dualprocTakeoverDiagnostics(t, ev, pool, procA, producer, beforeA, contested, sampler,
+				"sampler failed while orphaned claims were still pending")
+			t.Fatalf("sampler observed an error during the takeover wait: %v", err)
+		}
 		var pending int64
 		if err := pool.QueryRow(ctx,
 			`SELECT count(*) FROM outbox_events WHERE id = ANY($1) AND publish_state = 'pending'`, ids).
@@ -1620,26 +2007,48 @@ func dualprocWaitTakeover(t *testing.T, ctx context.Context, pool *pgxpool.Pool,
 			t.Fatalf("count orphaned claims: %v", err)
 		}
 		if pending == 0 {
+			ev.add(t, "phase=takeover-db-cleared wait=%s rows=%d", time.Since(start).Round(time.Millisecond), len(ids))
 			return
 		}
-		if err := sampler.firstError(); err != nil {
-			t.Fatalf("sampler observed an error: %v", err)
+		if time.Now().After(nextProgress) {
+			state, ok := dualprocProcessState(procA.pid)
+			if !ok {
+				state = "<unreadable>"
+			}
+			now := dualprocLogCountsOf(procA.stderrPath)
+			ev.add(t, "takeover-wait progress elapsed=%s pending=%d of %d survivor_os_state=%s survivor_counters(claimed=%d acked=%d published=%d) sampler_samples=%d",
+				time.Since(start).Round(time.Millisecond), pending, len(ids), state,
+				now.claimed, now.acked, now.published, sampler.summary().samples)
+			nextProgress = time.Now().Add(dualprocTakeoverProgress)
 		}
 		time.Sleep(100 * time.Millisecond)
 	}
-	t.Fatalf("orphaned claims were not taken over and published within the deadline")
+	dualprocTakeoverDiagnostics(t, ev, pool, procA, producer, beforeA, contested, sampler,
+		"orphaned claims not taken over and published within the wait budget")
+	t.Fatalf("orphaned claims were not taken over and published within %s; see DUALPROC-EVIDENCE takeover-diag lines for the survivor, durable row state and database backends",
+		dualprocTakeoverBudget)
 }
 
-// dualprocWaitContestedObserved waits until the sampler has recorded the full
-// takeover timeline for every contested row (left owner B, then published with
-// attempt+1), or the timeout elapses. The post-takeover state is terminal
-// (published) and cannot change again, so this is a bounded wait on sampler
-// observability, not a fixed sleep: it removes the race between the takeover
-// detection and the sampler's 25ms cadence. The returned views are the last
-// observation; the caller's assertions remain the verdict.
-func dualprocWaitContestedObserved(sampler *dualprocSampler, contested []dualprocClaim, timeout time.Duration) map[int64]dualprocContested {
+// dualprocWaitContestedObserved actively samples the contested rows until the
+// sampler has recorded the full takeover timeline for every row (left owner B,
+// then published with attempt+1), or the timeout elapses. The post-takeover
+// state is terminal (published) and cannot change again, so this is a bounded
+// wait on the observation method, not a fixed sleep. It samples the rows itself
+// on every iteration: relying only on the background ticker leaves the
+// transition observable only if the ticker happens to fire while the row
+// carries its post-takeover state, and a delayed ticker can miss a short
+// transition entirely. The durable row state is the same regardless of which
+// goroutine samples it. The returned views are the last observation; the
+// caller's assertions remain the verdict. On a miss the durable state of each
+// unobserved row is emitted, so a sampler observation gap is distinguishable
+// from a row that was never reclaimed.
+func dualprocWaitContestedObserved(t *testing.T, ctx context.Context, pool *pgxpool.Pool, sampler *dualprocSampler,
+	ev *dualprocEvidence, contested []dualprocClaim, timeout time.Duration) map[int64]dualprocContested {
+	t.Helper()
+	ids := dualprocClaimIDs(contested)
 	deadline := time.Now().Add(timeout)
 	for {
+		sampler.sampleContested(ctx, ids)
 		views := sampler.contestedViews()
 		complete := true
 		for _, c := range contested {
@@ -1649,7 +2058,32 @@ func dualprocWaitContestedObserved(sampler *dualprocSampler, contested []dualpro
 				break
 			}
 		}
-		if complete || time.Now().After(deadline) {
+		if complete {
+			return views
+		}
+		if time.Now().After(deadline) {
+			unobserved := 0
+			for _, c := range contested {
+				v := views[c.id]
+				if v.clearedAt.IsZero() || v.publishedAt.IsZero() || v.postAttempt < v.preAttempt+1 {
+					unobserved++
+				}
+			}
+			ev.add(t, "takeover-observe-miss unobserved=%d of %d samples=%d sampler_err=%v",
+				unobserved, len(contested), sampler.summary().samples, sampler.firstError())
+			if states, err := dualprocReadContestedStates(ctx, pool, ids); err != nil {
+				ev.add(t, "takeover-observe-miss durable state query failed: %v", err)
+			} else {
+				for _, s := range states {
+					v := views[s.id]
+					if v.clearedAt.IsZero() || v.publishedAt.IsZero() || v.postAttempt < v.preAttempt+1 {
+						ev.add(t, "takeover-observe-miss row=%d durable(state=%s owner=%q attempt=%d published_at=%s expires=%s) sampler(pre_attempt=%d post_attempt=%d cleared_at=%s published_at=%s)",
+							s.id, s.state, s.owner, s.attempt, dualprocFmtTime(s.publishedAt), dualprocFmtTime(s.expires),
+							v.preAttempt, v.postAttempt,
+							v.clearedAt.UTC().Format(time.RFC3339Nano), v.publishedAt.UTC().Format(time.RFC3339Nano))
+					}
+				}
+			}
 			return views
 		}
 		time.Sleep(dualprocSampleInterval)
