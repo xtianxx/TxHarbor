@@ -150,7 +150,7 @@ func parseReconcileTargetPrincipal(raw string) (reconciliation.Principal, error)
 		return reconciliation.Principal{}, err
 	}
 	if len(principal.String()) > 128 {
-		return reconciliation.Principal{}, fmt.Errorf("principal %q exceeds the 128-character recon_permission identity limit", principal.String())
+		return reconciliation.Principal{}, fmt.Errorf("principal %q exceeds the conservative 128-byte cap for registry rows (the recon_permission columns allow up to 128 characters)", principal.String())
 	}
 	return principal, nil
 }
@@ -225,7 +225,7 @@ func reconcileAdminPermissionMutation(ctx context.Context, args []string, d Deps
 	defer env.pool.Close()
 
 	if len(env.principal.String()) > 128 {
-		fmt.Fprintln(stderr, "txharbor reconcile-admin: the authenticated principal exceeds the 128-character permission-registry identity limit")
+		fmt.Fprintln(stderr, "txharbor reconcile-admin: the authenticated principal's canonical identity exceeds the conservative 128-byte cap for registry/audit rows (the columns themselves allow up to 128 characters)")
 		return 1
 	}
 
@@ -278,9 +278,13 @@ type reconcileManagementResult struct {
 }
 
 // reconcileManagementOperation is one recorded management mutation, read back
-// for operation_id dedup and replay.
+// for operation_id dedup and replay. ActorPrincipal is the full canonical
+// principal recorded in the audit target (never the truncated actor column):
+// replay/conflict decisions compare full identities only, and a row without a
+// recoverable full identity is conservatively refused, never attributed by
+// guess.
 type reconcileManagementOperation struct {
-	Actor            string
+	ActorPrincipal   string
 	ManagementAction string
 	TargetPrincipal  string
 	Permission       string
@@ -290,10 +294,14 @@ type reconcileManagementOperation struct {
 
 // readManagementOperationSQL reads the recorded management change for one
 // operation_id (recon_audit is the append-only 014 trail and the only
-// 014-owned carrier of management operations).
+// 014-owned carrier of management operations). The identity check uses
+// target.actor_principal, the untruncated Principal.String(), so two legal
+// principals sharing the 128-byte actor truncation can never be conflated; a
+// row without it (legacy/foreign shape) is a conservative conflict.
 const readManagementOperationSQL = `
-SELECT actor, COALESCE(target->>'management_action', ''), COALESCE(target->>'target_principal', ''),
-       COALESCE(target->>'permission', ''), COALESCE(target->>'scope_hash', ''), result
+SELECT COALESCE(target->>'actor_principal', ''), COALESCE(target->>'management_action', ''),
+       COALESCE(target->>'target_principal', ''), COALESCE(target->>'permission', ''),
+       COALESCE(target->>'scope_hash', ''), result
 FROM recon_audit
 WHERE target->>'operation_id' = $1 AND target ? 'management_action'
 ORDER BY audit_id DESC
@@ -312,7 +320,11 @@ VALUES ($1, $2, $3::jsonb, $4, $5, $6)`
 // row. operation_id dedup runs under a transaction-scoped advisory lock (no
 // schema carrier exists for management operations): the same input re-reads
 // the recorded outcome with zero writes, different input is
-// operation_conflict with zero writes (the 011/013 shape).
+// operation_conflict with zero writes (the 011/013 shape). The caller's
+// identity is compared on the full target.actor_principal, never on the
+// truncated actor column, and the mutation itself only runs after the current
+// management authorization has passed (the caller decides that before this
+// function).
 func (e *reconAdminEnv) applyPermissionMutation(ctx context.Context, kind reconciliation.ManagementKind,
 	target reconciliation.Principal, permission reconciliation.Permission, scope reconciliation.AuthScope,
 	operator, reason, operation string) (reconcileManagementResult, error) {
@@ -342,11 +354,11 @@ func (e *reconAdminEnv) applyPermissionMutation(ctx context.Context, kind reconc
 
 	var recorded reconcileManagementOperation
 	err = tx.QueryRow(ctx, readManagementOperationSQL, operation).Scan(
-		&recorded.Actor, &recorded.ManagementAction, &recorded.TargetPrincipal,
+		&recorded.ActorPrincipal, &recorded.ManagementAction, &recorded.TargetPrincipal,
 		&recorded.Permission, &recorded.ScopeHash, &recorded.Outcome)
 	switch {
 	case err == nil:
-		if recorded.Actor != actor || recorded.ManagementAction != string(kind) ||
+		if recorded.ActorPrincipal != e.principal.String() || recorded.ManagementAction != string(kind) ||
 			recorded.TargetPrincipal != target.String() || recorded.Permission != string(permission) ||
 			recorded.ScopeHash != scopeHash {
 			return result, errReconcileOperationConflict
@@ -440,6 +452,7 @@ WHERE principal = $1 AND action = $2 AND scope_hash = $3`,
 	}
 	targetDoc, err := json.Marshal(map[string]any{
 		"management_action": string(kind),
+		"actor_principal":   e.principal.String(),
 		"target_principal":  target.String(),
 		"permission":        string(permission),
 		"scope":             scope,

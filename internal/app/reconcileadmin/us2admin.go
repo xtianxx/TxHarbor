@@ -71,8 +71,11 @@ func parseReconcileOperationID(raw string) (string, error) {
 }
 
 // reconcileAuditActor renders the authenticated principal for the recon_audit
-// actor column (1..128 bytes; the T018 writer convention). It is an audit
-// annotation only; permission evaluation always uses the full identity.
+// actor column. It is a display annotation only: the column CHECK allows 1..128
+// CHARACTERS while this cap is 128 BYTES (stricter, and the truncation can
+// split a rune for multi-byte identities — a fail-closed DB error, never a
+// wrong identity). Identity comparisons never use this value; the full
+// Principal.String() is stored untruncated in the audit target instead.
 func reconcileAuditActor(principal reconciliation.Principal) string {
 	actor := principal.String()
 	if len(actor) > 128 {
@@ -116,9 +119,12 @@ func reconcileClaimAuditReason(reason, operationID string) (string, error) {
 }
 
 // reconcileClaimOperation is the recorded claim operation read back on a
-// repeated operation_id.
+// repeated operation_id. Owner is the full canonical principal recorded in
+// the audit target (never the actor column, which is truncated for display):
+// replay/conflict decisions compare full identities only, and a row without a
+// recoverable full identity is conservatively refused, never attributed by
+// guess.
 type reconcileClaimOperation struct {
-	Actor         string
 	DiscrepancyID string
 	Owner         string
 	From          string
@@ -128,8 +134,10 @@ type reconcileClaimOperation struct {
 // readClaimOperationSQL finds the claim audit row carrying one operation
 // carriage. The suffix match is exact (the operation id is control-free), and a
 // hit is proof the claim committed: refused attempts never carry the suffix.
+// target.owner is the untruncated Principal.String() written by T022, so the
+// identity check never depends on the 128-byte actor truncation.
 const readClaimOperationSQL = `
-SELECT actor, COALESCE(target->>'discrepancy_id', ''), COALESCE(target->>'owner', ''),
+SELECT COALESCE(target->>'discrepancy_id', ''), COALESCE(target->>'owner', ''),
        COALESCE(target->>'from', ''), COALESCE(target->>'to', '')
 FROM recon_audit
 WHERE action = 'claim' AND right(reason, length($1)) = $1
@@ -140,7 +148,7 @@ LIMIT 1`
 func (e *reconAdminEnv) readClaimOperation(ctx context.Context, operationID string) (reconcileClaimOperation, bool, error) {
 	var recorded reconcileClaimOperation
 	err := e.pool.QueryRow(ctx, readClaimOperationSQL, reconcileClaimOperationSuffix+operationID).
-		Scan(&recorded.Actor, &recorded.DiscrepancyID, &recorded.Owner, &recorded.From, &recorded.To)
+		Scan(&recorded.DiscrepancyID, &recorded.Owner, &recorded.From, &recorded.To)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return recorded, false, nil
 	}
@@ -148,6 +156,43 @@ func (e *reconAdminEnv) readClaimOperation(ctx context.Context, operationID stri
 		return recorded, false, fmt.Errorf("read claim operation record: %w", err)
 	}
 	return recorded, true, nil
+}
+
+// authorizeClaimReplay runs the exact T009 evaluation a fresh claim would run
+// before a recorded operation is reported as an idempotent replay: principal ×
+// ActionClaim × the ticket's recorded scope, default deny. The principal is
+// the authenticated caller and the scope comes from the ticket's scope marker;
+// a revoked permission therefore refuses (and is audited by the evaluator)
+// instead of replaying, and the caller never receives the recorded ticket
+// content on refusal. A missing ticket or an unreadable scope fails closed.
+func authorizeClaimReplay(ctx context.Context, env *reconAdminEnv, id string, stderr io.Writer) bool {
+	row, err := env.readDiscrepancyView(ctx, id)
+	if err != nil {
+		fmt.Fprintf(stderr, "txharbor reconcile-admin: claim replay refused: %s\n", logx.Redact(err.Error()))
+		return false
+	}
+	scope, scopeErr := reconcileDiscrepancyAuthScope(id, row.EvidenceDomain)
+	if scopeErr != nil {
+		// Fail closed through the evaluator so the refusal is audited as an
+		// invalid-scope denial (the T022 discrepancyAuthScope rule).
+		if _, err := env.evaluator.Authorize(ctx, env.principal, reconciliation.ActionClaim, reconciliation.AuthScope{}); err != nil {
+			fmt.Fprintf(stderr, "txharbor reconcile-admin: authorization failed: %s\n", logx.Redact(err.Error()))
+			return false
+		}
+		fmt.Fprintf(stderr, "txharbor reconcile-admin: claim replay refused: %s\n", logx.Redact(scopeErr.Error()))
+		return false
+	}
+	decision, err := env.evaluator.Authorize(ctx, env.principal, reconciliation.ActionClaim, scope)
+	if err != nil {
+		fmt.Fprintf(stderr, "txharbor reconcile-admin: authorization failed: %s\n", logx.Redact(err.Error()))
+		return false
+	}
+	if !decision.Allowed {
+		fmt.Fprintf(stderr, "txharbor reconcile-admin: claim replay refused: %s (%s)\n",
+			decision.Reason, decision.Detail)
+		return false
+	}
+	return true
 }
 
 // reconcileAdminClaim implements `claim(discrepancy_id)` for the authenticated
@@ -162,7 +207,12 @@ func (e *reconAdminEnv) readClaimOperation(ctx context.Context, operationID stri
 //   - the operation_id is the persistent idempotency key of one claim
 //     operation: a repeat converges on the recorded claim with zero writes
 //     (same ticket) or is an operation_conflict (different input or a
-//     different caller/ticket).
+//     different caller/ticket). A successful replay is authorized first with
+//     the same current principal × ActionClaim × ticket-scope evaluation a
+//     fresh claim passes (T009, default deny): a revoked permission turns the
+//     replay into an audited refusal and no recorded ticket content (from/to/
+//     owner) is emitted. Identity is compared on the full canonical principal
+//     (target.owner), never on the 128-byte actor truncation.
 func reconcileAdminClaim(ctx context.Context, args []string, d Deps) int {
 	stdout, stderr := d.stdout(), d.stderr()
 	fs := flag.NewFlagSet("reconcile-admin claim", flag.ContinueOnError)
@@ -212,13 +262,32 @@ func reconcileAdminClaim(ctx context.Context, args []string, d Deps) int {
 		return 1
 	}
 	if found {
+		// Full-identity comparison only: the actor column is a 128-byte
+		// display truncation and two legal principals can share it, so the
+		// untruncated target.owner is authoritative. A row whose full identity
+		// cannot be recovered is never attributed by guess.
 		switch {
-		case recorded.Actor != reconcileAuditActor(env.principal):
+		case recorded.Owner == "":
+			fmt.Fprintf(stderr, "txharbor reconcile-admin: operation_conflict operation_id=%s has no recoverable actor identity\n", operation)
+			return 1
+		case recorded.Owner != env.principal.String():
 			fmt.Fprintf(stderr, "txharbor reconcile-admin: operation_conflict operation_id=%s was already used by another principal\n", operation)
 			return 1
 		case recorded.DiscrepancyID != id:
-			fmt.Fprintf(stderr, "txharbor reconcile-admin: operation_conflict operation_id=%s already recorded discrepancy_id=%s\n",
-				operation, recorded.DiscrepancyID)
+			if recorded.DiscrepancyID == "" {
+				fmt.Fprintf(stderr, "txharbor reconcile-admin: operation_conflict operation_id=%s is not attributable to a ticket\n", operation)
+			} else {
+				fmt.Fprintf(stderr, "txharbor reconcile-admin: operation_conflict operation_id=%s already recorded discrepancy_id=%s\n",
+					operation, recorded.DiscrepancyID)
+			}
+			return 1
+		}
+		// The replay success path stays behind the same current-authorization
+		// gate a fresh claim passes (principal × ActionClaim × the ticket's
+		// recorded scope, T009 default deny): a revoked permission refuses and
+		// audits instead of replaying, and no recorded ticket content is
+		// emitted on refusal.
+		if !authorizeClaimReplay(ctx, env, id, stderr) {
 			return 1
 		}
 		fmt.Fprintf(stdout,

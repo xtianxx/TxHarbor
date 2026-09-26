@@ -145,7 +145,7 @@
 
 **Purpose**: Observability, evidence honesty, and layered validation (no risk-accept features; no prod-threshold claims)
 
-- [ ] T029 [P] Add bounded low-cardinality 014 metrics in `internal/metrics/reconciliation.go` (reuse `internal/metrics/events.go` registry; ENUM labels only; FR-24/27 redaction; duplicates-rate alert separated from fund tickets per Q4)
+- [ ] T029 [P] Add bounded low-cardinality 014 metrics in `internal/metrics/reconciliation.go` (reuse `internal/metrics/events.go` registry; ENUM labels only; FR-24/27 redaction; duplicates-rate alert separated from fund tickets per Q4; any `recon_audit` aggregation by action MUST exclude management rows via `target ? 'management_action'` — grant/revoke borrow `start`/`close` buckets with `target.management_action` as the discriminator; no new audit token or migration for this)
 - [ ] T030 [P] Evidence-honesty pass in `internal/reconciliation/scan.go` and `internal/reconciliation/lifecycle.go` (paused/incomplete never renders “fully consistent”; uncovered ranges from new data visible; Q3-5; pre-cutover requests without event rows stay pending/gap and never mint event-missing tickets — missing-by-insufficient-evidence is alert-only and MUST NOT bypass dispose/close evidence gates; acceptance: quickstart §3 + §11 gapped-never-close)
 - [ ] T031 Run `specs/014-reconciliation-exception-handling/quickstart.md` validation matrix and record results as test evidence (not production thresholds); keep ordinary PR CI layered, heavy runs on independent tags
 - [ ] T032 [P] Docs touch-up in `specs/014-reconciliation-exception-handling/` (plan/research cross-links; risk-accept explicitly absent; T000-P OPEN restated)
