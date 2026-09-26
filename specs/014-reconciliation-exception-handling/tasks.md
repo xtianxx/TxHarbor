@@ -74,6 +74,23 @@
 
 **Checkpoint**: At this point, User Story 1 should be fully functional and testable independently — operable via the built binary (`reconcile-admin scan/start/pause/resume/cancel/show`, T018), not library-only
 
+**US1 受限验收状态（2026-09-26 收口核定，不撤销 T011–T018 勾选）**：T011–T018 文本条件达成；以下已批准但无任务归属的能力由 Phase 3b（T033–T038）承接，完成前 US1 按受限范围验收——chain-first missing 结论仅 withdrawal 且在 T033 前视为待归属（provisional，只告警）；time 范围链结论恒 pending（T036 前不验收链结论）；deposit chain-first 未交付（T034）。
+
+---
+
+## Phase 3b: US1 定向收口遗留 (Priority: P1) 🎯 MVP 补齐
+
+**Goal**: 将已批准范围（FR-002/009、quickstart §1、FR-001 time kind）内但无任务归属的 US1 能力补入任务；不新增自动修复/付款/风险接受功能；不缩减 spec。
+
+- [ ] T033 [US1] Implement withdrawal chain-first 方向/资产归属过滤 in `internal/app/reconcileadmin/` enumeration + `internal/reconciliation/chainfacts.go` log read (depends on T016,T018; reuses T033 mechanism for T034): attributed (tx touches configured project address set AND contract in asset allowlist; from/to from topic1/topic2 extension read, amounts stay raw hex) → `missing`; unattributed → metrics-only, never a ticket; any chain log without a PG row MUST NOT equal project missing without attribution (covers FR-009, Q1; acceptance: quickstart §1 withdrawal rows)
+- [ ] T034 [US1] Implement deposit chain-first discovery reusing the T033 attribution mechanism (depends on T016,T018,T033): on-chain credit to a project address with no PG deposit row → `missing` (attributed only); business_types `deposit` closed-set unchanged (covers FR-002/009, Q1; acceptance: quickstart §1 deposit rows)
+- [ ] T035 [US1] Implement tx-aggregate identity + member-evidence rule in `internal/reconciliation/identity.go` + occurrence appends (depends on T005,T017; reuses the event occurrence contract): one ticket per (scope, `missing`, `tx_hash`, content-hash, version-domain); member logs (`log_index`/contract/topic0/block) enumerated in `evidence_ref` + `discrepancy_occurrence`; same-tx multi-log never splits tickets; reorg replacement (same `tx_hash`, new block) follows the Q5 invalidation path on the same identity (`pending_verify` + occurrence append), never a new ticket (covers FR-007, Q2/Q5)
+- [ ] T036 [US1] Design + implement the time window-resolver in `internal/reconciliation/` + admin wiring (depends on Foundational; explicitly NOT T028 — T028 is call-path docs + scheduling only): time→height mapping via the local block-time index; unmappable ranges → gap rows; reorg-invalidated mappings → pending; mapping queries charged to budget; `pending-by-design` is the current unfinished state, never an acceptance claim (covers FR-001 time kind, FR-003/017/019, Q3)
+- [ ] T037 [US1] Confirm-policy + task-policy docs closure with validation (depends on T006; docs in `contracts/task-lifecycle.md` + `quickstart.md`): `--confirm-threshold-n` is a reconcile observation parameter (source = explicit start flag, version snapshot = `task.policy_refs`), never writes `confirmation_policy_history` and never amends the 005 confirmation semantics; `policy_refs`/scope/budget are fixed at creation with no revision transaction (change = cancel + recreate); pre-fix tasks with `'{}'` stay fail-closed pending and are rebuilt, never silently defaulted (covers Q5; existing `TestScanTaskConfirmThresholdN` pins the parse/validation)
+- [ ] T038 [US1] Enumeration-layer budget accounting in `internal/reconciliation/scan.go` + `budget.go` seam (depends on T008,T016): every enumeration internal read is either charged via a budget callback or covered by a proven statement cap; overruns leave gap rows, never silent drops (covers FR-019, Q5)
+
+**Checkpoint**: US1 full acceptance (quickstart §1–3,8 without restrictions) requires T033–T038; T011–T018 results stand as the restricted-scope evidence.
+
 ---
 
 ## Phase 4: User Story 2 - 差异去重分类告警与处置闭环 (Priority: P2)
@@ -161,7 +178,7 @@
 
 ### Parallel Opportunities
 
-- T002, T003 parallel; T005–T009 parallel within Foundational (different files); T011‖T012, T013‖T014‖T015, T019‖T020, T024‖T025 parallel; stories parallel after Foundation; T029‖T030‖T032 parallel in Polish.
+- T002, T003 parallel; T005–T009 parallel within Foundational (different files); T011‖T012, T013‖T014‖T015, T019‖T020, T024‖T025 parallel; T033‖T034‖T035‖T036‖T037‖T038 parallel after US1 batch (T034 reuses the T033 attribution mechanism; T033–T036 touch the enumeration/adapter seam via one owner); stories parallel after Foundation; T029‖T030‖T032 parallel in Polish.
 
 ---
 
@@ -217,7 +234,7 @@ Task: "Event-delivery adapter in internal/reconciliation/eventstate.go"
 
 ## Notes
 
-- Coverage: FR-001–025, SC-001–006, Q1–Q5, quickstart §1–11 all mapped above;重点 six (atomicity, crash-no-miss, legal-duplicate silence, insufficient-evidence conservatism, invalidation on change, unauthorized refusal, unknown-disposal idempotency, pause/budget isolation) land in T010/T016/T017/T021/T022/T023/T026/T027/T028.
+- Coverage: FR-001–025, SC-001–006, Q1–Q5, quickstart §1–11 all mapped above (38 tasks: T001–T032 original + T033–T038 US1 closure);重点 six (atomicity, crash-no-miss, legal-duplicate silence, insufficient-evidence conservatism, invalidation on change, unauthorized refusal, unknown-disposal idempotency, pause/budget isolation) land in T010/T016/T017/T021/T022/T023/T026/T027/T028; chain-first attribution/deposit/identity/window-resolver/policy/budget-accounting land in T033/T034/T035/T036/T037/T038.
 - Risk-accept/ignore: NOT approved — zero implementation tasks generated for it; any future need is a business blocker, not a tasks-time decision.
 - Management authorization decided (014-only, 2026-09-26): first and subsequent grants/queries/revokes are single-executed by an authenticated local-ops principal explicitly granted management permission; ordinary holders cannot self-grant; first trust root comes from controlled deploy config, default-deny without valid config; no admin role created, no existing permission expanded; grants/revokes record before/after state, operator, and result.
 - Prod thresholds pending do not block local validation; local numbers are never claimed as production thresholds.

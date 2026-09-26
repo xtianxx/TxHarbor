@@ -60,6 +60,8 @@ Design only; no implementation in this round. All tables live in PostgreSQL (aut
 - 身份键 =（范围， 类别， 业务主键， 内容哈希， 证据版本域）。内容哈希覆盖三方快照规范化字节；版本域覆盖区块 number/hash、recovery/authorization/scope/state_version、证据时点。
 - 同身份内容一致且无分歧 → 不建单（Q4）；同身份异内容/重复效果/版本违规 → 建单去重；证据不足 → `incomplete`。
 - 重组/重扫不得丢失关联或无限建单：同身份重开原单，不同身份建关联单（`linked_to`）。
+- 门控语义（Q4/FR-006，2026-09-26 收口核定）：已证明的局部差异（`missing`/`state_mismatch` 建单，`ExternalCredit=unverified`）与未验证的其他维度并存；FR-006 仅禁止 `consistent` 结论与外部入账成立宣称——分类器先走 ticket 路径再走 upstream 门（证据门→三方分歧→上游门），未接入上游不屏蔽局部建单。
+- tx 聚合身份（T035 设计）：`tx_hash` 为聚合键，成员日志（`log_index`/contract/topic0/block）逐条列入 `evidence_ref` 与 `discrepancy_occurrence`；同 tx 多 log 不分票；重组替换（同 `tx_hash` 新 block）走 Q5 失效（同身份 `pending_verify` + occurrence 追加），不建新票。
 
 ## 3. 认领/处置/闭合与并发保护
 

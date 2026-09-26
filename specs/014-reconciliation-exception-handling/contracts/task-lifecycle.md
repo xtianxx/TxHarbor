@@ -16,6 +16,7 @@
 ## Operations (admin command surface; auth in auth-matrix.md)
 
 - `start(scope, budget)` → `created`; `pause(task, reason)` / `resume(task)` 仅影响 014 授权范围任务；`cancel(task)` 不前移指针。
+- 策略不可修订（T037，2026-09-26 收口核定）：`policy_refs`/scope/budget 创建时确定，无修订事务；变更走 `cancel` + 重建新任务；`policy_refs` 缺失旧任务链证据恒 pending（fail-closed），禁止静默默认值；`--confirm-threshold-n` 为对账观察参数（来源=start 显式参数，快照=`task.policy_refs`），不写 `confirmation_policy_history`，不改变 005 确认语义。
 - 非法跳转拒绝并审计。暂停/超预算 MUST NOT 显示“全量一致”；新增数据缺口须可见（Q3-5）。
 
 ## Integrity Rules
