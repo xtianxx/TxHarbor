@@ -32,8 +32,9 @@ var eventInfrastructureTables = []string{
 }
 
 // TestEventInfrastructureMigrationUpDownUp covers T009 (data-model §7):
-// 000015 applies on a scratch database, reverts cleanly with `down`, and
-// applies again; the seven tables and the single-row cutover seed exist.
+// 000015 applies on a scratch database, the joint tip 000016 reverts first,
+// 000015 then reverts cleanly with `down`, and both apply again; the seven
+// tables and the single-row cutover seed exist on the 16 tip.
 func TestEventInfrastructureMigrationUpDownUp(t *testing.T) {
 	dsn := startPostgres(t)
 	ctx := context.Background()
@@ -50,12 +51,20 @@ func TestEventInfrastructureMigrationUpDownUp(t *testing.T) {
 	if err != nil {
 		t.Fatalf("newProvider() error = %v", err)
 	}
+	// 000016 is the joint tip, so the first down reverts it before 000015.
 	result, err := provider.Down(ctx)
 	if err != nil {
 		t.Fatalf("Down() error = %v", err)
 	}
+	if result.Source.Version != 16 {
+		t.Fatalf("Down() reverted version %d, want 16 (the last migration)", result.Source.Version)
+	}
+	result, err = provider.Down(ctx)
+	if err != nil {
+		t.Fatalf("Down() of 000015 error = %v", err)
+	}
 	if result.Source.Version != 15 {
-		t.Fatalf("Down() reverted version %d, want 15 (the last migration)", result.Source.Version)
+		t.Fatalf("Down() reverted version %d, want 15 (000015)", result.Source.Version)
 	}
 	for _, table := range eventInfrastructureTables {
 		var reg *string
@@ -72,6 +81,13 @@ func TestEventInfrastructureMigrationUpDownUp(t *testing.T) {
 		t.Fatalf("MigrateUp() after down error = %v", err)
 	}
 	assertEventInfrastructureTables(t, sqlDB)
+	state, err := Inspect(ctx, opts)
+	if err != nil {
+		t.Fatalf("Inspect() after up error = %v", err)
+	}
+	if state.Current != 16 {
+		t.Fatalf("current migration after up = %d, want 16 (the last migration)", state.Current)
+	}
 }
 
 // assertEventInfrastructureTables checks the seven tables plus the seeded
@@ -247,9 +263,10 @@ func TestEventInfrastructureConstraintProbes(t *testing.T) {
 }
 
 // TestEventInfrastructureAdditiveOnly covers the T009 additive-only diff:
-// migrate to 000014, snapshot the schema, apply 000015, snapshot again and
-// require that nothing pre-existing changed and every new object belongs to
-// the seven 013 tables.
+// migrate to 000014, snapshot the schema, apply 000015 only (000016 and
+// later excluded by filter to keep this test scoped to 000015), snapshot
+// again and require that nothing pre-existing changed and every new object
+// belongs to the seven 013 tables.
 func TestEventInfrastructureAdditiveOnly(t *testing.T) {
 	dsn := startPostgres(t)
 	ctx := context.Background()
@@ -279,7 +296,20 @@ func TestEventInfrastructureAdditiveOnly(t *testing.T) {
 	sqlDB := openTestSQL(t, dsn)
 	before := schemaSnapshot(t, sqlDB)
 
-	if err := MigrateUp(ctx, testMigrateOptions(dsn), io.Discard); err != nil {
+	filtered15 := fstest.MapFS{}
+	for _, f := range all {
+		if f.Version > 15 {
+			continue
+		}
+		data, err := fs.ReadFile(Migrations, f.Name)
+		if err != nil {
+			t.Fatalf("read %s: %v", err, f.Name)
+		}
+		filtered15[f.Name] = &fstest.MapFile{Data: data}
+	}
+	opts15 := testMigrateOptions(dsn)
+	opts15.FS = filtered15
+	if err := MigrateUp(ctx, opts15, io.Discard); err != nil {
 		t.Fatalf("MigrateUp(000015) error = %v", err)
 	}
 	after := schemaSnapshot(t, sqlDB)
