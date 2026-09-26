@@ -80,7 +80,7 @@
 
 **修正（真实链路修复轮，撤回上段解除结论）**：上段“解除”在真实 CLI 铸票证据到位前作出，不成立，撤回。真实高度→事件窗透传、CoverageClosed 门控、事件键 join 落地并经真实入口验收后，US1 状态以本段为准；剩余限制见下。历史测试通过记录保留。
 - 已证实（真实 `Run(start→resume→scan)`＋真实三适配器＋真实 Anvil/PG）：deposit/withdrawal 链事实存在且 PG 无行→missing 票并稳定去重；两类匹配 PG 记录→零误报（含 receipted＋事件完整→consistent 零票）；事件不足→pending/gap；上游未接入不屏蔽已证实局部 missing（`ExternalCredit=unverified`）；重复扫描身份稳定；资金表行数＋全行摘要零变化；成员超限可追溯且 gapped 不可闭合。
-- 剩余限制：① scope 末端落在本地可证覆盖前沿时带永久 `query_failed` gap（右缝回落），`done` 被阻——运维将 scope 末端设于前沿之下；② intent 键候选（receipt 无可解析 request_id）PG 侧恒 incomplete，只能 pending——确定结论需新业务输入裁决；③ pre-cutover 无事件行请求仍得 missing 票（fail-closed 告警，独立设计项）；④ chain-first `tx_hash` 候选不带 EventKey（不发明 join），其 missing 仅依据 PG 缺失。
+- 剩余限制：① scope 末端落在本地可证覆盖前沿时带永久 `query_failed` gap（右缝回落），`done` 被阻——运维将 scope 末端设于前沿之下；② intent 键候选（receipt 无可解析 request_id）PG 侧 `linked_row_missing`→incomplete，只能 pending＋重扫（已有契约：000012 `payment_intents_request_fkey`、FR-004、data-model §2；不新增按 N 次失败升级建单能力）。FK 的存在不等同“唯一原因必然是读取竞态”——无快照/查询证据时原因保留未定，保守 pending 结论不变。③ pre-cutover 无事件行请求仍得 missing 票（fail-closed 告警，独立设计项）；④ chain-first `tx_hash` 候选不带 EventKey（不发明 join），其 missing 仅依据 PG 缺失。
 
 ---
 
@@ -107,14 +107,14 @@
 
 ### Tests for User Story 2
 
-- [ ] T019 [P] [US2] Contract test for discrepancy lifecycle + idempotency keys in `internal/reconciliation/lifecycle_contract_test.go` (tags: `contract`)
-- [ ] T020 [P] [US2] Integration test for claim/dispose/audit/unauthorized-refusal in `internal/reconciliation/lifecycle_integration_test.go` (tags: `integration`)
+- [X] T019 [P] [US2] Contract test for discrepancy lifecycle + idempotency keys in `internal/reconciliation/lifecycle_contract_test.go` (tags: `contract`)
+- [X] T020 [P] [US2] Integration test for claim/dispose/audit/unauthorized-refusal in `internal/reconciliation/lifecycle_integration_test.go` (tags: `integration`)
 
 ### Implementation for User Story 2
 
-- [ ] T021 [P] [US2] Implement occurrence append + dedup + linked-ticket logic in `internal/reconciliation/identity.go` (depends on T005; reappearances append `discrepancy_occurrence`, reopen original, no infinite tickets) (covers FR-007, SC-002, Q5-5)
-- [ ] T022 [US2] Implement claim/dispose paths in `internal/reconciliation/lifecycle.go` (depends on T007,T009,T021; CAS claim with owner; `idempotency_key` UNIQUE read-back; `new_fix_rule` dry-run only; reuse-recovery entries reference existing CLIs without auto-executing) (covers FR-010/012/013/016, Q1/Q2)
-- [ ] T023 [US2] Implement `reconcile-admin claim/dispose/show` wiring plus `permission-grant/permission-revoke/permission-show` management subcommands in `internal/app/reconcileadmin.go` (depends on T022; management ops reuse the 011 withdrawalexec local-privileged pattern — local execution, principal bound from authenticated caller, `--operator/--reason/--operation-id` required, audited, idempotent; ordinary 014 holders cannot self-grant; auth-matrix enforced; operator/reason/evidence recorded; refusals audited) (covers FR-011/012, Q2)
+- [X] T021 [P] [US2] Implement occurrence append + dedup + linked-ticket logic in `internal/reconciliation/identity.go` (depends on T005; reappearances append `discrepancy_occurrence`, reopen original, no infinite tickets) (covers FR-007, SC-002, Q5-5)
+- [X] T022 [US2] Implement claim/dispose paths in `internal/reconciliation/lifecycle.go` (depends on T007,T009,T021; CAS claim with owner; `idempotency_key` UNIQUE read-back; `new_fix_rule` dry-run only; reuse-recovery entries reference existing CLIs without auto-executing) (covers FR-010/012/013/016, Q1/Q2)
+- [X] T023 [US2] Implement `reconcile-admin claim/dispose/show` wiring plus `permission-grant/permission-revoke/permission-show` management subcommands in `internal/app/reconcileadmin.go` (depends on T022; management ops reuse the 011 withdrawalexec local-privileged pattern — local execution, principal bound from authenticated caller, `--operator/--reason/--operation-id` required, audited, idempotent; ordinary 014 holders cannot self-grant; auth-matrix enforced; operator/reason/evidence recorded; refusals audited) (covers FR-011/012, Q2)
 
 **Checkpoint**: At this point, User Stories 1 AND 2 should both work independently
 
@@ -146,7 +146,7 @@
 **Purpose**: Observability, evidence honesty, and layered validation (no risk-accept features; no prod-threshold claims)
 
 - [ ] T029 [P] Add bounded low-cardinality 014 metrics in `internal/metrics/reconciliation.go` (reuse `internal/metrics/events.go` registry; ENUM labels only; FR-24/27 redaction; duplicates-rate alert separated from fund tickets per Q4)
-- [ ] T030 [P] Evidence-honesty pass in `internal/reconciliation/scan.go` and `internal/reconciliation/lifecycle.go` (paused/incomplete never renders “fully consistent”; uncovered ranges from new data visible; Q3-5)
+- [ ] T030 [P] Evidence-honesty pass in `internal/reconciliation/scan.go` and `internal/reconciliation/lifecycle.go` (paused/incomplete never renders “fully consistent”; uncovered ranges from new data visible; Q3-5; pre-cutover requests without event rows stay pending/gap and never mint event-missing tickets — missing-by-insufficient-evidence is alert-only and MUST NOT bypass dispose/close evidence gates; acceptance: quickstart §3 + §11 gapped-never-close)
 - [ ] T031 Run `specs/014-reconciliation-exception-handling/quickstart.md` validation matrix and record results as test evidence (not production thresholds); keep ordinary PR CI layered, heavy runs on independent tags
 - [ ] T032 [P] Docs touch-up in `specs/014-reconciliation-exception-handling/` (plan/research cross-links; risk-accept explicitly absent; T000-P OPEN restated)
 

@@ -1,5 +1,7 @@
 // identity.go implements T005: stable discrepancy identity and evidence
-// hashing for 014 reconciliation (data-model.md §2, research §3).
+// hashing for 014 reconciliation (data-model.md §2, research §3), and T021:
+// occurrence append, dedup and linked-ticket persistence (data-model.md
+// §1.4–1.5/§2, contracts/discrepancy-lifecycle.md Q5, FR-007).
 //
 // The identity key is the fixed-order tuple
 //
@@ -21,6 +23,7 @@ package reconciliation
 
 import (
 	"bytes"
+	"context"
 	"crypto/sha256"
 	"encoding/binary"
 	"encoding/hex"
@@ -32,6 +35,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 )
 
 var (
@@ -828,4 +832,618 @@ func validIdentityToken(value string, max int) bool {
 		}
 	}
 	return true
+}
+
+// ---------------------------------------------------------------------------
+// T021: occurrence append, dedup and linked-ticket persistence
+// (data-model.md §1.4–1.5/§2, contracts/discrepancy-lifecycle.md Q5, FR-007)
+//
+// BuildIdentity (T005) mints the stable identity: the same fact detected twice
+// is the same ticket. This layer is the persistence counterpart and decides
+// what one recorded detection does to that ticket:
+//
+//   - a first detection inserts the ticket (an optional linked_to associates a
+//     different identity) and appends one occurrence row;
+//   - a repeat detection of the same identity only appends
+//     discrepancy_occurrence rows (evidence_ref + scan_task_id); it never
+//     creates a second ticket, so re-scans cannot mint tickets without bound;
+//   - a confirmed recurrence reopens the original ticket (reopen_count+1) and
+//     keeps every historical row: rows are only ever inserted or updated, so
+//     the close/disposition/reverify history stays intact;
+//   - a tx-aggregate detection (missing + tx_hash business key) reuses the
+//     T035 keyed root lookup and the evidence-change rule, so a reorg
+//     replacement or a changed member set stays on the original ticket (Q5
+//     invalidation + occurrence append) instead of minting a second ticket;
+//   - linked_to is written only on creation and is never cleared by dedup,
+//     invalidation or reopen, so reorg/re-scan cannot lose an association;
+//   - only 014 tables are written: discrepancy, discrepancy_occurrence and
+//     recon_audit.
+// ---------------------------------------------------------------------------
+
+// OccurrenceRecord is one append-only discrepancy_occurrence row
+// (data-model.md §1.5): the reappearance evidence of one detection. A repeat
+// detection appends a row and never creates or replaces a ticket.
+type OccurrenceRecord struct {
+	// DiscrepancyID is the stable identity handle the occurrence belongs to.
+	DiscrepancyID uuid.UUID
+	// ObservedAt is the evidence observation time; zero means now (UTC).
+	ObservedAt time.Time
+	// EvidenceRef is the bounded evidence reference (never empty).
+	EvidenceRef string
+	// ScanTaskID attributes the observing 014 scan task (FK to recon_task).
+	ScanTaskID string
+}
+
+// Validate checks the occurrence shape conservatively: the migration 000016
+// CHECK requires a 1..512 byte evidence_ref and the FK requires a real scan
+// task, so a malformed record is refused before it reaches the database.
+func (r OccurrenceRecord) Validate() error {
+	if r.DiscrepancyID == uuid.Nil {
+		return contractErrorf("occurrence requires a discrepancy_id")
+	}
+	if _, err := uuid.Parse(r.ScanTaskID); err != nil {
+		return contractErrorf("occurrence requires a scan_task_id UUID: %v", err)
+	}
+	if err := validateOccurrenceEvidenceRef(r.EvidenceRef); err != nil {
+		return err
+	}
+	return nil
+}
+
+// validateOccurrenceEvidenceRef bounds one occurrence evidence reference to the
+// migration CHECK (1..scanEvidenceRefMax bytes, no NUL).
+func validateOccurrenceEvidenceRef(ref string) error {
+	trimmed := strings.TrimSpace(ref)
+	if trimmed == "" || len(trimmed) > scanEvidenceRefMax || strings.ContainsRune(trimmed, 0) {
+		return contractErrorf("occurrence evidence_ref must be 1..%d bytes without NUL", scanEvidenceRefMax)
+	}
+	return nil
+}
+
+// insertOccurrenceRecordSQL appends one occurrence row with an explicit
+// observed_at. The scan loop's own statement (scan.go) keeps the database
+// now(); both write the same append-only table.
+const insertOccurrenceRecordSQL = `
+INSERT INTO discrepancy_occurrence (discrepancy_id, observed_at, evidence_ref, scan_task_id)
+VALUES ($1, $2, $3, $4)`
+
+// AppendOccurrenceTx appends one occurrence row inside the caller's
+// transaction. The caller must already have created or locked the ticket (the
+// dedup decision belongs to RecordDetectionTx); the append itself is
+// insert-only and never mutates the ticket.
+func AppendOccurrenceTx(ctx context.Context, tx pgx.Tx, rec OccurrenceRecord) error {
+	if tx == nil {
+		return contractErrorf("occurrence append requires a transaction")
+	}
+	if err := rec.Validate(); err != nil {
+		return err
+	}
+	observedAt := rec.ObservedAt.UTC()
+	if rec.ObservedAt.IsZero() {
+		observedAt = time.Now().UTC()
+	}
+	if _, err := tx.Exec(ctx, insertOccurrenceRecordSQL,
+		rec.DiscrepancyID, observedAt, strings.TrimSpace(rec.EvidenceRef), rec.ScanTaskID); err != nil {
+		return fmt.Errorf("insert discrepancy occurrence: %w", err)
+	}
+	return nil
+}
+
+// AppendOccurrence appends one occurrence row in its own short transaction.
+// It is the standalone reappearance-evidence path for callers that do not
+// already hold a transaction (e.g. audit/show tooling); the dedup/reopen path
+// uses RecordDetection/RecordDetectionTx instead.
+func (s *Store) AppendOccurrence(ctx context.Context, rec OccurrenceRecord) error {
+	if s == nil || s.db == nil {
+		return contractErrorf("store has no database")
+	}
+	if err := rec.Validate(); err != nil {
+		return err
+	}
+	tx, err := s.db.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("begin occurrence append: %w", err)
+	}
+	defer func() { _ = tx.Rollback(context.WithoutCancel(ctx)) }()
+	if err := AppendOccurrenceTx(ctx, tx, rec); err != nil {
+		return err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("commit occurrence append: %w", err)
+	}
+	return nil
+}
+
+// ValidateLinkedTicket checks one linked_to reference (data-model.md
+// §1.4/§2): the target is a different existing ticket and a ticket never links
+// to itself (the migration CHECK enforces the same invariant). The link is an
+// association between distinct identities, never a merge: both tickets keep
+// their own lifecycle and history.
+func ValidateLinkedTicket(id Identity, linkedTo uuid.UUID) error {
+	if !id.Valid() {
+		return contractErrorf("linked ticket requires a minted identity")
+	}
+	if linkedTo == uuid.Nil {
+		return contractErrorf("linked ticket requires a target discrepancy_id")
+	}
+	if linkedTo == id.ID() {
+		return contractErrorf("a ticket must not link to itself")
+	}
+	return nil
+}
+
+// DetectionRecord is one ticketable detection to persist: the stable identity,
+// the occurrence evidence, optional tx-aggregate member facts, an optional
+// linked_to for a different identity, and the caller's recurrence judgment.
+type DetectionRecord struct {
+	// Identity is the minted stable identity (BuildIdentity); it must be
+	// ticketable (only business divergence creates tickets, Q4).
+	Identity Identity
+	// ObservedAt is the occurrence observation time; zero means now (UTC).
+	ObservedAt time.Time
+	// EvidenceRef is the bounded occurrence evidence reference. Required
+	// unless member facts are present (each member then carries its own
+	// reference).
+	EvidenceRef string
+	// ScanTaskID attributes the detection to the observing 014 scan task.
+	ScanTaskID string
+	// Members enumerates the member log facts of a tx-aggregate detection
+	// (T035): each member is appended as its own occurrence row and the set
+	// never splits the transaction into several tickets.
+	Members []TxAggregateMember
+	// LinkedTo optionally associates a NEW ticket with an existing different
+	// ticket (data-model.md §2). It is honored only on creation; a dedup onto
+	// an existing ticket never rewrites the recorded link.
+	LinkedTo uuid.UUID
+	// ConfirmedRecurrence reports the caller's (T026) confirmed recurrence
+	// judgment: closed/pending_verify tickets then reopen with history
+	// retained. Unconfirmed re-detections only append evidence.
+	ConfirmedRecurrence bool
+	// Actor is the audit actor for reopen/invalidation rows; empty defaults
+	// to "system:detection".
+	Actor string
+	// Reason is an optional audit reason (no secrets).
+	Reason string
+}
+
+// DetectionResult reports what happened to the stable identity.
+type DetectionResult struct {
+	// DiscrepancyID is the ticket the detection was recorded against (the
+	// original ticket on dedup, including tx-aggregate reorg replacements).
+	DiscrepancyID uuid.UUID
+	// Created reports that a new ticket row was inserted.
+	Created bool
+	// Deduped reports that an existing ticket was reused: no new ticket, only
+	// occurrence evidence appended (SC-002).
+	Deduped bool
+	// Invalidated reports the Q5 tx-aggregate invalidation (changed evidence
+	// version) applied to an existing ticket.
+	Invalidated bool
+	// Reopened reports a confirmed recurrence reopening the original ticket
+	// (reopen_count+1, history retained).
+	Reopened bool
+	// ReopenCount is the ticket's reopen_count after the operation.
+	ReopenCount int64
+	// LinkedTo is the ticket's linked_to association (the requested link on
+	// creation, the recorded link when read back on dedup/reopen).
+	LinkedTo uuid.UUID
+	// Occurrences is the number of appended occurrence rows.
+	Occurrences int
+}
+
+// validateDetectionRecord checks the detection shape conservatively.
+func validateDetectionRecord(rec DetectionRecord) error {
+	if !rec.Identity.Valid() {
+		return contractErrorf("detection record requires a minted identity")
+	}
+	if !rec.Identity.Ticketable() {
+		return contractErrorf("category %q is not ticket-eligible (alert-only)", rec.Identity.Category())
+	}
+	if _, err := uuid.Parse(rec.ScanTaskID); err != nil {
+		return contractErrorf("detection record requires a scan_task_id UUID: %v", err)
+	}
+	if strings.TrimSpace(rec.EvidenceRef) == "" && len(rec.Members) == 0 {
+		return contractErrorf("detection record requires occurrence evidence")
+	}
+	if strings.TrimSpace(rec.EvidenceRef) != "" {
+		if err := validateOccurrenceEvidenceRef(rec.EvidenceRef); err != nil {
+			return err
+		}
+	}
+	if rec.LinkedTo != uuid.Nil {
+		if err := ValidateLinkedTicket(rec.Identity, rec.LinkedTo); err != nil {
+			return err
+		}
+	}
+	if len(rec.Members) > 0 {
+		if !detectionIsTxAggregate(rec) {
+			return contractErrorf("member facts are tx-aggregate evidence (missing + tx_hash); %s/%s is not an aggregate identity",
+				rec.Identity.Category(), rec.Identity.BusinessKey().Kind)
+		}
+		if _, err := CanonicalizeTxAggregateMembers(rec.Members); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// detectionIsTxAggregate reports whether the detection follows the T035
+// tx-aggregate identity rule: a missing divergence keyed by tx_hash.
+func detectionIsTxAggregate(rec DetectionRecord) bool {
+	return rec.Identity.Category() == CategoryMissing &&
+		rec.Identity.BusinessKey().Kind == BusinessKeyTxHash
+}
+
+// detectionAggregateGroup builds the T035 ticket group of one tx-aggregate
+// detection so the scan loop's keyed lookup (findTxAggregateRootTx) is reused
+// verbatim: one ticket per (scope, missing, tx_hash) regardless of member set
+// or reorg replacement.
+func detectionAggregateGroup(rec DetectionRecord) (*scanTicketGroup, error) {
+	if !detectionIsTxAggregate(rec) {
+		return nil, contractErrorf("tx aggregate detection requires a missing tx_hash identity")
+	}
+	primary := Classification{
+		Category:    rec.Identity.Category(),
+		Ticket:      true,
+		Identity:    rec.Identity,
+		Members:     rec.Members,
+		EvidenceRef: rec.EvidenceRef,
+	}
+	return &scanTicketGroup{
+		aggregate:       true,
+		businessKey:     scanBusinessKeyRecord(rec.Identity.BusinessKey()),
+		primary:         primary,
+		classifications: []Classification{primary},
+	}, nil
+}
+
+// insertLinkedDiscrepancySQL inserts one stable-identity ticket, optionally
+// linking a different identity. ON CONFLICT DO NOTHING is the dedup guard:
+// the same identity can never mint a second ticket. The recorded link is only
+// written here (creation) and is never cleared by dedup/invalidation/reopen.
+// For a link-less creation the scan loop's own insert statement
+// (insertDiscrepancySQL, scan.go) is reused so both paths always record the
+// identical ticket shape.
+const insertLinkedDiscrepancySQL = `
+INSERT INTO discrepancy (
+    discrepancy_id, category, business_key, content_hash, evidence_version_domain,
+    state, linked_to)
+VALUES ($1, $2, $3, $4, $5::jsonb, 'open_claimable', $6)
+ON CONFLICT (discrepancy_id) DO NOTHING`
+
+// insertDetectionTicketTx inserts the detection's ticket row and reports
+// whether it was created. The persisted evidence domain carries the detection
+// scope (T035 aggregate-root matching).
+func insertDetectionTicketTx(ctx context.Context, tx pgx.Tx, rec DetectionRecord) (bool, error) {
+	identity := rec.Identity
+	scope := identity.Scope()
+	versionDomain, err := PersistedEvidenceDomainJSON(identity.VersionDomain(), &scope)
+	if err != nil {
+		return false, err
+	}
+	args := []any{
+		identity.ID(), string(identity.Category()), scanBusinessKeyRecord(identity.BusinessKey()),
+		identity.ContentHash().Bytes(), string(versionDomain),
+	}
+	statement := insertDiscrepancySQL
+	if rec.LinkedTo != uuid.Nil {
+		if err := ValidateLinkedTicket(identity, rec.LinkedTo); err != nil {
+			return false, err
+		}
+		statement = insertLinkedDiscrepancySQL
+		args = append(args, rec.LinkedTo)
+	}
+	tag, err := tx.Exec(ctx, statement, args...)
+	if err != nil {
+		return false, fmt.Errorf("insert discrepancy: %w", err)
+	}
+	return tag.RowsAffected() == 1, nil
+}
+
+// lockDetectionTicketSQL locks one ticket and reads the lifecycle fields the
+// dedup/reopen path needs. linked_to is rendered as text so a malformed stored
+// value is refused instead of guessed.
+const lockDetectionTicketSQL = `
+SELECT state, reopen_count::bigint, COALESCE(linked_to::text, '')
+FROM discrepancy
+WHERE discrepancy_id = $1
+FOR UPDATE`
+
+// detectionTicketState is the locked ticket state read back by the dedup path.
+type detectionTicketState struct {
+	State       DiscrepancyState
+	ReopenCount int64
+	LinkedTo    uuid.UUID
+}
+
+// lockDetectionTicketTx locks one ticket FOR UPDATE and materializes its
+// lifecycle state. The lock only lives inside the caller's short transaction
+// (never across RPC; data-model.md §5.1).
+func lockDetectionTicketTx(ctx context.Context, tx pgx.Tx, id uuid.UUID) (detectionTicketState, error) {
+	var (
+		state   detectionTicketState
+		rawLink string
+	)
+	err := tx.QueryRow(ctx, lockDetectionTicketSQL, id).
+		Scan(&state.State, &state.ReopenCount, &rawLink)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return state, fmt.Errorf("%w: discrepancy_id %s", ErrDiscrepancyNotFound, id)
+	}
+	if err != nil {
+		return state, fmt.Errorf("lock discrepancy ticket: %w", err)
+	}
+	if !state.State.Valid() {
+		return state, contractErrorf("discrepancy %s has unknown state %q", id, state.State)
+	}
+	if rawLink != "" {
+		linked, parseErr := uuid.Parse(rawLink)
+		if parseErr != nil {
+			return state, contractErrorf("discrepancy %s has malformed linked_to %q", id, rawLink)
+		}
+		state.LinkedTo = linked
+	}
+	return state, nil
+}
+
+// detectionAuditActor resolves the audit actor of one detection.
+func detectionAuditActor(rec DetectionRecord) string {
+	if actor := strings.TrimSpace(rec.Actor); actor != "" {
+		return actor
+	}
+	return "system:detection"
+}
+
+// detectionAuditReason resolves the audit reason of one detection.
+func detectionAuditReason(rec DetectionRecord) string {
+	if reason := strings.TrimSpace(rec.Reason); reason != "" {
+		return reason
+	}
+	return "confirmed recurrence of the same identity"
+}
+
+// reopenConfirmedRecurrenceTx applies the Q5 reopen rule to a locked ticket:
+// EvaluateRecurrence (T007) decides, the guarded edge is validated, and the
+// row moves to reopened with reopen_count+1 while every historical row stays
+// untouched. The transition is audited; claimed/disposing tickets are never
+// settled here (the lifecycle owner owns claims).
+func reopenConfirmedRecurrenceTx(ctx context.Context, tx pgx.Tx, id uuid.UUID,
+	state detectionTicketState, rec DetectionRecord) (bool, int64, error) {
+	next, reopen := EvaluateRecurrence(state.State, true)
+	if !reopen {
+		return false, state.ReopenCount, nil
+	}
+	if err := ValidateDiscrepancyTransition(state.State, next, TransitionGuard{ConfirmedRecurrence: true}); err != nil {
+		return false, state.ReopenCount, err
+	}
+	var reopenCount int64
+	if err := tx.QueryRow(ctx, updateDiscrepancySQL, id, next, nil, state.State, "").Scan(&reopenCount); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return false, state.ReopenCount, fmt.Errorf("%w: concurrent state change", ErrIllegalDiscrepancyTransition)
+		}
+		return false, state.ReopenCount, fmt.Errorf("reopen discrepancy: %w", err)
+	}
+	if err := insertAuditTx(ctx, tx, AuditRecord{
+		Actor:  detectionAuditActor(rec),
+		Action: AuditActionReopen,
+		Target: discrepancyAuditTarget(id.String(), state.State, next, reopenCount),
+		Reason: detectionAuditReason(rec),
+		Result: "reopened",
+	}); err != nil {
+		return false, state.ReopenCount, err
+	}
+	return true, reopenCount, nil
+}
+
+// invalidateAggregateDetectionTx applies the T035/Q5 invalidation to an
+// existing tx-aggregate ticket whose evidence version changed (reorg
+// replacement to a new block, changed member set): the row moves to
+// pending_verify, the latest evidence replaces the recorded evidence, and an
+// append-only reverify audit row documents the trigger. No automatic
+// disposal/recovery/payment is ever triggered.
+func invalidateAggregateDetectionTx(ctx context.Context, tx pgx.Tx, root *scanAggregateRoot, rec DetectionRecord) error {
+	scope := rec.Identity.Scope()
+	domain, err := PersistedEvidenceDomainJSON(rec.Identity.VersionDomain(), &scope)
+	if err != nil {
+		return err
+	}
+	if _, err := tx.Exec(ctx, invalidateTxAggregateSQL,
+		root.ID, rec.Identity.ContentHash().Bytes(), string(domain)); err != nil {
+		return fmt.Errorf("invalidate tx aggregate ticket: %w", err)
+	}
+	return insertAuditTx(ctx, tx, AuditRecord{
+		Actor:  detectionAuditActor(rec),
+		Action: AuditActionReverify,
+		Target: map[string]any{
+			"discrepancy_id": root.ID.String(),
+			"task_id":        rec.ScanTaskID,
+			"business_key":   scanBusinessKeyRecord(rec.Identity.BusinessKey()),
+			"recorded_block": strings.TrimSpace(root.Domain.BlockHash),
+			"observed_block": strings.TrimSpace(rec.Identity.VersionDomain().BlockHash),
+			"trigger":        string(InvalidationReorg),
+		},
+		Reason: "tx aggregate evidence changed (reorg replacement or new member evidence); pending reverify",
+		Result: "invalidated",
+	})
+}
+
+// detectionOccurrence renders one occurrence row of a detection. A member
+// reference overrides the detection-level evidence reference (each member log
+// is individually traceable, T035).
+func detectionOccurrence(ticketID uuid.UUID, rec DetectionRecord, evidenceRef string) OccurrenceRecord {
+	if strings.TrimSpace(evidenceRef) == "" {
+		evidenceRef = rec.EvidenceRef
+	}
+	return OccurrenceRecord{
+		DiscrepancyID: ticketID,
+		ObservedAt:    rec.ObservedAt,
+		EvidenceRef:   evidenceRef,
+		ScanTaskID:    rec.ScanTaskID,
+	}
+}
+
+// appendDetectionOccurrencesTx appends the detection's occurrence evidence:
+// one row per canonical member log for a tx-aggregate detection (each member
+// individually traceable), otherwise one row for the detection. Repeats never
+// create a ticket; the append is the only side effect of a re-detection.
+func appendDetectionOccurrencesTx(ctx context.Context, tx pgx.Tx, ticketID uuid.UUID, rec DetectionRecord) (int, error) {
+	members, err := CanonicalizeTxAggregateMembers(rec.Members)
+	if err != nil {
+		return 0, err
+	}
+	if len(members) == 0 {
+		if err := AppendOccurrenceTx(ctx, tx, detectionOccurrence(ticketID, rec, "")); err != nil {
+			return 0, err
+		}
+		return 1, nil
+	}
+	for _, member := range members {
+		ref, refErr := TxAggregateEvidenceRef([]TxAggregateMember{member}, scanEvidenceRefMax)
+		if refErr != nil {
+			return 0, refErr
+		}
+		if err := AppendOccurrenceTx(ctx, tx, detectionOccurrence(ticketID, rec, ref)); err != nil {
+			return 0, err
+		}
+	}
+	return len(members), nil
+}
+
+// RecordDetectionTx records one ticketable detection inside the caller's
+// transaction (the CommitScanBatch PersistResults callback, the T022 dispose
+// path, or the T026 recurrence evaluator). It is the dedup/reopen/link core:
+//
+//   - a first detection inserts the ticket and its occurrence evidence;
+//   - a repeat detection of the same identity appends occurrence rows only
+//     (evidence_ref + scan_task_id) and reports Deduped;
+//   - a tx-aggregate detection reuses the T035 keyed lookup, so a reorg
+//     replacement stays on the original ticket (Invalidated + occurrence);
+//   - a confirmed recurrence reopens a closed/pending_verify ticket with
+//     reopen_count+1 and an audit row, preserving all history.
+//
+// The caller owns commit/rollback; errors leave the transaction untouched
+// (except for PostgreSQL's normal row locks).
+func RecordDetectionTx(ctx context.Context, tx pgx.Tx, rec DetectionRecord) (DetectionResult, error) {
+	if tx == nil {
+		return DetectionResult{}, contractErrorf("detection record requires a transaction")
+	}
+	if err := validateDetectionRecord(rec); err != nil {
+		return DetectionResult{}, err
+	}
+	identity := rec.Identity
+	result := DetectionResult{DiscrepancyID: identity.ID()}
+
+	// Resolve the ticket: the tx-aggregate rule looks up by (category,
+	// business key, scope) so a reorg replacement with a changed identity UUID
+	// merges onto the original ticket; every other identity dedups by its
+	// stable discrepancy_id.
+	var (
+		created   bool
+		aggregate *scanTicketGroup
+		root      *scanAggregateRoot
+		state     detectionTicketState
+	)
+	if detectionIsTxAggregate(rec) {
+		group, err := detectionAggregateGroup(rec)
+		if err != nil {
+			return DetectionResult{}, err
+		}
+		aggregate = group
+		root, err = findTxAggregateRootTx(ctx, tx, group)
+		if err != nil {
+			return DetectionResult{}, err
+		}
+		if root != nil {
+			result.DiscrepancyID = root.ID
+		} else {
+			created, err = insertDetectionTicketTx(ctx, tx, rec)
+			if err != nil {
+				return DetectionResult{}, err
+			}
+		}
+	} else {
+		inserted, err := insertDetectionTicketTx(ctx, tx, rec)
+		if err != nil {
+			return DetectionResult{}, err
+		}
+		created = inserted
+	}
+
+	// Existing ticket: lock it before appending evidence. The occurrence
+	// insert's FK check takes a KEY SHARE lock on the ticket row, and
+	// upgrading to FOR UPDATE afterwards could deadlock with a concurrent
+	// appender; the lock is short and never spans RPC (data-model.md §5.1).
+	if !created {
+		var err error
+		state, err = lockDetectionTicketTx(ctx, tx, result.DiscrepancyID)
+		if err != nil {
+			return DetectionResult{}, err
+		}
+		result.LinkedTo = state.LinkedTo
+		result.ReopenCount = state.ReopenCount
+		if root != nil {
+			changed, err := txAggregateEvidenceChanged(root, aggregate.primary)
+			if err != nil {
+				return DetectionResult{}, err
+			}
+			if changed {
+				if err := invalidateAggregateDetectionTx(ctx, tx, root, rec); err != nil {
+					return DetectionResult{}, err
+				}
+				result.Invalidated = true
+				// The invalidation moved the row (e.g. closed ->
+				// pending_verify); refresh the locked state so a confirmed
+				// recurrence reopens from the state actually recorded.
+				state, err = lockDetectionTicketTx(ctx, tx, result.DiscrepancyID)
+				if err != nil {
+					return DetectionResult{}, err
+				}
+				result.ReopenCount = state.ReopenCount
+			}
+		}
+	}
+	result.Created = created
+	result.Deduped = !created
+	if created {
+		result.LinkedTo = rec.LinkedTo
+	}
+
+	occurrences, err := appendDetectionOccurrencesTx(ctx, tx, result.DiscrepancyID, rec)
+	if err != nil {
+		return DetectionResult{}, err
+	}
+	result.Occurrences = occurrences
+
+	if !created && rec.ConfirmedRecurrence {
+		reopened, reopenCount, err := reopenConfirmedRecurrenceTx(ctx, tx, result.DiscrepancyID, state, rec)
+		if err != nil {
+			return DetectionResult{}, err
+		}
+		result.Reopened = reopened
+		result.ReopenCount = reopenCount
+	}
+	return result, nil
+}
+
+// RecordDetection records one ticketable detection in its own short
+// transaction (see RecordDetectionTx for the dedup/reopen/link semantics).
+func (s *Store) RecordDetection(ctx context.Context, rec DetectionRecord) (DetectionResult, error) {
+	if s == nil || s.db == nil {
+		return DetectionResult{}, contractErrorf("store has no database")
+	}
+	if err := validateDetectionRecord(rec); err != nil {
+		return DetectionResult{}, err
+	}
+	tx, err := s.db.Begin(ctx)
+	if err != nil {
+		return DetectionResult{}, fmt.Errorf("begin detection record: %w", err)
+	}
+	defer func() { _ = tx.Rollback(context.WithoutCancel(ctx)) }()
+	result, err := RecordDetectionTx(ctx, tx, rec)
+	if err != nil {
+		return DetectionResult{}, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return DetectionResult{}, fmt.Errorf("commit detection record: %w", err)
+	}
+	return result, nil
 }

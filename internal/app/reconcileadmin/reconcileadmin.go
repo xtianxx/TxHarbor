@@ -43,11 +43,30 @@
 //   - `show` is strictly read-only and reports coverage honestly (open gaps /
 //     uncovered remainder are never rendered as "fully consistent").
 //
-// Deliberately absent from this batch: the T023 permission grant/revoke/query
-// management commands (management trust-root naming is carried through
-// configuration only; ordinary holders cannot self-grant because no
-// recon_permission row can authorize a management action) and the US2/US3
-// discrepancy lifecycle/reverify commands. Audit rows are append-only.
+// T023 adds the US2 discrepancy surface (`claim`/`dispose` plus the
+// discrepancy half of `show`) on top of the T022 production paths
+// (Store.ClaimDiscrepancy/Store.DisposeDiscrepancy) and the T009 evaluator,
+// and the local-privileged permission management surface
+// (`permission-grant`/`permission-revoke`/`permission-show`):
+//
+//   - claim/dispose carry the authenticated caller as the principal,
+//     authorize through the T009 evaluator (default deny), and treat
+//     --operator/--reason/--operation-id as audit carriage only. A claim is
+//     responsibility only (never a disposal right); dispose uses the T022
+//     UNIQUE idempotency_key as its persistent idempotency.
+//   - management reuses the 011 withdrawalexec local-privileged pattern:
+//     local execution, actor bound from the authenticated caller, a valid
+//     deployment trust root (TXHARBOR_RECON_MANAGEMENT_TRUST) required or the
+//     operation is denied and audited by default, single-executed by the
+//     configured manager (no second approver in this phase), operation_id
+//     deduplicated, and every grant/revoke recording before/after state,
+//     operator and result. Only the five 014 permissions are grantable; no
+//     recon_permission row can authorize management (orthogonal), so ordinary
+//     014 holders can never self-grant, and no withdrawal/signing/payment/
+//     existing-recovery authority is created or expanded.
+//
+// The US3 invalidation/reverify surface stays out of this batch. Audit rows
+// are append-only.
 package reconcileadmin
 
 import (
@@ -125,6 +144,16 @@ func Run(ctx context.Context, args []string, d Deps) int {
 		return reconcileAdminCancel(ctx, args[1:], d)
 	case "show":
 		return reconcileAdminShow(ctx, args[1:], d)
+	case "claim":
+		return reconcileAdminClaim(ctx, args[1:], d)
+	case "dispose":
+		return reconcileAdminDispose(ctx, args[1:], d)
+	case "permission-grant":
+		return reconcileAdminPermissionGrant(ctx, args[1:], d)
+	case "permission-revoke":
+		return reconcileAdminPermissionRevoke(ctx, args[1:], d)
+	case "permission-show":
+		return reconcileAdminPermissionShow(ctx, args[1:], d)
 	default:
 		stderr := d.stderr()
 		fmt.Fprintf(stderr, "txharbor reconcile-admin: unknown action %q\n", args[0])
@@ -797,25 +826,41 @@ func reconcileAdminResume(ctx context.Context, args []string, d Deps) int {
 	return 0
 }
 
-// reconcileAdminShow prints the read-only task/coverage view. It never writes
-// (an allowed query writes no audit row; refusals are audited by the
-// evaluator) and never renders an incomplete task as fully consistent.
+// reconcileAdminShow prints the read-only task/coverage view or the read-only
+// discrepancy lifecycle view (exactly one of --task-id/--discrepancy-id). It
+// never writes (an allowed query writes no audit row; refusals are audited by
+// the evaluator) and never renders an incomplete task as fully consistent.
 func reconcileAdminShow(ctx context.Context, args []string, d Deps) int {
 	stdout, stderr := d.stdout(), d.stderr()
 	fs := flag.NewFlagSet("reconcile-admin show", flag.ContinueOnError)
 	fs.SetOutput(stderr)
-	taskID := fs.String("task-id", "", "task to inspect (required)")
+	taskID := fs.String("task-id", "", "task to inspect")
+	discrepancyID := fs.String("discrepancy-id", "", "discrepancy to inspect")
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
-	if fs.NArg() > 0 || strings.TrimSpace(*taskID) == "" {
+	taskRaw, discrepancyRaw := strings.TrimSpace(*taskID), strings.TrimSpace(*discrepancyID)
+	if fs.NArg() > 0 || (taskRaw == "") == (discrepancyRaw == "") {
 		reconcileAdminUsage(stderr)
 		return 2
 	}
-	id, err := reconciliation.RequireTaskID(*taskID)
-	if err != nil {
-		fmt.Fprintf(stderr, "txharbor reconcile-admin: %s\n", logx.Redact(err.Error()))
-		return 2
+	discrepancyUUID := ""
+	if discrepancyRaw != "" {
+		id, err := parseReconcileDiscrepancyID(discrepancyRaw)
+		if err != nil {
+			fmt.Fprintf(stderr, "txharbor reconcile-admin: %s\n", logx.Redact(err.Error()))
+			return 2
+		}
+		discrepancyUUID = id
+	}
+	taskUUID := ""
+	if taskRaw != "" {
+		id, err := reconciliation.RequireTaskID(taskRaw)
+		if err != nil {
+			fmt.Fprintf(stderr, "txharbor reconcile-admin: %s\n", logx.Redact(err.Error()))
+			return 2
+		}
+		taskUUID = id
 	}
 
 	env, code := reconcileAdminOpen(ctx, d)
@@ -824,6 +869,10 @@ func reconcileAdminShow(ctx context.Context, args []string, d Deps) int {
 	}
 	defer env.pool.Close()
 
+	if discrepancyUUID != "" {
+		return reconcileAdminShowDiscrepancy(ctx, env, discrepancyUUID, stdout, stderr)
+	}
+	id := taskUUID
 	task, ok := env.authorizeTaskAction(ctx, stderr, id, reconciliation.ActionQuery)
 	if !ok {
 		return 1
@@ -1401,6 +1450,14 @@ func reconcileAdminUsage(w io.Writer) {
 	fmt.Fprintln(w, "       txharbor reconcile-admin resume --task-id UUID [--reason R]")
 	fmt.Fprintln(w, "       txharbor reconcile-admin cancel --task-id UUID --reason R")
 	fmt.Fprintln(w, "       txharbor reconcile-admin show --task-id UUID")
+	fmt.Fprintln(w, "       txharbor reconcile-admin show --discrepancy-id UUID")
+	fmt.Fprintln(w, "       txharbor reconcile-admin claim --discrepancy-id UUID --operator NAME --reason R --operation-id OP")
+	fmt.Fprintln(w, "       txharbor reconcile-admin dispose --discrepancy-id UUID --kind ack_only|reuse_recovery|new_fix_rule [--action-ref REF] [--result done|refused|failed] [--evidence-ref E] --operator NAME --reason R --operation-id OP")
+	fmt.Fprintln(w, "       txharbor reconcile-admin permission-grant --target-principal KIND:ID --permission scan_manage|exception_handle|dispose_ack|dispose_reuse|close --chain-id C --scope-kind height|time --business-types B[,B] [--from H --to H] --operator NAME --reason R --operation-id OP")
+	fmt.Fprintln(w, "       txharbor reconcile-admin permission-revoke --target-principal KIND:ID --permission scan_manage|exception_handle|dispose_ack|dispose_reuse|close --chain-id C --scope-kind height|time --business-types B[,B] [--from H --to H] --operator NAME --reason R --operation-id OP")
+	fmt.Fprintln(w, "       txharbor reconcile-admin permission-show [--principal KIND:ID] [--permission PERM] [--chain-id C --scope-kind height|time --business-types B[,B] [--from H --to H]]")
+	fmt.Fprintln(w, "claim/dispose: the principal is the authenticated caller binding (TXHARBOR_RECON_PRINCIPAL); --operator/--reason/--operation-id are audit carriage only and never authorize. claim records responsibility only (no disposal right) and T022's single-owner CAS refuses a competing claimer with the observed owner; dispose authorizes the kind's own permission first, reuse_recovery only references an existing entry point (014 never executes it and never substitutes its gates), and new_fix_rule stays dry_run-only and is refused while its action remains unapproved")
+	fmt.Fprintln(w, "permission management (014-only; local privileged): single-executed by the authenticated manager configured in "+config.EnvReconManagementTrust+"; no second approver in this phase; denied and audited by default without a valid deployment trust root; ordinary 014 holders cannot self-grant; only the five 014 permissions are grantable and no withdrawal/signing/payment/existing-recovery authority is ever granted or expanded; grants/revokes record before/after state, operator and result in the append-only audit trail; --operation-id deduplicates")
 	fmt.Fprintln(w, "start requires --confirm-threshold-n N (integer >= 1, no default): the confirm policy depth snapshotted into the task's policy_refs as the scan's chain-evidence confirmation basis; a local test value is never a production threshold")
 	fmt.Fprintln(w, "scan enumerates candidates from the authoritative PG rows (007 requests by time window; 011 canonical receipts by height window) and, for height scopes, chain-first enumerates the durable indexed transfer facts with direction/asset attribution: attributed project withdrawals (from in the configured signer sender allowlist and contract in the 004 asset allowlist) and deposits (to in the 004 watch addresses) with no PG business row become missing candidates; confirmed-unattributed facts are metrics-only; undecidable attribution leaves an explicit gap and never a missing claim. Both scope kinds resolve through the T036 window resolver (block-time reader; header probes charged to the budget): time scopes map time->height for the chain read, height scopes map height->chain-time for the event adapter's exact inclusive occurrence window (blockless business-object rows are never silently under-covered)")
 	fmt.Fprintln(w, "scan observes the reference consumer's durable progress/inbox/quarantine records; it never runs, replays or unblocks the consumer")
