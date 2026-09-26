@@ -13,7 +13,7 @@
 - `dispose(kind, action_ref, idempotency_key)`：`ack_only` 默认；`reuse_recovery` 仅引用既有入口（014 不自动执行）；`new_fix_rule` 仅 `dry_run`。重复 key 读回收敛。
 - 系统复核写 `reverify` 行；`consistent` 仅证据完整新鲜且规则满足。
 - `close`: 需闭合权限 + 最新 consistent 未过期；写 `close_basis`（范围/区块/版本/时点）。
-- 失效/重开：并发变化/重组/新证据 → `pending_verify`；确认再现 → `reopened`（`reopen_count+1`，历史保留）；无关写入不触发；过期结果不得闭合。
+- 失效/重开：并发变化/重组/新证据/来源或版本轮换 → `pending_verify`（仅触发已批准的重验证流程，不扩大为自动处置）；确认再现 → `reopened`（`reopen_count+1`，历史保留）；无关写入不触发；过期结果不得闭合。
 - 非法跳转拒绝并审计。差异 MUST NOT 解释为重付许可（FR-015）。
 
 ## Classification (machine)
@@ -24,5 +24,5 @@
 
 - 发现者：扫描主循环顺带 cross-check（落入当前预算区间的已闭合项）＋ 定向复查枚举（本任务范围内 `closed` 且 `close_basis` 版本域落后者，按证据年龄最旧优先）。
 - 触发与预算：每次扫描调用预留有界 slice；重组/frontier 推进仅作下次优先提示；消耗计入任务总预算。
-- 进度：`history_sweep_through` 前进；未覆盖留 gap；无无限全量扫描。
+- 进度：`history_sweep_through` 前进；未覆盖留 gap；失败项记 gap（`query_failed`）后水位可继续推进但不得宣称已验证完整；gap 按失败次数升序＋证据年龄降序有界重试，成功即消除；无无限全量扫描。
 - 验收锚点见 quickstart §11：水位前进＋旧范围证据变化＋无人工逐条触发 → 进入重验证；中断恢复与证据不足不得错误闭合。

@@ -53,6 +53,7 @@ Design only; no implementation in this round. All tables live in PostgreSQL (aut
 
 - `principal` TEXT；`action` ENUM('scan_manage','exception_handle','dispose_ack','dispose_reuse','close')；`scope` JSONB（链/业务类型/范围前缀）；`granted_by/at`；PK(`principal`,`action`,(`scope` 规范化哈希))。
 - 默认拒绝：无行即无权；未知动作、越界范围一律拒绝并审计。授予操作为部署期运维行为，本阶段不预置任何授予（机制已定，政策未裁决）。
+- 信任根与自举：授予/撤销走本地特权操作路径（`contracts/auth-matrix.md` Management 节），`principal` 绑定认证调用者身份；普通持有者不得自授；首次授予亦须该路径并审计。管理双人审批问题待业务裁决（见 auth 矩阵），本轮不设管理员角色。
 
 ## 2. 稳定身份与证据哈希
 
@@ -65,7 +66,7 @@ Design only; no implementation in this round. All tables live in PostgreSQL (aut
 - 认领：`claimed` 需范围异常处理权限；单 owner；B 抢占同一 `open_claimable` 行用 `SELECT … FOR UPDATE` + 状态谓词 CAS，失败返回归属（US2-2）。
 - 处置：需具体动作权限；`idempotency_key` 唯一冲突读回（011/013 `operation_conflict` 同形）；调用既有恢复入口时在同一 014 事务外另行满足其门禁（010 锁序、011 claim 验证、013 inbox/version 守卫、006 版本捕获），014 不代行授权。
 - 闭合：需闭合权限 + 最新 `reverify=consistent` 且证据未过期；闭合写 `close_basis`（范围/区块/版本/时点快照）。
-- 失效/重开：影响结论的并发写入/重组/新证据 → `pending_verify`（失效），确认再现 → `reopened`；无关写入不触发；历史闭合/重开原因与证据保留。
+- 失效/重开：影响结论的并发写入/重组/新证据/来源或版本轮换 → `pending_verify`（失效，仅触发已批准的重验证流程，不扩大为自动处置），确认再现 → `reopened`；无关写入不触发；历史闭合/重开原因与证据保留。
 
 ## 4. 证据包内容
 
@@ -89,5 +90,7 @@ Design only; no implementation in this round. All tables live in PostgreSQL (aut
 - 发现者：扫描主循环（顺带 cross-check 落入当前预算区间的已闭合项）＋ 定向复查枚举（按证据年龄最旧优先，从 `discrepancy` 中选取本任务范围内 `closed` 且 `close_basis` 版本域落后于当前源版本的项）。
 - 触发：每次扫描调用预留预算 slice（配额内固定小比例，上限有界）执行历史复查；重组/ frontier 推进信号仅作为下次调用优先复查的提示，不另起通道。
 - 范围与进度：复查范围限任务 scope 内已闭合项；进度以前进的 `history_sweep_through`（证据年龄水位）记录在任务行；未覆盖部分留 gap（reason=`interrupted` 或预算耗尽）。
-- 预算：复查消耗计入任务总预算 slice，不挤占新区间扫描主配额之外；无无限全量扫描。
+- 失败与公平推进：单项复查失败（查询失败、源不可用、超时）记 gap 行（reason=`query_failed`，附证据年龄与失败类），不阻塞水位——水位可越过已记 gap 项继续推进，但**遍历游标≠已验证完整**：被越过的 gap 项不得据此宣称已验证完整，其相关差异不得闭合；gap 项按“失败次数升序＋证据年龄降序”在后续 slice 内有界重试（单项重试次数上限有界，耗尽后保持 gap 可见并升级告警，不无限占用 slice，避免后续项饥饿）。
+- gap 生命周期：复查成功即消除对应 gap 行；证据过期使复查结论只能为 `stale`/待验证；中断恢复后从水位继续，已记 gap 保留；成功消除、过期、重试上限三态均审计。
+- 预算：复查消耗计入任务总预算 slice，不挤占新区间扫描主配额之外；无无限全量扫描；不编造生产时限数值。
 - 验收锚点：水位已前进＋旧范围证据变化＋无人工逐条触发 → 差异进入重验证（quickstart §11）；中断恢复与证据不足不得错误闭合（沿用 §5 与 Q5-4）。
