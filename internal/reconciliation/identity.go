@@ -24,6 +24,7 @@ import (
 	"crypto/sha256"
 	"encoding/binary"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"sort"
@@ -524,6 +525,141 @@ func (id Identity) SameIdentity(other Identity) bool {
 	return id.Valid() && other.Valid() && id.id == other.id
 }
 
+// TxAggregateMember is one member log fact of a tx-aggregate detection (T035,
+// data-model.md §2 tx 聚合身份): the transaction hash is the aggregate key, and
+// every member log contributes its block height/hash, log index, contract and
+// topic0 to the evidence trail. Amount payloads are deliberately absent: money
+// stays in the chain adapter's raw hex form and is never parsed here.
+type TxAggregateMember struct {
+	BlockNumber int64  `json:"block_number"`
+	BlockHash   string `json:"block_hash"`
+	TxHash      string `json:"tx_hash"`
+	LogIndex    int64  `json:"log_index"`
+	Contract    string `json:"contract"`
+	Topic0      string `json:"topic0"`
+}
+
+// Validate checks the member shape conservatively.
+func (m TxAggregateMember) Validate() error {
+	if m.BlockNumber < 0 {
+		return fmt.Errorf("%w: member block number %d is negative", ErrInvalidIdentityShape, m.BlockNumber)
+	}
+	if m.LogIndex < 0 {
+		return fmt.Errorf("%w: member log index %d is negative", ErrInvalidIdentityShape, m.LogIndex)
+	}
+	if strings.TrimSpace(m.TxHash) == "" {
+		return fmt.Errorf("%w: member has no tx hash", ErrInvalidIdentityShape)
+	}
+	return nil
+}
+
+// txAggregateMemberKey identifies one member log for deduplication: block
+// identity + log index is the on-chain log identity.
+type txAggregateMemberKey struct {
+	blockNumber int64
+	blockHash   string
+	logIndex    int64
+	txHash      string
+}
+
+// CanonicalizeTxAggregateMembers validates, deduplicates and orders members by
+// (block number, block hash, tx hash, log index) so the same member set always
+// yields the same evidence bytes and the same ref regardless of discovery order.
+func CanonicalizeTxAggregateMembers(members []TxAggregateMember) ([]TxAggregateMember, error) {
+	seen := make(map[txAggregateMemberKey]struct{}, len(members))
+	out := make([]TxAggregateMember, 0, len(members))
+	for _, member := range members {
+		if err := member.Validate(); err != nil {
+			return nil, err
+		}
+		key := txAggregateMemberKey{
+			blockNumber: member.BlockNumber,
+			blockHash:   strings.ToLower(strings.TrimSpace(member.BlockHash)),
+			logIndex:    member.LogIndex,
+			txHash:      strings.ToLower(strings.TrimSpace(member.TxHash)),
+		}
+		if _, dup := seen[key]; dup {
+			continue
+		}
+		seen[key] = struct{}{}
+		member.BlockHash = key.blockHash
+		member.TxHash = key.txHash
+		out = append(out, member)
+	}
+	sort.Slice(out, func(i, j int) bool {
+		a, z := out[i], out[j]
+		switch {
+		case a.BlockNumber != z.BlockNumber:
+			return a.BlockNumber < z.BlockNumber
+		case a.BlockHash != z.BlockHash:
+			return a.BlockHash < z.BlockHash
+		case a.TxHash != z.TxHash:
+			return a.TxHash < z.TxHash
+		default:
+			return a.LogIndex < z.LogIndex
+		}
+	})
+	return out, nil
+}
+
+// txAggregateEvidenceVersion freezes the member evidence canonicalization
+// domain. Changing it changes every member digest.
+const txAggregateEvidenceVersion = "txharbor.reconciliation.txaggregate.v1"
+
+// txAggregateMemberCanonicalBytes encodes the member set deterministically for
+// the evidence digest fallback.
+func txAggregateMemberCanonicalBytes(members []TxAggregateMember) []byte {
+	w := &identityCanonWriter{}
+	w.bytesField("txaggregate.members.version", []byte(txAggregateEvidenceVersion))
+	w.uint64Field("txaggregate.members.count", uint64(len(members)))
+	for i, member := range members {
+		prefix := fmt.Sprintf("txaggregate.members.%d", i)
+		w.int64Field(prefix+".block_number", member.BlockNumber)
+		w.stringField(prefix+".block_hash", member.BlockHash)
+		w.stringField(prefix+".tx_hash", member.TxHash)
+		w.int64Field(prefix+".log_index", member.LogIndex)
+		w.stringField(prefix+".contract", member.Contract)
+		w.stringField(prefix+".topic0", member.Topic0)
+	}
+	return w.buf.Bytes()
+}
+
+// TxAggregateEvidenceRef renders one bounded occurrence evidence reference that
+// enumerates the member logs of a tx-aggregate detection (T035): every member's
+// block, log index, contract and topic0 appears verbatim while the reference
+// stays within the discrepancy_occurrence.evidence_ref bound. When the members
+// exceed the bound the reference carries the member count plus a member digest
+// (never a silently dropped subset).
+func TxAggregateEvidenceRef(members []TxAggregateMember, max int) (string, error) {
+	canonical, err := CanonicalizeTxAggregateMembers(members)
+	if err != nil {
+		return "", err
+	}
+	if len(canonical) == 0 {
+		return "", fmt.Errorf("%w: tx aggregate evidence requires at least one member", ErrInvalidIdentityShape)
+	}
+	if max <= 0 {
+		max = 512
+	}
+	txHash := canonical[0].TxHash
+	head := fmt.Sprintf("txagg:v1 tx=%s members=%d", txHash, len(canonical))
+	var full strings.Builder
+	full.WriteString(head)
+	for _, member := range canonical {
+		fmt.Fprintf(&full, ";b=%d:h=%s:l=%d:c=%s:t0=%s",
+			member.BlockNumber, member.BlockHash, member.LogIndex, member.Contract, member.Topic0)
+	}
+	if full.Len() <= max {
+		return full.String(), nil
+	}
+	digest := sha256.Sum256(txAggregateMemberCanonicalBytes(canonical))
+	bounded := fmt.Sprintf("%s digest=sha256:%s", head, hex.EncodeToString(digest[:]))
+	if len(bounded) > max || len(head) > max {
+		return "", fmt.Errorf("%w: tx aggregate evidence bound %d is too small", ErrInvalidIdentityShape, max)
+	}
+	return bounded, nil
+}
+
 // String renders a compact identity summary for logs and audit details. It
 // carries no secret material.
 func (id Identity) String() string {
@@ -532,6 +668,72 @@ func (id Identity) String() string {
 	}
 	return fmt.Sprintf("reconciliation-identity[%s category=%s business_key=%s/%s id=%s]",
 		id.scope, id.category, id.businessKey.Kind, id.businessKey.Value, id.id)
+}
+
+// PersistedEvidenceDomain is the JSONB document stored in
+// discrepancy.evidence_version_domain: the identity's version domain plus the
+// scope it was detected under, so a later scan can distinguish "the same
+// tx-aggregate identity in the same scope" from a same-key fact in a different
+// scope (T035). The extra scope fields are evidence metadata; the identity
+// derivation itself is untouched.
+type PersistedEvidenceDomain struct {
+	VersionDomain
+	Scope *IdentityScope `json:"scope,omitempty"`
+}
+
+// PersistedEvidenceDomainJSON marshals the version domain plus the detection
+// scope for the discrepancy row. A scope whose business types cannot be
+// canonicalized is refused instead of persisted without its scope marker.
+func PersistedEvidenceDomainJSON(version VersionDomain, scope *IdentityScope) ([]byte, error) {
+	doc := PersistedEvidenceDomain{VersionDomain: version}
+	if scope != nil {
+		copied := *scope
+		copied.BusinessTypes = copyBusinessTypes(scope.BusinessTypes)
+		if _, err := canonicalBusinessTypes(copied.BusinessTypes); err != nil {
+			return nil, err
+		}
+		doc.Scope = &copied
+	}
+	raw, err := json.Marshal(doc)
+	if err != nil {
+		return nil, fmt.Errorf("marshal persisted evidence domain: %w", err)
+	}
+	return raw, nil
+}
+
+// ParsePersistedEvidenceDomain decodes a stored evidence_version_domain
+// document. A malformed document is refused conservatively (the caller must
+// not guess a scope).
+func ParsePersistedEvidenceDomain(raw []byte) (PersistedEvidenceDomain, error) {
+	if len(strings.TrimSpace(string(raw))) == 0 {
+		return PersistedEvidenceDomain{}, fmt.Errorf("%w: empty evidence version domain", ErrInvalidIdentityShape)
+	}
+	var doc PersistedEvidenceDomain
+	if err := json.Unmarshal(raw, &doc); err != nil {
+		return PersistedEvidenceDomain{}, fmt.Errorf("%w: evidence version domain is not a JSON object: %v", ErrInvalidIdentityShape, err)
+	}
+	return doc, nil
+}
+
+// SameIdentityScope reports whether a stored scope equals the observed scope
+// (chain, kind, inclusive bounds and the canonical business-type set). It is
+// the tx-aggregate ticket lookup predicate: the same business key under a
+// different scope is a different identity, never a merge.
+func SameIdentityScope(a, b IdentityScope) bool {
+	if a.ChainID != b.ChainID || a.Kind != b.Kind || a.From != b.From || a.To != b.To {
+		return false
+	}
+	ta, errA := canonicalBusinessTypes(a.BusinessTypes)
+	tb, errB := canonicalBusinessTypes(b.BusinessTypes)
+	if errA != nil || errB != nil || len(ta) != len(tb) {
+		return false
+	}
+	for i := range ta {
+		if ta[i] != tb[i] {
+			return false
+		}
+	}
+	return true
 }
 
 // identityCanonWriter writes unambiguous, self-delimiting canonical bytes:

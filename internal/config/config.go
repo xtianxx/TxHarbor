@@ -161,6 +161,7 @@ const (
 	EnvReconMaxCandidates      = "TXHARBOR_RECON_MAX_CANDIDATES"
 	EnvReconMaxEventRows       = "TXHARBOR_RECON_MAX_EVENT_ROWS"
 	EnvReconSettleLimit        = "TXHARBOR_RECON_SETTLE_LIMIT"
+	EnvReconWindowMaxProbes    = "TXHARBOR_RECON_WINDOW_MAX_PROBES"
 	EnvReconManagementTrust    = "TXHARBOR_RECON_MANAGEMENT_TRUST"
 )
 const (
@@ -372,6 +373,10 @@ type ReconConfig struct {
 	MaxEventRows int
 	// SettleLimit bounds how many in-flight attempts one pause/cancel settles.
 	SettleLimit int
+	// WindowMaxProbes bounds the T036 time window resolver's header probes per
+	// resolution. It is required positive for time-scoped scans (refused by
+	// name otherwise); height-scoped scans do not use it.
+	WindowMaxProbes int
 	// ManagementTrustRaw is the controlled deployment-config management
 	// trust-root JSON (identity binding + manageable scope). Naming/pass-
 	// through only in this batch: grant/revoke/query management commands are
@@ -740,11 +745,12 @@ func (c *Config) Summary() string {
 			managementTrust = logx.Redacted
 		}
 		summary += fmt.Sprintf(
-			" recon_principal=%s recon_concurrency=%d recon_max_span_per_claim=%d recon_max_duration=%s recon_max_pg_requests=%d recon_max_rpc_requests=%d recon_lease_ttl=%s recon_freshness_tolerance=%s recon_max_tip_lag=%d recon_max_candidates=%d recon_max_event_rows=%d recon_settle_limit=%d recon_management_trust=%s",
+			" recon_principal=%s recon_concurrency=%d recon_max_span_per_claim=%d recon_max_duration=%s recon_max_pg_requests=%d recon_max_rpc_requests=%d recon_lease_ttl=%s recon_freshness_tolerance=%s recon_max_tip_lag=%d recon_max_candidates=%d recon_max_event_rows=%d recon_settle_limit=%d recon_window_max_probes=%d recon_management_trust=%s",
 			c.Recon.Principal, c.Recon.Concurrency, c.Recon.MaxSpanPerClaim,
 			c.Recon.MaxDuration, c.Recon.MaxPGRequests, c.Recon.MaxRPCRequests,
 			c.Recon.LeaseTTL, c.Recon.FreshnessTolerance, c.Recon.MaxTipLag,
 			c.Recon.MaxCandidates, c.Recon.MaxEventRows, c.Recon.SettleLimit,
+			c.Recon.WindowMaxProbes,
 			managementTrust)
 	}
 	return summary
@@ -1401,6 +1407,7 @@ func (c *Config) loadRecon014(getenv Getenv, errs *[]error) {
 	positiveInt(EnvReconMaxCandidates, &c.Recon.MaxCandidates)
 	positiveInt(EnvReconMaxEventRows, &c.Recon.MaxEventRows)
 	positiveInt(EnvReconSettleLimit, &c.Recon.SettleLimit)
+	positiveInt(EnvReconWindowMaxProbes, &c.Recon.WindowMaxProbes)
 }
 
 // parseBrokerList splits a comma-separated Kafka bootstrap list and validates

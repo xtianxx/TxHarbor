@@ -58,6 +58,7 @@ Design only; no implementation in this round. All tables live in PostgreSQL (aut
 ## 2. 稳定身份与证据哈希
 
 - 身份键 =（范围， 类别， 业务主键， 内容哈希， 证据版本域）。内容哈希覆盖三方快照规范化字节；版本域覆盖区块 number/hash、recovery/authorization/scope/state_version、证据时点。
+- tx 聚合例外（T035）：chain-first `missing` 按 `tx_hash` 聚合，内容哈希/版本变化驱动同身份 Q5 失效（`pending_verify` + occurrence 追加），不拆票不建新票；上条通用规则的其他业务键不受影响。
 - 同身份内容一致且无分歧 → 不建单（Q4）；同身份异内容/重复效果/版本违规 → 建单去重；证据不足 → `incomplete`。
 - 重组/重扫不得丢失关联或无限建单：同身份重开原单，不同身份建关联单（`linked_to`）。
 - 门控语义（Q4/FR-006，2026-09-26 收口核定）：已证明的局部差异（`missing`/`state_mismatch` 建单，`ExternalCredit=unverified`）与未验证的其他维度并存；FR-006 仅禁止 `consistent` 结论与外部入账成立宣称——分类器先走 ticket 路径再走 upstream 门（证据门→三方分歧→上游门），未接入上游不屏蔽局部建单。

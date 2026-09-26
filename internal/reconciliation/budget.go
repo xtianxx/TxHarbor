@@ -139,6 +139,60 @@ func (e *BudgetLimitError) Error() string {
 // Is makes every BudgetLimitError match ErrBudgetExhausted.
 func (e *BudgetLimitError) Is(target error) bool { return target == ErrBudgetExhausted }
 
+// ScanQueryBudget is the query-by-query accounting seam of the scan seams
+// (enumeration, window resolution; T038). Every internal read of a seam is
+// either charged through Consume* as it executes, or covered by a proven
+// statement cap declared by the seam. Charging happens during execution:
+// after-the-fact accounting is never accepted. *Budget satisfies the
+// interface; a seam returning ErrBudgetExhausted from a charge aborts
+// boundedly (gap + honest checkpoint, never a silent drop).
+type ScanQueryBudget interface {
+	ConsumePG(ctx context.Context, requests int) error
+	ConsumeRPC(ctx context.Context, requests int) error
+}
+
+// QueryStatementCap is a proven per-call upper bound of a seam's internal
+// queries. A seam that cannot charge query-by-query declares its cap and the
+// caller charges the worst case before the seam executes (conservative, never
+// an after-the-fact top-up).
+type QueryStatementCap struct {
+	PG  int
+	RPC int
+}
+
+// Validate fails closed on a malformed cap: both bounds must be non-negative
+// and at least one must be positive.
+func (c QueryStatementCap) Validate() error {
+	if c.PG < 0 || c.RPC < 0 {
+		return fmt.Errorf("%w: statement cap must be non-negative", ErrInvalidBudget)
+	}
+	if c.PG == 0 && c.RPC == 0 {
+		return fmt.Errorf("%w: statement cap must cover at least one query", ErrInvalidBudget)
+	}
+	return nil
+}
+
+// Charge charges the declared cap against the budget before the seam executes.
+func (c QueryStatementCap) Charge(ctx context.Context, budget ScanQueryBudget) error {
+	if err := c.Validate(); err != nil {
+		return err
+	}
+	if budget == nil {
+		return contractErrorf("query statement cap requires a budget seam")
+	}
+	if err := budget.ConsumePG(ctx, c.PG); err != nil {
+		return err
+	}
+	return budget.ConsumeRPC(ctx, c.RPC)
+}
+
+// ScanStatementCapSource optionally declares the proven internal query cap of
+// one candidate source call. It is the alternative to per-query charging for
+// seams that cannot thread the budget callback.
+type ScanStatementCapSource interface {
+	ScanStatementCap() QueryStatementCap
+}
+
 // BudgetUsage is an immutable, observable snapshot of one invocation's budget
 // state. It is the primitive that makes a wait/suspend state observable instead
 // of silent.

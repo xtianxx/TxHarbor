@@ -933,6 +933,10 @@ type ScanCandidate struct {
 	// ChainFact names the candidate's chain-side fact; an empty ref keeps
 	// the chain party unknown (never absent-by-guess).
 	ChainFact ChainFactRef
+	// Members carries the member log facts of a tx-aggregate candidate
+	// (T035): they are enumerated in the occurrence evidence reference and
+	// never split the tx into several tickets.
+	Members []TxAggregateMember
 	// EventKey optionally overrides the event identity matched against the
 	// interval's event evidence; empty means BusinessKey is used.
 	EventKey BusinessKey
@@ -950,12 +954,44 @@ type ScanCandidate struct {
 	EvidenceRef string
 }
 
+// ScanEnumeration is one interval's enumeration result: the business
+// candidates, the coverage reasons the enumerator could not prove (committed
+// as gap rows, never silently dropped), and the count of chain facts the
+// enumerator proved outside the project attribution (metrics-only; T033).
+type ScanEnumeration struct {
+	Candidates []ScanCandidate
+	// GapReasons are unproven-coverage reasons for the interval. Every reason
+	// must belong to the closed gap vocabulary; an unknown reason is a wiring
+	// defect and fails the invocation.
+	GapReasons []GapReason
+	// MetricsOnly counts chain facts proven not to belong to the project
+	// (attribution decided and negative). They are metrics/audit-only and
+	// MUST NOT become tickets.
+	MetricsOnly int
+}
+
 // ScanCandidateSource enumerates the business identities of one claimed
 // interval. An enumeration error is evidence-missing: the interval is
 // committed with a query_failed gap (never consistent), never silently
 // skipped.
 type ScanCandidateSource interface {
 	ScanCandidates(ctx context.Context, interval ScanInterval) ([]ScanCandidate, error)
+}
+
+// ScanCandidateEnumerator is the enumeration seam of one scan invocation:
+// implemented by ScanCandidateSource (legacy per-call charge), by
+// BudgetedScanCandidateSource (per-query charging, T038), or by both. The
+// compare loop refuses an enumerator that implements neither.
+type ScanCandidateEnumerator interface{}
+
+// BudgetedScanCandidateSource is the T038 enumeration seam: the enumerator
+// charges every internal read through the budget callback as it executes, and
+// reports the coverage it could not prove. It takes precedence over the legacy
+// ScanCandidateSource when a caller-implemented source satisfies both. A
+// returned ErrBudgetExhausted aborts the scan boundedly (gap + honest
+// checkpoint); it is never converted into a silent empty enumeration.
+type BudgetedScanCandidateSource interface {
+	EnumerateCandidates(ctx context.Context, interval ScanInterval, budget ScanQueryBudget) (ScanEnumeration, error)
 }
 
 // ScanChainWindowResolver optionally resolves the block-height window of a
@@ -1008,8 +1044,17 @@ type ScanOnceRequest struct {
 	FreshnessTolerance time.Duration
 	// Sources are the three read-only adapters.
 	Sources ScanSources
-	// Candidates enumerates the per-interval business identities.
-	Candidates ScanCandidateSource
+	// Candidates enumerates the per-interval business identities. A source
+	// that implements BudgetedScanCandidateSource charges every internal read
+	// through the budget seam; a legacy source is charged one PG per call (or
+	// its declared proven statement cap). An enumerator implementing neither
+	// interface is refused.
+	Candidates ScanCandidateEnumerator
+	// WindowResolver resolves time-scoped intervals to height windows (T036).
+	// Nil keeps time scopes pending-by-design (chain party unknown, explicit
+	// gap from the pending classification): an unmapped range is never read as
+	// proof that no chain fact exists.
+	WindowResolver ScanTimeWindowResolver
 	// EventConsumers/EventQuarantine are passed through to the event
 	// adapter. The event adapter requires a quarantine reader whenever
 	// consumers are registered; ScanOnce refuses the mismatched shape up
@@ -1035,25 +1080,33 @@ const (
 // suspended_budget (unless an operator already paused/cancelled it) and a gap
 // row records the uncovered remainder.
 type ScanOnceResult struct {
-	TaskID          string
-	Attempts        int
-	Committed       int
-	Discarded       int
-	Candidates      int
-	Tickets         int
-	Merged          int
-	Occurrences     int
-	Pending         int
-	Absorbed        int
-	Gaps            int
-	Stop            ScanStop
-	StoppedState    TaskState
-	DiscardReason   string
-	LastCheckpoint  *Checkpoint
-	Suspended       bool
-	SuspendResource BudgetResource
-	SuspendDetail   string
-	BudgetUsage     BudgetUsage
+	TaskID      string
+	Attempts    int
+	Committed   int
+	Discarded   int
+	Candidates  int
+	Tickets     int
+	Merged      int
+	Occurrences int
+	Pending     int
+	Absorbed    int
+	// Unattributed counts chain facts the enumerator proved outside the
+	// project address/asset attribution: metrics-only, never tickets (T033).
+	Unattributed int
+	// WindowUnmappable/WindowInvalidated count time intervals whose T036
+	// mapping could not be proven (explicit gap) or was reorg-invalidated
+	// (pending). Both stay pending observations.
+	WindowUnmappable  int
+	WindowInvalidated int
+	Gaps              int
+	Stop              ScanStop
+	StoppedState      TaskState
+	DiscardReason     string
+	LastCheckpoint    *Checkpoint
+	Suspended         bool
+	SuspendResource   BudgetResource
+	SuspendDetail     string
+	BudgetUsage       BudgetUsage
 }
 
 // ScanOnce runs one budgeted scan invocation (T016). It never panics on
@@ -1077,6 +1130,11 @@ func (s *Store) ScanOnce(ctx context.Context, req ScanOnceRequest) (result ScanO
 	}
 	if req.Candidates == nil {
 		return result, contractErrorf("scan requires a candidate source")
+	}
+	if _, legacy := req.Candidates.(ScanCandidateSource); !legacy {
+		if _, budgeted := req.Candidates.(BudgetedScanCandidateSource); !budgeted {
+			return result, contractErrorf("candidate enumerator implements neither ScanCandidateSource nor BudgetedScanCandidateSource")
+		}
 	}
 	if len(req.EventConsumers) > 0 && req.EventQuarantine == nil {
 		return result, contractErrorf("event consumers require a quarantine reader")
@@ -1309,31 +1367,98 @@ func scanContextError(err error) error {
 	}
 }
 
+// scanEnumerateCandidates runs the caller's enumeration seam under the T038
+// accounting rules: a BudgetedScanCandidateSource charges each internal read
+// through the budget callback as it executes; a legacy source is charged its
+// declared proven statement cap (conservative worst case, charged before the
+// call), or one PG when no cap is declared. Post-hoc accounting never happens.
+func scanEnumerateCandidates(ctx context.Context, req *ScanOnceRequest, interval ScanInterval, budget *Budget) (ScanEnumeration, error) {
+	if source, ok := req.Candidates.(BudgetedScanCandidateSource); ok && source != nil {
+		return source.EnumerateCandidates(ctx, interval, budget)
+	}
+	if capSource, ok := req.Candidates.(ScanStatementCapSource); ok && capSource != nil {
+		if err := capSource.ScanStatementCap().Charge(ctx, budget); err != nil {
+			return ScanEnumeration{}, err
+		}
+	} else if err := budget.ConsumePG(ctx, 1); err != nil {
+		return ScanEnumeration{}, err
+	}
+	source, ok := req.Candidates.(ScanCandidateSource)
+	if !ok || source == nil {
+		return ScanEnumeration{}, contractErrorf("candidate enumerator implements no enumeration interface")
+	}
+	candidates, err := source.ScanCandidates(ctx, interval)
+	if err != nil {
+		return ScanEnumeration{}, err
+	}
+	return ScanEnumeration{Candidates: candidates}, nil
+}
+
+// chainWindowResult is the outcome of resolving one claimed interval's chain
+// window. resolved means from..to is observable; otherwise the chain party
+// stays unknown and the status/reason are recorded (unmappable => explicit
+// gap, invalidated => pending reverify; T036/FR-017).
+type chainWindowResult struct {
+	from     int64
+	to       int64
+	resolved bool
+	status   WindowStatus
+	reason   string
+	gap      bool
+}
+
 // scanChainWindow resolves the height window of one claimed interval for the
 // chain-facts adapter. Height scopes resolve locally; time scopes need the
-// optional ScanChainWindowResolver (the local index stores no timestamps).
-func scanChainWindow(ctx context.Context, req *ScanOnceRequest, interval ScanInterval) (int64, int64, bool, error) {
+// T036 ScanTimeWindowResolver (the local index stores no chain timestamps). A
+// legacy ScanChainWindowResolver is still honored for compatibility; without
+// either seam the window stays unresolved (chain party unknown, pending).
+func scanChainWindow(ctx context.Context, req *ScanOnceRequest, task *Task, interval ScanInterval, budget *Budget) (chainWindowResult, error) {
 	if req.Sources.Chain == nil {
-		return 0, 0, false, nil
+		return chainWindowResult{}, nil
 	}
 	if interval.From.Kind == ScopeHeight {
-		return interval.From.Height, interval.To.Height, true, nil
+		return chainWindowResult{from: interval.From.Height, to: interval.To.Height, resolved: true}, nil
+	}
+	chainID, ok := scanNumericChainID(task)
+	if !ok {
+		// A symbolic chain identity cannot be read by the resolver; the time
+		// scope stays pending-by-design (no absence claim).
+		return chainWindowResult{}, nil
+	}
+	if req.WindowResolver != nil {
+		resolution, err := req.WindowResolver.ResolveScanWindow(ctx, chainID, interval, budget)
+		if err != nil {
+			return chainWindowResult{}, err
+		}
+		if err := resolution.Validate(); err != nil {
+			return chainWindowResult{}, err
+		}
+		switch resolution.Status {
+		case WindowResolved:
+			return chainWindowResult{from: resolution.From, to: resolution.To, resolved: true}, nil
+		default:
+			return chainWindowResult{
+				status: resolution.Status,
+				reason: resolution.Reason,
+				gap:    resolution.Status == WindowUnmappable,
+			}, nil
+		}
 	}
 	resolver, ok := req.Candidates.(ScanChainWindowResolver)
 	if !ok || resolver == nil {
-		return 0, 0, false, nil
+		return chainWindowResult{}, nil
 	}
 	from, to, resolved, err := resolver.ResolveChainWindow(ctx, interval)
 	if err != nil {
 		if ctxErr := scanContextError(err); ctxErr != nil {
-			return 0, 0, false, ctxErr
+			return chainWindowResult{}, ctxErr
 		}
-		return 0, 0, false, nil
+		return chainWindowResult{}, nil
 	}
 	if !resolved || from < 0 || to < from {
-		return 0, 0, false, nil
+		return chainWindowResult{}, nil
 	}
-	return from, to, true, nil
+	return chainWindowResult{from: from, to: to, resolved: true}, nil
 }
 
 // scanIntervalOutcome accumulates one interval's classifications plus the
@@ -1344,12 +1469,17 @@ type scanIntervalOutcome struct {
 	attemptID string
 	owner     string
 	interval  ScanInterval
+	scope     IdentityScope
 
 	classifications []Classification
 	gapReasons      []GapReason
 	pending         int
 	absorbed        int
 	candidates      int
+	metricsOnly     int
+
+	windowUnmappable  int
+	windowInvalidated int
 
 	tickets     int
 	merged      int
@@ -1375,6 +1505,9 @@ func (o *scanIntervalOutcome) applyTo(result *ScanOnceResult) {
 	result.Occurrences += o.occurrences
 	result.Pending += o.pending
 	result.Absorbed += o.absorbed
+	result.Unattributed += o.metricsOnly
+	result.WindowUnmappable += o.windowUnmappable
+	result.WindowInvalidated += o.windowInvalidated
 	result.Gaps += o.gaps
 }
 
@@ -1387,14 +1520,28 @@ func compareScanInterval(ctx context.Context, req *ScanOnceRequest, task *Task, 
 	if err := interval.Validate(); err != nil {
 		return nil, err
 	}
-	outcome := &scanIntervalOutcome{interval: interval}
+	outcome := &scanIntervalOutcome{interval: interval, scope: scope}
 	now := time.Now().UTC()
 
 	chainID, chainIDOK := scanNumericChainID(task)
-	from, to, haveWindow, err := scanChainWindow(ctx, req, interval)
+	window, err := scanChainWindow(ctx, req, task, interval, budget)
 	if err != nil {
 		return nil, err
 	}
+	if window.gap {
+		// An unmappable time window is an explicit uncovered range: the chain
+		// party stays unknown and the interval cannot close (T036/FR-003).
+		outcome.addGapReason(GapQueryFailed)
+	}
+	switch window.status {
+	case WindowUnmappable:
+		outcome.windowUnmappable++
+	case WindowInvalidated:
+		// The mapping was reorg-invalidated: the observation stays pending
+		// (FR-017), never consistent.
+		outcome.windowInvalidated++
+	}
+	from, to, haveWindow := window.from, window.to, window.resolved
 
 	// Chain facts (one interval-level read).
 	var (
@@ -1447,11 +1594,15 @@ func compareScanInterval(ctx context.Context, req *ScanOnceRequest, task *Task, 
 	}
 
 	// Candidate enumeration. Its error is evidence-missing: the interval is
-	// committed with a query_failed gap so it can never close silently.
-	if err := budget.ConsumePG(ctx, 1); err != nil {
-		return nil, err
+	// committed with a query_failed gap so it can never close silently. A
+	// budgeted source charges every internal read itself (T038); a legacy
+	// source is charged its declared proven statement cap, or one PG by
+	// default. An ErrBudgetExhausted charge aborts the scan boundedly instead
+	// of being mistaken for a failed enumeration.
+	enumeration, enumerateErr := scanEnumerateCandidates(ctx, req, interval, budget)
+	if errors.Is(enumerateErr, ErrBudgetExhausted) {
+		return nil, enumerateErr
 	}
-	candidates, enumerateErr := req.Candidates.ScanCandidates(ctx, interval)
 	if ctxErr := scanContextError(enumerateErr); ctxErr != nil {
 		return nil, ctxErr
 	}
@@ -1460,6 +1611,14 @@ func compareScanInterval(ctx context.Context, req *ScanOnceRequest, task *Task, 
 		outcome.addGapReason(GapQueryFailed)
 		return outcome, nil
 	}
+	for _, reason := range enumeration.GapReasons {
+		if !reason.Valid() {
+			return nil, contractErrorf("candidate enumeration reported unknown gap reason %q", reason)
+		}
+		outcome.addGapReason(reason)
+	}
+	outcome.metricsOnly += enumeration.MetricsOnly
+	candidates := enumeration.Candidates
 	outcome.candidates = len(candidates)
 
 	for i := range candidates {
@@ -1586,6 +1745,9 @@ func compareScanInterval(ctx context.Context, req *ScanOnceRequest, task *Task, 
 			Version:     mergeScanVersionDomain(chainBundle, chainBlock, chainLogs, eventObs, pgRecord, candidate.ChainFact, now),
 			EvidenceRef: candidate.EvidenceRef,
 		})
+		if members := scanCandidateMembers(candidate, chainLogs); len(members) > 0 {
+			classification.Members = members
+		}
 		outcome.classifications = append(outcome.classifications, classification)
 
 		switch {
@@ -1601,6 +1763,32 @@ func compareScanInterval(ctx context.Context, req *ScanOnceRequest, task *Task, 
 		}
 	}
 	return outcome, nil
+}
+
+// scanCandidateMembers returns the canonical member facts of one candidate:
+// the explicitly enumerated members (chain-first enumeration, T033/T034) take
+// precedence; otherwise the member logs matched inside the interval bundle are
+// used. Member facts never split a tx into several tickets (T035).
+func scanCandidateMembers(candidate ScanCandidate, matched []ChainFactLog) []TxAggregateMember {
+	source := candidate.Members
+	if len(source) == 0 {
+		source = make([]TxAggregateMember, 0, len(matched))
+		for i := range matched {
+			source = append(source, TxAggregateMember{
+				BlockNumber: matched[i].BlockNumber,
+				BlockHash:   matched[i].BlockHash,
+				TxHash:      matched[i].TxHash,
+				LogIndex:    matched[i].LogIndex,
+				Contract:    matched[i].Contract,
+				Topic0:      matched[i].Topic0,
+			})
+		}
+	}
+	canonical, err := CanonicalizeTxAggregateMembers(source)
+	if err != nil {
+		return nil
+	}
+	return canonical
 }
 
 // scanValidateCandidate refuses malformed or out-of-scope candidates before
@@ -2015,49 +2203,82 @@ const insertDiscrepancyOccurrenceSQL = `
 INSERT INTO discrepancy_occurrence (discrepancy_id, observed_at, evidence_ref, scan_task_id)
 VALUES ($1, now(), $2, $3)`
 
+// scanAggregateRootsSQL locates the tx-aggregate ticket rows of one business
+// key (bounded); the scope marker inside evidence_version_domain selects the
+// row of the observing scope (T035).
+const scanAggregateRootsSQL = `
+SELECT discrepancy_id, state, encode(content_hash, 'hex'), evidence_version_domain
+FROM discrepancy
+WHERE category = $1 AND business_key = $2
+ORDER BY created_at, discrepancy_id
+LIMIT 64`
+
+// invalidateTxAggregateSQL applies the Q5 invalidation to an existing ticket:
+// the latest evidence replaces the recorded evidence and a conclusion-bearing
+// state moves to pending_verify. claimed/disposing rows keep their state (only
+// the lifecycle owner may settle a claim); an absent conclusion (open_claimable/
+// reopened/pending_verify) also moves to pending_verify per the T035 rule that a
+// reorg replacement never mints a new ticket.
+const invalidateTxAggregateSQL = `
+UPDATE discrepancy
+SET state = CASE WHEN state IN ('open_claimable', 'reopened', 'closed', 'pending_verify')
+                 THEN 'pending_verify' ELSE state END,
+    content_hash = $2,
+    evidence_version_domain = $3::jsonb,
+    updated_at = now()
+WHERE discrepancy_id = $1`
+
 // persist writes one interval's results inside the commit transaction. It
 // never re-locks recon_task and never performs network I/O (CommitScanBatch
-// contract; data-model.md §5). A same-identity re-detection reuses the
-// original ticket row and appends an occurrence: no duplicate ticket, evidence
-// preserved. Reopen/invalidation stays with the lifecycle owner (T026).
+// contract; data-model.md §5). Detections are grouped before persistence:
+//
+//   - a tx-aggregate detection (`missing` under a tx_hash business key) is one
+//     ticket per tx (T035): member logs are enumerated in the occurrence
+//     evidence and a reorg replacement (same tx_hash, new block) follows the Q5
+//     invalidation path on the same ticket (pending_verify + occurrence), never
+//     a new ticket;
+//   - every other detection dedups by its stable identity id, and a same-batch
+//     repeat appends no second occurrence row.
 func (o *scanIntervalOutcome) persist(ctx context.Context, tx pgx.Tx) error {
-	seen := make(map[uuid.UUID]struct{})
+	groups := make([]*scanTicketGroup, 0, len(o.classifications))
+	index := make(map[string]*scanTicketGroup, len(o.classifications))
 	for i := range o.classifications {
 		classification := o.classifications[i]
 		if !classification.Ticket || !classification.Identity.Valid() {
 			continue
 		}
-		identity := classification.Identity
-		id := identity.ID()
-		inserted, err := insertScanDiscrepancyTx(ctx, tx, classification)
-		if err != nil {
+		key, aggregate := scanTicketGroupKey(classification)
+		if !aggregate {
+			key = "identity:" + classification.Identity.ID().String()
+		}
+		group, ok := index[key]
+		if !ok {
+			group = &scanTicketGroup{aggregate: aggregate,
+				businessKey: scanBusinessKeyRecord(classification.Identity.BusinessKey())}
+			index[key] = group
+			groups = append(groups, group)
+		}
+		if !group.primary.Identity.Valid() {
+			group.primary = classification
+		}
+		group.classifications = append(group.classifications, classification)
+	}
+	for _, group := range groups {
+		if err := o.persistTicketGroup(ctx, tx, group); err != nil {
 			return err
-		}
-		if _, duplicate := seen[id]; duplicate {
-			// One detection per batch: no second occurrence row for the
-			// same identity inside one committed interval.
-			continue
-		}
-		seen[id] = struct{}{}
-		evidenceRef := scanEvidenceRef(&classification, o.attemptID)
-		if _, err := tx.Exec(ctx, insertDiscrepancyOccurrenceSQL, id, evidenceRef, o.taskID); err != nil {
-			return fmt.Errorf("insert discrepancy occurrence: %w", err)
-		}
-		o.occurrences++
-		if inserted {
-			o.tickets++
-		} else {
-			o.merged++
 		}
 	}
 
 	// Q4: absorbed duplicates and pending/incomplete evidence are
 	// metrics/audit-only — never tickets. One bounded audit row per batch
 	// keeps the trail queryable without unbounded writes.
-	if o.pending > 0 || o.absorbed > 0 {
+	if o.pending > 0 || o.absorbed > 0 || o.metricsOnly > 0 {
 		result := "incomplete"
 		if o.pending == 0 {
 			result = "absorbed_duplicates"
+			if o.metricsOnly > 0 {
+				result = "unattributed"
+			}
 		}
 		if err := insertAuditTx(ctx, tx, AuditRecord{
 			Actor:  o.owner,
@@ -2069,6 +2290,7 @@ func (o *scanIntervalOutcome) persist(ctx context.Context, tx pgx.Tx) error {
 				"range_end":           rangeAuditValue(o.interval.To),
 				"pending":             o.pending,
 				"absorbed_duplicates": o.absorbed,
+				"unattributed":        o.metricsOnly,
 				"ticketable":          o.tickets + o.merged,
 			},
 			Reason: scanAuditReason(o),
@@ -2089,14 +2311,247 @@ func (o *scanIntervalOutcome) persist(ctx context.Context, tx pgx.Tx) error {
 	return nil
 }
 
+// scanTicketGroup collects the detections that belong to one persisted ticket
+// within one interval: either the same stable identity, or the same
+// tx-aggregate key (T035). Member facts are unioned so one transaction never
+// splits into several tickets.
+type scanTicketGroup struct {
+	aggregate       bool
+	businessKey     string
+	primary         Classification
+	classifications []Classification
+}
+
+// members returns the deduplicated canonical member facts of the group.
+func (g *scanTicketGroup) members() []TxAggregateMember {
+	var out []TxAggregateMember
+	for i := range g.classifications {
+		out = append(out, g.classifications[i].Members...)
+	}
+	canonical, err := CanonicalizeTxAggregateMembers(out)
+	if err != nil {
+		return nil
+	}
+	return canonical
+}
+
+// scanTicketGroupKey reports whether one detection belongs to a tx-aggregate
+// ticket (missing under a tx_hash business key) and its grouping key.
+func scanTicketGroupKey(c Classification) (string, bool) {
+	if c.Category != CategoryMissing {
+		return "", false
+	}
+	key := c.Identity.BusinessKey()
+	if key.Kind != BusinessKeyTxHash {
+		return "", false
+	}
+	return "txagg:" + scanBusinessKeyRecord(key), true
+}
+
+// persistTicketGroup persists one group of same-ticket detections.
+func (o *scanIntervalOutcome) persistTicketGroup(ctx context.Context, tx pgx.Tx, group *scanTicketGroup) error {
+	if !group.aggregate {
+		inserted, err := insertScanDiscrepancyTx(ctx, tx, group.primary, o.scope)
+		if err != nil {
+			return err
+		}
+		if err := o.appendTicketOccurrences(ctx, tx, group.primary.Identity.ID(), nil, &group.primary); err != nil {
+			return err
+		}
+		if inserted {
+			o.tickets++
+		} else {
+			o.merged++
+		}
+		return nil
+	}
+
+	members := group.members()
+	root, err := findTxAggregateRootTx(ctx, tx, group)
+	if err != nil {
+		return err
+	}
+	if root == nil {
+		inserted, err := insertScanDiscrepancyTx(ctx, tx, group.primary, o.scope)
+		if err != nil {
+			return err
+		}
+		if err := o.appendTicketOccurrences(ctx, tx, group.primary.Identity.ID(), members, &group.primary); err != nil {
+			return err
+		}
+		if inserted {
+			o.tickets++
+		} else {
+			o.merged++
+		}
+		return nil
+	}
+
+	// The ticket already exists: this detection is a merge. A changed evidence
+	// version (reorg replacement to a new block, new member evidence) follows
+	// the Q5 invalidation path on the same ticket — pending_verify plus an
+	// occurrence append — never a new ticket (T035/FR-007/FR-017).
+	changed, err := txAggregateEvidenceChanged(root, group.primary)
+	if err != nil {
+		return err
+	}
+	if changed {
+		if err := o.invalidateTxAggregateTx(ctx, tx, root, group.primary); err != nil {
+			return err
+		}
+	}
+	if err := o.appendTicketOccurrences(ctx, tx, root.ID, members, &group.primary); err != nil {
+		return err
+	}
+	o.merged++
+	return nil
+}
+
+// appendTicketOccurrences appends one occurrence row per member fact (T035:
+// each member log is individually recorded), or one row for the detection when
+// no member facts exist. The reference is bounded; an oversized member list is
+// digested, never truncated silently.
+func (o *scanIntervalOutcome) appendTicketOccurrences(ctx context.Context, tx pgx.Tx,
+	id uuid.UUID, members []TxAggregateMember, classification *Classification) error {
+	if len(members) == 0 {
+		if _, err := tx.Exec(ctx, insertDiscrepancyOccurrenceSQL,
+			id, scanEvidenceRef(classification, o.attemptID), o.taskID); err != nil {
+			return fmt.Errorf("insert discrepancy occurrence: %w", err)
+		}
+		o.occurrences++
+		return nil
+	}
+	for _, member := range members {
+		if _, err := tx.Exec(ctx, insertDiscrepancyOccurrenceSQL,
+			id, scanMemberEvidenceRef(member, o.attemptID), o.taskID); err != nil {
+			return fmt.Errorf("insert discrepancy occurrence: %w", err)
+		}
+		o.occurrences++
+	}
+	return nil
+}
+
+// scanAggregateRoot is the existing tx-aggregate ticket row located by
+// (category, business key): the row whose recorded scope matches the observing
+// task scope, or (compatibility) the first legacy row that carries no scope
+// marker.
+type scanAggregateRoot struct {
+	ID             uuid.UUID
+	State          DiscrepancyState
+	ContentHashHex string
+	Domain         PersistedEvidenceDomain
+}
+
+// findTxAggregateRootTx locates the aggregate ticket of one tx-aggregate group
+// inside the commit transaction. A same-key row under a different scope is a
+// different identity and never a merge target.
+func findTxAggregateRootTx(ctx context.Context, tx pgx.Tx, group *scanTicketGroup) (*scanAggregateRoot, error) {
+	rows, err := tx.Query(ctx, scanAggregateRootsSQL,
+		string(group.primary.Category), group.businessKey)
+	if err != nil {
+		return nil, fmt.Errorf("find tx aggregate ticket: %w", err)
+	}
+	defer rows.Close()
+	var legacy *scanAggregateRoot
+	for rows.Next() {
+		var (
+			id          uuid.UUID
+			state       DiscrepancyState
+			hashHex     string
+			domainBytes []byte
+		)
+		if err := rows.Scan(&id, &state, &hashHex, &domainBytes); err != nil {
+			return nil, fmt.Errorf("scan tx aggregate ticket: %w", err)
+		}
+		if !state.Valid() {
+			return nil, contractErrorf("discrepancy %s has unknown state %q", id, state)
+		}
+		root := &scanAggregateRoot{ID: id, State: state, ContentHashHex: strings.ToLower(hashHex)}
+		domain, parseErr := ParsePersistedEvidenceDomain(domainBytes)
+		if parseErr == nil {
+			root.Domain = domain
+		}
+		switch {
+		case root.Domain.Scope != nil && SameIdentityScope(*root.Domain.Scope, group.primary.Identity.Scope()):
+			return root, nil
+		case root.Domain.Scope == nil && legacy == nil:
+			// Compatibility: a row detected before scope markers existed can
+			// still be the aggregate root (same chain/business key).
+			legacy = root
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("find tx aggregate ticket: %w", err)
+	}
+	return legacy, nil
+}
+
+// txAggregateEvidenceChanged reports whether the new detection's evidence
+// contradicts the recorded ticket (content hash or block identity). A reorg
+// replacement to a new block is a change; an identical re-observation is not.
+func txAggregateEvidenceChanged(root *scanAggregateRoot, primary Classification) (bool, error) {
+	if root == nil {
+		return false, contractErrorf("tx aggregate evidence change requires a recorded ticket")
+	}
+	if !primary.Identity.Valid() {
+		return false, contractErrorf("tx aggregate evidence change requires a minted identity")
+	}
+	if !strings.EqualFold(root.ContentHashHex, primary.Identity.ContentHash().Hex()) {
+		return true, nil
+	}
+	recordedBlock := strings.TrimSpace(root.Domain.BlockHash)
+	observedBlock := strings.TrimSpace(primary.Identity.VersionDomain().BlockHash)
+	return !strings.EqualFold(recordedBlock, observedBlock), nil
+}
+
+// invalidateTxAggregateTx applies the Q5 invalidation to an existing
+// tx-aggregate ticket: the row moves to pending_verify (from the conclusion/
+// conclusion-less states; claimed/disposing rows keep their state because only
+// the lifecycle owner may settle a claim), the latest evidence replaces the
+// recorded evidence, and an append-only reverify audit row records the
+// invalidation. No automatic disposal/recovery/payment is ever triggered.
+func (o *scanIntervalOutcome) invalidateTxAggregateTx(ctx context.Context, tx pgx.Tx,
+	root *scanAggregateRoot, primary Classification) error {
+	domain, err := PersistedEvidenceDomainJSON(primary.Identity.VersionDomain(), &o.scope)
+	if err != nil {
+		return err
+	}
+	if _, err := tx.Exec(ctx, invalidateTxAggregateSQL,
+		root.ID, primary.Identity.ContentHash().Bytes(), string(domain)); err != nil {
+		return fmt.Errorf("invalidate tx aggregate ticket: %w", err)
+	}
+	return insertAuditTx(ctx, tx, AuditRecord{
+		Actor:  o.owner,
+		Action: AuditActionReverify,
+		Target: map[string]any{
+			"discrepancy_id": root.ID.String(),
+			"task_id":        o.taskID,
+			"attempt_id":     o.attemptID,
+			"business_key":   o.scanBusinessKey(primary),
+			"recorded_block": strings.TrimSpace(root.Domain.BlockHash),
+			"observed_block": strings.TrimSpace(primary.Identity.VersionDomain().BlockHash),
+			"trigger":        string(InvalidationReorg),
+		},
+		Reason: "tx aggregate evidence changed (reorg replacement or new evidence); pending reverify",
+		Result: "invalidated",
+	})
+}
+
+// scanBusinessKey renders the persisted business-key record of a detection.
+func (o *scanIntervalOutcome) scanBusinessKey(c Classification) string {
+	return scanBusinessKeyRecord(c.Identity.BusinessKey())
+}
+
 // insertScanDiscrepancyTx inserts the stable-identity ticket row if it does
 // not exist yet; a conflict means the same identity was already recorded
-// (dedup) and the existing lifecycle state is left untouched.
-func insertScanDiscrepancyTx(ctx context.Context, tx pgx.Tx, classification Classification) (bool, error) {
+// (dedup) and the existing lifecycle state is left untouched. The persisted
+// evidence domain carries the detection scope so a later scan can match the
+// tx-aggregate aggregate root without guessing (T035).
+func insertScanDiscrepancyTx(ctx context.Context, tx pgx.Tx, classification Classification, scope IdentityScope) (bool, error) {
 	identity := classification.Identity
-	versionDomain, err := json.Marshal(identity.VersionDomain())
+	versionDomain, err := PersistedEvidenceDomainJSON(identity.VersionDomain(), &scope)
 	if err != nil {
-		return false, fmt.Errorf("marshal evidence version domain: %w", err)
+		return false, err
 	}
 	tag, err := tx.Exec(ctx, insertDiscrepancySQL,
 		identity.ID(), string(classification.Category), scanBusinessKeyRecord(identity.BusinessKey()),
@@ -2117,6 +2572,20 @@ func scanEvidenceRef(classification *Classification, attemptID string) string {
 		return fmt.Sprintf("scan:v1 attempt=%s reason=%s", attemptID, classification.Reason)
 	}
 	return fmt.Sprintf("scan:v1 attempt=%s", attemptID)
+}
+
+// scanMemberEvidenceRef bounds one member's occurrence evidence to the
+// migration CHECK (the attempt identity is appended when it still fits).
+func scanMemberEvidenceRef(member TxAggregateMember, attemptID string) string {
+	ref, err := TxAggregateEvidenceRef([]TxAggregateMember{member}, scanEvidenceRefMax)
+	if err != nil {
+		return fmt.Sprintf("scan:v1 attempt=%s", attemptID)
+	}
+	suffix := " attempt=" + attemptID
+	if len(ref)+len(suffix) <= scanEvidenceRefMax {
+		return ref + suffix
+	}
+	return ref
 }
 
 // scanAuditReason summarizes the pending reasons of one batch (bounded,

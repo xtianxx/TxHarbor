@@ -418,6 +418,10 @@ type Classification struct {
 	// same identity reopens the original ticket, a different identity
 	// creates a linked ticket (FR-007).
 	Identity Identity
+	// Members enumerates the member log facts of a tx-aggregate detection
+	// (T035): they are persisted as occurrence evidence and never split the
+	// transaction into several tickets.
+	Members []TxAggregateMember
 	// Conclusion is the honest in-project three-way conclusion.
 	Conclusion Conclusion
 	// ExternalCredit is the upstream-ledger credit dimension state (FR-006).

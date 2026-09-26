@@ -66,6 +66,7 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"github.com/xtianxx/txharbor/internal/execution"
+	"github.com/xtianxx/txharbor/internal/indexer"
 	"github.com/xtianxx/txharbor/internal/txlifecycle"
 )
 
@@ -113,6 +114,11 @@ const (
 	// attempt graph, and "no row" is the definitive absence of a business
 	// record for the chain fact (US1 missing detection).
 	PGSourceTxHash PGSource = "tx_hash"
+	// PGSourceDepositCredits is one 004 deposit-credit read: the authoritative
+	// receive-side credit rows of a transaction. No row is the definitive
+	// absence of a deposit business record (T034). The table stays owned by
+	// internal/indexer; this token is evidence vocabulary only.
+	PGSourceDepositCredits PGSource = "deposit_credit_rows"
 )
 
 // PGStateStatus is the conservative availability verdict of one PG-state read.
@@ -428,6 +434,26 @@ type PGReceipt struct {
 	OrphanedAt        *time.Time
 }
 
+// PGDepositObservation is one stored 004 deposit-credit row: the authoritative
+// receive-side credit fact of one source log. Amount stays in its NUMERIC
+// domain (AmountText + big.Int); no float touches it. The stored 004 status is
+// 'pending' (005 confirmation owns the status change), so the row's mere
+// existence is the "PG deposit record exists" fact T034 compares against.
+type PGDepositObservation struct {
+	BlockNumber int64
+	BlockHash   string
+	TxHash      string
+	LogIndex    int64
+	Contract    string
+	Sender      string
+	Recipient   string
+	AmountText  string
+	Amount      *big.Int
+	Status      string
+	VersionSeq  int64
+	ObservedAt  time.Time
+}
+
 // PGGateContext is the read-only 006 gate snapshot observed with the read
 // (execution.RecoverySnapshotSQL; no SHARE lock). It contributes the recovery
 // version to the evidence version domain and pause context; it is never a
@@ -506,6 +532,11 @@ type PGStateRecord struct {
 	Attempts          []PGAttempt
 	AttemptsTruncated bool
 	Attempt           *PGAttempt
+
+	// Deposits are the stored 004 deposit-credit rows of a deposit business
+	// key (T034). Present iff the read is a deposit tx-hash read; an empty
+	// slice with Status absent is the definitive "no PG deposit row" fact.
+	Deposits []PGDepositObservation
 
 	Gate    PGGateContext
 	Version PGVersion
@@ -593,6 +624,13 @@ func (a *PGStateAdapter) Read(ctx context.Context, req PGReadRequest) (PGStateRe
 	}
 	rec.ReadAt = readAt
 
+	// Deposit reads are a separate authoritative source (the 004
+	// deposit-credit store): the withdrawal attempt graph, cross-check and
+	// finality evaluation do not apply to a receive-side credit fact.
+	if rec.BusinessType == BusinessDeposit {
+		return a.readDepositState(ctx, rec)
+	}
+
 	if err := a.readGraph(ctx, rec); err != nil {
 		rec.Freshness = PGFreshness{
 			Source:           rec.anchorSource(),
@@ -606,6 +644,49 @@ func (a *PGStateAdapter) Read(ctx context.Context, req PGReadRequest) (PGStateRe
 	if rec.Status != PGStateAbsent {
 		evaluatePGAttempt(rec)
 	}
+	a.finalizeRecord(rec)
+	return *rec, nil
+}
+
+// readDepositState materializes the stored 004 deposit-credit rows of one
+// transaction (T034) through the indexer-owned read path. It is strictly
+// read-only and one bounded query: no rows is the definitive absence of a
+// deposit business record; rows present are the authoritative credit facts
+// (amounts NUMERIC -> big.Int, never float). The 005 confirmation status is
+// carried verbatim and never concluded here.
+func (a *PGStateAdapter) readDepositState(ctx context.Context, rec *PGStateRecord) (PGStateRecord, error) {
+	stored, err := indexer.ReadDepositStoredObservations(ctx, a.db, rec.ChainID, []string{rec.BusinessKey.Value})
+	if err != nil {
+		markPGUnreachable(rec, PGSourceDepositCredits, err)
+		a.finalizeRecord(rec)
+		return *rec, err
+	}
+	rec.noteSource(PGSourceDepositCredits)
+	if len(stored) == 0 {
+		rec.Status = PGStateAbsent
+		a.finalizeRecord(rec)
+		return *rec, nil
+	}
+	deposits := make([]PGDepositObservation, 0, len(stored))
+	for i := range stored {
+		row := PGDepositObservation{
+			BlockNumber: stored[i].BlockNumber,
+			BlockHash:   stored[i].BlockHash,
+			TxHash:      stored[i].TxHash,
+			LogIndex:    stored[i].LogIndex,
+			Contract:    stored[i].Contract,
+			Sender:      stored[i].Sender,
+			Recipient:   stored[i].Recipient,
+			AmountText:  stored[i].AmountText,
+			Status:      stored[i].Status,
+			VersionSeq:  stored[i].VersionSeq,
+			ObservedAt:  stored[i].ObservedAt,
+		}
+		row.Amount = parsePGAmount(rec, "deposit_credit_rows", row.TxHash, row.AmountText)
+		rec.trackObserved(row.ObservedAt)
+		deposits = append(deposits, row)
+	}
+	rec.Deposits = deposits
 	a.finalizeRecord(rec)
 	return *rec, nil
 }
@@ -862,6 +943,9 @@ func (a *PGStateAdapter) finalizeRecord(rec *PGStateRecord) {
 
 // anchorSource names the table the read was keyed by.
 func (rec *PGStateRecord) anchorSource() PGSource {
+	if rec.BusinessType == BusinessDeposit {
+		return PGSourceDepositCredits
+	}
 	switch rec.BusinessKey.Kind {
 	case BusinessKeyRequestID:
 		return PGSourceWithdrawalRequest
@@ -1658,6 +1742,23 @@ func (r *PGStateRecord) CanonicalBytes() []byte {
 	if r.Attempt != nil {
 		pgCanonAttempt(w, "attempt", r.Attempt)
 		pgCanonAttemptDetail(w, "attempt", r.Attempt)
+	}
+
+	pgCanonBool(w, "deposits.present", len(r.Deposits) > 0)
+	pgCanonInt(w, "deposits.count", int64(len(r.Deposits)))
+	for i := range r.Deposits {
+		prefix := fmt.Sprintf("deposits.%d", i)
+		pgCanonInt(w, prefix+".block_number", r.Deposits[i].BlockNumber)
+		pgCanonString(w, prefix+".block_hash", r.Deposits[i].BlockHash)
+		pgCanonString(w, prefix+".tx_hash", r.Deposits[i].TxHash)
+		pgCanonInt(w, prefix+".log_index", r.Deposits[i].LogIndex)
+		pgCanonString(w, prefix+".contract", r.Deposits[i].Contract)
+		pgCanonString(w, prefix+".sender", r.Deposits[i].Sender)
+		pgCanonString(w, prefix+".recipient", r.Deposits[i].Recipient)
+		pgCanonMoney(w, prefix+".amount", r.Deposits[i].AmountText, r.Deposits[i].Amount)
+		pgCanonString(w, prefix+".status", r.Deposits[i].Status)
+		pgCanonInt(w, prefix+".version_seq", r.Deposits[i].VersionSeq)
+		pgCanonTime(w, prefix+".observed_at", r.Deposits[i].ObservedAt)
 	}
 
 	pgCanonBool(w, "gate.has_recovery", r.Gate.HasRecovery)

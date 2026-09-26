@@ -53,7 +53,9 @@ import (
 
 // chainFactsCanonicalVersion freezes the chain-party snapshot canonicalization
 // domain. Changing it changes every content hash and is a dedup-breaking change.
-const chainFactsCanonicalVersion = "txharbor.reconciliation.chainfacts.v1"
+// v2 adds the indexed topic1/topic2 transfer parameters (T033 direction
+// attribution); the amount stays raw hex in data.
+const chainFactsCanonicalVersion = "txharbor.reconciliation.chainfacts.v2"
 
 // ChainFactSource is the closed provenance vocabulary of chain evidence. A
 // source identifies one physical read path; the same path re-read (or one read
@@ -273,8 +275,12 @@ type ChainFactBlock struct {
 }
 
 // ChainFactLog is one indexed ERC-20 Transfer log fact (erc20_transfer_logs).
-// Amount and address payloads stay in their raw on-chain hex form (Data); the
-// adapter never parses them into floating point (integer/NUMERIC rule).
+// Amount and address payloads stay in their raw on-chain hex form (Data,
+// Topic1, Topic2); the adapter never parses an amount into floating point
+// (integer/NUMERIC rule). From/To are the normalized lowercase sender/recipient
+// addresses decoded from the indexed topic1/topic2 parameters; they are empty
+// when the topic is not a zero-padded 20-byte address, so an unknown direction
+// is never guessed (T033 direction/asset attribution reads these fields).
 type ChainFactLog struct {
 	BlockNumber int64  `json:"block_number"`
 	BlockHash   string `json:"block_hash"`
@@ -282,8 +288,24 @@ type ChainFactLog struct {
 	LogIndex    int64  `json:"log_index"`
 	Contract    string `json:"contract"`
 	Topic0      string `json:"topic0"`
+	Topic1      string `json:"topic1,omitempty"`
+	Topic2      string `json:"topic2,omitempty"`
+	From        string `json:"from,omitempty"`
+	To          string `json:"to,omitempty"`
 	Data        string `json:"data"`
 }
+
+// ChainFactsObservePGStatementCap / ChainFactsObserveRPCCallCap are the proven
+// upper bounds of the internal reads one Observe call issues (T038): ten
+// standalone SQL statements (header progress, header meta, log progress, log
+// meta, header pause, log pause, block rows, transfer-log rows, recovery
+// snapshot, recovery released) and at most three header RPCs (chain id, live
+// tip, live anchor). Budget seams charge these caps instead of guessing an
+// unbounded read count.
+const (
+	ChainFactsObservePGStatementCap = 10
+	ChainFactsObserveRPCCallCap     = 3
+)
 
 // ChainPause is one durable stream-pause row (indexer_pause / log_pause).
 type ChainPause struct {
@@ -751,6 +773,8 @@ func (b *ChainFactsBundle) CanonicalBytes() []byte {
 		w.int64Field(prefix+".log_index", log.LogIndex)
 		w.stringField(prefix+".contract", log.Contract)
 		w.stringField(prefix+".topic0", log.Topic0)
+		w.stringField(prefix+".topic1", log.Topic1)
+		w.stringField(prefix+".topic2", log.Topic2)
 		w.stringField(prefix+".data", log.Data)
 	}
 	return w.buf.Bytes()
@@ -1244,7 +1268,9 @@ func (a *ChainFactsAdapter) readBlocks(ctx context.Context, q ChainFactsQuery) (
 }
 
 // readLogs reads the erc20_transfer_logs rows of the bounded range in a stable
-// order. Payloads stay raw hex; no amount is parsed (integer rule).
+// order. Payloads stay raw hex; no amount is parsed (integer rule). topic1 and
+// topic2 are read as well and their low-20-byte address form is exposed as
+// From/To (empty when the topic is not zero-padded, never guessed).
 func (a *ChainFactsAdapter) readLogs(ctx context.Context, q ChainFactsQuery) ([]ChainFactLog, error) {
 	rows, err := a.pool.Query(ctx, chainFactsLogsSQL, q.ChainID, q.From, q.To)
 	if err != nil {
@@ -1253,14 +1279,47 @@ func (a *ChainFactsAdapter) readLogs(ctx context.Context, q ChainFactsQuery) ([]
 	defer rows.Close()
 	var out []ChainFactLog
 	for rows.Next() {
-		var log ChainFactLog
+		var (
+			log            ChainFactLog
+			topic1, topic2 string
+		)
 		if err := rows.Scan(&log.BlockNumber, &log.BlockHash, &log.TxHash, &log.LogIndex,
-			&log.Contract, &log.Topic0, &log.Data); err != nil {
+			&log.Contract, &log.Topic0, &topic1, &topic2, &log.Data); err != nil {
 			return nil, err
+		}
+		log.Topic1, log.Topic2 = topic1, topic2
+		if from, ok := chainTopicAddress(topic1); ok {
+			log.From = from
+		}
+		if to, ok := chainTopicAddress(topic2); ok {
+			log.To = to
 		}
 		out = append(out, log)
 	}
 	return out, rows.Err()
+}
+
+// chainTopicAddress decodes one 32-byte indexed topic into its canonical
+// lowercase 0x-prefixed 20-byte address. It returns ok=false for a malformed
+// shape or a non-zero high 12 bytes (a non-address topic) instead of guessing,
+// so an unattributable direction can never be read as a project address.
+func chainTopicAddress(topic string) (string, bool) {
+	trimmed := strings.ToLower(strings.TrimSpace(topic))
+	if len(trimmed) != 66 || !strings.HasPrefix(trimmed, "0x") {
+		return "", false
+	}
+	body := trimmed[2:]
+	if strings.Trim(body[:24], "0") != "" {
+		return "", false
+	}
+	for _, r := range body {
+		switch {
+		case r >= '0' && r <= '9', r >= 'a' && r <= 'f':
+		default:
+			return "", false
+		}
+	}
+	return "0x" + body[24:], true
 }
 
 // chainLiveObservation is one optional live header read: the tip plus any
@@ -1388,7 +1447,7 @@ WHERE chain_id = $1 AND number BETWEEN $2 AND $3
 ORDER BY number`
 
 	chainFactsLogsSQL = `
-SELECT block_number, block_hash, tx_hash, log_index, contract, topic0, data
+SELECT block_number, block_hash, tx_hash, log_index, contract, topic0, topic1, topic2, data
 FROM erc20_transfer_logs
 WHERE chain_id = $1 AND block_number BETWEEN $2 AND $3
 ORDER BY block_number, block_hash, tx_hash, log_index`

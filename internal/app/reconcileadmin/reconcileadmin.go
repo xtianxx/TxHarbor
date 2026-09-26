@@ -62,6 +62,7 @@ import (
 
 	"github.com/xtianxx/txharbor/internal/config"
 	"github.com/xtianxx/txharbor/internal/db"
+	"github.com/xtianxx/txharbor/internal/eth"
 	"github.com/xtianxx/txharbor/internal/logx"
 	"github.com/xtianxx/txharbor/internal/reconciliation"
 	"github.com/xtianxx/txharbor/internal/txlifecycle"
@@ -346,6 +347,18 @@ func reconcileSettleLimit(cfg *config.Config) (int, error) {
 	return cfg.Recon.SettleLimit, nil
 }
 
+// reconcileWindowProbes returns the required positive header-probe bound of the
+// T036 time window resolver. It is only demanded for time-scoped tasks; a
+// missing or non-positive value is refused by name (no default is invented, no
+// local value is claimed as a production threshold).
+func reconcileWindowProbes(cfg *config.Config) (int, error) {
+	if cfg.Recon.WindowMaxProbes <= 0 {
+		return 0, fmt.Errorf("time-scoped scan requires a positive %s (header probes per window resolution; no default)",
+			config.EnvReconWindowMaxProbes)
+	}
+	return cfg.Recon.WindowMaxProbes, nil
+}
+
 // reconcileAdminStart implements `start(scope, budget) -> created`.
 func reconcileAdminStart(ctx context.Context, args []string, d Deps) int {
 	stdout, stderr := d.stdout(), d.stderr()
@@ -533,6 +546,42 @@ func reconcileAdminScan(ctx context.Context, args []string, d Deps) int {
 		return 1
 	}
 
+	// Time-scoped tasks need the T036 window resolver: time->height mapping
+	// via the block-time reader, with every mapping query charged to the scan
+	// budget as it executes. A time task without the required positive probe
+	// bound is refused by name; no default is invented. Height-scoped tasks
+	// need no resolver.
+	var windowResolver reconciliation.ScanTimeWindowResolver
+	var windowClient *eth.Client
+	if task.ScopeKind == reconciliation.ScopeTime {
+		probes, err := reconcileWindowProbes(env.cfg)
+		if err != nil {
+			fmt.Fprintf(stderr, "txharbor reconcile-admin: %s\n", err)
+			return 1
+		}
+		client, err := eth.Dial(ctx, env.cfg.RPCURL, env.cfg.IndexRPCTimeout)
+		if err != nil {
+			fmt.Fprintf(stderr, "txharbor reconcile-admin: time window resolver RPC refused: %s\n", logx.Redact(err.Error()))
+			return 1
+		}
+		windowClient = client
+		defer windowClient.Close()
+		reader, err := reconciliation.NewHeaderBlockTimeReader(env.pool, windowClient, env.cfg.IndexRPCTimeout)
+		if err != nil {
+			fmt.Fprintf(stderr, "txharbor reconcile-admin: block-time reader refused: %s\n", logx.Redact(err.Error()))
+			return 1
+		}
+		resolver, err := reconciliation.NewTimeHeightResolver(reader, reconciliation.TimeHeightResolverConfig{
+			MaxProbes:  probes,
+			RPCTimeout: env.cfg.IndexRPCTimeout,
+		})
+		if err != nil {
+			fmt.Fprintf(stderr, "txharbor reconcile-admin: time window resolver refused: %s\n", logx.Redact(err.Error()))
+			return 1
+		}
+		windowResolver = resolver
+	}
+
 	result, scanErr := env.store.ScanOnce(ctx, reconciliation.ScanOnceRequest{
 		TaskID:             id,
 		Owner:              env.principal.String(),
@@ -544,20 +593,23 @@ func reconcileAdminScan(ctx context.Context, args []string, d Deps) int {
 			PG:     pgState,
 			Events: eventState,
 		},
-		Candidates: reconcileScanCandidates{
+		WindowResolver: windowResolver,
+		Candidates: &reconcileScanCandidates{
 			pool:          env.pool,
 			chainID:       task.ScopeChainID,
 			limit:         maxCandidates,
 			chain:         chainFacts,
 			businessTypes: task.BusinessTypes,
+			signerSenders: env.cfg.SignerSenders,
 		},
 	})
 
 	fmt.Fprintf(stdout,
-		"txharbor reconcile-admin: scan task_id=%s stop=%s stopped_state=%s attempts=%d committed=%d discarded=%d candidates=%d tickets=%d merged=%d occurrences=%d pending=%d absorbed=%d gaps=%d suspended=%t",
+		"txharbor reconcile-admin: scan task_id=%s stop=%s stopped_state=%s attempts=%d committed=%d discarded=%d candidates=%d tickets=%d merged=%d occurrences=%d pending=%d absorbed=%d unattributed=%d window_unmappable=%d window_invalidated=%d gaps=%d suspended=%t",
 		result.TaskID, result.Stop, result.StoppedState, result.Attempts, result.Committed,
 		result.Discarded, result.Candidates, result.Tickets, result.Merged, result.Occurrences,
-		result.Pending, result.Absorbed, result.Gaps, result.Suspended)
+		result.Pending, result.Absorbed, result.Unattributed, result.WindowUnmappable,
+		result.WindowInvalidated, result.Gaps, result.Suspended)
 	if result.LastCheckpoint != nil {
 		fmt.Fprintf(stdout, " checkpoint_seq=%d persisted_through=%s",
 			result.LastCheckpoint.Seq, reconcileBoundText(result.LastCheckpoint.ResultPersistedThrough))
@@ -779,29 +831,36 @@ func reconcileAdminShow(ctx context.Context, args []string, d Deps) int {
 
 // reconcileScanCandidates enumerates the read-only business candidates of one
 // claimed interval. It is the caller-supplied enumeration seam of ScanOnce
-// (T016): it never writes, never opens a transaction, and its error is
-// committed as a query_failed gap by ScanOnce (an interval can never close
-// silently over a failed or truncated enumeration).
+// (T016) and implements the T038 budgeted seam: every internal read is charged
+// through the budget callback as it executes (raw SQL one per query, the
+// chain-facts adapter call its proven statement/RPC cap), so an exhausted
+// budget stops the scan boundedly with an explicit gap and an honest
+// checkpoint. The legacy ScanCandidates entry point delegates here.
 //
-// Height intervals combine two bounded discovery passes:
+// Height intervals combine bounded discovery passes:
 //
 //   - PG-anchored: the canonical 011 receipts whose block lies in the
 //     interval; the candidate carries the receipt's chain anchor
 //     (block/hash/tx hash).
-//   - chain-first (US1 missing detection, FR-009): the durable indexed
-//     transfer-log facts of the interval (the same erc20_transfer_logs read
-//     path the T013 chain-facts adapter uses) are enumerated through the
-//     chain-facts reader, reverse checked against the authoritative
-//     withdrawal execution rows by tx hash (tx_attempt_signings/tx_receipts,
-//     read-only), and every chain transaction with no PG row becomes a
-//     missing candidate carrying the stable chain identity (tx_hash business
-//     key + block/log evidence reference). Classification stays with T017 and
-//     ScanOnce: this layer only reports the candidate and its evidence.
+//   - chain-first withdrawal (T033, FR-009): the durable indexed transfer-log
+//     facts of the interval are attributed to project withdrawals (from ∈ the
+//     configured sender set AND contract ∈ the asset allowlist) and reverse
+//     checked against the authoritative withdrawal execution rows by tx hash
+//     (tx_attempt_signings/tx_receipts, read-only). An attributed transaction
+//     with no PG row becomes a missing candidate carrying the stable chain
+//     identity (tx_hash business key, member-log evidence). A chain fact that
+//     is confirmed not attributable is metrics-only, never a ticket; an
+//     undecidable attribution (missing/blank/unreadable source) emits no
+//     chain-first candidate and records an explicit query_failed gap.
+//   - chain-first deposit (T034, FR-002/009): the same mechanism with the
+//     deposit direction (to ∈ the configured 004 watch addresses AND contract
+//     ∈ the asset allowlist); an attributed transfer whose member log has no
+//     stored 004 deposit-credit row becomes a deposit missing candidate
+//     (read through the indexer-owned read-only deposit API).
 //
-// Time intervals deliberately do not map time->heights: no chain anchor is
-// invented and the chain party stays unknown/pending (pending-by-design; a
-// dedicated window-resolver task owns that mapping, so time scopes stay
-// PG-anchored until then).
+// Time intervals deliberately do not map time->heights here: the T036 window
+// resolver owns that mapping in the compare loop, so this enumeration stays
+// PG-anchored for time scopes.
 //
 // Bounds and honesty (no silent truncation):
 //
@@ -812,13 +871,6 @@ func reconcileAdminShow(ctx context.Context, args []string, d Deps) int {
 //   - a chain read failure, an uncovered durable log stream, or orphaned block
 //     evidence fails the same way: chain-first discovery never claims a
 //     complete discovery set over evidence it could not prove complete;
-//   - chain-first candidates are attributed to the withdrawal business type
-//     only (the reverse-checked 011 rows are the withdrawal execution side); a
-//     scope without that business type keeps the PG-anchored enumeration. The
-//     pass deliberately does not attempt transfer-direction or asset
-//     attribution: each candidate carries its durable block/tx evidence
-//     reference and stays an alert-only signal for operator triage (no
-//     automatic disposition, FR-014);
 //   - only read-only SQL runs here. No business table is written, and no
 //     recovery, replay/unblock or payment path is ever invoked (FR-014/015/
 //     023).
@@ -826,13 +878,21 @@ type reconcileScanCandidates struct {
 	pool    *pgxpool.Pool
 	chainID string
 	limit   int
-	// chain is the read-only chain-facts surface (T013). The chain-first pass
-	// consumes its canonical transfer-log facts and its durable log-stream
-	// coverage only; the confirmation gate stays with the compare loop.
+	// chain is the read-only chain-facts surface (T013). The chain-first
+	// passes consume its canonical transfer-log facts and its durable
+	// log-stream coverage only; the confirmation gate stays with the compare
+	// loop.
 	chain reconciliation.ChainFactsReader
 	// businessTypes is the task scope's closed business-type set; chain-first
 	// candidates must stay inside it.
 	businessTypes []reconciliation.BusinessType
+	// signerSenders is the configured withdrawal sender allowlist
+	// (TXHARBOR_SIGNER_SENDERS); it is canonicalized and validated by the
+	// attribution pass, never redefined here.
+	signerSenders []string
+	// attribution is the lazily resolved attribution source set, cached for
+	// the invocation.
+	attribution *reconcileAttribution
 }
 
 const reconcileCandidatesTimeSQL = `
@@ -872,51 +932,127 @@ FROM (
     WHERE a.chain_id = $1 AND r.tx_hash = ANY($2::text[])
 ) resolved`
 
-// ScanCandidates implements reconciliation.ScanCandidateSource.
-func (s reconcileScanCandidates) ScanCandidates(ctx context.Context, interval reconciliation.ScanInterval) ([]reconciliation.ScanCandidate, error) {
+// reconcileNoChargeBudget is the no-op budget used by the legacy
+// ScanCandidates entry point (direct callers only; the ScanOnce compare loop
+// always uses the charged EnumerateCandidates path).
+type reconcileNoChargeBudget struct{}
+
+// ConsumePG implements reconciliation.ScanQueryBudget.
+func (reconcileNoChargeBudget) ConsumePG(ctx context.Context, requests int) error { return nil }
+
+// ConsumeRPC implements reconciliation.ScanQueryBudget.
+func (reconcileNoChargeBudget) ConsumeRPC(ctx context.Context, requests int) error { return nil }
+
+// ScanCandidates implements the legacy reconciliation.ScanCandidateSource by
+// delegating to the budgeted enumeration without a charge seam.
+func (s *reconcileScanCandidates) ScanCandidates(ctx context.Context, interval reconciliation.ScanInterval) ([]reconciliation.ScanCandidate, error) {
+	enumeration, err := s.EnumerateCandidates(ctx, interval, reconcileNoChargeBudget{})
+	if err != nil {
+		return nil, err
+	}
+	return enumeration.Candidates, nil
+}
+
+// EnumerateCandidates implements reconciliation.BudgetedScanCandidateSource
+// (T038): every internal read is charged through budget as it executes.
+func (s *reconcileScanCandidates) EnumerateCandidates(ctx context.Context, interval reconciliation.ScanInterval,
+	budget reconciliation.ScanQueryBudget) (reconciliation.ScanEnumeration, error) {
 	if s.pool == nil {
-		return nil, errors.New("candidate enumeration is not wired")
+		return reconciliation.ScanEnumeration{}, errors.New("candidate enumeration is not wired")
+	}
+	if budget == nil {
+		return reconciliation.ScanEnumeration{}, errors.New("candidate enumeration requires a query budget")
 	}
 	if s.limit <= 0 {
-		return nil, errors.New("candidate enumeration limit must be positive")
+		return reconciliation.ScanEnumeration{}, errors.New("candidate enumeration limit must be positive")
 	}
 	chainID, err := strconv.ParseInt(strings.TrimSpace(s.chainID), 10, 64)
 	if err != nil || chainID <= 0 {
-		return nil, fmt.Errorf("candidate enumeration requires a numeric chain id, got %q", s.chainID)
+		return reconciliation.ScanEnumeration{}, fmt.Errorf("candidate enumeration requires a numeric chain id, got %q", s.chainID)
 	}
 	switch interval.From.Kind {
 	case reconciliation.ScopeHeight:
-		return s.scanHeightCandidates(ctx, chainID, interval.From.Height, interval.To.Height)
+		return s.enumerateHeightCandidates(ctx, chainID, interval.From.Height, interval.To.Height, budget)
 	case reconciliation.ScopeTime:
-		return s.scanTimeCandidates(ctx, chainID, interval.From.Time, interval.To.Time)
+		return s.enumerateTimeCandidates(ctx, chainID, interval.From.Time, interval.To.Time, budget)
 	default:
-		return nil, fmt.Errorf("candidate enumeration does not know scope kind %q", interval.From.Kind)
+		return reconciliation.ScanEnumeration{}, fmt.Errorf("candidate enumeration does not know scope kind %q", interval.From.Kind)
 	}
 }
 
-// scanHeightCandidates combines the PG-anchored and chain-first passes under
-// the shared MAX_CANDIDATES bound.
-func (s reconcileScanCandidates) scanHeightCandidates(ctx context.Context, chainID, from, to int64) ([]reconciliation.ScanCandidate, error) {
-	pgCandidates, err := s.scanPGHeightCandidates(ctx, chainID, from, to)
+// enumerateHeightCandidates combines the PG-anchored and chain-first passes
+// under the shared MAX_CANDIDATES bound.
+func (s *reconcileScanCandidates) enumerateHeightCandidates(ctx context.Context, chainID, from, to int64,
+	budget reconciliation.ScanQueryBudget) (reconciliation.ScanEnumeration, error) {
+	enum := reconciliation.ScanEnumeration{}
+	pgCandidates, err := s.scanPGHeightCandidates(ctx, chainID, from, to, budget)
 	if err != nil {
-		return nil, err
+		return enum, err
 	}
-	chainCandidates, err := s.scanChainFirstHeightCandidates(ctx, chainID, from, to)
+	enum.Candidates = append(enum.Candidates, pgCandidates...)
+
+	needWithdrawal := reconcileHasBusinessType(s.businessTypes, reconciliation.BusinessWithdrawal)
+	needDeposit := reconcileHasBusinessType(s.businessTypes, reconciliation.BusinessDeposit)
+	if !needWithdrawal && !needDeposit {
+		return enum, nil
+	}
+	if s.chain == nil {
+		return enum, errors.New("chain-first enumeration requires the chain-facts reader (no silent skip)")
+	}
+	bundle, err := s.observeChainFirst(ctx, chainID, from, to, budget)
 	if err != nil {
-		return nil, err
+		return enum, err
 	}
-	if len(pgCandidates)+len(chainCandidates) > s.limit {
-		return nil, fmt.Errorf(
-			"candidate enumeration %d..%d exceeds the bound of %d candidates (%d PG-anchored + %d chain-first); refusing a silent truncation",
-			from, to, s.limit, len(pgCandidates), len(chainCandidates))
+	if err := s.loadAttribution(ctx, chainID, budget); err != nil {
+		return enum, err
 	}
-	return append(pgCandidates, chainCandidates...), nil
+
+	var passes []reconcileChainFirstPass
+	if needWithdrawal {
+		withdrawalPass, err := s.withdrawalChainFirstPass(ctx, chainID, bundle.Logs, budget)
+		if err != nil {
+			return enum, err
+		}
+		passes = append(passes, withdrawalPass)
+	}
+	if needDeposit {
+		depositPass, err := s.depositChainFirstPass(ctx, chainID, bundle.Logs, budget)
+		if err != nil {
+			return enum, err
+		}
+		passes = append(passes, depositPass)
+	}
+	mergeChainFirstPasses(&enum, passes...)
+
+	if len(enum.Candidates) > s.limit {
+		return enum, fmt.Errorf(
+			"candidate enumeration %d..%d exceeds the bound of %d candidates; refusing a silent truncation",
+			from, to, s.limit)
+	}
+	return enum, nil
+}
+
+// enumerateTimeCandidates enumerates withdrawal requests created inside the
+// time interval. One extra row is read so an overflow past the bound is
+// detected instead of silently truncated; no time->height mapping is attempted
+// here (the T036 window resolver owns that in the compare loop).
+func (s *reconcileScanCandidates) enumerateTimeCandidates(ctx context.Context, chainID int64,
+	from, to time.Time, budget reconciliation.ScanQueryBudget) (reconciliation.ScanEnumeration, error) {
+	candidates, err := s.scanTimeCandidates(ctx, chainID, from, to, budget)
+	if err != nil {
+		return reconciliation.ScanEnumeration{}, err
+	}
+	return reconciliation.ScanEnumeration{Candidates: candidates}, nil
 }
 
 // scanPGHeightCandidates enumerates canonical receipts inside the height
 // interval. One extra row is read so an overflow past the bound is detected
-// instead of silently truncated.
-func (s reconcileScanCandidates) scanPGHeightCandidates(ctx context.Context, chainID, from, to int64) ([]reconciliation.ScanCandidate, error) {
+// instead of silently truncated; the single query is charged as it executes.
+func (s *reconcileScanCandidates) scanPGHeightCandidates(ctx context.Context, chainID, from, to int64,
+	budget reconciliation.ScanQueryBudget) ([]reconciliation.ScanCandidate, error) {
+	if err := budget.ConsumePG(ctx, 1); err != nil {
+		return nil, err
+	}
 	rows, err := s.pool.Query(ctx, reconcileCandidatesHeightSQL, chainID, from, to, s.limit+1)
 	if err != nil {
 		return nil, fmt.Errorf("enumerate height candidates: %w", err)
@@ -957,136 +1093,6 @@ func (s reconcileScanCandidates) scanPGHeightCandidates(ctx context.Context, cha
 	return out, nil
 }
 
-// scanChainFirstHeightCandidates enumerates the durable indexed transfer-log
-// facts of one height interval and reports every chain transaction with no
-// authoritative PG row as a missing candidate. The chain-facts reader supplies
-// the canonical log facts and the log-stream coverage proof; the reverse check
-// confirms the absence inside PostgreSQL.
-func (s reconcileScanCandidates) scanChainFirstHeightCandidates(ctx context.Context, chainID, from, to int64) ([]reconciliation.ScanCandidate, error) {
-	if !reconcileHasBusinessType(s.businessTypes, reconciliation.BusinessWithdrawal) {
-		// The reverse-checked 011 rows are the withdrawal execution side;
-		// without the withdrawal business type a chain-only fact has no
-		// attributable scope identity, so this pass is skipped (the
-		// PG-anchored pass still covers the scope's own business types).
-		return nil, nil
-	}
-	if s.chain == nil {
-		return nil, errors.New("chain-first enumeration requires the chain-facts reader (no silent skip)")
-	}
-	bundle, err := s.chain.Observe(ctx, reconciliation.ChainFactsQuery{
-		ChainID:          chainID,
-		From:             from,
-		To:               to,
-		NeedTransferLogs: true,
-	})
-	if err != nil {
-		return nil, fmt.Errorf("chain-first enumeration %d..%d: %w", from, to, err)
-	}
-	if bundle.Orphaned {
-		return nil, fmt.Errorf("chain-first enumeration %d..%d: block evidence is orphaned; refusing to derive permanent missing candidates", from, to)
-	}
-	if !bundle.Coverage.LogRangeCovered {
-		return nil, fmt.Errorf("chain-first enumeration %d..%d: the durable log stream does not cover the interval; refusing to claim a complete discovery set", from, to)
-	}
-	facts, overflow := reconcileChainFirstTxFacts(bundle.Logs, s.limit)
-	if overflow {
-		return nil, fmt.Errorf("chain-first enumeration %d..%d: more than %d distinct chain transactions; refusing a silent truncation",
-			from, to, s.limit)
-	}
-	if len(facts) == 0 {
-		return nil, nil
-	}
-	pgTxHashes, err := s.pgTxHashes(ctx, chainID, facts)
-	if err != nil {
-		return nil, err
-	}
-	out := make([]reconciliation.ScanCandidate, 0, len(facts))
-	for i := range facts {
-		if _, covered := pgTxHashes[facts[i].txHash]; covered {
-			// The transaction already has an authoritative PG row; the
-			// PG-anchored pass owns it (no duplicate coverage here).
-			continue
-		}
-		out = append(out, reconciliation.ScanCandidate{
-			BusinessType: reconciliation.BusinessWithdrawal,
-			BusinessKey: reconciliation.BusinessKey{
-				Kind:  reconciliation.BusinessKeyTxHash,
-				Value: facts[i].txHash,
-			},
-			ChainFact: reconciliation.ChainFactRef{
-				BlockNumber: facts[i].blockNumber,
-				BlockHash:   facts[i].blockHash,
-				TxHash:      facts[i].txHash,
-			},
-			EvidenceRef: fmt.Sprintf("scan:candidates:chain tx_hash=%s block=%d", facts[i].txHash, facts[i].blockNumber),
-		})
-	}
-	return out, nil
-}
-
-// reconcileChainFirstTxFact is one distinct chain transaction discovered by
-// the chain-first pass: the first (lowest block/log index) durable transfer
-// fact of the transaction anchors the candidate's chain identity.
-type reconcileChainFirstTxFact struct {
-	txHash      string
-	blockNumber int64
-	blockHash   string
-}
-
-// reconcileChainFirstTxFacts groups the ordered transfer-log facts by
-// transaction hash (first occurrence wins; the log order is deterministic),
-// normalizes the hash, and reports an overflow past the bound instead of
-// truncating silently.
-func reconcileChainFirstTxFacts(logs []reconciliation.ChainFactLog, limit int) ([]reconcileChainFirstTxFact, bool) {
-	out := make([]reconcileChainFirstTxFact, 0, len(logs))
-	seen := make(map[string]struct{}, len(logs))
-	for i := range logs {
-		txHash := strings.ToLower(strings.TrimSpace(logs[i].TxHash))
-		if txHash == "" {
-			continue
-		}
-		if _, dup := seen[txHash]; dup {
-			continue
-		}
-		seen[txHash] = struct{}{}
-		out = append(out, reconcileChainFirstTxFact{
-			txHash:      txHash,
-			blockNumber: logs[i].BlockNumber,
-			blockHash:   logs[i].BlockHash,
-		})
-		if len(out) > limit {
-			return nil, true
-		}
-	}
-	return out, false
-}
-
-// pgTxHashes returns the subset of the given tx hashes that already has an
-// authoritative withdrawal execution row on the scoped chain.
-func (s reconcileScanCandidates) pgTxHashes(ctx context.Context, chainID int64, facts []reconcileChainFirstTxFact) (map[string]struct{}, error) {
-	hashes := make([]string, 0, len(facts))
-	for i := range facts {
-		hashes = append(hashes, facts[i].txHash)
-	}
-	rows, err := s.pool.Query(ctx, reconcilePGTxHashLookupSQL, chainID, hashes)
-	if err != nil {
-		return nil, fmt.Errorf("chain-first PG reverse lookup: %w", err)
-	}
-	defer rows.Close()
-	out := make(map[string]struct{}, len(hashes))
-	for rows.Next() {
-		var txHash string
-		if err := rows.Scan(&txHash); err != nil {
-			return nil, fmt.Errorf("chain-first PG reverse lookup: %w", err)
-		}
-		out[strings.ToLower(strings.TrimSpace(txHash))] = struct{}{}
-	}
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("chain-first PG reverse lookup: %w", err)
-	}
-	return out, nil
-}
-
 // reconcileHasBusinessType reports whether the scope's closed set contains the
 // given business type.
 func reconcileHasBusinessType(types []reconciliation.BusinessType, want reconciliation.BusinessType) bool {
@@ -1101,8 +1107,13 @@ func reconcileHasBusinessType(types []reconciliation.BusinessType, want reconcil
 // scanTimeCandidates enumerates withdrawal requests created inside the time
 // interval. One extra row is read so an overflow past the bound is detected
 // instead of silently truncated; no time->height mapping is attempted here
-// (pending-by-design until a window resolver exists).
-func (s reconcileScanCandidates) scanTimeCandidates(ctx context.Context, chainID int64, from, to time.Time) ([]reconciliation.ScanCandidate, error) {
+// (the T036 window resolver owns that mapping in the compare loop). The single
+// query is charged as it executes.
+func (s *reconcileScanCandidates) scanTimeCandidates(ctx context.Context, chainID int64, from, to time.Time,
+	budget reconciliation.ScanQueryBudget) ([]reconciliation.ScanCandidate, error) {
+	if err := budget.ConsumePG(ctx, 1); err != nil {
+		return nil, err
+	}
 	rows, err := s.pool.Query(ctx, reconcileCandidatesTimeSQL, chainID, from, to, s.limit+1)
 	if err != nil {
 		return nil, fmt.Errorf("enumerate time candidates: %w", err)
@@ -1309,7 +1320,7 @@ func reconcileAdminUsage(w io.Writer) {
 	fmt.Fprintln(w, "       txharbor reconcile-admin cancel --task-id UUID --reason R")
 	fmt.Fprintln(w, "       txharbor reconcile-admin show --task-id UUID")
 	fmt.Fprintln(w, "start requires --confirm-threshold-n N (integer >= 1, no default): the confirm policy depth snapshotted into the task's policy_refs as the scan's chain-evidence confirmation basis; a local test value is never a production threshold")
-	fmt.Fprintln(w, "scan enumerates candidates from the authoritative PG rows (007 requests by time window; 011 canonical receipts by height window) and, for height scopes, chain-first enumerates the durable indexed transfer facts (bounded read-only) and reports chain transactions with no PG execution row as missing candidates; time scopes stay PG-anchored (no time->height mapping: pending-by-design until a window resolver exists)")
+	fmt.Fprintln(w, "scan enumerates candidates from the authoritative PG rows (007 requests by time window; 011 canonical receipts by height window) and, for height scopes, chain-first enumerates the durable indexed transfer facts with direction/asset attribution: attributed project withdrawals (from in the configured signer sender allowlist and contract in the 004 asset allowlist) and deposits (to in the 004 watch addresses) with no PG business row become missing candidates; confirmed-unattributed facts are metrics-only; undecidable attribution leaves an explicit gap and never a missing claim. Time scopes resolve time->height through the window resolver (block-time reader; header probes charged to the budget)")
 	fmt.Fprintln(w, "budget keys (required positive; no defaults): "+strings.Join([]string{
 		config.EnvReconPrincipal,
 		config.EnvReconConcurrency,
@@ -1324,4 +1335,5 @@ func reconcileAdminUsage(w io.Writer) {
 		config.EnvReconMaxEventRows,
 		config.EnvReconSettleLimit,
 	}, " "))
+	fmt.Fprintln(w, "time-scoped scans additionally require a positive "+config.EnvReconWindowMaxProbes+" (bounded header probes per window resolution; no default)")
 }

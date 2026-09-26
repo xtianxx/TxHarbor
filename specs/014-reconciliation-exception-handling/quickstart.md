@@ -26,6 +26,7 @@ Backend-only validation. No product code exists yet; run the named suites only a
 
 - 普通 PR：unit/contract/小 integration（PG tags）；重载（大扫描/fault/perf/长基准）走独立标签与 `fault-perf.yml`，不新增普通 PR 长测。
 - 本地值≠生产阈值：暂停响应/配额/容忍窗实测填入，不宣称生产结论（Q3-6）。
+- 确认参数与旧任务（T037，Q5）：`--confirm-threshold-n` 为对账观察参数（来源=start 显式参数，快照=`task.policy_refs`），不写 `confirmation_policy_history`，不改变 005 确认语义；`policy_refs`/scope/budget 创建时确定、无修订事务，变更走 cancel＋重建；收口前已创建的 `policy_refs='{}'` 旧任务链证据恒 pending（fail-closed），须重建，禁止静默默认值。
 
 ### tags × suites 对照矩阵
 
