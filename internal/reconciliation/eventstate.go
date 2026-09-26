@@ -663,16 +663,26 @@ func (i EventStateInterval) Kind() ScopeKind { return i.From.Kind }
 // interval. Scope supplies the chain id and the closed business-type set; the
 // interval supplies the height/time window of the claimed attempt.
 //
-// A height-scoped interval can only attribute outbox rows that carry a block
-// identity (evm_log events). Business-object rows carry no block number, so
-// callers that reconcile them must also pass the interval's OccurredFrom/To
-// time window (resolved from chain block times by T013); without it the bundle
-// stays incomplete instead of silently under-covering.
+// A height-scoped interval attributes outbox rows through two alternative
+// paths: evm_log rows by their exact block identity, and blockless
+// business-object rows by the interval's resolved OccurredFrom/To chain-time
+// window (endpoint heights exact and inclusive; the chain times are the
+// header's own second-precision timestamps, closed at the next height's chain
+// time so adjacent intervals tile without a seam; resolved by the T036 height
+// window resolver, with an unclosable right seam declared as a caller gap).
+// Without the resolved window only block-identified rows are attributable and
+// the bundle stays incomplete instead of silently under-covering; the window
+// is never guessed from a local clock or an index insert time, and no
+// sub-second precision is claimed.
 type EventStateQuery struct {
 	Scope    IdentityScope      `json:"scope"`
 	Interval EventStateInterval `json:"interval"`
-	// OccurredFrom/OccurredTo optionally narrow the observation by emission
-	// (business) time; both or neither.
+	// OccurredFrom/OccurredTo carry the interval's resolved occurrence-time
+	// window (both or neither). For a time interval they narrow the
+	// occurred_at filter; for a height interval they are the alternative
+	// attribution path for blockless business-object rows (OR-ed with the
+	// exact block-identity window), resolved from chain block times — never
+	// guessed. Times carry chain-header second precision.
 	OccurredFrom *time.Time `json:"occurred_from,omitempty"`
 	OccurredTo   *time.Time `json:"occurred_to,omitempty"`
 	// Consumers are the registered consumers that own the scope's event
@@ -816,6 +826,62 @@ func (e *EventStateEvidence) addEvidence(source EventDeliverySource, ref string)
 // verdict. Only a complete bundle (fresh, closed, connected) can.
 func (e *EventStateEvidence) CanSupportConsistent() bool {
 	return e != nil && e.Status == EventDeliveryComplete
+}
+
+// CoverageClosed reports whether the bundle's own observation window is
+// closed, independently of the upstream receipt declaration. It differs from
+// CanSupportConsistent in exactly one dimension: an unconnected or
+// unconfigured upstream receipt source downgrades Status (FR-006), but it is
+// an input of the classifier's upstream-credit verdict
+// (Observation.Upstream / ExternalCredit), not a defect of the event-delivery
+// coverage. The compare loop therefore uses this predicate for ScanComplete
+// while the classifier keeps ExternalCredit at its honest (usually
+// unverified) state and still refuses a consistent conclusion without a
+// connected, available source.
+//
+// The predicate is deliberately exact, never a superset of "complete": a
+// complete bundle is closed; an incomplete bundle is closed only when every
+// recorded reason is an upstream-connectivity mark or a purely informational
+// note (the always-recorded external-credit reason and the absorbed-duplicate
+// metrics-only marker). Any other reason (truncated scope, unknown row shape,
+// unclosed delivery, no registered consumer, open quarantine, blocked publish,
+// unproven duplicate, unreadable progress, failed audit probe, height scope
+// without a time window, stale or unknown reads) means the delivery coverage
+// itself is unproven and the observation must stay pending/gap.
+func (e *EventStateEvidence) CoverageClosed() bool {
+	if e == nil {
+		return false
+	}
+	switch e.Status {
+	case EventDeliveryComplete:
+		return true
+	case EventDeliveryIncomplete:
+		if len(e.Reasons) == 0 {
+			// An unexplained incomplete status cannot prove its own reason;
+			// fail closed.
+			return false
+		}
+		for _, reason := range e.Reasons {
+			switch reason {
+			case EventReasonReceiptUnconnected, EventReasonReceiptUnconfigured,
+				EventReasonExternalCreditUnprovable,
+				// EventReasonDuplicateAbsorbed is informational only: it is
+				// recorded alongside an already terminal, legally absorbed
+				// duplicate (metrics-only, no downgrade). Excluding it would
+				// let one absorbed duplicate fail the whole interval's coverage
+				// and re-mask fully proven local facts through the Q4 path,
+				// while the classifier's absorbed-duplicate verdict is
+				// unchanged (classify.go).
+				EventReasonDuplicateAbsorbed:
+				// Upstream-declaration dimension (owned by the classifier) and
+				// informational notes: not delivery-coverage marks.
+			default:
+				return false
+			}
+		}
+		return true
+	}
+	return false
 }
 
 // EmptyCovered reports whether the scope was covered and contained no event
@@ -1345,23 +1411,42 @@ func (a *EventStateAdapter) readOutboxRows(ctx context.Context, q EventStateQuer
 }
 
 // eventStateOutboxWhere builds the scope predicate of the outbox read.
+//
+// A height interval covers two row shapes through two alternative (OR-ed)
+// attribution paths, never a conjunction: evm_log rows by their exact block
+// identity (the chain-anchored path), and blockless business_object rows by
+// the interval's resolved chain-time window (the only time axis such rows
+// carry). AND-ing the two would silently drop an evm_log row whose occurred_at
+// (emission time) is later than its block's chain time even though its block is
+// inside the interval. Without the resolved window only the block path is
+// attributable, so Observe marks the bundle incomplete
+// (EventReasonHeightScopeWithoutTime) and the caller can never claim absence
+// over blockless rows.
 func eventStateOutboxWhere(q EventStateQuery, chainID int64) (string, []any) {
 	args := &eventStateArgs{}
 	predicates := []string{"chain_id = " + args.add(chainID)}
 	switch q.Interval.Kind() {
 	case ScopeHeight:
-		predicates = append(predicates,
-			"block_number >= "+args.add(q.Interval.From.Height),
-			"block_number <= "+args.add(q.Interval.To.Height))
+		blockWindow := "block_number >= " + args.add(q.Interval.From.Height) +
+			" AND block_number <= " + args.add(q.Interval.To.Height)
+		if q.OccurredFrom != nil {
+			observedWindow := "occurred_at >= " + args.add(*q.OccurredFrom) +
+				" AND occurred_at <= " + args.add(*q.OccurredTo)
+			predicates = append(predicates, "("+blockWindow+" OR "+observedWindow+")")
+		} else {
+			predicates = append(predicates, blockWindow)
+		}
 	case ScopeTime:
 		predicates = append(predicates,
 			"occurred_at >= "+args.add(q.Interval.From.Time),
 			"occurred_at <= "+args.add(q.Interval.To.Time))
-	}
-	if q.OccurredFrom != nil {
-		predicates = append(predicates,
-			"occurred_at >= "+args.add(*q.OccurredFrom),
-			"occurred_at <= "+args.add(*q.OccurredTo))
+		// A time interval already filters occurred_at exactly; a caller-supplied
+		// window only narrows it further, so it stays a conjunction.
+		if q.OccurredFrom != nil {
+			predicates = append(predicates,
+				"occurred_at >= "+args.add(*q.OccurredFrom),
+				"occurred_at <= "+args.add(*q.OccurredTo))
+		}
 	}
 	if predicate, ok := eventStateBusinessPredicate(q.Scope.BusinessTypes, args); ok {
 		predicates = append(predicates, predicate)
@@ -2206,9 +2291,13 @@ func (a *EventStateAdapter) applyFreshness(evidence *EventStateEvidence, q Event
 	}
 }
 
-// applyUpstream enforces FR-006: every scope business type must have a
-// connected receipt declaration; anything less keeps the bundle incomplete and
-// a connected declaration still never proves upstream success.
+// applyUpstream enforces FR-006 declaration semantics, identical in substance
+// to the chain-facts adapter's applyUpstream: a missing declaration for a
+// scope business type counts as unconfigured, a declaration with
+// Connected=false counts as unconnected, and either downgrades the bundle to
+// incomplete. A connected declaration still never proves upstream success;
+// the ExternalCredit verdict itself is derived by the classifier from
+// Observation.Upstream, not from this status (see CoverageClosed).
 func (a *EventStateAdapter) applyUpstream(evidence *EventStateEvidence) {
 	declared := make(map[BusinessType]ChainUpstreamReceiptSource, len(evidence.UpstreamReceipts))
 	for _, item := range evidence.UpstreamReceipts {

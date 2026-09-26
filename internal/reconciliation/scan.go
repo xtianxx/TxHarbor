@@ -859,6 +859,21 @@ func insertGapTx(ctx context.Context, tx pgx.Tx, taskID string, start, end Range
 //     incomplete/stale/unknown bundle, an orphaned fact, an unconnected or
 //     unavailable upstream receipt source, or an unproven freshness gate all
 //     yield incomplete/pending, never consistent (FR-004/005/006/017/018).
+//     The upstream receipt declaration is the one input that is not a coverage
+//     gate: it is carried by Observation.Upstream (ExternalCredit) exactly as
+//     the T017 classifier owns it, so an unconnected upstream keeps the
+//     external-credit dimension unverified and still forbids a consistent
+//     verdict, but it never masks a fully proven local fact (a chain present
+//     without its business row, an absent chain fact, a divergence). See
+//     ChainFactsBundle.CoverageClosed / EventStateEvidence.CoverageClosed.
+//   - Height-scoped intervals resolve their chain-time window
+//     (OccurredFrom/To) from chain block times before the event read (endpoint
+//     heights exact, header second precision, right seam closed at the next
+//     height), so the event adapter can attribute blockless business-object
+//     rows without guessing; an unprovable mapping is an explicit gap, an
+//     unclosable right seam is an explicit gap declaration, and a
+//     reorg-invalidated mapping stays pending. A height interval without the
+//     resolved window keeps the event party incomplete, never an absence.
 //   - Legal absorbed duplicates (Q4) create no ticket: metrics/audit only.
 //   - Divergences dedup by stable identity: the same identity reuses the
 //     original ticket row and appends a discrepancy_occurrence evidence row
@@ -1055,6 +1070,13 @@ type ScanOnceRequest struct {
 	// gap from the pending classification): an unmapped range is never read as
 	// proof that no chain fact exists.
 	WindowResolver ScanTimeWindowResolver
+	// HeightWindowResolver resolves height-scoped intervals to the chain-time
+	// window (OccurredFrom/To) the event adapter needs to attribute blockless
+	// business-object rows: endpoint heights exact, header second precision,
+	// right seam closed at the next height. Nil keeps height scopes
+	// pending-by-design (the event adapter refuses to cover blockless rows):
+	// an unresolved event-time coverage is never an absence claim.
+	HeightWindowResolver ScanHeightTimeWindowResolver
 	// EventConsumers/EventQuarantine are passed through to the event
 	// adapter. The event adapter requires a quarantine reader whenever
 	// consumers are registered; ScanOnce refuses the mismatched shape up
@@ -1093,9 +1115,11 @@ type ScanOnceResult struct {
 	// Unattributed counts chain facts the enumerator proved outside the
 	// project address/asset attribution: metrics-only, never tickets (T033).
 	Unattributed int
-	// WindowUnmappable/WindowInvalidated count time intervals whose T036
+	// WindowUnmappable/WindowInvalidated count intervals whose chain-time
 	// mapping could not be proven (explicit gap) or was reorg-invalidated
-	// (pending). Both stay pending observations.
+	// (pending): the T036 time→height mapping for time scopes and the
+	// height→time event window for height scopes. Both stay pending
+	// observations.
 	WindowUnmappable  int
 	WindowInvalidated int
 	Gaps              int
@@ -1461,6 +1485,72 @@ func scanChainWindow(ctx context.Context, req *ScanOnceRequest, task *Task, inte
 	return chainWindowResult{from: from, to: to, resolved: true}, nil
 }
 
+// eventTimeWindowResult is the outcome of resolving one height interval's
+// chain-time window for the event adapter's OccurredFrom/To boundary. from/to
+// are set only when the window was proven; gap marks an unmappable resolution
+// (explicit uncovered range); boundaryUnproven marks a resolved window whose
+// right seam to the next height could not be closed (explicit gap, the window
+// itself still usable); status/reason record the outcome for the invocation
+// counters and audit evidence.
+type eventTimeWindowResult struct {
+	from             *time.Time
+	to               *time.Time
+	gap              bool
+	boundaryUnproven bool
+	status           WindowStatus
+	reason           string
+}
+
+// scanEventTimeWindow resolves the chain-time window of a height-scoped
+// interval so the event adapter can attribute blockless business-object rows
+// without guessing. It is a no-op for time-scoped intervals (their own
+// occurred_at window already is the query boundary), without an event adapter,
+// and without the T036 height window seam — in those cases the event adapter
+// keeps the interval incomplete instead of the compare loop fabricating
+// coverage. The resolution comes from chain block times with canonical
+// endpoint verification (reorg => invalidated/pending, unprovable =>
+// unmappable/gap); every mapping query is charged to the budget as it
+// executes.
+func scanEventTimeWindow(ctx context.Context, req *ScanOnceRequest, task *Task,
+	interval ScanInterval, budget *Budget) (eventTimeWindowResult, error) {
+	if req.Sources.Events == nil || interval.From.Kind != ScopeHeight {
+		return eventTimeWindowResult{}, nil
+	}
+	if req.HeightWindowResolver == nil {
+		return eventTimeWindowResult{}, nil
+	}
+	chainID, ok := scanNumericChainID(task)
+	if !ok {
+		// A symbolic chain identity cannot be read by the resolver; the event
+		// window stays unresolved (pending-by-design, no absence claim).
+		return eventTimeWindowResult{}, nil
+	}
+	resolution, err := req.HeightWindowResolver.ResolveHeightTimeWindow(ctx, chainID, interval, budget)
+	if err != nil {
+		return eventTimeWindowResult{}, err
+	}
+	if err := resolution.Validate(); err != nil {
+		return eventTimeWindowResult{}, err
+	}
+	switch resolution.Status {
+	case WindowResolved:
+		from, to := resolution.From.UTC(), resolution.To.UTC()
+		return eventTimeWindowResult{
+			from:             &from,
+			to:               &to,
+			boundaryUnproven: resolution.BoundaryUnproven,
+			reason:           resolution.Reason,
+		}, nil
+	case WindowUnmappable:
+		// Unproven chain-time coverage is an explicit uncovered range: the
+		// event party stays unknown and the interval cannot close.
+		return eventTimeWindowResult{gap: true, status: resolution.Status, reason: resolution.Reason}, nil
+	default:
+		// Reorg-invalidated mapping: pending reverify only (FR-017).
+		return eventTimeWindowResult{status: resolution.Status, reason: resolution.Reason}, nil
+	}
+}
+
 // scanIntervalOutcome accumulates one interval's classifications plus the
 // bounded side-effect counters that are applied to the invocation result only
 // after the commit transaction succeeds.
@@ -1543,6 +1633,35 @@ func compareScanInterval(ctx context.Context, req *ScanOnceRequest, task *Task, 
 	}
 	from, to, haveWindow := window.from, window.to, window.resolved
 
+	// Event-time window (height scopes only): the chain-time window of the
+	// claimed interval, resolved from chain block times and closed at the next
+	// height so adjacent intervals tile without a seam. Without it the event
+	// adapter refuses to cover blockless business-object rows, so a chain-first
+	// fact could never become a ticket on a height scan.
+	eventWindow, err := scanEventTimeWindow(ctx, req, task, interval, budget)
+	if err != nil {
+		return nil, err
+	}
+	if eventWindow.gap {
+		// An unmappable event-time window is an explicit uncovered range: the
+		// event party stays unknown and the interval cannot close (T036).
+		outcome.addGapReason(GapQueryFailed)
+	}
+	if eventWindow.boundaryUnproven {
+		// The window is usable but its right seam to the next height could not
+		// be closed: the interval must carry a visible gap so no following
+		// interval can close the seam silently (fail-closed no-miss rule).
+		outcome.addGapReason(GapQueryFailed)
+	}
+	switch eventWindow.status {
+	case WindowUnmappable:
+		outcome.windowUnmappable++
+	case WindowInvalidated:
+		// The window mapping was reorg-invalidated: the observation stays
+		// pending (FR-017), never consistent.
+		outcome.windowInvalidated++
+	}
+
 	// Chain facts (one interval-level read).
 	var (
 		chainBundle *ChainFactsBundle
@@ -1560,14 +1679,23 @@ func compareScanInterval(ctx context.Context, req *ScanOnceRequest, task *Task, 
 			From:              from,
 			To:                to,
 			ConfirmThresholdN: scanTaskConfirmThresholdN(task),
-			NeedTransferLogs:  true,
-			UpstreamReceipts:  append([]ChainUpstreamReceiptSource(nil), task.UpstreamReceipts...),
+			// This compare-loop read is the coverage-bearing chain read and
+			// pins NeedTransferLogs=true: only then does the adapter run its
+			// log-stream coverage checks, so CoverageClosed can never read a
+			// header-only bundle (empty Logs) as "no transfer happened".
+			NeedTransferLogs: true,
+			UpstreamReceipts: append([]ChainUpstreamReceiptSource(nil), task.UpstreamReceipts...),
 		})
 		if ctxErr := scanContextError(observeErr); ctxErr != nil {
 			return nil, ctxErr
 		}
 		chainBundle = &bundle
-		chainUsable = observeErr == nil && bundle.CanSupportConsistent()
+		// CoverageClosed, not CanSupportConsistent: an unconnected upstream
+		// receipt declaration downgrades the bundle status (FR-006) but is the
+		// classifier's upstream-credit input, not a chain-coverage defect.
+		// Missing evidence still never becomes a conclusion: every non-upstream
+		// downgrade keeps this false.
+		chainUsable = observeErr == nil && bundle.CoverageClosed()
 	}
 
 	// Event delivery evidence (one interval-level read).
@@ -1582,6 +1710,8 @@ func compareScanInterval(ctx context.Context, req *ScanOnceRequest, task *Task, 
 		evidence, observeErr := req.Sources.Events.Observe(ctx, EventStateQuery{
 			Scope:            scope,
 			Interval:         EventStateInterval{From: interval.From, To: interval.To},
+			OccurredFrom:     eventWindow.from,
+			OccurredTo:       eventWindow.to,
 			Consumers:        append([]EventConsumerRegistration(nil), req.EventConsumers...),
 			Quarantine:       req.EventQuarantine,
 			UpstreamReceipts: append([]ChainUpstreamReceiptSource(nil), task.UpstreamReceipts...),
@@ -1590,7 +1720,11 @@ func compareScanInterval(ctx context.Context, req *ScanOnceRequest, task *Task, 
 			return nil, ctxErr
 		}
 		eventEvidence = &evidence
-		eventUsable = observeErr == nil && evidence.CanSupportConsistent()
+		// CoverageClosed, not CanSupportConsistent: the upstream receipt
+		// declaration is carried by Observation.Upstream/ExternalCredit;
+		// every delivery-coverage downgrade (truncation, unclosed delivery,
+		// quarantine, missing time window, read failure) keeps this false.
+		eventUsable = observeErr == nil && evidence.CoverageClosed()
 	}
 
 	// Candidate enumeration. Its error is evidence-missing: the interval is

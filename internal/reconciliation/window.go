@@ -29,11 +29,24 @@
 // (chain_blocks). The local index stores no chain timestamps, so the header
 // RPC is the only chain-time source; when it is unavailable the resolution is
 // unmappable (gap), never guessed from the local insert clock.
+//
+// The same seam serves the reverse direction for height-scoped tasks
+// (ResolveHeightTimeWindow): a claimed height interval maps to the inclusive
+// chain-time window of its endpoint heights. The boundary heights are exact
+// (the endpoint blocks themselves) and the window is closed at the next
+// height's chain time so adjacent intervals tile without a seam; the chain
+// times carry the header's own second precision (time.Unix), and no
+// sub-second precision, local clock or index insert time is ever claimed. The
+// endpoint canonical identity keeps reorg-contradicted mappings pending
+// (invalidated), unprovable ones gap, and an unclosable right seam stays an
+// explicit gap declaration (BoundaryUnproven).
 package reconciliation
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"math"
 	"math/big"
 	"strings"
 	"time"
@@ -80,6 +93,11 @@ const (
 	WindowReasonProbeFailed          = "time_window_probe_failed"
 	WindowReasonIdentityNotCanonical = "time_window_identity_not_canonical"
 	WindowReasonReorgInvalidated     = "time_window_reorg_invalidated"
+	// WindowReasonTimeOrder: the two endpoint heights were readable but their
+	// chain times are not ascending, so no inclusive chain-time window exists.
+	// The resolution stays unmappable; a negative/zero-length window is never
+	// silently normalized into coverage.
+	WindowReasonTimeOrder = "height_window_time_not_ascending"
 )
 
 // ChainWindowResolution is one window resolution: the inclusive height window
@@ -126,6 +144,83 @@ type ScanTimeWindowResolver interface {
 	ResolveScanWindow(ctx context.Context, chainID int64, interval ScanInterval, budget ScanQueryBudget) (ChainWindowResolution, error)
 }
 
+// ChainTimeResolution is one height→chain-time resolution: the inclusive
+// chain-time window [From, To] of a claimed height interval, or the refusal
+// reason for an unmappable/invalidated resolution. From/To are only meaningful
+// for WindowResolved. The window is the event-query OccurredFrom/To of the
+// interval: both endpoint heights' chain times are probed and their canonical
+// block identity is verified. The boundary heights are exact and inclusive,
+// and To is closed at the next height's chain time so adjacent claimed
+// intervals tile the time axis without a seam (BoundaryUnproven records a
+// right seam that could not be closed). The chain times themselves are the
+// header's second-precision timestamps (time.Unix); no sub-second precision,
+// local clock or index insert time is ever claimed.
+type ChainTimeResolution struct {
+	Status WindowStatus
+	From   time.Time
+	To     time.Time
+
+	// Reason is the machine refusal token of a non-resolved resolution, or of
+	// a resolved window whose right seam could not be closed
+	// (BoundaryUnproven=true).
+	Reason string
+	// BoundaryUnproven reports that the window is resolved but its right
+	// boundary could not be extended to the next height's chain time: the next
+	// height is beyond the locally provable coverage/tip, its canonical
+	// identity is unprovable or reorg-contradicted, or its chain time is not
+	// ascending. The window is still the covered span's window; the caller
+	// records an explicit gap so the seam to any following interval can never
+	// close silently. Reason carries one of the stable window reasons.
+	BoundaryUnproven bool
+	EvidenceRef      string
+}
+
+// Validate checks the resolution shape conservatively. Resolved requires a
+// non-zero ascending inclusive window; a resolved window carries either no
+// reason or, when BoundaryUnproven is set, a machine reason for the unclosed
+// right seam. Every non-resolved status requires a machine reason.
+func (r ChainTimeResolution) Validate() error {
+	if !r.Status.Valid() {
+		return contractErrorf("unknown height time window status %q", r.Status)
+	}
+	switch r.Status {
+	case WindowResolved:
+		if r.From.IsZero() || r.To.IsZero() {
+			return contractErrorf("resolved height time window requires two non-zero chain times")
+		}
+		if r.To.Before(r.From) {
+			return contractErrorf("resolved height time window is not an inclusive ascending range")
+		}
+		if r.BoundaryUnproven {
+			if strings.TrimSpace(r.Reason) == "" {
+				return contractErrorf("resolved height time window with an unproven right boundary requires a machine reason")
+			}
+		} else if strings.TrimSpace(r.Reason) != "" {
+			return contractErrorf("resolved height time window must not carry a refusal reason %q", r.Reason)
+		}
+	case WindowUnmappable, WindowInvalidated:
+		if strings.TrimSpace(r.Reason) == "" {
+			return contractErrorf("non-resolved height time window requires a machine reason")
+		}
+	}
+	if len(r.EvidenceRef) > scanEvidenceRefMax {
+		return contractErrorf("height time window evidence ref exceeds %d bytes", scanEvidenceRefMax)
+	}
+	return nil
+}
+
+// ScanHeightTimeWindowResolver is the height→chain-time seam the compare loop
+// consumes for height-scoped intervals so the event adapter's OccurredFrom/To
+// window is resolved from chain block times (header second precision, endpoint
+// heights exact) instead of guessed. Every mapping query is charged to the
+// budget as it executes, exactly like the T036 time→height resolver. A nil
+// resolver leaves height scopes pending-by-design: the event adapter then
+// refuses to cover blockless business-object rows, which is never read as an
+// absence claim.
+type ScanHeightTimeWindowResolver interface {
+	ResolveHeightTimeWindow(ctx context.Context, chainID int64, interval ScanInterval, budget ScanQueryBudget) (ChainTimeResolution, error)
+}
+
 // BlockTimeReader is the read-only source of the resolver: chain times and
 // canonical block identity. Implementations MUST NOT write or take locks.
 type BlockTimeReader interface {
@@ -133,8 +228,9 @@ type BlockTimeReader interface {
 	// ok=false means no durable coverage exists for the chain.
 	IndexedBounds(ctx context.Context, chainID int64) (start, tip int64, ok bool, err error)
 	// ChainTimeAt returns the block header time (chain time, never the local
-	// insert clock) and header hash at a height. ok=false means the height is
-	// not available from the source.
+	// insert clock) and header hash at a height. The time carries the header's
+	// own second precision (time.Unix); ok=false means the height is not
+	// available from the source.
 	ChainTimeAt(ctx context.Context, chainID int64, height int64) (at time.Time, hash string, ok bool, err error)
 	// CanonicalHashAt returns the durable canonical block hash at a height.
 	// ok=false means the local index cannot prove a canonical identity there.
@@ -281,6 +377,240 @@ func (r *TimeHeightResolver) ResolveScanWindow(ctx context.Context, chainID int6
 		EvidenceRef: fmt.Sprintf("timewindow:v1 chain=%d heights=%d..%d probes=%d",
 			chainID, fromHeight, toHeight, search.used),
 	}, nil
+}
+
+// ResolveHeightTimeWindow implements ScanHeightTimeWindowResolver: it maps a
+// claimed height interval to the inclusive chain-time window of its two
+// endpoint heights, closed at the next height's chain time so adjacent claimed
+// intervals tile the time axis without a seam. The boundary heights are exact
+// and the times are the header's second-precision chain timestamps; no
+// sub-second precision, local clock or index insert time is ever claimed.
+// Both endpoints are header-probed (bounded by MaxProbes and charged as RPC)
+// and their canonical block identity is verified against the durable index
+// (charged as PG): a contradicted identity is `invalidated` (pending, FR-017)
+// and an unprovable one is `unmappable` (explicit gap). Probe read failures on
+// an endpoint are evidence-unavailable, not hard errors: they resolve
+// `unmappable` so the caller records an explicit gap instead of stalling the
+// scan; only budget exhaustion and cancellation/deadline on the caller's
+// context abort. When the right seam cannot be closed (the next height's chain
+// time is unprovable), the window falls back to the covered endpoint and
+// BoundaryUnproven declares the unclosed seam for an explicit caller gap.
+func (r *TimeHeightResolver) ResolveHeightTimeWindow(ctx context.Context, chainID int64,
+	interval ScanInterval, budget ScanQueryBudget) (ChainTimeResolution, error) {
+	if r == nil || r.reader == nil {
+		return ChainTimeResolution{}, contractErrorf("height time window resolver is not wired")
+	}
+	if err := interval.Validate(); err != nil {
+		return ChainTimeResolution{}, err
+	}
+	if budget == nil {
+		return ChainTimeResolution{}, contractErrorf("height time window resolution requires a query budget")
+	}
+	if interval.From.Kind != ScopeHeight {
+		return ChainTimeResolution{}, contractErrorf("height time window resolution requires a height interval, got %q",
+			interval.From.Kind)
+	}
+	if chainID <= 0 {
+		return ChainTimeResolution{}, contractErrorf("height time window resolution requires a positive numeric chain id")
+	}
+	fromHeight, toHeight := interval.From.Height, interval.To.Height
+
+	search := newWindowSearch(r, chainID, budget)
+	fromAt, fromHash, status, reason, err := search.heightProbeResult(ctx, fromHeight)
+	if err != nil {
+		return ChainTimeResolution{}, err
+	}
+	if status != WindowResolved {
+		return r.unmappableTime(chainID, fromHeight, toHeight, reason, search.used), nil
+	}
+	toAt, toHash, status, reason, err := search.heightProbeResult(ctx, toHeight)
+	if err != nil {
+		return ChainTimeResolution{}, err
+	}
+	if status != WindowResolved {
+		return r.unmappableTime(chainID, fromHeight, toHeight, reason, search.used), nil
+	}
+
+	// Canonical identity verification of both endpoint heights: the live header
+	// observed at the height must still match the durable canonical block. A
+	// contradicted identity is a reorg (`invalidated`, pending only); an
+	// unprovable one keeps the window unmappable (explicit gap).
+	for _, endpoint := range []struct {
+		height int64
+		hash   string
+	}{{fromHeight, fromHash}, {toHeight, toHash}} {
+		verdict, localHash, err := r.verifyCanonicalEndpoint(ctx, chainID, endpoint.height, endpoint.hash, budget)
+		if err != nil {
+			return ChainTimeResolution{}, err
+		}
+		switch verdict {
+		case canonicalUnprovable:
+			return r.unmappableTime(chainID, fromHeight, toHeight, WindowReasonIdentityNotCanonical, search.used), nil
+		case canonicalContradicted:
+			return ChainTimeResolution{
+				Status: WindowInvalidated,
+				Reason: WindowReasonReorgInvalidated,
+				EvidenceRef: fmt.Sprintf("heightwindow:v1 chain=%d status=invalidated height=%d header=%s canonical=%s",
+					chainID, endpoint.height, strings.ToLower(endpoint.hash), strings.ToLower(localHash)),
+			}, nil
+		}
+	}
+	if toAt.Before(fromAt) {
+		// Non-monotonic chain times cannot form an inclusive window; refuse
+		// rather than normalize a negative span into coverage.
+		return r.unmappableTime(chainID, fromHeight, toHeight, WindowReasonTimeOrder, search.used), nil
+	}
+
+	// Right-seam closure: adjacent claimed intervals [a..b] and [b+1..c] must
+	// tile the time axis. Closing [a..b] at t(b) would leave a hole
+	// (t(b), t(b+1)) in which a blockless row would be read by neither interval
+	// while both claim closed coverage. The window is therefore closed at the
+	// next height's chain time, overlapping the next interval's left edge
+	// (harmless: candidates match by stable business key and identities dedup).
+	// When the next height's chain time is not provable — beyond the locally
+	// provable coverage/tip, a probe bound/failure, an unprovable or
+	// reorg-contradicted canonical identity, a backwards chain time — the
+	// window falls back to [t(from), t(to)] and marks the right boundary
+	// unproven; the caller records an explicit gap, so the seam can never close
+	// silently. A height that cannot advance has no following interval and
+	// needs no extension.
+	rightAt := toAt
+	boundaryUnproven := false
+	boundaryReason := ""
+	if toHeight < math.MaxInt64 {
+		nextAt, nextHash, ok, tryReason, err := search.tryHeightProbe(ctx, toHeight+1)
+		if err != nil {
+			return ChainTimeResolution{}, err
+		}
+		switch {
+		case !ok:
+			boundaryUnproven, boundaryReason = true, tryReason
+		case toAt.After(nextAt):
+			boundaryUnproven, boundaryReason = true, WindowReasonTimeOrder
+		default:
+			verdict, _, err := r.verifyCanonicalEndpoint(ctx, chainID, toHeight+1, nextHash, budget)
+			if err != nil {
+				return ChainTimeResolution{}, err
+			}
+			switch verdict {
+			case canonicalVerified:
+				rightAt = nextAt
+			case canonicalUnprovable:
+				boundaryUnproven, boundaryReason = true, WindowReasonIdentityNotCanonical
+			default:
+				boundaryUnproven, boundaryReason = true, WindowReasonReorgInvalidated
+			}
+		}
+	}
+
+	evidenceRef := fmt.Sprintf("heightwindow:v1 chain=%d heights=%d..%d probes=%d",
+		chainID, fromHeight, toHeight, search.used)
+	if boundaryUnproven {
+		evidenceRef = fmt.Sprintf("heightwindow:v1 chain=%d heights=%d..%d probes=%d boundary=to_height_%d_unproven reason=%s",
+			chainID, fromHeight, toHeight, search.used, toHeight+1, boundaryReason)
+	} else if rightAt.After(toAt) {
+		evidenceRef = fmt.Sprintf("heightwindow:v1 chain=%d heights=%d..%d probes=%d boundary_height=%d",
+			chainID, fromHeight, toHeight, search.used, toHeight+1)
+	}
+	return ChainTimeResolution{
+		Status:           WindowResolved,
+		From:             fromAt,
+		To:               rightAt,
+		Reason:           boundaryReason,
+		BoundaryUnproven: boundaryUnproven,
+		EvidenceRef:      evidenceRef,
+	}, nil
+}
+
+// tryHeightProbe reads one optional boundary height's chain time without
+// failing the resolution: an exhausted budget or caller cancellation is a hard
+// error, every other probe problem reports ok=false with a stable machine
+// reason (probe bound, probe failure, unreadable source).
+func (s *windowSearch) tryHeightProbe(ctx context.Context, height int64) (time.Time, string, bool, string, error) {
+	probe, err := s.probe(ctx, height)
+	if err != nil {
+		if errors.Is(err, ErrBudgetExhausted) {
+			// An exhausted budget must stop the invocation observably; it is
+			// never converted into a silent boundary fallback.
+			return time.Time{}, "", false, "", err
+		}
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return time.Time{}, "", false, "", ctxErr
+		}
+		if errors.Is(err, errWindowProbeLimit) {
+			return time.Time{}, "", false, WindowReasonProbeLimit, nil
+		}
+		return time.Time{}, "", false, WindowReasonProbeFailed, nil
+	}
+	if !probe.ok {
+		return time.Time{}, "", false, WindowReasonProbeFailed, nil
+	}
+	return probe.at, probe.hash, true, "", nil
+}
+
+// heightProbeResult reads one endpoint height's chain time within the bounded
+// probe state. A probe problem resolves as an unmappable status/reason pair
+// (evidence-unavailable); an exhausted budget aborts the scan boundedly
+// (ErrBudgetExhausted) and caller-context cancellation is a hard error.
+func (s *windowSearch) heightProbeResult(ctx context.Context, height int64) (time.Time, string, WindowStatus, string, error) {
+	at, hash, ok, reason, err := s.tryHeightProbe(ctx, height)
+	if err != nil {
+		return time.Time{}, "", "", "", err
+	}
+	if !ok {
+		return time.Time{}, "", WindowUnmappable, reason, nil
+	}
+	return at, hash, WindowResolved, "", nil
+}
+
+// canonicalVerdict is the outcome of comparing one probed header hash against
+// the durable canonical identity.
+type canonicalVerdict int
+
+const (
+	// canonicalVerified: the header hash and the durable canonical hash agree
+	// (or the probe carried no hash to compare).
+	canonicalVerified canonicalVerdict = iota
+	// canonicalUnprovable: the durable index cannot prove a canonical identity
+	// at the height.
+	canonicalUnprovable
+	// canonicalContradicted: the durable canonical identity contradicts the
+	// live header at the height (reorg).
+	canonicalContradicted
+)
+
+// verifyCanonicalEndpoint checks one probed height's header hash against the
+// durable canonical identity, charged as one PG read when the probe carries a
+// hash. An empty header hash skips the comparison (nothing to compare).
+func (r *TimeHeightResolver) verifyCanonicalEndpoint(ctx context.Context, chainID, height int64,
+	headerHash string, budget ScanQueryBudget) (canonicalVerdict, string, error) {
+	if headerHash == "" {
+		return canonicalVerified, "", nil
+	}
+	if err := budget.ConsumePG(ctx, 1); err != nil {
+		return canonicalVerified, "", err
+	}
+	localHash, ok, err := r.reader.CanonicalHashAt(ctx, chainID, height)
+	if err != nil {
+		return canonicalVerified, "", fmt.Errorf("read canonical identity at %d: %w", height, err)
+	}
+	if !ok || strings.TrimSpace(localHash) == "" {
+		return canonicalUnprovable, "", nil
+	}
+	if !strings.EqualFold(localHash, headerHash) {
+		return canonicalContradicted, localHash, nil
+	}
+	return canonicalVerified, localHash, nil
+}
+
+// unmappableTime builds the conservative height→time refusal resolution.
+func (r *TimeHeightResolver) unmappableTime(chainID, fromHeight, toHeight int64, reason string, probes int) ChainTimeResolution {
+	return ChainTimeResolution{
+		Status: WindowUnmappable,
+		Reason: reason,
+		EvidenceRef: fmt.Sprintf("heightwindow:v1 chain=%d status=unmappable reason=%s probes=%d heights=%d..%d",
+			chainID, reason, probes, fromHeight, toHeight),
+	}
 }
 
 // unmappable builds the conservative refusal resolution.
@@ -453,7 +783,10 @@ func (r *HeaderBlockTimeReader) IndexedBounds(ctx context.Context, chainID int64
 	return start, tip, true, nil
 }
 
-// ChainTimeAt reads one block header time and hash from the node RPC.
+// ChainTimeAt reads one block header time and hash from the node RPC. The time
+// is the header's own second-precision timestamp (time.Unix, no nanosecond
+// fabrication); a nil/mismatched header reports ok=false, never a guessed
+// time.
 func (r *HeaderBlockTimeReader) ChainTimeAt(ctx context.Context, chainID int64, height int64) (time.Time, string, bool, error) {
 	probeCtx, cancel := context.WithTimeout(ctx, r.timeout)
 	defer cancel()

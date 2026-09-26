@@ -31,10 +31,15 @@
 //     chain-first aware: the durable indexed transfer-log facts of the
 //     interval are reverse checked against the authoritative withdrawal
 //     execution rows (read-only) and a chain transaction without any PG row
-//     becomes a missing candidate (FR-009, US1 missing detection). Time
-//     scopes deliberately do not map time->heights and keep the chain party
-//     unknown/pending (pending-by-design; a dedicated window-resolver task
-//     owns that mapping).
+//     becomes a missing candidate (FR-009, US1 missing detection). Both scope
+//     kinds drive the T036 window resolver: time scopes map their claimed
+//     interval to a height window for the chain read, and height scopes map
+//     the claimed interval to the exact inclusive chain-time window the event
+//     adapter uses as its OccurredFrom/To boundary, so blockless
+//     business-object rows are never silently under-covered and no window is
+//     guessed. The command observes the reference consumer's durable
+//     progress/inbox/quarantine records; it never runs, replays or unblocks
+//     the consumer.
 //   - `show` is strictly read-only and reports coverage honestly (open gaps /
 //     uncovered remainder are never rendered as "fully consistent").
 //
@@ -63,9 +68,12 @@ import (
 	"github.com/xtianxx/txharbor/internal/config"
 	"github.com/xtianxx/txharbor/internal/db"
 	"github.com/xtianxx/txharbor/internal/eth"
+	"github.com/xtianxx/txharbor/internal/events"
+	"github.com/xtianxx/txharbor/internal/execution"
 	"github.com/xtianxx/txharbor/internal/logx"
 	"github.com/xtianxx/txharbor/internal/reconciliation"
 	"github.com/xtianxx/txharbor/internal/txlifecycle"
+	"github.com/xtianxx/txharbor/internal/withdrawal"
 )
 
 // Deps carries the process dependencies so the command is testable in-process
@@ -348,12 +356,15 @@ func reconcileSettleLimit(cfg *config.Config) (int, error) {
 }
 
 // reconcileWindowProbes returns the required positive header-probe bound of the
-// T036 time window resolver. It is only demanded for time-scoped tasks; a
-// missing or non-positive value is refused by name (no default is invented, no
-// local value is claimed as a production threshold).
+// T036 window resolver. Scans need the resolver in both directions: time-scoped
+// tasks map their claimed time interval to a height window for the chain read,
+// and height-scoped tasks map their claimed height interval to the exact
+// inclusive chain-time window the event adapter needs for blockless
+// business-object rows. A missing or non-positive value is refused by name (no
+// default is invented, no local value is claimed as a production threshold).
 func reconcileWindowProbes(cfg *config.Config) (int, error) {
 	if cfg.Recon.WindowMaxProbes <= 0 {
-		return 0, fmt.Errorf("time-scoped scan requires a positive %s (header probes per window resolution; no default)",
+		return 0, fmt.Errorf("scan window resolution requires a positive %s (header probes per window resolution; no default)",
 			config.EnvReconWindowMaxProbes)
 	}
 	return cfg.Recon.WindowMaxProbes, nil
@@ -546,40 +557,53 @@ func reconcileAdminScan(ctx context.Context, args []string, d Deps) int {
 		return 1
 	}
 
-	// Time-scoped tasks need the T036 window resolver: time->height mapping
-	// via the block-time reader, with every mapping query charged to the scan
-	// budget as it executes. A time task without the required positive probe
-	// bound is refused by name; no default is invented. Height-scoped tasks
-	// need no resolver.
-	var windowResolver reconciliation.ScanTimeWindowResolver
-	var windowClient *eth.Client
-	if task.ScopeKind == reconciliation.ScopeTime {
-		probes, err := reconcileWindowProbes(env.cfg)
-		if err != nil {
-			fmt.Fprintf(stderr, "txharbor reconcile-admin: %s\n", err)
-			return 1
-		}
-		client, err := eth.Dial(ctx, env.cfg.RPCURL, env.cfg.IndexRPCTimeout)
-		if err != nil {
-			fmt.Fprintf(stderr, "txharbor reconcile-admin: time window resolver RPC refused: %s\n", logx.Redact(err.Error()))
-			return 1
-		}
-		windowClient = client
-		defer windowClient.Close()
-		reader, err := reconciliation.NewHeaderBlockTimeReader(env.pool, windowClient, env.cfg.IndexRPCTimeout)
-		if err != nil {
-			fmt.Fprintf(stderr, "txharbor reconcile-admin: block-time reader refused: %s\n", logx.Redact(err.Error()))
-			return 1
-		}
-		resolver, err := reconciliation.NewTimeHeightResolver(reader, reconciliation.TimeHeightResolverConfig{
-			MaxProbes:  probes,
-			RPCTimeout: env.cfg.IndexRPCTimeout,
-		})
-		if err != nil {
-			fmt.Fprintf(stderr, "txharbor reconcile-admin: time window resolver refused: %s\n", logx.Redact(err.Error()))
-			return 1
-		}
-		windowResolver = resolver
+	// Both scope kinds need the T036 window resolver:
+	//   - time scopes map time->height for the chain read;
+	//   - height scopes map height->chain-time for the event adapter's exact
+	//     inclusive OccurredFrom/To window, so blockless business-object rows
+	//     are attributable without a guessed window.
+	// Every mapping query is charged to the scan budget as it executes, and a
+	// missing positive probe bound is refused by name (no default is invented).
+	probes, err := reconcileWindowProbes(env.cfg)
+	if err != nil {
+		fmt.Fprintf(stderr, "txharbor reconcile-admin: %s\n", err)
+		return 1
+	}
+	windowClient, err := eth.Dial(ctx, env.cfg.RPCURL, env.cfg.IndexRPCTimeout)
+	if err != nil {
+		fmt.Fprintf(stderr, "txharbor reconcile-admin: window resolver RPC refused: %s\n", logx.Redact(err.Error()))
+		return 1
+	}
+	defer windowClient.Close()
+	blockTimeReader, err := reconciliation.NewHeaderBlockTimeReader(env.pool, windowClient, env.cfg.IndexRPCTimeout)
+	if err != nil {
+		fmt.Fprintf(stderr, "txharbor reconcile-admin: block-time reader refused: %s\n", logx.Redact(err.Error()))
+		return 1
+	}
+	windowResolver, err := reconciliation.NewTimeHeightResolver(blockTimeReader, reconciliation.TimeHeightResolverConfig{
+		MaxProbes:  probes,
+		RPCTimeout: env.cfg.IndexRPCTimeout,
+	})
+	if err != nil {
+		fmt.Fprintf(stderr, "txharbor reconcile-admin: window resolver refused: %s\n", logx.Redact(err.Error()))
+		return 1
+	}
+
+	// Event-delivery evidence needs the registered consumer's durable results:
+	// the reference consumer's progress/inbox/quarantine reads are the only
+	// consumer records this project keeps. The registration is observation
+	// only: the command never runs, replays or unblocks the consumer and never
+	// writes its simulated ledger (FR-014/020/023).
+	reference, err := events.NewReferenceConsumer(env.pool, events.ConsumerOptions{
+		GapWait:     env.cfg.Events.Consumer.GapWait,
+		BackoffBase: env.cfg.Events.Consumer.BackoffBase,
+		BackoffMax:  env.cfg.Events.Consumer.BackoffMax,
+		RetryLimit:  env.cfg.Events.Consumer.RetryLimit,
+		ChainID:     int64(env.cfg.ChainID),
+	})
+	if err != nil {
+		fmt.Fprintf(stderr, "txharbor reconcile-admin: event consumer registration refused: %s\n", logx.Redact(err.Error()))
+		return 1
 	}
 
 	result, scanErr := env.store.ScanOnce(ctx, reconciliation.ScanOnceRequest{
@@ -593,7 +617,13 @@ func reconcileAdminScan(ctx context.Context, args []string, d Deps) int {
 			PG:     pgState,
 			Events: eventState,
 		},
-		WindowResolver: windowResolver,
+		WindowResolver:       windowResolver,
+		HeightWindowResolver: windowResolver,
+		EventConsumers: []reconciliation.EventConsumerRegistration{{
+			Name:     events.RefConsumerName,
+			Progress: reference.Consumer,
+		}},
+		EventQuarantine: &events.QuarantineStore{Pool: env.pool},
 		Candidates: &reconcileScanCandidates{
 			pool:          env.pool,
 			chainID:       task.ScopeChainID,
@@ -841,7 +871,13 @@ func reconcileAdminShow(ctx context.Context, args []string, d Deps) int {
 //
 //   - PG-anchored: the canonical 011 receipts whose block lies in the
 //     interval; the candidate carries the receipt's chain anchor
-//     (block/hash/tx hash).
+//     (block/hash/tx hash) and the event aggregate identity of its own
+//     business object (`withdrawal_request:<request_id>` /
+//     `withdrawal_intent:<intent_id>`, the frozen 013 convention) as the
+//     candidate EventKey, so a delivered+closed event is matched instead of
+//     being read as absent. The chain-first `tx_hash` candidates carry no
+//     EventKey: their identity has no event aggregate in the frozen catalog,
+//     and no join is invented.
 //   - chain-first withdrawal (T033, FR-009): the durable indexed transfer-log
 //     facts of the interval are attributed to project withdrawals (from ∈ the
 //     configured sender set AND contract ∈ the asset allowlist) and reverse
@@ -1075,6 +1111,11 @@ func (s *reconcileScanCandidates) scanPGHeightCandidates(ctx context.Context, ch
 		out = append(out, reconciliation.ScanCandidate{
 			BusinessType: reconciliation.BusinessWithdrawal,
 			BusinessKey:  key,
+			// The event identity of the same business object: without it the
+			// compare loop would read a delivered+closed withdrawal event as
+			// "no event delivery" (kind mismatch) and mint a false missing
+			// ticket on the request_id business key.
+			EventKey: reconcileCandidateEventKey(key),
 			ChainFact: reconciliation.ChainFactRef{
 				BlockNumber: blockNumber,
 				BlockHash:   blockHash,
@@ -1128,12 +1169,17 @@ func (s *reconcileScanCandidates) scanTimeCandidates(ctx context.Context, chainI
 		if strings.TrimSpace(requestID) == "" {
 			continue
 		}
+		key := reconciliation.BusinessKey{
+			Kind:  reconciliation.BusinessKeyRequestID,
+			Value: requestID,
+		}
 		out = append(out, reconciliation.ScanCandidate{
 			BusinessType: reconciliation.BusinessWithdrawal,
-			BusinessKey: reconciliation.BusinessKey{
-				Kind:  reconciliation.BusinessKeyRequestID,
-				Value: requestID,
-			},
+			BusinessKey:  key,
+			// The 007 request event identity (see reconcileCandidateEventKey):
+			// the same-object event must be matchable or the delivered request
+			// event stays invisible to the compare loop.
+			EventKey:    reconcileCandidateEventKey(key),
 			EvidenceRef: "scan:candidates:request request_id=" + requestID,
 		})
 	}
@@ -1157,6 +1203,42 @@ func reconcileCandidateKey(intentID, requestID string) (reconciliation.BusinessK
 		return reconciliation.BusinessKey{Kind: reconciliation.BusinessKeyIntentID, Value: trimmed}, true
 	}
 	return reconciliation.BusinessKey{}, false
+}
+
+// reconcileCandidateEventKey maps a withdrawal candidate's business key onto
+// the real event aggregate identity of the same business object, following the
+// frozen 013 business-object convention (specs/013 data-model §2:
+// `<aggregate_type>:<aggregate_id>` with `withdrawal_request:<request_id>` and
+// `withdrawal_intent:<intent_id>`). The event matcher
+// (reconciliation.matchCandidateEventObservation) compares this key with the
+// observation's aggregate identity, so a delivered+closed event of the
+// candidate's own object is found instead of being read as absent. The
+// matcher's identity rule is unchanged: a request aggregate carries at most one
+// event (request.received), while an intent aggregate can carry several
+// versions — those stay under the existing ambiguity rule (pending, never
+// absent-by-guess and never a false consistent).
+//
+// This is a key derivation, never an existence claim: no matching event row
+// still yields absent/unknown (the compare loop's fail-closed behavior is
+// unchanged), and no mapping is created for a business key that has no event
+// aggregate in the frozen catalog — the chain-first `tx_hash` identity carries
+// no aggregate and therefore yields the zero key, so the caller never invents
+// a join the outbox tables cannot support.
+func reconcileCandidateEventKey(key reconciliation.BusinessKey) reconciliation.BusinessKey {
+	switch key.Kind {
+	case reconciliation.BusinessKeyRequestID:
+		return reconciliation.BusinessKey{
+			Kind:  reconciliation.EventBusinessKeyAggregate,
+			Value: withdrawal.RequestAggregateType + "/" + key.Value,
+		}
+	case reconciliation.BusinessKeyIntentID:
+		return reconciliation.BusinessKey{
+			Kind:  reconciliation.EventBusinessKeyAggregate,
+			Value: execution.IntentAggregateType + "/" + key.Value,
+		}
+	default:
+		return reconciliation.BusinessKey{}
+	}
 }
 
 // reconcileBoundText renders a range bound for operator output.
@@ -1320,7 +1402,8 @@ func reconcileAdminUsage(w io.Writer) {
 	fmt.Fprintln(w, "       txharbor reconcile-admin cancel --task-id UUID --reason R")
 	fmt.Fprintln(w, "       txharbor reconcile-admin show --task-id UUID")
 	fmt.Fprintln(w, "start requires --confirm-threshold-n N (integer >= 1, no default): the confirm policy depth snapshotted into the task's policy_refs as the scan's chain-evidence confirmation basis; a local test value is never a production threshold")
-	fmt.Fprintln(w, "scan enumerates candidates from the authoritative PG rows (007 requests by time window; 011 canonical receipts by height window) and, for height scopes, chain-first enumerates the durable indexed transfer facts with direction/asset attribution: attributed project withdrawals (from in the configured signer sender allowlist and contract in the 004 asset allowlist) and deposits (to in the 004 watch addresses) with no PG business row become missing candidates; confirmed-unattributed facts are metrics-only; undecidable attribution leaves an explicit gap and never a missing claim. Time scopes resolve time->height through the window resolver (block-time reader; header probes charged to the budget)")
+	fmt.Fprintln(w, "scan enumerates candidates from the authoritative PG rows (007 requests by time window; 011 canonical receipts by height window) and, for height scopes, chain-first enumerates the durable indexed transfer facts with direction/asset attribution: attributed project withdrawals (from in the configured signer sender allowlist and contract in the 004 asset allowlist) and deposits (to in the 004 watch addresses) with no PG business row become missing candidates; confirmed-unattributed facts are metrics-only; undecidable attribution leaves an explicit gap and never a missing claim. Both scope kinds resolve through the T036 window resolver (block-time reader; header probes charged to the budget): time scopes map time->height for the chain read, height scopes map height->chain-time for the event adapter's exact inclusive occurrence window (blockless business-object rows are never silently under-covered)")
+	fmt.Fprintln(w, "scan observes the reference consumer's durable progress/inbox/quarantine records; it never runs, replays or unblocks the consumer")
 	fmt.Fprintln(w, "budget keys (required positive; no defaults): "+strings.Join([]string{
 		config.EnvReconPrincipal,
 		config.EnvReconConcurrency,
@@ -1335,5 +1418,5 @@ func reconcileAdminUsage(w io.Writer) {
 		config.EnvReconMaxEventRows,
 		config.EnvReconSettleLimit,
 	}, " "))
-	fmt.Fprintln(w, "time-scoped scans additionally require a positive "+config.EnvReconWindowMaxProbes+" (bounded header probes per window resolution; no default)")
+	fmt.Fprintln(w, "scans require a positive "+config.EnvReconWindowMaxProbes+" (bounded header probes per window resolution; no default)")
 }

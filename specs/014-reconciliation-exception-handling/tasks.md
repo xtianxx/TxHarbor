@@ -78,6 +78,10 @@
 
 **US1 限制解除（T033–T038 完成，累计 24/38）**：withdrawal/deposit chain-first 归属发现、tx 聚合身份、time window-resolver、策略文档、枚举预算记账均已交付并验收，上段受限状态解除。已知剩余限制（非 US2/US3 能力）：真实 CLI 高度扫描中事件侧无时间窗时 chain-first missing 保持 pending（保守正确；compare loop 高度→时间窗透传为后续优化，不属本批任务）。
 
+**修正（真实链路修复轮，撤回上段解除结论）**：上段“解除”在真实 CLI 铸票证据到位前作出，不成立，撤回。真实高度→事件窗透传、CoverageClosed 门控、事件键 join 落地并经真实入口验收后，US1 状态以本段为准；剩余限制见下。历史测试通过记录保留。
+- 已证实（真实 `Run(start→resume→scan)`＋真实三适配器＋真实 Anvil/PG）：deposit/withdrawal 链事实存在且 PG 无行→missing 票并稳定去重；两类匹配 PG 记录→零误报（含 receipted＋事件完整→consistent 零票）；事件不足→pending/gap；上游未接入不屏蔽已证实局部 missing（`ExternalCredit=unverified`）；重复扫描身份稳定；资金表行数＋全行摘要零变化；成员超限可追溯且 gapped 不可闭合。
+- 剩余限制：① scope 末端落在本地可证覆盖前沿时带永久 `query_failed` gap（右缝回落），`done` 被阻——运维将 scope 末端设于前沿之下；② intent 键候选（receipt 无可解析 request_id）PG 侧恒 incomplete，只能 pending——确定结论需新业务输入裁决；③ pre-cutover 无事件行请求仍得 missing 票（fail-closed 告警，独立设计项）；④ chain-first `tx_hash` 候选不带 EventKey（不发明 join），其 missing 仅依据 PG 缺失。
+
 ---
 
 ## Phase 3b: US1 定向收口遗留 (Priority: P1) 🎯 MVP 补齐

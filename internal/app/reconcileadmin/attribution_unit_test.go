@@ -20,7 +20,9 @@ import (
 	"time"
 
 	"github.com/xtianxx/txharbor/internal/config"
+	"github.com/xtianxx/txharbor/internal/execution"
 	"github.com/xtianxx/txharbor/internal/reconciliation"
+	"github.com/xtianxx/txharbor/internal/withdrawal"
 )
 
 const (
@@ -288,5 +290,39 @@ func TestReconcileCandidateKey(t *testing.T) {
 	}
 	if _, ok := reconcileCandidateKey("", " "); ok {
 		t.Fatalf("key with neither identity was accepted")
+	}
+}
+
+func TestReconcileCandidateEventKey(t *testing.T) {
+	// request_id -> aggregate/withdrawal_request/<id> (the frozen 013
+	// convention the event matcher compares against).
+	key := reconcileCandidateEventKey(reconciliation.BusinessKey{
+		Kind: reconciliation.BusinessKeyRequestID, Value: "req-1",
+	})
+	if key.Kind != reconciliation.EventBusinessKeyAggregate ||
+		key.Value != withdrawal.RequestAggregateType+"/req-1" {
+		t.Fatalf("request event key = %+v, want aggregate/%s/req-1",
+			key, withdrawal.RequestAggregateType)
+	}
+
+	// intent_id -> aggregate/withdrawal_intent/<id>.
+	key = reconcileCandidateEventKey(reconciliation.BusinessKey{
+		Kind: reconciliation.BusinessKeyIntentID, Value: "intent-1",
+	})
+	if key.Kind != reconciliation.EventBusinessKeyAggregate ||
+		key.Value != execution.IntentAggregateType+"/intent-1" {
+		t.Fatalf("intent event key = %+v, want aggregate/%s/intent-1",
+			key, execution.IntentAggregateType)
+	}
+
+	// A tx_hash identity has no event aggregate in the frozen catalog: the
+	// mapping stays the zero key and never invents a join.
+	for _, kind := range []reconciliation.BusinessKeyKind{
+		reconciliation.BusinessKeyTxHash, reconciliation.BusinessKeyEventID, reconciliation.BusinessKeyAttemptID, "",
+	} {
+		key = reconcileCandidateEventKey(reconciliation.BusinessKey{Kind: kind, Value: "0xabc"})
+		if key.Kind != "" || key.Value != "" {
+			t.Fatalf("key kind %q produced a fabricated event key %+v", kind, key)
+		}
 	}
 }

@@ -481,7 +481,11 @@ type ChainFactsQuery struct {
 	// evidence is then incomplete and can never support a consistent verdict.
 	ConfirmThresholdN uint64 `json:"confirm_threshold_n"`
 	// NeedTransferLogs requests the ERC-20 Transfer facts (and the 003 log
-	// stream coverage) of the range.
+	// stream coverage) of the range. Only with this true do the bundle's
+	// log-coverage checks run; the compare loop's chain read — the
+	// coverage-bearing read of the 014 scan — always sets it, so a coverage
+	// conclusion never rests on a header-only read with an empty Logs slice
+	// (absence of transfer rows is only provable inside a proven log stream).
 	NeedTransferLogs bool `json:"need_transfer_logs"`
 	// UpstreamReceipts is the task's declared per-business-type upstream
 	// receipt source. Nil/empty means "not connected", which downgrades the
@@ -625,6 +629,43 @@ func (b *ChainFactsBundle) addEvidence(source ChainFactSource, ref string) error
 // verdict: only a complete, non-orphaned bundle can (FR-004/005/017).
 func (b *ChainFactsBundle) CanSupportConsistent() bool {
 	return b != nil && b.Status == ChainFactsComplete && !b.Orphaned
+}
+
+// CoverageClosed reports whether the bundle's own coverage of the requested
+// range is closed, independently of the upstream receipt declaration. It
+// differs from CanSupportConsistent in exactly one dimension: a missing,
+// unconnected upstream receipt source downgrades Status (FR-006), but it is an
+// input of the classifier's upstream-credit verdict (Observation.Upstream /
+// ExternalCredit), not a defect of the chain coverage. The compare loop uses
+// this predicate for ScanComplete so a fully proven local fact (including a
+// chain absence) is not masked by an unconnected upstream; the classifier
+// still refuses a consistent conclusion without a connected, available source.
+//
+// The predicate is exact, never a superset of "complete": a complete,
+// non-orphaned bundle is closed; an incomplete bundle is closed only when
+// every recorded reason is the upstream-connectivity mark. Any other reason
+// (range not indexed, missing/pruned rows, non-canonical blocks, broken
+// linkage, paused stream, stale tip, unproven confirmation, failed read) means
+// coverage itself is unproven and the observation must stay pending.
+func (b *ChainFactsBundle) CoverageClosed() bool {
+	if b == nil || b.Orphaned {
+		return false
+	}
+	switch b.Status {
+	case ChainFactsComplete:
+		return true
+	case ChainFactsIncomplete:
+		if len(b.Reasons) == 0 {
+			return false
+		}
+		for _, reason := range b.Reasons {
+			if reason != ChainReasonUpstreamUnconnected {
+				return false
+			}
+		}
+		return true
+	}
+	return false
 }
 
 // PendingReverify maps the bundle onto the reverify vocabulary. ok=false means
@@ -950,6 +991,12 @@ func (a *ChainFactsAdapter) applyHeaderCoverage(b *ChainFactsBundle, header inde
 				b.mark(ChainFactsIncomplete, ChainReasonRangeNotIndexed)
 			}
 		} else if int64(header.LastHeight) < q.To {
+			// The source meta row is unavailable, so only the tip side can be
+			// contradicted: the range start cannot be compared against
+			// meta.start (unknown). A range below the configured index start
+			// therefore surfaces as missing block rows in applyBlockCoverage,
+			// never as a silent pass — the unreachable-meta path narrows what
+			// is provable, it never widens coverage.
 			b.mark(ChainFactsIncomplete, ChainReasonRangeNotIndexed)
 		}
 	} else {
@@ -1000,7 +1047,10 @@ func (a *ChainFactsAdapter) applyBlockCoverage(b *ChainFactsBundle) {
 // applyLogCoverage checks the 003 stream coverage only when transfer logs are
 // needed: next_block must cover the range, the range must not precede the
 // configured start, and no log pause may be open. Missing log rows inside a
-// covered range are legitimate (no transfer happened), never an error.
+// covered range are legitimate (no transfer happened), never an error. With
+// NeedTransferLogs=false this function returns silently: no log-coverage mark
+// is raised and an empty Logs slice must then never be read as "no transfer
+// happened" (the compare loop always requests logs — see ChainFactsQuery).
 func (a *ChainFactsAdapter) applyLogCoverage(b *ChainFactsBundle, q ChainFactsQuery, logProgress indexer.ReliableProgress, meta chainSourceMeta) {
 	if !q.NeedTransferLogs {
 		return
@@ -1150,10 +1200,13 @@ func (a *ChainFactsAdapter) applyConfirmation(b *ChainFactsBundle, q ChainFactsQ
 	}
 }
 
-// applyUpstream enforces FR-006: with any unconnected (or missing) upstream
-// receipt declaration the bundle stays incomplete, and even a fully connected
-// declaration never proves upstream success (ExternalLedgerProvable stays
-// false).
+// applyUpstream enforces FR-006 declaration semantics, identical in substance
+// to the event adapter's applyUpstream: a missing declaration or a declaration
+// with Connected=false counts as an unconnected upstream receipt source and
+// downgrades the bundle to incomplete. A connected declaration still never
+// proves upstream success (ExternalLedgerProvable stays false); the
+// ExternalCredit verdict itself is derived by the classifier from
+// Observation.Upstream, not from this status (see CoverageClosed).
 func (a *ChainFactsAdapter) applyUpstream(b *ChainFactsBundle, q ChainFactsQuery) {
 	if len(q.UpstreamReceipts) == 0 {
 		b.mark(ChainFactsIncomplete, ChainReasonUpstreamUnconnected)
