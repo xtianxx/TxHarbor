@@ -53,7 +53,7 @@ Design only; no implementation in this round. All tables live in PostgreSQL (aut
 
 - `principal` TEXT；`action` ENUM('scan_manage','exception_handle','dispose_ack','dispose_reuse','close')；`scope` JSONB（链/业务类型/范围前缀）；`granted_by/at`；PK(`principal`,`action`,(`scope` 规范化哈希))。
 - 默认拒绝：无行即无权；未知动作、越界范围一律拒绝并审计。授予操作为部署期运维行为，本阶段不预置任何授予（机制已定，政策未裁决）。
-- 信任根与自举：授予/撤销走本地特权操作路径（`contracts/auth-matrix.md` Management 节），`principal` 绑定认证调用者身份；普通持有者不得自授；首次授予亦须该路径并审计。管理双人审批问题待业务裁决（见 auth 矩阵），本轮不设管理员角色。
+- 信任根与自举（管理授权裁决，仅 014，2026-09-26，已决）：授予/撤销走本地特权操作路径（`contracts/auth-matrix.md` Management 节），`principal` 绑定认证调用者身份；普通持有者不得自授；首次信任根经受控部署配置建立（身份绑定＋可管范围＋审计），无有效配置默认拒绝；单人执行，本阶段不强制第二人审批；未设管理员角色，未扩大任何既有权限。
 
 ## 2. 稳定身份与证据哈希
 

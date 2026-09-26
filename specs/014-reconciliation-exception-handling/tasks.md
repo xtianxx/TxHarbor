@@ -219,6 +219,6 @@ Task: "Event-delivery adapter in internal/reconciliation/eventstate.go"
 
 - Coverage: FR-001–025, SC-001–006, Q1–Q5, quickstart §1–11 all mapped above;重点 six (atomicity, crash-no-miss, legal-duplicate silence, insufficient-evidence conservatism, invalidation on change, unauthorized refusal, unknown-disposal idempotency, pause/budget isolation) land in T010/T016/T017/T021/T022/T023/T026/T027/T028.
 - Risk-accept/ignore: NOT approved — zero implementation tasks generated for it; any future need is a business blocker, not a tasks-time decision.
-- Open business question (R2, awaiting user ruling; implementers must not decide): whether first/high-risk permission grants need second-person approval, or local-privileged single-operator + audit suffices; no admin role is created and no permission is expanded in the meantime.
+- Management authorization decided (014-only, 2026-09-26): first and subsequent grants/queries/revokes are single-executed by an authenticated local-ops principal explicitly granted management permission; ordinary holders cannot self-grant; first trust root comes from controlled deploy config, default-deny without valid config; no admin role created, no existing permission expanded; grants/revokes record before/after state, operator, and result.
 - Prod thresholds pending do not block local validation; local numbers are never claimed as production thresholds.
 - [P] tasks = different files, no dependencies; [Story] label maps traceability; commit after each task or logical group; stop at any checkpoint to validate independently.
