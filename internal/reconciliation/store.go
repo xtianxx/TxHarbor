@@ -249,8 +249,8 @@ const (
 // order: task -> attempt/checkpoint/gap) before touching its rows.
 
 const taskSelectSQL = `
-SELECT task_id, scope_kind, scope_start, scope_start_at, scope_end, scope_end_at,
-       state, COALESCE(pause_reason, '')
+SELECT task_id, scope_chain_id, scope_kind, scope_start, scope_start_at, scope_end, scope_end_at,
+       state, COALESCE(pause_reason, ''), business_types, upstream_receipt_source, policy_refs
 FROM recon_task
 WHERE task_id = $1`
 

@@ -874,10 +874,15 @@ func loadGrants(ctx context.Context, query PermissionQueryer, principal string) 
 }
 
 // authzRangeCovered reports whether grant bounds [gStart, gEnd] contain request
-// bounds [rStart, rEnd]. Absent grant bounds mean range-unbounded; absent
-// request bounds (or inverted grant bounds) never match.
+// bounds [rStart, rEnd]. Absent grant bounds mean range-unbounded and cover a
+// request with or without a stated range (a time-scoped task carries no height
+// range by design, so its request range is absent); a bounded grant only ever
+// covers a bounded request fully inside it, and inverted bounds never match.
 func authzRangeCovered(gStart, gEnd, rStart, rEnd *int64) bool {
 	if gStart == nil && gEnd == nil {
+		if rStart == nil && rEnd == nil {
+			return true
+		}
 		return rStart != nil && rEnd != nil && *rStart <= *rEnd
 	}
 	if rStart == nil || rEnd == nil || *rStart > *rEnd {

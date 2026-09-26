@@ -6,6 +6,7 @@ package config
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"math/big"
@@ -138,6 +139,29 @@ const (
 	// window when absent. No numeric business threshold lives here.
 	EnvEventsAlertEnabled             = "TXHARBOR_EVENTS_ALERT_ENABLED"
 	EnvEventsAlertSoftSustainedWindow = "TXHARBOR_EVENTS_ALERT_SOFT_SUSTAINED_WINDOW"
+	// 014 reconciliation (T018; FR-001/003/019, Q3). Every knob is optional at
+	// Load and format-validated when present; required-ness (all-positive)
+	// is enforced fail-closed by the reconcile-admin command path, so the
+	// serve/migrate flows keep their exact semantics. Budget knobs carry
+	// deliberately NO defaults: an invented value would be a fabricated
+	// resource threshold (FR-019; local test values are never production
+	// thresholds). The principal is the authenticated caller identity binding
+	// (controlled deployment config, never CLI free text); the management
+	// trust-root JSON name is carried through for the T023 management surface
+	// (grant/revoke not delivered in this batch; zero grants are seeded).
+	EnvReconPrincipal          = "TXHARBOR_RECON_PRINCIPAL"
+	EnvReconConcurrency        = "TXHARBOR_RECON_CONCURRENCY"
+	EnvReconMaxSpanPerClaim    = "TXHARBOR_RECON_MAX_SPAN_PER_CLAIM"
+	EnvReconMaxDuration        = "TXHARBOR_RECON_MAX_DURATION"
+	EnvReconMaxPGRequests      = "TXHARBOR_RECON_MAX_PG_REQUESTS"
+	EnvReconMaxRPCRequests     = "TXHARBOR_RECON_MAX_RPC_REQUESTS"
+	EnvReconLeaseTTL           = "TXHARBOR_RECON_LEASE_TTL"
+	EnvReconFreshnessTolerance = "TXHARBOR_RECON_FRESHNESS_TOLERANCE"
+	EnvReconMaxTipLag          = "TXHARBOR_RECON_MAX_TIP_LAG"
+	EnvReconMaxCandidates      = "TXHARBOR_RECON_MAX_CANDIDATES"
+	EnvReconMaxEventRows       = "TXHARBOR_RECON_MAX_EVENT_ROWS"
+	EnvReconSettleLimit        = "TXHARBOR_RECON_SETTLE_LIMIT"
+	EnvReconManagementTrust    = "TXHARBOR_RECON_MANAGEMENT_TRUST"
 )
 const (
 	DefaultHTTPAddr           = "127.0.0.1:8080"
@@ -309,6 +333,50 @@ type Config struct {
 	Kafka     KafkaConfig
 	RateLimit RateLimitConfig
 	Capacity  CapacityConfig
+	// 014 reconciliation operator surface (T018). Zero-valued until the
+	// TXHARBOR_RECON_* knobs are set; the reconcile-admin command refuses
+	// missing/invalid values fail-closed (no defaults are invented here).
+	Recon ReconConfig
+}
+
+// ReconConfig is the 014 reconcile-admin configuration: the authenticated
+// principal binding, the bounded scan budget, and the pass-through management
+// trust root. Concrete budget values are deployment/test parameters and are
+// never claimed as production thresholds.
+type ReconConfig struct {
+	// Principal is the canonical "<kind>:<id>" authenticated caller identity
+	// (controlled deployment config; the reconcile-admin command binds it with
+	// reconciliation.ConfigPrincipal and denies everything when absent or
+	// malformed).
+	Principal string
+	// Concurrency bounds parallel in-flight scan work units.
+	Concurrency int
+	// MaxSpanPerClaim bounds one claimed interval in scope units (blocks or
+	// unix microseconds).
+	MaxSpanPerClaim int64
+	// MaxDuration bounds one scan invocation wall-clock.
+	MaxDuration time.Duration
+	// MaxPGRequests bounds PostgreSQL requests per scan invocation.
+	MaxPGRequests int
+	// MaxRPCRequests bounds chain RPC requests per scan invocation.
+	MaxRPCRequests int
+	// LeaseTTL bounds the claimed attempt lease.
+	LeaseTTL time.Duration
+	// FreshnessTolerance is the classification freshness window.
+	FreshnessTolerance time.Duration
+	// MaxTipLag is the chain-facts live-tip freshness tolerance in heights.
+	MaxTipLag int64
+	// MaxCandidates bounds the per-interval candidate enumeration.
+	MaxCandidates int
+	// MaxEventRows bounds the per-observation outbox rows read.
+	MaxEventRows int
+	// SettleLimit bounds how many in-flight attempts one pause/cancel settles.
+	SettleLimit int
+	// ManagementTrustRaw is the controlled deployment-config management
+	// trust-root JSON (identity binding + manageable scope). Naming/pass-
+	// through only in this batch: grant/revoke/query management commands are
+	// T023 and are deliberately not delivered here.
+	ManagementTrustRaw string
 }
 
 // EventsConfig is the 013 events runtime configuration. Technical cadence
@@ -587,6 +655,7 @@ func Load(getenv Getenv) (*Config, error) {
 	c.loadTxLifecycle(getenv, &errs)
 	c.loadWorker(getenv, &errs)
 	c.loadEvents013(getenv, &errs)
+	c.loadRecon014(getenv, &errs)
 	// Nonce read API (008 FR-19): the bearer token passes through verbatim
 	// and is never formatted into an error. Unset or empty leaves the read
 	// endpoints fail-closed (the read provider authenticates against it).
@@ -661,6 +730,22 @@ func (c *Config) Summary() string {
 			len(c.Kafka.Brokers), c.Kafka.Topic, c.Redis.Addr,
 			c.Capacity.SoftLimit, c.Capacity.HardLimit, c.Capacity.Reserve,
 			c.Events.Alerts.Enabled)
+	}
+	// 014 reconcile-admin block: appended only when a principal binding is
+	// configured, so the default serve/migrate line is unchanged. The
+	// management trust root is rendered by presence only (never its content).
+	if c.Recon.Principal != "" {
+		managementTrust := ""
+		if c.Recon.ManagementTrustRaw != "" {
+			managementTrust = logx.Redacted
+		}
+		summary += fmt.Sprintf(
+			" recon_principal=%s recon_concurrency=%d recon_max_span_per_claim=%d recon_max_duration=%s recon_max_pg_requests=%d recon_max_rpc_requests=%d recon_lease_ttl=%s recon_freshness_tolerance=%s recon_max_tip_lag=%d recon_max_candidates=%d recon_max_event_rows=%d recon_settle_limit=%d recon_management_trust=%s",
+			c.Recon.Principal, c.Recon.Concurrency, c.Recon.MaxSpanPerClaim,
+			c.Recon.MaxDuration, c.Recon.MaxPGRequests, c.Recon.MaxRPCRequests,
+			c.Recon.LeaseTTL, c.Recon.FreshnessTolerance, c.Recon.MaxTipLag,
+			c.Recon.MaxCandidates, c.Recon.MaxEventRows, c.Recon.SettleLimit,
+			managementTrust)
 	}
 	return summary
 }
@@ -1244,6 +1329,78 @@ func (c *Config) loadEvents013(getenv Getenv, errs *[]error) {
 			}
 		}
 	}
+}
+
+// loadRecon014 parses the 014 reconcile-admin knobs (T018). Every knob is
+// optional at Load so the serve/migrate flows are untouched; present values
+// must be well-formed and positive or Load refuses (fail-closed). The command
+// path enforces required-ness: a missing budget value is refused by name, never
+// silently defaulted (FR-019), and no default here is a production threshold.
+// The principal and management trust root are carried through as controlled
+// deployment configuration (identity binding), never as CLI free text.
+func (c *Config) loadRecon014(getenv Getenv, errs *[]error) {
+	positiveInt := func(name string, dest *int) {
+		raw, ok := getenv(name)
+		if !ok || raw == "" {
+			return
+		}
+		n, err := strconv.Atoi(raw)
+		if err != nil || n <= 0 {
+			*errs = append(*errs, invalid(name, "%q is not a positive decimal integer", raw))
+			return
+		}
+		*dest = n
+	}
+	positiveInt64 := func(name string, dest *int64) {
+		raw, ok := getenv(name)
+		if !ok || raw == "" {
+			return
+		}
+		n, err := strconv.ParseInt(raw, 10, 64)
+		if err != nil || n <= 0 {
+			*errs = append(*errs, invalid(name, "%q is not a positive decimal integer", raw))
+			return
+		}
+		*dest = n
+	}
+	positiveDuration := func(name string, dest *time.Duration) {
+		raw, ok := getenv(name)
+		if !ok || raw == "" {
+			return
+		}
+		d, err := time.ParseDuration(raw)
+		if err != nil || d <= 0 {
+			*errs = append(*errs, invalid(name, "%q is not a positive duration", raw))
+			return
+		}
+		*dest = d
+	}
+
+	if raw, ok := getenv(EnvReconPrincipal); ok && raw != "" {
+		if strings.TrimSpace(raw) != raw {
+			*errs = append(*errs, invalid(EnvReconPrincipal, "must not carry surrounding whitespace"))
+		} else {
+			c.Recon.Principal = raw
+		}
+	}
+	if raw, ok := getenv(EnvReconManagementTrust); ok && raw != "" {
+		if !json.Valid([]byte(raw)) {
+			*errs = append(*errs, invalid(EnvReconManagementTrust, "is not valid JSON"))
+		} else {
+			c.Recon.ManagementTrustRaw = raw
+		}
+	}
+	positiveInt(EnvReconConcurrency, &c.Recon.Concurrency)
+	positiveInt64(EnvReconMaxSpanPerClaim, &c.Recon.MaxSpanPerClaim)
+	positiveDuration(EnvReconMaxDuration, &c.Recon.MaxDuration)
+	positiveInt(EnvReconMaxPGRequests, &c.Recon.MaxPGRequests)
+	positiveInt(EnvReconMaxRPCRequests, &c.Recon.MaxRPCRequests)
+	positiveDuration(EnvReconLeaseTTL, &c.Recon.LeaseTTL)
+	positiveDuration(EnvReconFreshnessTolerance, &c.Recon.FreshnessTolerance)
+	positiveInt64(EnvReconMaxTipLag, &c.Recon.MaxTipLag)
+	positiveInt(EnvReconMaxCandidates, &c.Recon.MaxCandidates)
+	positiveInt(EnvReconMaxEventRows, &c.Recon.MaxEventRows)
+	positiveInt(EnvReconSettleLimit, &c.Recon.SettleLimit)
 }
 
 // parseBrokerList splits a comma-separated Kafka bootstrap list and validates

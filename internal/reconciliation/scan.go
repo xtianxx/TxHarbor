@@ -1,17 +1,24 @@
-// scan.go implements the T006 task/checkpoint/gap state machine skeleton:
-// the task lifecycle of contracts/task-lifecycle.md, the gap vocabulary of
-// data-model.md §1.3, the checkpoint pointer rule of §1.2/§5, and the
-// claim-execute-commit entry point (claim in a short transaction with
-// `SELECT recon_task ... FOR UPDATE`, no RPC inside; §5.1). ScanOnce itself
-// (T016) builds on these primitives; this file owns only the state machine
-// and the claim half of the protocol.
+// scan.go implements the 014 task state machine and the scan compare loop:
+//
+//   - T006: the task lifecycle of contracts/task-lifecycle.md, the gap
+//     vocabulary of data-model.md §1.3, the checkpoint pointer rule of
+//     §1.2/§5, and the claim half of the claim-execute-commit protocol
+//     (claim in a short transaction with `SELECT recon_task ... FOR UPDATE`,
+//     no RPC inside; §5.1).
+//   - T016: ScanOnce, the budgeted compare loop that builds on those
+//     primitives, reads the three parties through the T013–T015 read-only
+//     adapters, classifies with T017 and commits results + checkpoint in one
+//     short transaction (T010).
 package reconciliation
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"math"
+	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -257,15 +264,27 @@ func (c Checkpoint) Validate() error {
 	return nil
 }
 
-// Task is the subset of recon_task the state machine needs. Budget/policy
-// JSONB fields stay with the T008/T016 callers.
+// Task is the recon_task row materialized by the state machine and the T016
+// compare loop. ScopeChainID, BusinessTypes, UpstreamReceipts and PolicyRefs
+// feed the scan's identity scope and the read-only adapters; the budget JSONB
+// stays with the T008 caller (BudgetLimits are passed per invocation).
 type Task struct {
-	TaskID      string
-	ScopeKind   ScopeKind
-	ScopeStart  RangeBound
-	ScopeEnd    RangeBound
-	State       TaskState
-	PauseReason string
+	TaskID       string
+	ScopeChainID string
+	ScopeKind    ScopeKind
+	ScopeStart   RangeBound
+	ScopeEnd     RangeBound
+	State        TaskState
+	PauseReason  string
+	// BusinessTypes is the validated, canonical (sorted, deduplicated)
+	// business-type set of the task scope.
+	BusinessTypes []BusinessType
+	// UpstreamReceipts is the parsed upstream_receipt_source declaration of
+	// the task (empty means every business type counts as unconnected).
+	UpstreamReceipts []ChainUpstreamReceiptSource
+	// PolicyRefs is the raw policy_refs JSONB snapshot (confirm policy seq,
+	// cutover/catalog versions); scanTaskConfirmThresholdN reads it.
+	PolicyRefs []byte
 }
 
 // NextClaimStart returns the first position a new claim may cover: the
@@ -642,36 +661,61 @@ func taskAuditTarget(task *Task, to TaskState) map[string]any {
 	}
 }
 
-// TaskByID loads one task row for observation (no lock).
-func (s *Store) TaskByID(ctx context.Context, taskID string) (*Task, error) {
-	if s == nil || s.db == nil {
-		return nil, contractErrorf("store has no database")
-	}
-	task := &Task{TaskID: taskID}
+// scanTaskRow materializes one recon_task row. It is shared by the unlocked
+// read (TaskByID) and the locked read (lockTaskTx) so both see the same shape,
+// including the scope identity and upstream receipt declaration the T016
+// compare loop needs.
+func scanTaskRow(row pgx.Row) (*Task, error) {
+	task := &Task{}
 	var (
 		rawStart, rawEnd     *int64
 		rawStartAt, rawEndAt *time.Time
+		rawTypes             []string
+		rawUpstream          []byte
 	)
-	err := s.db.QueryRow(ctx, taskSelectSQL, taskID).
-		Scan(&task.TaskID, &task.ScopeKind, &rawStart, &rawStartAt, &rawEnd, &rawEndAt,
-			&task.State, &task.PauseReason)
-	if errors.Is(err, pgx.ErrNoRows) {
-		return nil, fmt.Errorf("%w: task_id %s", ErrTaskNotFound, taskID)
-	}
+	err := row.Scan(&task.TaskID, &task.ScopeChainID, &task.ScopeKind,
+		&rawStart, &rawStartAt, &rawEnd, &rawEndAt,
+		&task.State, &task.PauseReason, &rawTypes, &rawUpstream, &task.PolicyRefs)
 	if err != nil {
-		return nil, fmt.Errorf("load task: %w", err)
+		return nil, err
 	}
 	if !task.ScopeKind.Known() {
-		return nil, contractErrorf("task %s has unknown scope kind %q", taskID, task.ScopeKind)
+		return nil, contractErrorf("task %s has unknown scope kind %q", task.TaskID, task.ScopeKind)
 	}
 	if !task.State.Valid() {
-		return nil, contractErrorf("task %s has unknown state %q", taskID, task.State)
+		return nil, contractErrorf("task %s has unknown state %q", task.TaskID, task.State)
 	}
 	if task.ScopeStart, err = boundFromPair(task.ScopeKind, rawStart, rawStartAt); err != nil {
 		return nil, err
 	}
 	if task.ScopeEnd, err = boundFromPair(task.ScopeKind, rawEnd, rawEndAt); err != nil {
 		return nil, err
+	}
+	types := make([]BusinessType, 0, len(rawTypes))
+	for _, raw := range rawTypes {
+		types = append(types, BusinessType(raw))
+	}
+	if task.BusinessTypes, err = canonicalBusinessTypes(types); err != nil {
+		return nil, err
+	}
+	var parseErr error
+	if task.UpstreamReceipts, parseErr = ParseChainUpstreamReceiptSources(rawUpstream); parseErr != nil {
+		return nil, parseErr
+	}
+	return task, nil
+}
+
+// TaskByID loads one task row for observation (no lock).
+func (s *Store) TaskByID(ctx context.Context, taskID string) (*Task, error) {
+	if s == nil || s.db == nil {
+		return nil, contractErrorf("store has no database")
+	}
+	task, err := scanTaskRow(s.db.QueryRow(ctx, taskSelectSQL, taskID))
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, fmt.Errorf("%w: task_id %s", ErrTaskNotFound, taskID)
+	}
+	if err != nil {
+		return nil, fmt.Errorf("load task: %w", err)
 	}
 	return task, nil
 }
@@ -728,31 +772,12 @@ func (s *Store) OpenGapCount(ctx context.Context, taskID string) (int64, error) 
 // the first lock of every mutating 014 helper (package lock order:
 // recon_task -> recon_scan_attempt/recon_checkpoint/recon_gap).
 func lockTaskTx(ctx context.Context, tx pgx.Tx, taskID string) (*Task, error) {
-	task := &Task{TaskID: taskID}
-	var (
-		rawStart, rawEnd     *int64
-		rawStartAt, rawEndAt *time.Time
-	)
-	err := tx.QueryRow(ctx, lockTaskSQL, taskID).
-		Scan(&task.TaskID, &task.ScopeKind, &rawStart, &rawStartAt, &rawEnd, &rawEndAt,
-			&task.State, &task.PauseReason)
+	task, err := scanTaskRow(tx.QueryRow(ctx, lockTaskSQL, taskID))
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, fmt.Errorf("%w: task_id %s", ErrTaskNotFound, taskID)
 	}
 	if err != nil {
 		return nil, fmt.Errorf("lock task: %w", err)
-	}
-	if !task.ScopeKind.Known() {
-		return nil, contractErrorf("task %s has unknown scope kind %q", taskID, task.ScopeKind)
-	}
-	if !task.State.Valid() {
-		return nil, contractErrorf("task %s has unknown state %q", taskID, task.State)
-	}
-	if task.ScopeStart, err = boundFromPair(task.ScopeKind, rawStart, rawStartAt); err != nil {
-		return nil, err
-	}
-	if task.ScopeEnd, err = boundFromPair(task.ScopeKind, rawEnd, rawEndAt); err != nil {
-		return nil, err
 	}
 	return task, nil
 }
@@ -814,4 +839,1345 @@ func insertGapTx(ctx context.Context, tx pgx.Tx, taskID string, start, end Range
 		return fmt.Errorf("insert gap: %w", err)
 	}
 	return nil
+}
+
+// ===========================================================================
+// T016: ScanOnce compare loop
+// ===========================================================================
+//
+// ScanOnce is the US1 core: one budgeted invocation claims the next interval
+// of a running task (short transaction, `SELECT recon_task ... FOR UPDATE`,
+// no RPC inside; data-model.md §5.1), reads the three parties outside any
+// database transaction through the T013–T015 read-only adapters, classifies
+// every enumerated candidate with T017, and commits the persisted results and
+// the checkpoint pointer in one short transaction (T010 CommitScanBatch;
+// data-model.md §5).
+//
+// Hard boundaries encoded here:
+//
+//   - Missing evidence never becomes a conclusion: an unreadable party, an
+//     incomplete/stale/unknown bundle, an orphaned fact, an unconnected or
+//     unavailable upstream receipt source, or an unproven freshness gate all
+//     yield incomplete/pending, never consistent (FR-004/005/006/017/018).
+//   - Legal absorbed duplicates (Q4) create no ticket: metrics/audit only.
+//   - Divergences dedup by stable identity: the same identity reuses the
+//     original ticket row and appends a discrepancy_occurrence evidence row
+//     (FR-007); a new identity creates one ticket. Reopen/invalidation is the
+//     lifecycle owner's job (T026) and is deliberately not decided here.
+//   - Budget exhaustion suspends observably: new work stops, the in-flight
+//     attempt is settled boundedly, a gap row and a suspended_budget task
+//     transition (014 tasks only) record the uncovered remainder; there is no
+//     busy loop and no unbounded retry (FR-019, Q3).
+//   - A crash/cancel/timeout between claim and commit advances nothing: the
+//     pointer only moves inside CommitScanBatch over the contiguous persisted
+//     prefix.
+//   - Only 014-owned tables are written. No recovery, replay/unblock or
+//     payment path is ever invoked or triggered (FR-014/015/023).
+//   - Owner is the authenticated principal for attempt ownership and audit
+//     only. operator/reason/operation_id text never authorizes anything here;
+//     authorization happens before ScanOnce (authz.go, T009).
+//
+// Enumeration is the one caller-supplied seam: ScanCandidateSource lists the
+// business identities of an interval and owns enumeration completeness. An
+// empty candidate list is taken as "nothing to compare in this interval" and
+// is never used to hide an unwired adapter; an enumeration error is committed
+// with a query_failed gap so the range can never close silently.
+
+// ScanInterval is one inclusive interval claimed from the task pointer.
+type ScanInterval struct {
+	From RangeBound
+	To   RangeBound
+}
+
+// Validate checks the interval shape conservatively.
+func (i ScanInterval) Validate() error {
+	if !i.From.Valid() || !i.To.Valid() {
+		return contractErrorf("scan interval has an invalid range bound")
+	}
+	if i.From.Kind != i.To.Kind {
+		return contractErrorf("scan interval kinds differ: %q vs %q", i.From.Kind, i.To.Kind)
+	}
+	cmp, err := i.From.Compare(i.To)
+	if err != nil {
+		return err
+	}
+	if cmp > 0 {
+		return contractErrorf("scan interval is not ascending")
+	}
+	return nil
+}
+
+// ChainFactRef names one candidate's chain-side fact inside the claimed
+// interval. BlockNumber (+ optional BlockHash) anchors a canonical block;
+// TxHash (+ optional LogIndex) anchors indexed transfer-log facts. An empty
+// ref (Declared() == false) cannot attribute the chain party: it stays
+// unknown/pending instead of becoming a guess.
+type ChainFactRef struct {
+	BlockNumber int64
+	BlockHash   string
+	TxHash      string
+	LogIndex    *int64
+}
+
+// Declared reports whether the ref names any chain-side fact.
+func (r ChainFactRef) Declared() bool {
+	return r.BlockNumber > 0 || strings.TrimSpace(r.TxHash) != ""
+}
+
+// ScanCandidate is one business identity to reconcile in a claimed interval.
+type ScanCandidate struct {
+	// BusinessType must belong to the task scope's closed business-type set.
+	BusinessType BusinessType
+	// BusinessKey is the stable business identity of the candidate.
+	BusinessKey BusinessKey
+	// ChainFact names the candidate's chain-side fact; an empty ref keeps
+	// the chain party unknown (never absent-by-guess).
+	ChainFact ChainFactRef
+	// EventKey optionally overrides the event identity matched against the
+	// interval's event evidence; empty means BusinessKey is used.
+	EventKey BusinessKey
+	// Mismatch is the caller-computed verdict of the present required
+	// parties (their facts were compared and disagree). It is never inferred
+	// from availability alone.
+	Mismatch bool
+	// PGDuplicate carries the PG-side repeated business-effect facts
+	// (repeated effect / repeated withdrawal intent) that only the PG side
+	// can evidence; the event adapter supplies the delivery-side facts.
+	PGDuplicate DuplicateEvidence
+	// EvidenceRef optionally references the evidence bundle for occurrence
+	// rows (bounded to 512 bytes); an empty or oversized value is replaced by
+	// a synthesized scan reference.
+	EvidenceRef string
+}
+
+// ScanCandidateSource enumerates the business identities of one claimed
+// interval. An enumeration error is evidence-missing: the interval is
+// committed with a query_failed gap (never consistent), never silently
+// skipped.
+type ScanCandidateSource interface {
+	ScanCandidates(ctx context.Context, interval ScanInterval) ([]ScanCandidate, error)
+}
+
+// ScanChainWindowResolver optionally resolves the block-height window of a
+// claimed interval for the chain-facts adapter. A height-scoped interval
+// resolves locally; a time-scoped task needs this resolver because the local
+// index stores no chain timestamps. An unresolved window leaves the chain
+// party unknown/pending, never consistent.
+type ScanChainWindowResolver interface {
+	ResolveChainWindow(ctx context.Context, interval ScanInterval) (from, to int64, ok bool, err error)
+}
+
+// The read-only adapter surfaces ScanOnce consumes. The T013–T015 adapters
+// satisfy them; bounded fakes may substitute in tests.
+type (
+	// ChainFactsReader is the T013 chain-facts surface.
+	ChainFactsReader interface {
+		Observe(ctx context.Context, q ChainFactsQuery) (ChainFactsBundle, error)
+	}
+	// PGStateReader is the T014 PG-state surface.
+	PGStateReader interface {
+		Read(ctx context.Context, req PGReadRequest) (PGStateRecord, error)
+	}
+	// EventStateReader is the T015 event-delivery surface.
+	EventStateReader interface {
+		Observe(ctx context.Context, q EventStateQuery) (EventStateEvidence, error)
+	}
+)
+
+// ScanSources groups the three read-only adapters. A nil adapter leaves its
+// party unknown/pending; it is never read as permission to conclude.
+type ScanSources struct {
+	Chain  ChainFactsReader
+	PG     PGStateReader
+	Events EventStateReader
+}
+
+// ScanOnceRequest is one budgeted scan invocation.
+type ScanOnceRequest struct {
+	TaskID string
+	// Owner is the authenticated principal bound by the caller before the
+	// call: attempt ownership + audit actor, never an authorization source.
+	Owner string
+	// LeaseTTL bounds the claimed attempt lease; a crashed invocation's
+	// attempt is abandoned after expiry (RecoverStaleAttempts).
+	LeaseTTL time.Duration
+	// Limits are the hard budget bounds; every field must be positive.
+	Limits BudgetLimits
+	// FreshnessTolerance is the classification freshness window. Zero keeps
+	// every conclusion pending (freshness cannot be proven; fail-closed).
+	FreshnessTolerance time.Duration
+	// Sources are the three read-only adapters.
+	Sources ScanSources
+	// Candidates enumerates the per-interval business identities.
+	Candidates ScanCandidateSource
+	// EventConsumers/EventQuarantine are passed through to the event
+	// adapter. The event adapter requires a quarantine reader whenever
+	// consumers are registered; ScanOnce refuses the mismatched shape up
+	// front instead of reading a poisoned event as "not yet consumed".
+	EventConsumers  []EventConsumerRegistration
+	EventQuarantine EventQuarantineReader
+}
+
+// ScanStop names why an invocation stopped claiming intervals.
+type ScanStop string
+
+// The recognized stop reasons. The zero value means "not stopped" (the loop
+// only exits through one of the values below).
+const (
+	ScanStopScopeExhausted   ScanStop = "scope_exhausted"
+	ScanStopTaskNotRunning   ScanStop = "task_not_running"
+	ScanStopClaimHeld        ScanStop = "claim_held"
+	ScanStopAttemptDiscarded ScanStop = "attempt_discarded"
+)
+
+// ScanOnceResult is the observable outcome of one invocation. Suspended is
+// true when the budget stopped new work; the task was moved to
+// suspended_budget (unless an operator already paused/cancelled it) and a gap
+// row records the uncovered remainder.
+type ScanOnceResult struct {
+	TaskID          string
+	Attempts        int
+	Committed       int
+	Discarded       int
+	Candidates      int
+	Tickets         int
+	Merged          int
+	Occurrences     int
+	Pending         int
+	Absorbed        int
+	Gaps            int
+	Stop            ScanStop
+	StoppedState    TaskState
+	DiscardReason   string
+	LastCheckpoint  *Checkpoint
+	Suspended       bool
+	SuspendResource BudgetResource
+	SuspendDetail   string
+	BudgetUsage     BudgetUsage
+}
+
+// ScanOnce runs one budgeted scan invocation (T016). It never panics on
+// malformed input: every shape violation is a typed refusal.
+func (s *Store) ScanOnce(ctx context.Context, req ScanOnceRequest) (result ScanOnceResult, err error) {
+	result = ScanOnceResult{TaskID: req.TaskID}
+	if s == nil || s.db == nil {
+		return result, contractErrorf("store has no database")
+	}
+	if strings.TrimSpace(req.TaskID) == "" {
+		return result, contractErrorf("scan requires a task_id")
+	}
+	if strings.TrimSpace(req.Owner) == "" {
+		return result, contractErrorf("scan requires an attempt owner (authenticated principal)")
+	}
+	if req.LeaseTTL <= 0 {
+		return result, contractErrorf("scan lease ttl must be positive")
+	}
+	if err := req.Limits.Validate(); err != nil {
+		return result, err
+	}
+	if req.Candidates == nil {
+		return result, contractErrorf("scan requires a candidate source")
+	}
+	if len(req.EventConsumers) > 0 && req.EventQuarantine == nil {
+		return result, contractErrorf("event consumers require a quarantine reader")
+	}
+
+	task, err := s.TaskByID(ctx, req.TaskID)
+	if err != nil {
+		return result, err
+	}
+	if task.State != TaskStateRunning {
+		result.Stop = ScanStopTaskNotRunning
+		result.StoppedState = task.State
+		return result, fmt.Errorf("%w: state=%s", ErrTaskNotRunning, task.State)
+	}
+	scope, err := scanTaskIdentityScope(task)
+	if err != nil {
+		return result, err
+	}
+
+	budget, err := NewBudget(req.Limits)
+	if err != nil {
+		return result, err
+	}
+	defer func() { result.BudgetUsage = budget.Usage() }()
+
+	// Crash-safe resume: expired claims from a crashed invocation are
+	// abandoned (gap + audit, pointer untouched) before new work is claimed.
+	if err := budget.ConsumePG(ctx, 1); err != nil {
+		if errors.Is(err, ErrBudgetExhausted) {
+			return s.suspendScanOnce(ctx, &req, budget, result, false)
+		}
+		return result, err
+	}
+	if _, err := s.RecoverStaleAttempts(ctx, RecoverStaleAttemptsRequest{
+		TaskID: req.TaskID,
+		Limit:  scanPositiveLimit(req.Limits.MaxConcurrency),
+		Actor:  req.Owner,
+	}); err != nil {
+		return result, err
+	}
+
+	for {
+		if err := ctx.Err(); err != nil {
+			// Interrupted between intervals: nothing in flight, nothing
+			// committed, the pointer is exactly where the last commit left it.
+			return result, err
+		}
+		release, err := budget.Acquire(ctx)
+		if err != nil {
+			if errors.Is(err, ErrBudgetExhausted) {
+				return s.suspendScanOnce(ctx, &req, budget, result, false)
+			}
+			return result, err
+		}
+
+		if err := budget.ConsumePG(ctx, 1); err != nil {
+			release()
+			if errors.Is(err, ErrBudgetExhausted) {
+				return s.suspendScanOnce(ctx, &req, budget, result, false)
+			}
+			return result, err
+		}
+		claim, claimErr := s.ClaimScanAttempt(ctx, ClaimAttemptRequest{
+			TaskID:   req.TaskID,
+			Owner:    req.Owner,
+			Span:     req.Limits.MaxSpanPerClaim,
+			LeaseTTL: req.LeaseTTL,
+		})
+		if claimErr != nil {
+			release()
+			switch {
+			case errors.Is(claimErr, ErrScopeExhausted):
+				// Scope fully persisted: no claimable interval remains. The
+				// task is not auto-closed here (closing is an operator action
+				// that requires zero open gaps).
+				result.Stop = ScanStopScopeExhausted
+				return result, nil
+			case errors.Is(claimErr, ErrTaskNotRunning):
+				result.Stop = ScanStopTaskNotRunning
+				if current, loadErr := s.TaskByID(ctx, req.TaskID); loadErr == nil {
+					result.StoppedState = current.State
+				}
+				return result, nil
+			case errors.Is(claimErr, ErrClaimTaken):
+				// Another invocation holds the task's single claimed
+				// interval; this one did no work and must not spin.
+				result.Stop = ScanStopClaimHeld
+				return result, nil
+			default:
+				return result, claimErr
+			}
+		}
+		result.Attempts++
+
+		interval := ScanInterval{From: claim.RangeStart, To: claim.RangeEnd}
+		outcome, compareErr := compareScanInterval(ctx, &req, task, scope, interval, budget)
+		if compareErr != nil {
+			release()
+			if errors.Is(compareErr, ErrBudgetExhausted) {
+				// The attempt is still claimed: settle it (gap, no pointer
+				// move) and suspend the task observably.
+				return s.suspendScanOnce(ctx, &req, budget, result, true)
+			}
+			// ctx/contract errors: the attempt stays claimed until its lease
+			// expires (RecoverStaleAttempts); nothing was committed.
+			return result, compareErr
+		}
+		outcome.taskID = req.TaskID
+		outcome.attemptID = claim.AttemptID
+		outcome.owner = req.Owner
+
+		if err := budget.ConsumePG(ctx, 1); err != nil {
+			release()
+			if errors.Is(err, ErrBudgetExhausted) {
+				return s.suspendScanOnce(ctx, &req, budget, result, true)
+			}
+			return result, err
+		}
+		commit, commitErr := s.CommitScanBatch(ctx, CommitScanBatchRequest{
+			TaskID:         req.TaskID,
+			AttemptID:      claim.AttemptID,
+			PersistResults: outcome.persist,
+		})
+		release()
+		switch {
+		case commitErr == nil:
+			if commit.Checkpoint != nil {
+				result.LastCheckpoint = commit.Checkpoint
+			}
+			result.Committed++
+			outcome.applyTo(&result)
+		case errors.Is(commitErr, ErrAttemptDiscarded):
+			// Late submitter: audited inside the discard transaction, pointer
+			// untouched, results dropped. Stop instead of racing the next
+			// interval.
+			result.Discarded++
+			result.DiscardReason = commit.DiscardReason
+			result.Stop = ScanStopAttemptDiscarded
+			if current, loadErr := s.TaskByID(ctx, req.TaskID); loadErr == nil {
+				result.StoppedState = current.State
+			}
+			return result, nil
+		default:
+			return result, commitErr
+		}
+	}
+}
+
+// scanTaskIdentityScope builds the stable identity scope of a task from its
+// recorded scope (chain + kind + inclusive bounds + business types).
+func scanTaskIdentityScope(task *Task) (IdentityScope, error) {
+	if task == nil {
+		return IdentityScope{}, contractErrorf("scan requires a task")
+	}
+	types, err := canonicalBusinessTypes(task.BusinessTypes)
+	if err != nil {
+		return IdentityScope{}, err
+	}
+	scope := IdentityScope{
+		ChainID:       task.ScopeChainID,
+		Kind:          task.ScopeKind,
+		BusinessTypes: types,
+	}
+	switch task.ScopeKind {
+	case ScopeHeight:
+		scope.From = task.ScopeStart.Height
+		scope.To = task.ScopeEnd.Height
+	case ScopeTime:
+		scope.From = task.ScopeStart.Time.UnixMicro()
+		scope.To = task.ScopeEnd.Time.UnixMicro()
+	default:
+		return IdentityScope{}, contractErrorf("task %s has unknown scope kind %q", task.TaskID, task.ScopeKind)
+	}
+	if err := scope.Validate(); err != nil {
+		return IdentityScope{}, err
+	}
+	return scope, nil
+}
+
+// scanPositiveLimit returns v, or 1 when v is non-positive. It is used for
+// bounded settle/recovery limits that must be positive.
+func scanPositiveLimit(v int) int {
+	if v < 1 {
+		return 1
+	}
+	return v
+}
+
+// scanNumericChainID converts the task's chain identity into the numeric
+// chain id the adapters require. A non-numeric chain identity cannot be read
+// by the current adapters and fails closed (parties stay unknown/pending).
+func scanNumericChainID(task *Task) (int64, bool) {
+	if task == nil {
+		return 0, false
+	}
+	id, err := strconv.ParseInt(strings.TrimSpace(task.ScopeChainID), 10, 64)
+	if err != nil || id <= 0 {
+		return 0, false
+	}
+	return id, true
+}
+
+// scanTaskConfirmThresholdN reads the confirm policy depth N from the task's
+// policy_refs snapshot. A missing/malformed value is 0: the chain evidence is
+// then incomplete and can never support a consistent verdict.
+func scanTaskConfirmThresholdN(task *Task) uint64 {
+	if task == nil || len(task.PolicyRefs) == 0 {
+		return 0
+	}
+	var refs struct {
+		ConfirmThresholdN uint64 `json:"confirm_threshold_n"`
+	}
+	if err := json.Unmarshal(task.PolicyRefs, &refs); err != nil {
+		return 0
+	}
+	return refs.ConfirmThresholdN
+}
+
+// scanContextError returns err when it is a context cancellation/deadline,
+// nil otherwise. It lets the compare loop treat adapter read failures as
+// evidence-unknown while still aborting promptly on interruption.
+func scanContextError(err error) error {
+	switch {
+	case err == nil:
+		return nil
+	case errors.Is(err, context.Canceled), errors.Is(err, context.DeadlineExceeded):
+		return err
+	default:
+		return nil
+	}
+}
+
+// scanChainWindow resolves the height window of one claimed interval for the
+// chain-facts adapter. Height scopes resolve locally; time scopes need the
+// optional ScanChainWindowResolver (the local index stores no timestamps).
+func scanChainWindow(ctx context.Context, req *ScanOnceRequest, interval ScanInterval) (int64, int64, bool, error) {
+	if req.Sources.Chain == nil {
+		return 0, 0, false, nil
+	}
+	if interval.From.Kind == ScopeHeight {
+		return interval.From.Height, interval.To.Height, true, nil
+	}
+	resolver, ok := req.Candidates.(ScanChainWindowResolver)
+	if !ok || resolver == nil {
+		return 0, 0, false, nil
+	}
+	from, to, resolved, err := resolver.ResolveChainWindow(ctx, interval)
+	if err != nil {
+		if ctxErr := scanContextError(err); ctxErr != nil {
+			return 0, 0, false, ctxErr
+		}
+		return 0, 0, false, nil
+	}
+	if !resolved || from < 0 || to < from {
+		return 0, 0, false, nil
+	}
+	return from, to, true, nil
+}
+
+// scanIntervalOutcome accumulates one interval's classifications plus the
+// bounded side-effect counters that are applied to the invocation result only
+// after the commit transaction succeeds.
+type scanIntervalOutcome struct {
+	taskID    string
+	attemptID string
+	owner     string
+	interval  ScanInterval
+
+	classifications []Classification
+	gapReasons      []GapReason
+	pending         int
+	absorbed        int
+	candidates      int
+
+	tickets     int
+	merged      int
+	occurrences int
+	gaps        int
+}
+
+// addGapReason records one distinct uncovered-range reason for the interval.
+func (o *scanIntervalOutcome) addGapReason(reason GapReason) {
+	for _, existing := range o.gapReasons {
+		if existing == reason {
+			return
+		}
+	}
+	o.gapReasons = append(o.gapReasons, reason)
+}
+
+// applyTo copies the committed side effects onto the invocation result.
+func (o *scanIntervalOutcome) applyTo(result *ScanOnceResult) {
+	result.Candidates += o.candidates
+	result.Tickets += o.tickets
+	result.Merged += o.merged
+	result.Occurrences += o.occurrences
+	result.Pending += o.pending
+	result.Absorbed += o.absorbed
+	result.Gaps += o.gaps
+}
+
+// compareScanInterval reads the three parties for one claimed interval and
+// classifies every enumerated candidate. It performs no database transaction
+// and no write: all reads happen outside the claim/commit transactions
+// (data-model.md §5.1).
+func compareScanInterval(ctx context.Context, req *ScanOnceRequest, task *Task, scope IdentityScope,
+	interval ScanInterval, budget *Budget) (*scanIntervalOutcome, error) {
+	if err := interval.Validate(); err != nil {
+		return nil, err
+	}
+	outcome := &scanIntervalOutcome{interval: interval}
+	now := time.Now().UTC()
+
+	chainID, chainIDOK := scanNumericChainID(task)
+	from, to, haveWindow, err := scanChainWindow(ctx, req, interval)
+	if err != nil {
+		return nil, err
+	}
+
+	// Chain facts (one interval-level read).
+	var (
+		chainBundle *ChainFactsBundle
+		chainUsable bool
+	)
+	if req.Sources.Chain != nil && chainIDOK && haveWindow {
+		if err := budget.ConsumePG(ctx, 1); err != nil {
+			return nil, err
+		}
+		if err := budget.ConsumeRPC(ctx, 1); err != nil {
+			return nil, err
+		}
+		bundle, observeErr := req.Sources.Chain.Observe(ctx, ChainFactsQuery{
+			ChainID:           chainID,
+			From:              from,
+			To:                to,
+			ConfirmThresholdN: scanTaskConfirmThresholdN(task),
+			NeedTransferLogs:  true,
+			UpstreamReceipts:  append([]ChainUpstreamReceiptSource(nil), task.UpstreamReceipts...),
+		})
+		if ctxErr := scanContextError(observeErr); ctxErr != nil {
+			return nil, ctxErr
+		}
+		chainBundle = &bundle
+		chainUsable = observeErr == nil && bundle.CanSupportConsistent()
+	}
+
+	// Event delivery evidence (one interval-level read).
+	var (
+		eventEvidence *EventStateEvidence
+		eventUsable   bool
+	)
+	if req.Sources.Events != nil {
+		if err := budget.ConsumePG(ctx, 1); err != nil {
+			return nil, err
+		}
+		evidence, observeErr := req.Sources.Events.Observe(ctx, EventStateQuery{
+			Scope:            scope,
+			Interval:         EventStateInterval{From: interval.From, To: interval.To},
+			Consumers:        append([]EventConsumerRegistration(nil), req.EventConsumers...),
+			Quarantine:       req.EventQuarantine,
+			UpstreamReceipts: append([]ChainUpstreamReceiptSource(nil), task.UpstreamReceipts...),
+		})
+		if ctxErr := scanContextError(observeErr); ctxErr != nil {
+			return nil, ctxErr
+		}
+		eventEvidence = &evidence
+		eventUsable = observeErr == nil && evidence.CanSupportConsistent()
+	}
+
+	// Candidate enumeration. Its error is evidence-missing: the interval is
+	// committed with a query_failed gap so it can never close silently.
+	if err := budget.ConsumePG(ctx, 1); err != nil {
+		return nil, err
+	}
+	candidates, enumerateErr := req.Candidates.ScanCandidates(ctx, interval)
+	if ctxErr := scanContextError(enumerateErr); ctxErr != nil {
+		return nil, ctxErr
+	}
+	if enumerateErr != nil {
+		outcome.pending++
+		outcome.addGapReason(GapQueryFailed)
+		return outcome, nil
+	}
+	outcome.candidates = len(candidates)
+
+	for i := range candidates {
+		candidate := candidates[i]
+		if err := scanValidateCandidate(&candidate, scope); err != nil {
+			return nil, err
+		}
+		eventKey := candidate.EventKey
+		if strings.TrimSpace(eventKey.Value) == "" {
+			eventKey = candidate.BusinessKey
+		}
+
+		// Chain party.
+		var (
+			chainParty PartyObservation
+			chainBlock *ChainFactBlock
+			chainLogs  []ChainFactLog
+		)
+		switch {
+		case chainBundle == nil:
+			chainParty = PartyObservation{Status: PartyUnknown, Content: chainUnavailableSnapshot(candidate.ChainFact)}
+		default:
+			match := matchChainCandidateFacts(chainBundle, candidate.ChainFact)
+			switch {
+			case match.orphaned:
+				chainParty = PartyObservation{Status: PartyAbsent, Orphaned: true,
+					Content: chainAbsenceSnapshot(chainID, candidate.ChainFact)}
+			case match.ambiguous:
+				chainParty = PartyObservation{Status: PartyUnknown, Content: chainUnavailableSnapshot(candidate.ChainFact)}
+			case match.present:
+				chainParty = PartyObservation{Status: PartyPresent,
+					Content: chainCandidateSnapshot(chainID, candidate.ChainFact, match.block, match.logs)}
+				chainBlock = match.block
+				chainLogs = match.logs
+			case !chainUsable:
+				chainParty = PartyObservation{Status: PartyUnknown, Content: chainUnavailableSnapshot(candidate.ChainFact)}
+			default:
+				chainParty = PartyObservation{Status: PartyAbsent,
+					Content: chainAbsenceSnapshot(chainID, candidate.ChainFact)}
+			}
+		}
+
+		// Event party.
+		var (
+			eventParty PartyObservation
+			eventObs   *EventDeliveryObservation
+		)
+		if eventEvidence == nil {
+			eventParty = PartyObservation{Status: PartyUnknown, Content: eventUnavailableSnapshot(eventKey)}
+		} else {
+			observation, match := matchCandidateEventObservation(eventEvidence, eventKey)
+			switch match {
+			case eventMatchFound:
+				eventParty = observation.PartyObservation()
+				eventObs = observation
+			case eventMatchAmbiguous:
+				eventParty = PartyObservation{Status: PartyUnknown, Content: eventUnavailableSnapshot(eventKey)}
+			default:
+				if eventUsable {
+					eventParty = PartyObservation{Status: PartyAbsent, Content: EventAbsenceSnapshot(eventKey)}
+				} else {
+					eventParty = PartyObservation{Status: PartyUnknown, Content: eventUnavailableSnapshot(eventKey)}
+				}
+			}
+		}
+
+		// PG party (one read per candidate; outside any transaction).
+		var pgRecord *PGStateRecord
+		pgParty := PartyObservation{Status: PartyUnknown, Content: pgUnavailableSnapshot(candidate.BusinessKey)}
+		if req.Sources.PG != nil && chainIDOK {
+			if err := budget.ConsumePG(ctx, 1); err != nil {
+				return nil, err
+			}
+			record, readErr := req.Sources.PG.Read(ctx, PGReadRequest{
+				ChainID:      chainID,
+				BusinessType: candidate.BusinessType,
+				Key:          candidate.BusinessKey,
+			})
+			if ctxErr := scanContextError(readErr); ctxErr != nil {
+				return nil, ctxErr
+			}
+			pgRecord = &record
+			switch record.Status {
+			case PGStateComplete:
+				pgParty = PartyObservation{Status: PartyPresent, Content: record.CanonicalBytes()}
+			case PGStateAbsent:
+				pgParty = PartyObservation{Status: PartyAbsent, Content: record.CanonicalBytes()}
+			default:
+				pgParty = PartyObservation{Status: PartyUnknown, Content: record.CanonicalBytes()}
+			}
+		}
+
+		// Q4 duplicate evidence: the event adapter owns the delivery-side
+		// facts, the candidate owns the PG-side repeated-effect facts.
+		duplicates := candidate.PGDuplicate
+		if eventObs != nil {
+			duplicates = mergeDuplicateEvidence(eventObs.DuplicateEvidence(), candidate.PGDuplicate)
+		}
+		if eventParty.Status != PartyPresent && duplicates.Deliveries > 1 {
+			// The classifier refuses duplicate evidence without a present
+			// event party; keep the shape valid instead of dropping the
+			// divergence facts.
+			duplicates.Deliveries = 1
+		}
+
+		evidenceAt := stableScanEvidenceInstant(chainBlock, eventObs, pgRecord, now)
+		classification := Classify(Observation{
+			Scope:        scope,
+			BusinessKey:  candidate.BusinessKey,
+			BusinessType: candidate.BusinessType,
+			Chain:        chainParty,
+			PG:           pgParty,
+			Event:        eventParty,
+			Mismatch:     candidate.Mismatch,
+			Duplicates:   duplicates,
+			Coverage: Coverage{
+				ScanComplete:       chainUsable && eventUsable,
+				OpenGaps:           0,
+				EvidenceAt:         evidenceAt,
+				Now:                now,
+				FreshnessTolerance: req.FreshnessTolerance,
+			},
+			Upstream:    scanUpstreamReceiptSource(task, candidate.BusinessType),
+			Version:     mergeScanVersionDomain(chainBundle, chainBlock, chainLogs, eventObs, pgRecord, candidate.ChainFact, now),
+			EvidenceRef: candidate.EvidenceRef,
+		})
+		outcome.classifications = append(outcome.classifications, classification)
+
+		switch {
+		case classification.Ticket:
+			// Persisted (dedup + occurrence) inside the commit transaction.
+		case classification.MetricsOnly() && classification.Conclusion == ConclusionConsistent:
+			outcome.absorbed++
+		case classification.Conclusion == ConclusionPending || classification.Category == CategoryIncomplete:
+			outcome.pending++
+			outcome.addGapReason(gapReasonForClassification(classification, scanUpstreamReceiptSource(task, candidate.BusinessType)))
+		default:
+			// Consistent on complete, fresh evidence.
+		}
+	}
+	return outcome, nil
+}
+
+// scanValidateCandidate refuses malformed or out-of-scope candidates before
+// any comparison: they are wiring defects, not evidence, so they fail the
+// invocation without writing anything.
+func scanValidateCandidate(candidate *ScanCandidate, scope IdentityScope) error {
+	if candidate == nil {
+		return contractErrorf("nil scan candidate")
+	}
+	if !candidate.BusinessType.Known() {
+		return contractErrorf("candidate has unknown business type %q", candidate.BusinessType)
+	}
+	if err := candidate.BusinessKey.Validate(); err != nil {
+		return err
+	}
+	if len(scanBusinessKeyRecord(candidate.BusinessKey)) > scanBusinessKeyMax {
+		return contractErrorf("candidate business key exceeds %d bytes", scanBusinessKeyMax)
+	}
+	if strings.TrimSpace(candidate.EventKey.Value) != "" {
+		if err := candidate.EventKey.Validate(); err != nil {
+			return err
+		}
+	}
+	for _, businessType := range scope.BusinessTypes {
+		if businessType == candidate.BusinessType {
+			return nil
+		}
+	}
+	return contractErrorf("candidate business type %q is outside the task scope", candidate.BusinessType)
+}
+
+// scanBusinessKeyRecord renders the persisted discrepancy.business_key text:
+// kind and value are both part of the identity, never truncated silently.
+func scanBusinessKeyRecord(key BusinessKey) string {
+	return string(key.Kind) + "=" + key.Value
+}
+
+// scanUpstreamReceiptSource looks up the task's declared upstream receipt
+// source of one business type. A missing declaration counts as unconnected
+// (FR-006): no consistent conclusion is possible from it.
+func scanUpstreamReceiptSource(task *Task, businessType BusinessType) UpstreamReceiptSource {
+	if task == nil {
+		return UpstreamReceiptSource{}
+	}
+	for _, declaration := range task.UpstreamReceipts {
+		if declaration.BusinessType != businessType {
+			continue
+		}
+		return UpstreamReceiptSource{
+			Source:    declaration.Source,
+			Connected: declaration.Connected,
+			// A connected declaration is an available read path. A connected
+			// flag alone still never proves upstream success: the classifier
+			// keeps ExternalCredit unverified without a positive receipt
+			// (FR-006).
+			Available: declaration.Connected,
+		}
+	}
+	return UpstreamReceiptSource{}
+}
+
+// gapReasonForClassification maps a pending classification onto the closed
+// uncovered-range vocabulary so the interval cannot close over unproven
+// evidence.
+func gapReasonForClassification(classification Classification, upstream UpstreamReceiptSource) GapReason {
+	switch classification.Reason {
+	case ReasonUpstreamUnconnected, ReasonUpstreamUnavailable:
+		return GapUpstreamUnconnected
+	case ReasonFreshnessExpired, ReasonFreshnessUnproven, ReasonEvidenceTrimmed:
+		return GapFreshnessHold
+	default:
+		if !upstream.Connected {
+			return GapUpstreamUnconnected
+		}
+		return GapQueryFailed
+	}
+}
+
+// chainCandidateMatch is the chain-facts membership verdict of one candidate
+// ref. ambiguous means the ref cannot be located/attributed (chain party
+// stays unknown); orphaned means the durable facts contradict the ref (reorg;
+// only pending handling is possible, FR-017).
+type chainCandidateMatch struct {
+	declared  bool
+	ambiguous bool
+	orphaned  bool
+	present   bool
+	block     *ChainFactBlock
+	logs      []ChainFactLog
+}
+
+// matchChainCandidateFacts checks one candidate ref against the interval's
+// chain bundle. Absence is only reported when the ref declares a locatable
+// block and the bundle can support a conclusion.
+func matchChainCandidateFacts(bundle *ChainFactsBundle, ref ChainFactRef) chainCandidateMatch {
+	match := chainCandidateMatch{declared: ref.Declared()}
+	if bundle == nil || !match.declared {
+		match.ambiguous = true
+		return match
+	}
+	if ref.BlockNumber > 0 {
+		for i := range bundle.Blocks {
+			block := &bundle.Blocks[i]
+			if block.Number != ref.BlockNumber {
+				continue
+			}
+			if ref.BlockHash != "" && !strings.EqualFold(block.Hash, ref.BlockHash) {
+				// The height carries a different canonical hash: the
+				// referenced fact was reorged away.
+				match.orphaned = true
+				return match
+			}
+			match.block = block
+			break
+		}
+	} else if ref.BlockHash != "" {
+		for i := range bundle.Blocks {
+			if strings.EqualFold(bundle.Blocks[i].Hash, ref.BlockHash) {
+				match.block = &bundle.Blocks[i]
+				break
+			}
+		}
+		if match.block == nil {
+			// A hash without a number cannot be located inside a height
+			// range; absence is not provable from this bundle.
+			match.ambiguous = true
+		}
+	}
+	if ref.TxHash != "" {
+		for i := range bundle.Logs {
+			log := &bundle.Logs[i]
+			if !strings.EqualFold(log.TxHash, ref.TxHash) {
+				continue
+			}
+			if ref.LogIndex != nil && log.LogIndex != *ref.LogIndex {
+				continue
+			}
+			match.logs = append(match.logs, *log)
+		}
+	}
+	match.present = match.block != nil || len(match.logs) > 0
+	if !match.present && ref.BlockNumber == 0 {
+		// Without a declared height the ref cannot be located by this
+		// adapter's complete height index (the transfer-log index only
+		// carries ERC-20 transfers), so absence is not provable.
+		match.ambiguous = true
+	}
+	return match
+}
+
+// candidateEventMatch is the event-identity membership verdict of one
+// candidate key.
+type candidateEventMatch int
+
+const (
+	eventMatchNone candidateEventMatch = iota
+	eventMatchFound
+	eventMatchAmbiguous
+)
+
+// matchCandidateEventObservation finds the single event observation whose
+// event id or aggregate identity equals key. More than one distinct event id
+// is ambiguous and must stay pending instead of guessing one version.
+func matchCandidateEventObservation(evidence *EventStateEvidence, key BusinessKey) (*EventDeliveryObservation, candidateEventMatch) {
+	if evidence == nil {
+		return nil, eventMatchNone
+	}
+	var (
+		found    *EventDeliveryObservation
+		distinct = make(map[uuid.UUID]struct{})
+	)
+	for i := range evidence.Observations {
+		observation := &evidence.Observations[i]
+		matches := observation.EventBusinessKey() == key
+		if !matches {
+			if aggregate := observation.AggregateBusinessKey(); aggregate.Value != "" {
+				matches = aggregate == key
+			}
+		}
+		if !matches {
+			continue
+		}
+		distinct[observation.EventID] = struct{}{}
+		if found == nil {
+			found = observation
+		}
+	}
+	switch len(distinct) {
+	case 0:
+		return nil, eventMatchNone
+	case 1:
+		return found, eventMatchFound
+	default:
+		return nil, eventMatchAmbiguous
+	}
+}
+
+// mergeDuplicateEvidence folds the event-delivery facts and the PG-side
+// repeated-effect facts into one conservative Q4 evidence package: every
+// divergence flag is an OR and every count is the observed maximum — a
+// duplicate is never absorbed by merging.
+func mergeDuplicateEvidence(base, extra DuplicateEvidence) DuplicateEvidence {
+	merged := base
+	if extra.Deliveries > merged.Deliveries {
+		merged.Deliveries = extra.Deliveries
+	}
+	merged.ContentChecked = base.ContentChecked || extra.ContentChecked
+	merged.ContentDivergent = base.ContentDivergent || extra.ContentDivergent
+	merged.VersionGuardIgnoredLegalOld = base.VersionGuardIgnoredLegalOld || extra.VersionGuardIgnoredLegalOld
+	merged.VersionRuleViolated = base.VersionRuleViolated || extra.VersionRuleViolated
+	merged.IdempotencyRecorded = base.IdempotencyRecorded || extra.IdempotencyRecorded
+	merged.EffectEvidencePresent = base.EffectEvidencePresent || extra.EffectEvidencePresent
+	if extra.EffectCount > merged.EffectCount {
+		merged.EffectCount = extra.EffectCount
+	}
+	merged.RepeatedBusinessEffect = base.RepeatedBusinessEffect || extra.RepeatedBusinessEffect
+	merged.RepeatedWithdrawalIntent = base.RepeatedWithdrawalIntent || extra.RepeatedWithdrawalIntent
+	return merged
+}
+
+// stableScanEvidenceInstant derives the stable evidence time of one candidate
+// from observed facts only (never the scan's wall clock), so re-observing the
+// same facts keeps the same identity and cross-scan dedup works.
+func stableScanEvidenceInstant(block *ChainFactBlock, event *EventDeliveryObservation, pg *PGStateRecord, fallback time.Time) time.Time {
+	instant := time.Time{}
+	if block != nil && !block.IndexedAt.IsZero() {
+		instant = block.IndexedAt.UTC()
+	}
+	if event != nil {
+		for _, at := range []time.Time{event.OccurredAt, event.EmittedAt} {
+			if !at.IsZero() && at.UTC().After(instant) {
+				instant = at.UTC()
+			}
+		}
+	}
+	if pg != nil && !pg.Freshness.NewestObservedAt.IsZero() {
+		if at := pg.Freshness.NewestObservedAt.UTC(); at.After(instant) {
+			instant = at
+		}
+	}
+	if instant.IsZero() {
+		return fallback.UTC()
+	}
+	return instant
+}
+
+// mergeScanVersionDomain folds the three parties' version contributions into
+// the identity evidence version domain (research §3): block identity anchors
+// the domain, recovery/authorization/state versions make a later change
+// re-enter verification, and the evidence time stays fact-derived.
+func mergeScanVersionDomain(chain *ChainFactsBundle, block *ChainFactBlock, logs []ChainFactLog,
+	event *EventDeliveryObservation, pg *PGStateRecord, ref ChainFactRef, fallback time.Time) VersionDomain {
+	domain := VersionDomain{}
+	switch {
+	case block != nil && block.Number >= 0 && block.Hash != "":
+		domain.BlockNumber = uint64(block.Number)
+		domain.BlockHash = block.Hash
+	case len(logs) > 0 && logs[0].BlockHash != "":
+		domain.BlockNumber = uint64(logs[0].BlockNumber)
+		domain.BlockHash = logs[0].BlockHash
+	case ref.BlockNumber > 0 && ref.BlockHash != "":
+		domain.BlockNumber = uint64(ref.BlockNumber)
+		domain.BlockHash = ref.BlockHash
+	case event != nil && event.BlockNumber != nil && *event.BlockNumber > 0 &&
+		event.BlockHash != nil && *event.BlockHash != "":
+		domain.BlockNumber = uint64(*event.BlockNumber)
+		domain.BlockHash = *event.BlockHash
+	}
+	switch {
+	case chain != nil && chain.Recovery.RecoveryID != "":
+		domain.RecoveryVersion = fmt.Sprintf("%s/%d", chain.Recovery.RecoveryID, chain.Recovery.Seq)
+	case pg != nil && pg.Version.RecoveryVersion > 0:
+		domain.RecoveryVersion = strconv.FormatInt(pg.Version.RecoveryVersion, 10)
+	case event != nil && event.RecoveryVersion != nil && *event.RecoveryVersion > 0:
+		domain.RecoveryVersion = strconv.FormatInt(*event.RecoveryVersion, 10)
+	}
+	if pg != nil && pg.Version.AuthorizationVersion > 0 {
+		domain.AuthorizationVersion = strconv.FormatInt(pg.Version.AuthorizationVersion, 10)
+	}
+	if pg != nil && pg.Version.StateVersion > 0 {
+		domain.StateVersion = pg.Version.StateVersion
+	}
+	domain.EvidenceAt = stableScanEvidenceInstant(block, event, pg, fallback)
+	return domain
+}
+
+// The compare loop's canonical snapshot versions. Changing any of them
+// changes every derived content hash and is a dedup-breaking change.
+const (
+	chainCandidateCanonicalVersion   = "txharbor.reconciliation.chaincandidate.v1"
+	chainAbsenceCanonicalVersion     = "txharbor.reconciliation.chainabsence.v1"
+	chainUnavailableCanonicalVersion = "txharbor.reconciliation.chainunavailable.v1"
+	eventUnavailableCanonicalVersion = "txharbor.reconciliation.eventunavailable.v1"
+	pgUnavailableCanonicalVersion    = "txharbor.reconciliation.pgunavailable.v1"
+
+	// scanEvidenceRefMax / scanBusinessKeyMax mirror the migration 000016
+	// CHECK bounds of discrepancy_occurrence.evidence_ref and
+	// discrepancy.business_key.
+	scanEvidenceRefMax = 512
+	scanBusinessKeyMax = 512
+)
+
+// chainCandidateSnapshot encodes only the candidate's matched chain facts,
+// never the whole interval bundle: the content hash must be stable when the
+// same fact is re-observed under a different claim size.
+func chainCandidateSnapshot(chainID int64, ref ChainFactRef, block *ChainFactBlock, logs []ChainFactLog) []byte {
+	w := &identityCanonWriter{}
+	w.bytesField("chaincandidate.version", []byte(chainCandidateCanonicalVersion))
+	w.int64Field("chaincandidate.chain_id", chainID)
+	w.int64Field("chaincandidate.ref.block_number", ref.BlockNumber)
+	w.stringField("chaincandidate.ref.block_hash", ref.BlockHash)
+	w.stringField("chaincandidate.ref.tx_hash", ref.TxHash)
+	if ref.LogIndex != nil {
+		w.uint64Field("chaincandidate.ref.log_index.present", 1)
+		w.int64Field("chaincandidate.ref.log_index.value", *ref.LogIndex)
+	} else {
+		w.uint64Field("chaincandidate.ref.log_index.present", 0)
+	}
+	if block != nil {
+		w.uint64Field("chaincandidate.block.present", 1)
+		w.int64Field("chaincandidate.block.number", block.Number)
+		w.stringField("chaincandidate.block.hash", block.Hash)
+		w.stringField("chaincandidate.block.parent_hash", block.ParentHash)
+		w.bytesField("chaincandidate.block.canonical", chainFactsBoolByte(block.Canonical))
+		w.int64Field("chaincandidate.block.indexed_at_unix_nano", block.IndexedAt.UnixNano())
+	} else {
+		w.uint64Field("chaincandidate.block.present", 0)
+	}
+	ordered := append([]ChainFactLog(nil), logs...)
+	sort.Slice(ordered, func(i, j int) bool {
+		a, z := ordered[i], ordered[j]
+		switch {
+		case a.BlockNumber != z.BlockNumber:
+			return a.BlockNumber < z.BlockNumber
+		case a.BlockHash != z.BlockHash:
+			return a.BlockHash < z.BlockHash
+		case a.TxHash != z.TxHash:
+			return a.TxHash < z.TxHash
+		default:
+			return a.LogIndex < z.LogIndex
+		}
+	})
+	w.uint64Field("chaincandidate.logs.count", uint64(len(ordered)))
+	for i := range ordered {
+		prefix := fmt.Sprintf("chaincandidate.logs.%d", i)
+		w.int64Field(prefix+".block_number", ordered[i].BlockNumber)
+		w.stringField(prefix+".block_hash", ordered[i].BlockHash)
+		w.stringField(prefix+".tx_hash", ordered[i].TxHash)
+		w.int64Field(prefix+".log_index", ordered[i].LogIndex)
+		w.stringField(prefix+".contract", ordered[i].Contract)
+		w.stringField(prefix+".topic0", ordered[i].Topic0)
+		w.stringField(prefix+".data", ordered[i].Data)
+	}
+	return w.buf.Bytes()
+}
+
+// chainAbsenceSnapshot is the canonical marker of a definitively absent chain
+// fact inside a complete interval (a non-empty marker keeps the three-party
+// snapshot hashable; an empty slice would only downgrade the observation).
+func chainAbsenceSnapshot(chainID int64, ref ChainFactRef) []byte {
+	w := &identityCanonWriter{}
+	w.bytesField("chainabsence.version", []byte(chainAbsenceCanonicalVersion))
+	w.int64Field("chainabsence.chain_id", chainID)
+	w.int64Field("chainabsence.ref.block_number", ref.BlockNumber)
+	w.stringField("chainabsence.ref.block_hash", ref.BlockHash)
+	w.stringField("chainabsence.ref.tx_hash", ref.TxHash)
+	return w.buf.Bytes()
+}
+
+// chainUnavailableSnapshot is the canonical marker of an un-attributable
+// chain party (unconfigured adapter, unresolved window, unknown bundle).
+func chainUnavailableSnapshot(ref ChainFactRef) []byte {
+	w := &identityCanonWriter{}
+	w.bytesField("chainunavailable.version", []byte(chainUnavailableCanonicalVersion))
+	w.int64Field("chainunavailable.ref.block_number", ref.BlockNumber)
+	w.stringField("chainunavailable.ref.block_hash", ref.BlockHash)
+	w.stringField("chainunavailable.ref.tx_hash", ref.TxHash)
+	return w.buf.Bytes()
+}
+
+// eventUnavailableSnapshot is the canonical marker of an event party that
+// could not be determined (adapter unwired, evidence incomplete, ambiguous
+// match). It is never a claim of absence.
+func eventUnavailableSnapshot(key BusinessKey) []byte {
+	w := &identityCanonWriter{}
+	w.bytesField("eventunavailable.version", []byte(eventUnavailableCanonicalVersion))
+	w.stringField("eventunavailable.business_key.kind", string(key.Kind))
+	w.stringField("eventunavailable.business_key.value", key.Value)
+	return w.buf.Bytes()
+}
+
+// pgUnavailableSnapshot is the canonical marker of a PG party that could not
+// be read (adapter unwired, non-numeric chain identity).
+func pgUnavailableSnapshot(key BusinessKey) []byte {
+	w := &identityCanonWriter{}
+	w.bytesField("pgunavailable.version", []byte(pgUnavailableCanonicalVersion))
+	w.stringField("pgunavailable.business_key.kind", string(key.Kind))
+	w.stringField("pgunavailable.business_key.value", key.Value)
+	return w.buf.Bytes()
+}
+
+// SQL for the batch results (persisted inside CommitScanBatch's transaction,
+// ordering: discrepancy -> occurrence -> audit -> gaps, then checkpoint by
+// CommitScanBatch itself). Table/column names follow migration 000016.
+const insertDiscrepancySQL = `
+INSERT INTO discrepancy (
+    discrepancy_id, category, business_key, content_hash, evidence_version_domain, state)
+VALUES ($1, $2, $3, $4, $5::jsonb, 'open_claimable')
+ON CONFLICT (discrepancy_id) DO NOTHING`
+
+const insertDiscrepancyOccurrenceSQL = `
+INSERT INTO discrepancy_occurrence (discrepancy_id, observed_at, evidence_ref, scan_task_id)
+VALUES ($1, now(), $2, $3)`
+
+// persist writes one interval's results inside the commit transaction. It
+// never re-locks recon_task and never performs network I/O (CommitScanBatch
+// contract; data-model.md §5). A same-identity re-detection reuses the
+// original ticket row and appends an occurrence: no duplicate ticket, evidence
+// preserved. Reopen/invalidation stays with the lifecycle owner (T026).
+func (o *scanIntervalOutcome) persist(ctx context.Context, tx pgx.Tx) error {
+	seen := make(map[uuid.UUID]struct{})
+	for i := range o.classifications {
+		classification := o.classifications[i]
+		if !classification.Ticket || !classification.Identity.Valid() {
+			continue
+		}
+		identity := classification.Identity
+		id := identity.ID()
+		inserted, err := insertScanDiscrepancyTx(ctx, tx, classification)
+		if err != nil {
+			return err
+		}
+		if _, duplicate := seen[id]; duplicate {
+			// One detection per batch: no second occurrence row for the
+			// same identity inside one committed interval.
+			continue
+		}
+		seen[id] = struct{}{}
+		evidenceRef := scanEvidenceRef(&classification, o.attemptID)
+		if _, err := tx.Exec(ctx, insertDiscrepancyOccurrenceSQL, id, evidenceRef, o.taskID); err != nil {
+			return fmt.Errorf("insert discrepancy occurrence: %w", err)
+		}
+		o.occurrences++
+		if inserted {
+			o.tickets++
+		} else {
+			o.merged++
+		}
+	}
+
+	// Q4: absorbed duplicates and pending/incomplete evidence are
+	// metrics/audit-only — never tickets. One bounded audit row per batch
+	// keeps the trail queryable without unbounded writes.
+	if o.pending > 0 || o.absorbed > 0 {
+		result := "incomplete"
+		if o.pending == 0 {
+			result = "absorbed_duplicates"
+		}
+		if err := insertAuditTx(ctx, tx, AuditRecord{
+			Actor:  o.owner,
+			Action: AuditActionQuery,
+			Target: map[string]any{
+				"task_id":             o.taskID,
+				"attempt_id":          o.attemptID,
+				"range_start":         rangeAuditValue(o.interval.From),
+				"range_end":           rangeAuditValue(o.interval.To),
+				"pending":             o.pending,
+				"absorbed_duplicates": o.absorbed,
+				"ticketable":          o.tickets + o.merged,
+			},
+			Reason: scanAuditReason(o),
+			Result: result,
+		}); err != nil {
+			return err
+		}
+	}
+
+	// Uncovered/unproven remainder: pending classifications keep the interval
+	// visible as a gap so `done` can never close over them (FR-004/019).
+	for _, reason := range o.gapReasons {
+		if err := insertGapTx(ctx, tx, o.taskID, o.interval.From, o.interval.To, reason); err != nil {
+			return err
+		}
+		o.gaps++
+	}
+	return nil
+}
+
+// insertScanDiscrepancyTx inserts the stable-identity ticket row if it does
+// not exist yet; a conflict means the same identity was already recorded
+// (dedup) and the existing lifecycle state is left untouched.
+func insertScanDiscrepancyTx(ctx context.Context, tx pgx.Tx, classification Classification) (bool, error) {
+	identity := classification.Identity
+	versionDomain, err := json.Marshal(identity.VersionDomain())
+	if err != nil {
+		return false, fmt.Errorf("marshal evidence version domain: %w", err)
+	}
+	tag, err := tx.Exec(ctx, insertDiscrepancySQL,
+		identity.ID(), string(classification.Category), scanBusinessKeyRecord(identity.BusinessKey()),
+		identity.ContentHash().Bytes(), string(versionDomain))
+	if err != nil {
+		return false, fmt.Errorf("insert discrepancy: %w", err)
+	}
+	return tag.RowsAffected() == 1, nil
+}
+
+// scanEvidenceRef bounds the occurrence evidence reference to the migration
+// CHECK; an empty/oversized candidate ref is replaced by a synthesized one.
+func scanEvidenceRef(classification *Classification, attemptID string) string {
+	if classification != nil {
+		if ref := strings.TrimSpace(classification.EvidenceRef); ref != "" && len(ref) <= scanEvidenceRefMax {
+			return ref
+		}
+		return fmt.Sprintf("scan:v1 attempt=%s reason=%s", attemptID, classification.Reason)
+	}
+	return fmt.Sprintf("scan:v1 attempt=%s", attemptID)
+}
+
+// scanAuditReason summarizes the pending reasons of one batch (bounded,
+// secret-free).
+func scanAuditReason(o *scanIntervalOutcome) string {
+	reasons := make([]string, 0, len(o.gapReasons))
+	for _, reason := range o.gapReasons {
+		reasons = append(reasons, string(reason))
+	}
+	sort.Strings(reasons)
+	return strings.Join(reasons, ",")
+}
+
+// suspendScanOnce stops new work on budget exhaustion and makes the
+// suspension observable and safe (FR-019, Q3): the in-flight attempt (when
+// one is held) is settled boundedly as superseded with a gap row, the task
+// moves running -> suspended_budget with the budget reason recorded, and the
+// pointer never moves. A concurrent operator pause/cancel wins: the refused
+// transition is audited and the task's actual state is reported.
+func (s *Store) suspendScanOnce(ctx context.Context, req *ScanOnceRequest, budget *Budget,
+	result ScanOnceResult, hasClaim bool) (ScanOnceResult, error) {
+	resource, detail, suspended := budget.Suspended()
+	if !suspended {
+		resource, detail = ResourceDuration, durationLimitDetail
+	}
+	result.Suspended = true
+	result.SuspendResource = resource
+	result.SuspendDetail = detail
+	reason := fmt.Sprintf("reconciliation budget exhausted (%s): %s", resource, detail)
+
+	if hasClaim {
+		if _, err := s.SettleInFlight(ctx, SettleInFlightRequest{
+			TaskID: req.TaskID,
+			Mode:   SettleModePause,
+			Limit:  scanPositiveLimit(req.Limits.MaxConcurrency),
+			Reason: reason,
+			Actor:  req.Owner,
+		}); err != nil {
+			return result, err
+		}
+	}
+
+	if _, err := s.TransitionTask(ctx, TaskTransitionRequest{
+		TaskID: req.TaskID,
+		To:     TaskStateSuspendedBudget,
+		Reason: reason,
+		Actor:  req.Owner,
+	}); err != nil {
+		if errors.Is(err, ErrIllegalTaskTransition) {
+			// The task already left running (operator pause/cancel): the
+			// refusal was audited by TransitionTask and the operator state
+			// wins. The suspension remains observable in the result.
+			if current, loadErr := s.TaskByID(ctx, req.TaskID); loadErr == nil {
+				result.StoppedState = current.State
+			} else {
+				result.StoppedState = TaskStatePaused
+			}
+			return result, nil
+		}
+		return result, err
+	}
+	result.StoppedState = TaskStateSuspendedBudget
+	return result, nil
 }
