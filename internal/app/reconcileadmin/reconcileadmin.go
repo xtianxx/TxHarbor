@@ -65,8 +65,32 @@
 //     014 holders can never self-grant, and no withdrawal/signing/payment/
 //     existing-recovery authority is created or expanded.
 //
-// The US3 invalidation/reverify surface stays out of this batch. Audit rows
-// are append-only.
+// T028 adds the US3 operator surface on top of the T027 production paths
+// (Store.RunReverifySweep / Store.CloseDiscrepancy) and the T026 evaluator:
+//
+//   - `reverify` runs one bounded history-revalidation slice over a running
+//     task. It is authorized as a scan-management budgeted operation
+//     (ActionScanStart → scan_manage × the task scope): contracts/auth-matrix.md
+//     marks the reverify row system-only and the T009 evaluator structurally
+//     denies ActionReverify for every operator grant, so this command reuses
+//     the scan authority instead of inventing a reverify permission. The slice
+//     bounds are required positive values (refused by name, no defaults) and
+//     its charges also consume the task's configured total budget; the
+//     production EventStateReverifyEvaluator is wired with the same
+//     reference-consumer/quarantine/window-resolver construction as the scan
+//     path (read-only). The sweep writes only 014-owned records (reverify/gap/
+//     audit rows and the history_sweep_through traversal cursor); the cursor is
+//     progress, never verified completeness (the output's verified_complete is
+//     the conservative ReverifySweepResult predicate), and no daemon or
+//     serve/worker auto-start is added (ADR-001).
+//   - `close` is evidence-gated: the ticket's recorded scope authorizes
+//     principal × verify_close (the close permission; default deny, refusals
+//     audited) and Store.CloseDiscrepancy reads the latest reverify row from
+//     the database, so a caller can never substitute fresher evidence. The
+//     required close_basis JSON object is recorded and no payment, signature
+//     or broadcast path is involved.
+//
+// Audit rows are append-only.
 package reconcileadmin
 
 import (
@@ -148,6 +172,10 @@ func Run(ctx context.Context, args []string, d Deps) int {
 		return reconcileAdminClaim(ctx, args[1:], d)
 	case "dispose":
 		return reconcileAdminDispose(ctx, args[1:], d)
+	case "reverify":
+		return reconcileAdminReverify(ctx, args[1:], d)
+	case "close":
+		return reconcileAdminClose(ctx, args[1:], d)
 	case "permission-grant":
 		return reconcileAdminPermissionGrant(ctx, args[1:], d)
 	case "permission-revoke":
@@ -1451,6 +1479,8 @@ func reconcileAdminUsage(w io.Writer) {
 	fmt.Fprintln(w, "       txharbor reconcile-admin cancel --task-id UUID --reason R")
 	fmt.Fprintln(w, "       txharbor reconcile-admin show --task-id UUID")
 	fmt.Fprintln(w, "       txharbor reconcile-admin show --discrepancy-id UUID")
+	fmt.Fprintln(w, "       txharbor reconcile-admin reverify --task-id UUID --max-items N --max-pg-requests N --max-item-attempts N [--max-item-duration D] [--reason R]")
+	fmt.Fprintln(w, "       txharbor reconcile-admin close --discrepancy-id UUID --close-basis JSON --reason R [--reverify-tolerance D]")
 	fmt.Fprintln(w, "       txharbor reconcile-admin claim --discrepancy-id UUID --operator NAME --reason R --operation-id OP")
 	fmt.Fprintln(w, "       txharbor reconcile-admin dispose --discrepancy-id UUID --kind ack_only|reuse_recovery|new_fix_rule [--action-ref REF] [--result done|refused|failed] [--evidence-ref E] --operator NAME --reason R --operation-id OP")
 	fmt.Fprintln(w, "       txharbor reconcile-admin permission-grant --target-principal KIND:ID --permission scan_manage|exception_handle|dispose_ack|dispose_reuse|close --chain-id C --scope-kind height|time --business-types B[,B] [--from H --to H] --operator NAME --reason R --operation-id OP")
@@ -1461,6 +1491,8 @@ func reconcileAdminUsage(w io.Writer) {
 	fmt.Fprintln(w, "start requires --confirm-threshold-n N (integer >= 1, no default): the confirm policy depth snapshotted into the task's policy_refs as the scan's chain-evidence confirmation basis; a local test value is never a production threshold")
 	fmt.Fprintln(w, "scan enumerates candidates from the authoritative PG rows (007 requests by time window; 011 canonical receipts by height window) and, for height scopes, chain-first enumerates the durable indexed transfer facts with direction/asset attribution: attributed project withdrawals (from in the configured signer sender allowlist and contract in the 004 asset allowlist) and deposits (to in the 004 watch addresses) with no PG business row become missing candidates; confirmed-unattributed facts are metrics-only; undecidable attribution leaves an explicit gap and never a missing claim. Both scope kinds resolve through the T036 window resolver (block-time reader; header probes charged to the budget): time scopes map time->height for the chain read, height scopes map height->chain-time for the event adapter's exact inclusive occurrence window (blockless business-object rows are never silently under-covered)")
 	fmt.Fprintln(w, "scan observes the reference consumer's durable progress/inbox/quarantine records; it never runs, replays or unblocks the consumer")
+	fmt.Fprintln(w, "reverify runs one bounded history-revalidation slice over a running task's closed items: it is authorized as a scan-management (scan_manage) budgeted operation on the task scope because the auth-matrix reverify row is system-only and T009 denies ActionReverify for every operator grant (no reverify permission is invented). Its bounds are required positive and refused by name (no defaults); its charges also consume the task budget. It writes only 014-owned reverify/gap/audit rows and the history_sweep_through traversal cursor, which is progress only: verified_complete=true is the sole completeness claim (waterline reached, zero open gaps, no exhausted retry, not slice-cut). A divergent re-read only enters the approved reverify flow (pending_verify); it never auto-disposes, auto-closes, recovers, replays or pays. No daemon is started.")
+	fmt.Fprintln(w, "close is evidence-gated: it authorizes the authenticated principal x verify_close (the close permission) x the ticket's recorded scope (default deny; refusals audited) and Store.CloseDiscrepancy always reads the latest reverify row from the database, so a caller can never substitute fresher evidence; the required --close-basis JSON object snapshot (range/block/version/timestamp) is recorded. The tolerance defaults to "+config.EnvReconFreshnessTolerance+" and an explicit --reverify-tolerance must stay positive. Incomplete/expired/unknown/divergent or gap-limited evidence is refused and audited; no payment, signature or broadcast path is involved.")
 	fmt.Fprintln(w, "budget keys (required positive; no defaults): "+strings.Join([]string{
 		config.EnvReconPrincipal,
 		config.EnvReconConcurrency,
@@ -1475,5 +1507,5 @@ func reconcileAdminUsage(w io.Writer) {
 		config.EnvReconMaxEventRows,
 		config.EnvReconSettleLimit,
 	}, " "))
-	fmt.Fprintln(w, "scans require a positive "+config.EnvReconWindowMaxProbes+" (bounded header probes per window resolution; no default)")
+	fmt.Fprintln(w, "scan/reverify require a positive "+config.EnvReconWindowMaxProbes+" (bounded header probes per window resolution; no default)")
 }

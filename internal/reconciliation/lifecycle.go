@@ -374,6 +374,377 @@ func EvaluateRecurrence(from DiscrepancyState, confirmed bool) (DiscrepancyState
 	return from, false
 }
 
+// ---------------------------------------------------------------------------
+// T026: invalidation/reopen evaluator (FR-010/017/018, Q5)
+//
+// The evaluator reads the recorded lifecycle rows — the latest disposition,
+// the latest reverify verdict, and the close_basis snapshot — from the
+// Foundational schema (data-model.md §1.6/§1.7/§3) in one short read, applies
+// the pure EvaluateInvalidation/EvaluateRecurrence rules, and drives the
+// approved TransitionDiscrepancy edge:
+//
+//   - concurrent write / reorg / new evidence / source-or-version rotation on
+//     a closed item -> pending_verify (only the approved reverify flow);
+//     unrelated writes and non-closed states change nothing;
+//   - confirmed recurrence -> reopened (reopen_count+1, history retained);
+//   - unknown triggers are contract errors: never silently ignored;
+//   - the evaluator never writes a disposition, never closes, and never
+//     triggers recovery/replay/payment (Q1/Q5-6): a rotation can only ever
+//     re-enter verification.
+// ---------------------------------------------------------------------------
+
+// DiscrepancyEvidence is the read-only lifecycle evidence view of one ticket:
+// its state/reopen history plus the recorded decision rows the guards read
+// back (latest disposition, latest reverify verdict with freshness, the
+// close_basis snapshot, and the persisted evidence version domain). It is
+// system evidence only and never an execution right.
+type DiscrepancyEvidence struct {
+	DiscrepancyID string
+	State         DiscrepancyState
+	ReopenCount   int64
+	Category      Category
+	BusinessKey   string
+	// CloseBasis is the recorded close snapshot (empty object when unset).
+	CloseBasis []byte
+	// EvidenceDomain is the persisted evidence_version_domain document
+	// (scope marker + version domain), raw for the lifecycle owner.
+	EvidenceDomain []byte
+	// LatestDisposition is the newest recorded disposition row, if any.
+	LatestDisposition *DispositionSnapshot
+	// LatestReverify is the newest recorded reverify row, if any. A close
+	// guard MUST use this row (never a caller-supplied copy) so stale or
+	// gap-limited evidence structurally cannot close.
+	LatestReverify *ReverifyEvidence
+}
+
+// LoadDiscrepancyEvidence reads one ticket's state plus its latest
+// disposition/reverify rows and its close_basis/evidence-domain snapshots in
+// one short read-only statement (no lock, no transaction held). The returned
+// rows are the decision basis of the T026 evaluator and of the evidence-gated
+// close path.
+func (s *Store) LoadDiscrepancyEvidence(ctx context.Context, id string) (DiscrepancyEvidence, error) {
+	var evidence DiscrepancyEvidence
+	if s == nil || s.db == nil {
+		return evidence, contractErrorf("store has no database")
+	}
+	if _, err := uuid.Parse(strings.TrimSpace(id)); err != nil {
+		return evidence, contractErrorf("discrepancy evidence requires a UUID discrepancy_id: %v", err)
+	}
+	evidence.DiscrepancyID = strings.TrimSpace(id)
+
+	var (
+		rawState                         string
+		rawCategory, rawBusinessKey      string
+		rawCloseBasis, rawEvidenceDomain []byte
+		dispKind, dispResult, dispRef    *string
+		revVerdict, revRef               *string
+		revFreshness                     *time.Time
+	)
+	err := s.db.QueryRow(ctx, readDiscrepancyEvidenceSQL, evidence.DiscrepancyID).Scan(
+		&rawState, &evidence.ReopenCount, &rawCategory, &rawBusinessKey,
+		&rawCloseBasis, &rawEvidenceDomain,
+		&dispKind, &dispResult, &dispRef,
+		&revVerdict, &revRef, &revFreshness)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return evidence, fmt.Errorf("%w: discrepancy_id %s", ErrDiscrepancyNotFound, evidence.DiscrepancyID)
+	}
+	if err != nil {
+		return evidence, fmt.Errorf("read discrepancy evidence: %w", err)
+	}
+	evidence.State = DiscrepancyState(rawState)
+	if !evidence.State.Valid() {
+		return evidence, contractErrorf("discrepancy %s has unknown state %q", evidence.DiscrepancyID, evidence.State)
+	}
+	evidence.Category = Category(rawCategory)
+	if !evidence.Category.Known() {
+		return evidence, contractErrorf("discrepancy %s has unknown category %q", evidence.DiscrepancyID, evidence.Category)
+	}
+	evidence.BusinessKey = rawBusinessKey
+	evidence.CloseBasis = rawCloseBasis
+	evidence.EvidenceDomain = rawEvidenceDomain
+	if dispKind != nil || dispResult != nil || dispRef != nil {
+		if dispKind == nil || dispResult == nil {
+			return evidence, contractErrorf("discrepancy %s has a torn disposition row", evidence.DiscrepancyID)
+		}
+		evidence.LatestDisposition = &DispositionSnapshot{
+			Kind:      DispositionKind(*dispKind),
+			Result:    DispositionResult(*dispResult),
+			ActionRef: derefString(dispRef),
+		}
+	}
+	if revVerdict != nil {
+		evidence.LatestReverify = &ReverifyEvidence{
+			Verdict:     ReverifyVerdict(*revVerdict),
+			EvidenceRef: derefString(revRef),
+		}
+		if revFreshness != nil {
+			evidence.LatestReverify.FreshnessAt = *revFreshness
+		}
+	}
+	return evidence, nil
+}
+
+// derefString renders an optional scan string.
+func derefString(v *string) string {
+	if v == nil {
+		return ""
+	}
+	return *v
+}
+
+// DiscrepancyInvalidationRequest is one invalidation/reopen evaluation of a
+// recorded conclusion (Q5). Exactly one of Signal or ConfirmedRecurrence is
+// normally set; a request with neither evaluates to "ignored" (nothing
+// observed, nothing written).
+type DiscrepancyInvalidationRequest struct {
+	// DiscrepancyID is the ticket to evaluate (UUID).
+	DiscrepancyID string
+	// Signal is the observed change (concurrent write, reorg, new evidence,
+	// source/version rotation, or the explicitly ignored unrelated write).
+	Signal *InvalidationSignal
+	// ConfirmedRecurrence reports confirmed recurrence of the same identity;
+	// it reopens the original item with its history retained.
+	ConfirmedRecurrence bool
+	// RecurrenceEvidenceRef is the bounded evidence reference of the
+	// recurrence report (audit carriage only).
+	RecurrenceEvidenceRef string
+	// Actor is the authenticated/system caller recorded on the audit row.
+	Actor string
+	// Reason is the operator-facing audit annotation (never an input of the
+	// evaluation).
+	Reason string
+	// Now is the evaluation instant; zero means time.Now().
+	Now time.Time
+}
+
+// DiscrepancyInvalidationResult reports the evaluation outcome. Applied is
+// true only when a lifecycle edge was actually written; Action is the stable
+// machine token ("invalidate", "reopen", "ignored", "recurrence_not_applicable").
+type DiscrepancyInvalidationResult struct {
+	DiscrepancyID string
+	ObservedState DiscrepancyState
+	State         DiscrepancyState
+	ReopenCount   int64
+	Applied       bool
+	Action        string
+	// Evidence is the decision basis loaded from the Foundational rows.
+	Evidence DiscrepancyEvidence
+}
+
+// Invalidation action tokens (stable audit vocabulary).
+const (
+	InvalidationActionInvalidate              = "invalidate"
+	InvalidationActionReopen                  = "reopen"
+	InvalidationActionIgnored                 = "ignored"
+	InvalidationActionRecurrenceNotApplicable = "recurrence_not_applicable"
+)
+
+// EvaluateInvalidationForDiscrepancy applies the Q5 invalidation/reopen rules
+// to one persisted ticket:
+//
+//   - it loads the ticket's state plus the latest disposition/reverify rows
+//     and the close_basis snapshot (LoadDiscrepancyEvidence) — the rows the
+//     task names as the evaluator's input;
+//   - a confirmed recurrence reopens a closed or pending_verify item through
+//     TransitionDiscrepancy (reopen_count+1; every prior row is retained);
+//   - a conclusion-affecting signal (concurrent write, reorg, new evidence,
+//     source/version rotation) moves a closed item to pending_verify, i.e.
+//     into the approved reverify flow only;
+//   - unrelated writes, missing signals, and non-closed states are left
+//     unchanged (no write, no audit row: "unrelated writes do not trigger");
+//   - an unknown trigger is a contract error before any write;
+//   - it never disposes, never closes, and never triggers recovery, replay or
+//     payment. The applied edge is audited by TransitionDiscrepancy with the
+//     observed basis in its reason.
+func (s *Store) EvaluateInvalidationForDiscrepancy(ctx context.Context, req DiscrepancyInvalidationRequest) (DiscrepancyInvalidationResult, error) {
+	var result DiscrepancyInvalidationResult
+	if s == nil || s.db == nil {
+		return result, contractErrorf("store has no database")
+	}
+	if strings.TrimSpace(req.Actor) == "" {
+		return result, contractErrorf("invalidation evaluation requires an actor")
+	}
+	if len(req.Reason) > 1024 || strings.ContainsRune(req.Reason, 0) {
+		return result, contractErrorf("invalidation reason is malformed")
+	}
+	if len(req.RecurrenceEvidenceRef) > 512 || strings.ContainsRune(req.RecurrenceEvidenceRef, 0) {
+		return result, contractErrorf("recurrence evidence_ref is malformed")
+	}
+	actor := strings.TrimSpace(req.Actor)
+	reason := strings.TrimSpace(req.Reason)
+	now := req.Now
+	if now.IsZero() {
+		now = time.Now().UTC()
+	}
+
+	evidence, err := s.LoadDiscrepancyEvidence(ctx, req.DiscrepancyID)
+	if err != nil {
+		return result, err
+	}
+	result = DiscrepancyInvalidationResult{
+		DiscrepancyID: evidence.DiscrepancyID,
+		ObservedState: evidence.State,
+		State:         evidence.State,
+		ReopenCount:   evidence.ReopenCount,
+		Evidence:      evidence,
+	}
+
+	apply := func(to DiscrepancyState, guard TransitionGuard, auditReason string) error {
+		transition, err := s.TransitionDiscrepancy(ctx, DiscrepancyTransitionRequest{
+			DiscrepancyID: evidence.DiscrepancyID,
+			To:            to,
+			Actor:         actor,
+			Reason:        auditReason,
+			Guard:         guard,
+		})
+		if err != nil {
+			return err
+		}
+		result.State = transition.To
+		result.ReopenCount = transition.ReopenCount
+		result.Applied = true
+		return nil
+	}
+
+	if req.ConfirmedRecurrence {
+		// EvaluateRecurrence is the frozen Q5 rule: only closed/pending_verify
+		// reopens, and only when confirmed. A confirmed report on any other
+		// state is not applicable and writes nothing.
+		next, changed := EvaluateRecurrence(evidence.State, true)
+		if !changed {
+			result.Action = InvalidationActionRecurrenceNotApplicable
+			return result, nil
+		}
+		reason := joinInvalidationReason(reason, "confirmed recurrence")
+		if ref := strings.TrimSpace(req.RecurrenceEvidenceRef); ref != "" {
+			reason = joinInvalidationReason(reason, "recurrence evidence_ref="+ref)
+		}
+		if err := apply(next, TransitionGuard{ConfirmedRecurrence: true, Now: now},
+			joinInvalidationReason(reason, invalidatedBasis(evidence))); err != nil {
+			return result, err
+		}
+		result.Action = InvalidationActionReopen
+		return result, nil
+	}
+
+	if req.Signal == nil {
+		result.Action = InvalidationActionIgnored
+		return result, nil
+	}
+	next, changed, err := EvaluateInvalidation(evidence.State, req.Signal)
+	if err != nil {
+		// Unknown trigger: a contract error, never a silent ignore.
+		return result, err
+	}
+	if !changed {
+		// Unrelated writes (and non-closed states) change nothing: no state
+		// write and no audit row.
+		result.Action = InvalidationActionIgnored
+		return result, nil
+	}
+	reason = joinInvalidationReason(reason, "invalidation trigger="+string(req.Signal.Trigger))
+	if ref := strings.TrimSpace(req.Signal.EvidenceRef); ref != "" {
+		reason = joinInvalidationReason(reason, "signal evidence_ref="+ref)
+	}
+	reason = joinInvalidationReason(reason, invalidatedBasis(evidence))
+	if err := apply(next, TransitionGuard{Invalidation: req.Signal, Now: now}, reason); err != nil {
+		return result, err
+	}
+	result.Action = InvalidationActionInvalidate
+	return result, nil
+}
+
+// DiscrepancyCloseRequest is one evidence-gated close of a pending_verify
+// ticket. The latest reverify row is always read from the database (never
+// caller-supplied), so a stale, unknown or gap-limited result structurally
+// cannot close.
+type DiscrepancyCloseRequest struct {
+	DiscrepancyID string
+	Actor         string
+	Reason        string
+	// CloseBasis is the range/block/version/timestamp snapshot recorded on
+	// close (data-model.md §3). Required, valid JSON object.
+	CloseBasis []byte
+	// Now is the close decision instant; zero means time.Now().
+	Now time.Time
+	// ReverifyTolerance is the maximum evidence age a close may accept.
+	ReverifyTolerance time.Duration
+}
+
+// CloseDiscrepancy closes one ticket through the T007 guard using the latest
+// reverify row as persisted (LoadDiscrepancyEvidence): the caller cannot
+// substitute fresher evidence than the database holds, and an expired,
+// unknown, divergent or missing verdict is refused with ErrReverifyRequired
+// and audited. It writes the close_basis snapshot and reopen history only; no
+// disposal, recovery or payment path is ever involved.
+func (s *Store) CloseDiscrepancy(ctx context.Context, req DiscrepancyCloseRequest) (DiscrepancyTransitionResult, error) {
+	if s == nil || s.db == nil {
+		return DiscrepancyTransitionResult{}, contractErrorf("store has no database")
+	}
+	if strings.TrimSpace(req.Actor) == "" {
+		return DiscrepancyTransitionResult{}, contractErrorf("close requires an actor")
+	}
+	evidence, err := s.LoadDiscrepancyEvidence(ctx, req.DiscrepancyID)
+	if err != nil {
+		return DiscrepancyTransitionResult{}, err
+	}
+	now := req.Now
+	if now.IsZero() {
+		now = time.Now().UTC()
+	}
+	guard := TransitionGuard{
+		// The persisted row is the only acceptable evidence: a caller cannot
+		// close over a reverify this database does not hold.
+		LatestReverify:    evidence.LatestReverify,
+		CloseBasis:        req.CloseBasis,
+		Now:               now,
+		ReverifyTolerance: req.ReverifyTolerance,
+	}
+	return s.TransitionDiscrepancy(ctx, DiscrepancyTransitionRequest{
+		DiscrepancyID: evidence.DiscrepancyID,
+		To:            DiscrepancyStateClosed,
+		Actor:         strings.TrimSpace(req.Actor),
+		Reason:        strings.TrimSpace(req.Reason),
+		Guard:         guard,
+	})
+}
+
+// joinInvalidationReason appends one bounded audit clause.
+func joinInvalidationReason(base, clause string) string {
+	clause = strings.TrimSpace(clause)
+	if clause == "" {
+		return base
+	}
+	if base == "" {
+		return clause
+	}
+	return base + "; " + clause
+}
+
+// invalidatedBasis renders the observed evidence basis of one evaluation
+// (bounded, secret-free): close_basis presence, the latest reverify verdict
+// and the latest disposition result.
+func invalidatedBasis(evidence DiscrepancyEvidence) string {
+	parts := []string{
+		fmt.Sprintf("state=%s", evidence.State),
+		fmt.Sprintf("reopen_count=%d", evidence.ReopenCount),
+		fmt.Sprintf("close_basis=%t", len(evidence.CloseBasis) > 0),
+	}
+	if evidence.LatestReverify != nil {
+		parts = append(parts, fmt.Sprintf("latest_reverify=%s", evidence.LatestReverify.Verdict))
+	} else {
+		parts = append(parts, "latest_reverify=none")
+	}
+	if evidence.LatestDisposition != nil {
+		parts = append(parts, fmt.Sprintf("latest_disposition=%s/%s",
+			evidence.LatestDisposition.Kind, evidence.LatestDisposition.Result))
+	} else {
+		parts = append(parts, "latest_disposition=none")
+	}
+	parts = append(parts, "auto_disposal=false")
+	return "basis: " + strings.Join(parts, " ")
+}
+
 // DiscrepancyTransitionRequest is one explicit, guarded discrepancy
 // transition. Reason is required for audit quality on operator-driven edges.
 type DiscrepancyTransitionRequest struct {
@@ -1382,3 +1753,31 @@ SELECT d.disposition_id::text, d.discrepancy_id::text, d.kind, d.action_ref,
 FROM disposition d
 JOIN discrepancy disc ON disc.discrepancy_id = d.discrepancy_id
 WHERE d.idempotency_key = $1`
+
+// readDiscrepancyEvidenceSQL reads the T026 decision basis of one ticket in
+// one statement: its lifecycle state/history, its latest disposition row and
+// its latest reverify row (with freshness), plus the close_basis and evidence
+// version-domain snapshots. The LATERAL reads are bounded to one row each;
+// no lock is taken and no transaction is held across a slow call.
+const readDiscrepancyEvidenceSQL = `
+SELECT d.state, d.reopen_count::bigint, d.category, d.business_key,
+       COALESCE(d.close_basis, '{}'::jsonb),
+       COALESCE(d.evidence_version_domain, '{}'::jsonb),
+       disp.kind, disp.result, disp.action_ref,
+       rev.verdict, rev.evidence_ref, rev.freshness_at
+FROM discrepancy d
+LEFT JOIN LATERAL (
+    SELECT kind, result, action_ref
+    FROM disposition
+    WHERE discrepancy_id = d.discrepancy_id
+    ORDER BY created_at DESC, disposition_id DESC
+    LIMIT 1
+) disp ON true
+LEFT JOIN LATERAL (
+    SELECT verdict, evidence_ref, freshness_at
+    FROM reverify
+    WHERE discrepancy_id = d.discrepancy_id
+    ORDER BY created_at DESC, reverify_id DESC
+    LIMIT 1
+) rev ON true
+WHERE d.discrepancy_id = $1`
