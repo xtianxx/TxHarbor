@@ -239,6 +239,13 @@ const (
 	BusinessKeyIntentID  BusinessKeyKind = "intent_id"
 	BusinessKeyEventID   BusinessKeyKind = "event_id"
 	BusinessKeyAttemptID BusinessKeyKind = "attempt_id"
+	// BusinessKeyTxHash is the chain-anchored identity of one transaction:
+	// the only stable business key available when a confirmed chain fact has
+	// no PostgreSQL business row at all (014 US1 missing detection). The
+	// value is the lowercase 0x-prefixed transaction hash; the PG-state read
+	// resolves it back to the authoritative attempt rows and reports a
+	// definitive absence when none exists.
+	BusinessKeyTxHash BusinessKeyKind = "tx_hash"
 )
 
 // BusinessKey is one business object's primary key. The kind disambiguates

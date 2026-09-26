@@ -15,6 +15,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"strings"
 	"time"
 
@@ -46,8 +47,12 @@ type TaskCreateRequest struct {
 	// unconnected: the classifier can then never claim external success
 	// (FR-006).
 	UpstreamReceipts []ChainUpstreamReceiptSource
-	// PolicyRefs is the optional raw policy_refs JSONB snapshot (confirm
-	// policy seq, cutover/catalog versions). Empty records `{}`.
+	// PolicyRefs is the raw policy_refs JSONB snapshot (confirm policy seq,
+	// cutover/catalog versions). It MUST carry the confirm policy depth
+	// confirm_threshold_n (N in [1, MaxInt64]): the scan reads that depth as
+	// the chain-evidence confirmation basis (scanTaskConfirmThresholdN), and a
+	// missing depth would leave every chain conclusion pending. There is no
+	// default: a missing or illegal value is refused, never invented.
 	PolicyRefs []byte
 	// Budget is the optional raw budget JSONB snapshot. Empty records `{}`.
 	Budget []byte
@@ -106,6 +111,34 @@ func (r TaskCreateRequest) Validate() error {
 	}
 	if strings.ContainsRune(r.Reason, 0) || len(r.Reason) > 1024 {
 		return contractErrorf("task creation reason is malformed")
+	}
+	if err := validateTaskPolicyRefs(r.PolicyRefs); err != nil {
+		return err
+	}
+	return nil
+}
+
+// validateTaskPolicyRefs enforces the confirm policy basis of a new task:
+// policy_refs MUST be a JSON object carrying confirm_threshold_n as an integer
+// in [1, MaxInt64] (the same domain as the 005 confirmation policy and the
+// BIGINT receipt storage). The scan layer treats a missing depth as
+// fail-closed (0 => chain evidence never complete), so a task without it would
+// be silently unscannable; the store refuses it instead. No default exists.
+func validateTaskPolicyRefs(raw []byte) error {
+	if len(strings.TrimSpace(string(raw))) == 0 {
+		return contractErrorf("policy_refs must carry confirm_threshold_n (N in [1, %d]); there is no default", math.MaxInt64)
+	}
+	var refs struct {
+		ConfirmThresholdN *uint64 `json:"confirm_threshold_n"`
+	}
+	if err := json.Unmarshal(raw, &refs); err != nil {
+		return contractErrorf("policy_refs is not a JSON object: %v", err)
+	}
+	if refs.ConfirmThresholdN == nil {
+		return contractErrorf("policy_refs is missing confirm_threshold_n (N in [1, %d]); there is no default", math.MaxInt64)
+	}
+	if *refs.ConfirmThresholdN < 1 || *refs.ConfirmThresholdN > math.MaxInt64 {
+		return contractErrorf("policy_refs confirm_threshold_n %d is outside [1, %d]", *refs.ConfirmThresholdN, math.MaxInt64)
 	}
 	return nil
 }
@@ -225,7 +258,8 @@ func upstreamReceiptsJSON(receipts []ChainUpstreamReceiptSource) ([]byte, error)
 
 // taskJSONObject normalizes an optional raw JSONB snapshot: empty records
 // `{}`; a non-object or malformed value is refused (the schema requires a JSON
-// object).
+// object). policy_refs is validated before this point (it always carries the
+// confirm threshold), so only the optional budget can be empty here.
 func taskJSONObject(raw []byte, name string) ([]byte, error) {
 	if len(strings.TrimSpace(string(raw))) == 0 {
 		return []byte(`{}`), nil

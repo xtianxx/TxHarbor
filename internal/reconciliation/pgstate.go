@@ -108,6 +108,11 @@ const (
 	PGSourceTxReconciliation        PGSource = "tx_reconciliations"
 	PGSourceTxReceipt               PGSource = "tx_receipts"
 	PGSourceRecoveryGate            PGSource = "recovery_snapshot"
+	// PGSourceTxHash is the chain-anchored lookup token of a tx-hash keyed
+	// read: the hash resolves through tx_attempt_signings/tx_receipts to the
+	// attempt graph, and "no row" is the definitive absence of a business
+	// record for the chain fact (US1 missing detection).
+	PGSourceTxHash PGSource = "tx_hash"
 )
 
 // PGStateStatus is the conservative availability verdict of one PG-state read.
@@ -268,6 +273,11 @@ func (r PGReadRequest) validate() error {
 	}
 	switch r.Key.Kind {
 	case BusinessKeyRequestID, BusinessKeyIntentID, BusinessKeyAttemptID:
+		return nil
+	case BusinessKeyTxHash:
+		// The chain-anchored key resolves the tx hash to the authoritative
+		// attempt rows; it never fabricates an attempt identity (a missing
+		// row is reported as absence, not as an invented attempt id).
 		return nil
 	}
 	return contractErrorf("business key kind %q has no PG-state source", r.Key.Kind)
@@ -646,44 +656,78 @@ func (a *PGStateAdapter) readGraph(ctx context.Context, rec *PGStateRecord) erro
 			rec.note("intent %s references missing request %s", intent.IntentID, intent.RequestID)
 		}
 	case BusinessKeyAttemptID:
-		attempt, found, err := a.readAttemptByID(ctx, rec, rec.BusinessKey.Value)
+		if err := a.readAttemptAnchor(ctx, rec, rec.BusinessKey.Value); err != nil {
+			return err
+		}
+	case BusinessKeyTxHash:
+		// Chain-anchored read: resolve the tx hash to the authoritative
+		// attempt (tx_attempt_signings/tx_receipts, read-only). No row is the
+		// definitive absence of a business record for the chain fact; an
+		// ambiguous resolution downgrades conservatively inside the helper.
+		attemptID, found, err := a.readAttemptIDByTxHash(ctx, rec, rec.BusinessKey.Value)
 		if err != nil {
-			return markPGUnreachable(rec, PGSourceTxAttempt, err)
+			return markPGUnreachable(rec, PGSourceTxHash, err)
 		}
 		if !found {
 			rec.Status = PGStateAbsent
 			return nil
 		}
-		rec.Attempt = attempt
-		rec.checkChain(PGSourceTxAttempt, attempt.ChainID)
-		intent, found, err := a.readIntentByID(ctx, rec, attempt.IntentID)
-		if err != nil {
-			return markPGUnreachable(rec, PGSourcePaymentIntent, err)
-		}
-		if found {
-			rec.Intent = intent
-			rec.checkChain(PGSourcePaymentIntent, intent.ChainID)
-		} else {
-			rec.downgrade(PGStateIncomplete, PGReasonLinkedRowMissing)
-			rec.note("attempt %s references missing intent %s", attempt.AttemptID, attempt.IntentID)
-		}
-		if rec.Intent != nil {
-			request, found, err := a.readRequest(ctx, rec, rec.Intent.RequestID)
-			if err != nil {
-				return markPGUnreachable(rec, PGSourceWithdrawalRequest, err)
-			}
-			if found {
-				rec.Request = request
-				rec.checkChain(PGSourceWithdrawalRequest, request.ChainID)
-			} else {
-				rec.downgrade(PGStateIncomplete, PGReasonLinkedRowMissing)
-				rec.note("intent %s references missing request %s", rec.Intent.IntentID, rec.Intent.RequestID)
-			}
+		if err := a.readAttemptAnchor(ctx, rec, attemptID); err != nil {
+			return err
 		}
 	}
 
 	if err := a.readCommonGraph(ctx, rec); err != nil {
 		return err
+	}
+	return nil
+}
+
+// readAttemptAnchor materializes the attempt graph of one attempt id: the
+// attempt row plus its intent/request/authorization linkage. A missing attempt
+// is the definitive absence of the anchor row.
+func (a *PGStateAdapter) readAttemptAnchor(ctx context.Context, rec *PGStateRecord, attemptID string) error {
+	attempt, found, err := a.readAttemptByID(ctx, rec, attemptID)
+	if err != nil {
+		return markPGUnreachable(rec, PGSourceTxAttempt, err)
+	}
+	if !found {
+		// A direct attempt-id read that finds nothing is the definitive
+		// absence of the anchor row. A resolution that already downgraded
+		// (ambiguous tx-hash resolution) must stay incomplete, never absent.
+		if rec.Status == PGStateComplete {
+			rec.Status = PGStateAbsent
+		} else {
+			rec.downgrade(PGStateIncomplete, PGReasonLinkedRowMissing)
+			rec.note("resolved attempt anchor row is missing")
+		}
+		return nil
+	}
+	rec.Attempt = attempt
+	rec.checkChain(PGSourceTxAttempt, attempt.ChainID)
+	intent, found, err := a.readIntentByID(ctx, rec, attempt.IntentID)
+	if err != nil {
+		return markPGUnreachable(rec, PGSourcePaymentIntent, err)
+	}
+	if found {
+		rec.Intent = intent
+		rec.checkChain(PGSourcePaymentIntent, intent.ChainID)
+	} else {
+		rec.downgrade(PGStateIncomplete, PGReasonLinkedRowMissing)
+		rec.note("attempt %s references missing intent %s", attempt.AttemptID, attempt.IntentID)
+	}
+	if rec.Intent != nil {
+		request, found, err := a.readRequest(ctx, rec, rec.Intent.RequestID)
+		if err != nil {
+			return markPGUnreachable(rec, PGSourceWithdrawalRequest, err)
+		}
+		if found {
+			rec.Request = request
+			rec.checkChain(PGSourceWithdrawalRequest, request.ChainID)
+		} else {
+			rec.downgrade(PGStateIncomplete, PGReasonLinkedRowMissing)
+			rec.note("intent %s references missing request %s", rec.Intent.IntentID, rec.Intent.RequestID)
+		}
 	}
 	return nil
 }
@@ -825,6 +869,8 @@ func (rec *PGStateRecord) anchorSource() PGSource {
 		return PGSourcePaymentIntent
 	case BusinessKeyAttemptID:
 		return PGSourceTxAttempt
+	case BusinessKeyTxHash:
+		return PGSourceTxHash
 	}
 	return ""
 }
@@ -1145,6 +1191,20 @@ FROM tx_attempts a
 LEFT JOIN tx_attempt_signings s ON s.attempt_id = a.attempt_id
 WHERE a.attempt_id = $1`
 
+// pgAttemptIDByTxHashSQL is the chain-anchored reverse lookup: the durable
+// signing row (unique tx hash) and the receipt rows both bind a transaction
+// hash to its attempt. Read-only; no row means no business record exists for
+// the chain fact.
+const pgAttemptIDByTxHashSQL = `
+SELECT resolved.attempt_id
+FROM (
+    SELECT attempt_id FROM tx_attempt_signings WHERE tx_hash = $1
+    UNION
+    SELECT attempt_id FROM tx_receipts WHERE tx_hash = $1
+) resolved
+ORDER BY resolved.attempt_id
+LIMIT 2`
+
 const pgLatestReceiptSQL = `
 SELECT tx_hash, status, block_number, block_hash, effect, canonicality,
        confirmations::text, confirm_threshold, confirm_policy_seq,
@@ -1324,6 +1384,44 @@ func (a *PGStateAdapter) readAttemptByID(ctx context.Context, rec *PGStateRecord
 	row.Amount = parsePGAmount(rec, "tx_attempts", attemptID, row.AmountText)
 	rec.trackObserved(row.UpdatedAt)
 	return row, true, nil
+}
+
+// readAttemptIDByTxHash resolves a chain transaction hash to its authoritative
+// attempt id through the durable 010/011 rows (tx_attempt_signings first, then
+// tx_receipts; both read-only). No row is a definitive "no business record for
+// this chain fact" answer. More than one distinct attempt behind one hash can
+// only be structural drift: it is downgraded conservatively (incomplete) so the
+// read can never support a conclusion.
+func (a *PGStateAdapter) readAttemptIDByTxHash(ctx context.Context, rec *PGStateRecord, txHash string) (string, bool, error) {
+	rec.noteSource(PGSourceTxSigning)
+	rec.noteSource(PGSourceTxReceipt)
+	rows, err := a.db.Query(ctx, pgAttemptIDByTxHashSQL, txHash)
+	if err != nil {
+		return "", false, fmt.Errorf("read tx_attempt_signings/tx_receipts by tx hash: %w", err)
+	}
+	defer rows.Close()
+
+	var ids []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return "", false, fmt.Errorf("scan tx-hash attempt resolution: %w", err)
+		}
+		ids = append(ids, id)
+	}
+	if err := rows.Err(); err != nil {
+		return "", false, fmt.Errorf("iterate tx-hash attempt resolution: %w", err)
+	}
+	switch len(ids) {
+	case 0:
+		return "", false, nil
+	case 1:
+		return ids[0], true, nil
+	default:
+		rec.downgrade(PGStateIncomplete, PGReasonEvidenceInconsistent)
+		rec.note("tx hash resolves to %d distinct attempts; evidence is structurally inconsistent", len(ids))
+		return ids[0], true, nil
+	}
 }
 
 // readAttemptDetail attaches the txlifecycle.UnknownRecovery facts and the
