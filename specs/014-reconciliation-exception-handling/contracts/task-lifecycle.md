@@ -22,3 +22,10 @@
 
 - checkpoint 行仅覆盖已完成且已持久化前缀；cancel/timeout/failure 不越界；恢复可重扫。
 - 预算字段有界；耗尽停新工作，不忙循环不无界重试；记录原因/指针/gap/新鲜度。
+
+## Claim–Execute–Commit Protocol（F3；与 `data-model.md` §5.1 一致）
+
+- 互斥保护范围＝`recon_scan_attempt` 认领行（同一任务同一区间单 `claimed`），不以领取短事务的行锁冒充全程互斥。
+- 领取短事务（无 RPC）→ 事务外执行（凭 attempt 身份）→ 提交短事务（条件更新指针，迟到者丢弃并审计）。
+- 崩溃后过期 attempt 置 `abandoned` 并留 gap，指针不动；检查点只前移到连续已持久前缀最大值。
+- 慢 RPC 期间不持有 DB 事务；并发反例见 tasks T025。

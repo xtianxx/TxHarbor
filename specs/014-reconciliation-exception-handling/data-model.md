@@ -8,7 +8,7 @@ Design only; no implementation in this round. All tables live in PostgreSQL (aut
 
 ### 1.1 `recon_task`（对账任务；FR-001/003/019/022, Q3）
 
-- `task_id` UUID PK；`scope_chain_id` TEXT；`scope_kind` ENUM('height','time')；`scope_start/scope_end`（bigint/timestamptz，按 kind 其中之一有效）；`business_types` TEXT[]（闭集：withdrawal/deposit/event-delivery…，未知类型拒绝）；`policy_refs` JSONB（confirm policy_seq、cutover/catalog 版本快照）；`state` ENUM('created','running','paused','suspended_budget','done','cancelled')；`pause_reason` TEXT nullable；`budget` JSONB（并发/单次范围/时长/PG-RPC 配额）；`created_by/at`、`updated_at`。
+- `task_id` UUID PK；`scope_chain_id` TEXT；`scope_kind` ENUM('height','time')；`scope_start/scope_end`（bigint/timestamptz，按 kind 其中之一有效）；`business_types` TEXT[]（闭集：withdrawal/deposit/event-delivery…，未知类型拒绝）；`upstream_receipt_source` JSONB（每业务类型的上游回执来源与接入状态：`{business_type: {source, connected}}`，`connected=false` 即未接入；创建时由任务参数写入，运行中仅经任务修订事务变更）；`policy_refs` JSONB（confirm policy_seq、cutover/catalog 版本快照）；`state` ENUM('created','running','paused','suspended_budget','done','cancelled')；`pause_reason` TEXT nullable；`budget` JSONB（并发/单次范围/时长/PG-RPC 配额，含历史复查 slice 见 §5）；`history_sweep_through` JSONB nullable（历史复查水位，见 §6）；`created_by/at`、`updated_at`。
 - Validation: 范围必填可复现；空范围输出“覆盖为空且完整”需任务行 + 零 checkpoint 跨度共同证明（Edge）。
 
 ### 1.2 `recon_checkpoint`（检查点；FR-003, Q3-2/Q5）
@@ -43,6 +43,17 @@ Design only; no implementation in this round. All tables live in PostgreSQL (aut
 
 - Append-only；`audit_id` BIGSERIAL PK；`actor`；`action` ENUM('query','start','pause','resume','claim','dispose','reverify','close','reopen','refuse')；`target` JSONB；`reason/evidence/result`；`created_at`。越权拒绝亦记行（含归属提示）。
 
+### 1.9 `recon_scan_attempt`（扫描认领；F3 领取—执行—提交协议载体）
+
+- `attempt_id` UUID PK；`task_id` FK；`range_start/range_end`（本次认领区间，由指针 + 预算在短事务内计算）；`state` ENUM('claimed','done','abandoned','superseded')；`owner` TEXT（调用者身份）；`lease_expires_at` TIMESTAMPTZ（心跳可选，超时即放弃候选）；`created_at/updated_at`。
+- UNIQUE(`task_id`,`attempt_id`)；同一任务同一区间只允许一个 `claimed` 行（部分唯一索引 `WHERE state='claimed'`）。
+- 认领短事务：`SELECT recon_task … FOR UPDATE` 校验 state=running → 计算区间 → INSERT attempt → COMMIT，全程无 RPC；行锁仅存续于该短事务，不跨慢调用。
+
+### 1.10 `recon_permission`（对账权限注册表；F5 求值源）
+
+- `principal` TEXT；`action` ENUM('scan_manage','exception_handle','dispose_ack','dispose_reuse','close')；`scope` JSONB（链/业务类型/范围前缀）；`granted_by/at`；PK(`principal`,`action`,(`scope` 规范化哈希))。
+- 默认拒绝：无行即无权；未知动作、越界范围一律拒绝并审计。授予操作为部署期运维行为，本阶段不预置任何授予（机制已定，政策未裁决）。
+
 ## 2. 稳定身份与证据哈希
 
 - 身份键 =（范围， 类别， 业务主键， 内容哈希， 证据版本域）。内容哈希覆盖三方快照规范化字节；版本域覆盖区块 number/hash、recovery/authorization/scope/state_version、证据时点。
@@ -64,3 +75,19 @@ Design only; no implementation in this round. All tables live in PostgreSQL (aut
 
 - 每批扫描提交：先持久化本批比较结果（差异/occurrence/复核行），再前移 `result_persisted_through`，最后追加 checkpoint 行——同一 DB 事务内完成；崩溃后从指针恢复：已持久前缀不重报，未完成区间继续，可重复扫描已覆盖区间（读+幂等写，无副作用）。
 - 预算耗尽/暂停：停止领取新区间，在途有界完成或取消，留 gap 行，不前移指针越过未完成区间。
+
+### 5.1 领取—执行—提交协议（F3；互斥范围＝认领行，不跨慢调用持锁）
+
+- 领取（短事务，无 RPC）：`SELECT recon_task … FOR UPDATE` 校验 `state='running'` 且预算充足 → 按指针 + 预算计算区间 → INSERT `recon_scan_attempt(state='claimed')` → COMMIT。行锁仅存续该短事务；事务外读取期间所有权由 attempt 行（`task_id` + `attempt_id` + 未过期 lease）证明，不靠长事务。
+- 执行（事务外）：持 attempt 身份做 RPC 与只读查询；可中断/取消（检查任务 state，暂停即停领，在途有界收尾）。
+- 提交（短事务）：重读任务行（FOR UPDATE）+ attempt 行；仅当 attempt 仍为当前有效认领（未被暂停/取消/超期取代）才持久化结果并按连续已持久前缀前移指针；迟到执行者（attempt 已 superseded/abandoned）提交被拒绝，结果丢弃并审计，不覆盖指针。
+- 崩溃恢复：重启后 `claimed` 且 lease 过期的 attempt 置 `abandoned` 并留 gap 行，指针不动；续扫重领。检查点条件更新：指针只前移到连续已持久前缀的最大值。
+- 反例覆盖：双调用者同时领取同一任务（T025 并发反例）→ 仅一 attempt 落为 claimed，另一因部分唯一索引/状态谓词失败重试下一区间；慢 RPC 期间不持有 DB 事务。
+
+## 6. 历史复查（F4；覆盖新水位之前的已闭合项）
+
+- 发现者：扫描主循环（顺带 cross-check 落入当前预算区间的已闭合项）＋ 定向复查枚举（按证据年龄最旧优先，从 `discrepancy` 中选取本任务范围内 `closed` 且 `close_basis` 版本域落后于当前源版本的项）。
+- 触发：每次扫描调用预留预算 slice（配额内固定小比例，上限有界）执行历史复查；重组/ frontier 推进信号仅作为下次调用优先复查的提示，不另起通道。
+- 范围与进度：复查范围限任务 scope 内已闭合项；进度以前进的 `history_sweep_through`（证据年龄水位）记录在任务行；未覆盖部分留 gap（reason=`interrupted` 或预算耗尽）。
+- 预算：复查消耗计入任务总预算 slice，不挤占新区间扫描主配额之外；无无限全量扫描。
+- 验收锚点：水位已前进＋旧范围证据变化＋无人工逐条触发 → 差异进入重验证（quickstart §11）；中断恢复与证据不足不得错误闭合（沿用 §5 与 Q5-4）。

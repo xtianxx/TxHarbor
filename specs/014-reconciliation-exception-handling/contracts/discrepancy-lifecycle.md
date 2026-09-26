@@ -19,3 +19,10 @@
 ## Classification (machine)
 
 `missing | duplicate_divergent | state_mismatch | unknown | incomplete`；未知形状 → `incomplete` 只告警；证据不足 → 待核验/覆盖不完整。
+
+## History Revalidation Sweep（F4；与 `data-model.md` §6 一致）
+
+- 发现者：扫描主循环顺带 cross-check（落入当前预算区间的已闭合项）＋ 定向复查枚举（本任务范围内 `closed` 且 `close_basis` 版本域落后者，按证据年龄最旧优先）。
+- 触发与预算：每次扫描调用预留有界 slice；重组/frontier 推进仅作下次优先提示；消耗计入任务总预算。
+- 进度：`history_sweep_through` 前进；未覆盖留 gap；无无限全量扫描。
+- 验收锚点见 quickstart §11：水位前进＋旧范围证据变化＋无人工逐条触发 → 进入重验证；中断恢复与证据不足不得错误闭合。

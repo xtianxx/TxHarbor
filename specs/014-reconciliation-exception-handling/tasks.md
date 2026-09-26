@@ -27,8 +27,8 @@
 **Purpose**: Plan-only scaffolding references and CI/layering guardrails (no product code changes in this tasks round; tasks below are implementation work for later phases)
 
 - [ ] T001 Create `internal/reconciliation/` package skeleton per plan.md Source Code layout in `internal/reconciliation/doc.go`
-- [ ] T002 [P] Draft `migrations/000016_reconciliation_handling.sql` skeleton covering `recon_task/recon_checkpoint/recon_gap/discrepancy/discrepancy_occurrence/disposition/reverify/recon_audit` per `data-model.md` §1 (constraints: PK/FK/UNIQUE/CHECK/ENUMs, integer/NUMERIC money rule, append-only audit)
-- [ ] T003 [P] Register 014 CI layering map in `specs/014-reconciliation-exception-handling/quickstart.md` validation matrix (ordinary PR tags vs independent `fault`/`perf` runs; Docker-absent NOT RUN discipline)
+- [ ] T002 [P] Draft `migrations/000016_reconciliation_handling.sql` skeleton covering `recon_task` (incl. `upstream_receipt_source` per `data-model.md` §1.1)/`recon_checkpoint`/`recon_gap`/`discrepancy`/`discrepancy_occurrence`/`disposition`/`reverify`/`recon_audit`/`recon_scan_attempt`/`recon_permission` per `data-model.md` §1 (constraints: PK/FK/UNIQUE/CHECK/ENUMs, integer/NUMERIC money rule, append-only audit)
+- [ ] T003 [P] Add the tags×suites validation matrix table to the Layering section of `specs/014-reconciliation-exception-handling/quickstart.md` (rows: ordinary-PR tags vs independent `fault`/`perf` runs with Docker-absent NOT RUN discipline; no new ordinary-PR long tests)
 
 ---
 
@@ -38,13 +38,13 @@
 
 **⚠️ CRITICAL**: No user story work can begin until this phase is complete. Merge responsibility: migration + state-machine + auth-matrix owner merges first; all stories rebase on it.
 
-- [ ] T004 Implement `migrations/000016_reconciliation_handling.sql` with all tables/constraints/indexes per `data-model.md` §1–2 (verify with `internal/db/migrate.go` compatibility; `goose_db_version` clean)
+- [ ] T004 Implement `migrations/000016_reconciliation_handling.sql` with all tables/constraints/indexes per `data-model.md` §1–2 — explicitly including `recon_scan_attempt` (§1.9, partial unique on `claimed`) and `recon_permission` (§1.10, default-deny, zero grants seeded) — (verify with `internal/db/migrate.go` compatibility; `goose_db_version` clean)
 - [ ] T005 [P] Implement stable identity + evidence-hash in `internal/reconciliation/identity.go` per `data-model.md` §2 and research §3 (key order fixed; unknown shapes conservative; Q4 business-divergence rule enforced at classifier boundary)
-- [ ] T006 [P] Implement task/checkpoint/gap state machine in `internal/reconciliation/scan.go` skeleton per `contracts/task-lifecycle.md` (illegal transitions refused + audited; pointer never advances past unpersisted ranges)
+- [ ] T006 [P] Implement task/checkpoint/gap state machine in `internal/reconciliation/scan.go` skeleton per `contracts/task-lifecycle.md` and `data-model.md` §1.9/§5.1 (claim in a short txn with `SELECT recon_task … FOR UPDATE`, no RPC inside; illegal transitions refused + audited; pointer never advances past unpersisted ranges)
 - [ ] T007 [P] Implement discrepancy lifecycle skeleton in `internal/reconciliation/lifecycle.go` per `contracts/discrepancy-lifecycle.md` (5 states + reopen; `disposed≠reverified≠closed`; Q5 invalidation/reopen rules as transition guards)
 - [ ] T008 [P] Implement budget/backoff/cancel primitives in `internal/reconciliation/budget.go` per Q3/FR-019 (bounded concurrency/range/time/PG-RPC quotas; no busy loop; observable wait/suspend)
-- [ ] T009 [P] Implement action×permission×scope enforcement helper in `internal/reconciliation/authz.go` per `contracts/auth-matrix.md` and Q2 (claim≠execute right; fields≠authorization; `operation_id` audit idempotency)
-- [ ] T010 Implement atomic result+checkpoint commit helper in `internal/reconciliation/store.go` per `data-model.md` §5 (same-tx persist ordering; crash-safe resume; bounded in-flight settle/cancel)
+- [ ] T009 [P] Implement action×permission×scope enforcement helper in `internal/reconciliation/authz.go` per `contracts/auth-matrix.md` Evaluation Source and Q2 (evaluate exact (principal, action, scope) matches against `recon_permission`; unconfigured rows, unknown actions, and out-of-scope access are denied + audited; claim≠execute right; fields≠authorization; `operation_id` audit idempotency; existing 011/009/012 permissions are never expanded)
+- [ ] T010 Implement atomic result+checkpoint commit helper in `internal/reconciliation/store.go` per `data-model.md` §5/§5.1 (same-tx persist ordering; pointer advances only over the contiguous persisted prefix; late submitters with superseded/abandoned attempts are discarded + audited, never overwrite the pointer; crash-safe resume; bounded in-flight settle/cancel)
 
 **Checkpoint**: Foundation ready - user story implementation can now begin in parallel
 
@@ -61,7 +61,7 @@
 > **NOTE: Write these tests FIRST, ensure they FAIL before implementation**
 
 - [ ] T011 [P] [US1] Contract test for task lifecycle transitions in `internal/reconciliation/scan_contract_test.go` (tags: `contract`)
-- [ ] T012 [P] [US1] Integration test for scoped scan + checkpoint resume + budget suspend in `internal/reconciliation/scan_integration_test.go` (tags: `integration`; PG required; Docker-absent → NOT RUN, not pass)
+- [ ] T012 [P] [US1] Integration test for scoped scan + checkpoint resume + budget suspend plus the upstream-unconnected negative case in `internal/reconciliation/scan_integration_test.go` (tags: `integration`; PG required; Docker-absent → NOT RUN, not pass): unconnected scope yields `incomplete`/pending only, never `consistent` and never an external-credit claim
 
 ### Implementation for User Story 1
 
@@ -69,10 +69,10 @@
 - [ ] T014 [P] [US1] Implement PG-state adapter in `internal/reconciliation/pgstate.go` reusing `internal/txlifecycle/reconcile.go:62`, `:183 UnknownRecovery`, `execution/gates.go` reads, `consumer` progress reads (unknown stays unknown; FR-018)
 - [ ] T015 [P] [US1] Implement event-delivery adapter in `internal/reconciliation/eventstate.go` reusing `internal/events/outbox.go`, `consumer.go:887/914`, `audit.go:133/158`, `quarantine.go` reads (Q4: absorbed duplicates metrics-only)
 - [ ] T016 [US1] Implement `ScanOnce` compare loop in `internal/reconciliation/scan.go` (depends on T013–T015; scope→budgeted intervals→classify→persist results+checkpoint same-tx; missing evidence → incomplete/pending, never consistent) (covers FR-001–006, Q1/Q3)
-- [ ] T017 [US1] Implement machine classifier in `internal/reconciliation/classify.go` (depends on T005; categories `missing/duplicate_divergent/state_mismatch/unknown/incomplete`; absorbed-zero-effect → no ticket + metrics; insufficient evidence → pending/incomplete) (covers FR-009, Q4)
-- [ ] T018 [US1] Wire `reconcile-admin scan/start/pause/resume/cancel/show` thin commands in `internal/app/reconcileadmin.go` (depends on T006,T008,T016; pause scoped to 014 tasks only; bounded in-flight settle/cancel) (covers FR-001/003/019, Q3)
+- [ ] T017 [US1] Implement machine classifier in `internal/reconciliation/classify.go` (depends on T005; reads per-scope `upstream_receipt_source.connected` as an input; categories `missing/duplicate_divergent/state_mismatch/unknown/incomplete`; absorbed-zero-effect → no ticket + metrics; insufficient evidence → pending/incomplete; unconnected/configured-but-unavailable → `incomplete`, never `consistent`; a `connected` flag alone never proves upstream success) (covers FR-006/009, Q4)
+- [ ] T018 [US1] Wire `reconcile-admin scan/start/pause/resume/cancel/show` thin commands in `internal/app/reconcileadmin.go`, register the command in `cmd/txharbor/main.go`, pass through `TXHARBOR_RECON_*` env in `internal/config/config.go` (pass-through only), and smoke-verify a single budgeted scan via the built binary (depends on T006,T008,T016; pause scoped to 014 tasks only; bounded in-flight settle/cancel) (covers FR-001/003/019, Q3; makes the MVP operable)
 
-**Checkpoint**: At this point, User Story 1 should be fully functional and testable independently
+**Checkpoint**: At this point, User Story 1 should be fully functional and testable independently — operable via the built binary (`reconcile-admin scan/start/pause/resume/cancel/show`, T018), not library-only
 
 ---
 
@@ -101,18 +101,18 @@
 
 **Goal**: Reorg/unknown/interrupt/concurrent-change conservative semantics with auto-invalidation and reopen (FR-004/005/010/016–019, Q5, SC-003/006)
 
-**Independent Test**: Four fault-injection groups (reorg, unknown receipt, kill/restart interrupt, concurrent updates): zero wrong payments, zero permanent false conclusions, all converge to defined conservative states (quickstart §4,5,7,10; independent `fault` tag runs)
+**Independent Test**: Four fault-injection groups (reorg, unknown receipt, kill/restart interrupt, concurrent updates): zero wrong payments, zero permanent false conclusions, all converge to defined conservative states (quickstart §4,5,7,10; independent `fault` tag runs); history revalidation acceptance per quickstart §11 (advanced waterline + changed old-range evidence discovered without per-item manual trigger)
 
 ### Tests for User Story 3
 
 - [ ] T024 [P] [US3] Fault test for reorg/unknown/interrupt/concurrent invalidation in `internal/reconciliation/conservative_fault_test.go` (tags: `fault`; independent channel, never ordinary-PR gate)
-- [ ] T025 [P] [US3] Integration test for checkpoint crash recovery (no-miss/no-dup) in `internal/reconciliation/recovery_integration_test.go` (tags: `integration`)
+- [ ] T025 [P] [US3] Integration test for checkpoint crash recovery (no-miss/no-dup) plus the overlap counterexample in `internal/reconciliation/recovery_integration_test.go` (tags: `integration`): two concurrent invocations claim the same task (only one `claimed` attempt lands), the late submitter is discarded + audited without moving the pointer, and no DB transaction is held across slow RPC
 
 ### Implementation for User Story 3
 
-- [ ] T026 [US3] Implement invalidation/reopen evaluator in `internal/reconciliation/lifecycle.go` (depends on T007,T022; concurrent-write/reorg/new-evidence → `pending_verify`; confirmed recurrence → `reopened` with history; unrelated writes ignored; stale results never close) (covers Q5, FR-010/017/018)
-- [ ] T027 [US3] Implement bounded reverify executor in `internal/reconciliation/reverify.go` (depends on T015,T026; Q1 read-only scope + Q5-6 limits; timeout/incomplete/unavailable/insufficient → never `consistent`; bounded retry or stay pending) (covers Q1/Q5, FR-005/018)
-- [ ] T028 [US3] Wire production entry: construct `reconcile-admin` in `cmd/txharbor/main.go`, config passing (`TXHARBOR_RECON_*` env wired in `internal/config/config.go` only as pass-through), lifecycle (start/run/pause/resume/cancel/show), and documented repeat-invocation call path in `specs/014-reconciliation-exception-handling/quickstart.md` §call-path (depends on T018,T023; proves repeated budgeted invocations converge; no daemon added; no serve/worker auto-start) (covers user req 4, Q3/ADR-001)
+- [ ] T026 [US3] Implement invalidation/reopen evaluator in `internal/reconciliation/lifecycle.go` (depends on T007; reads disposition/reverify/close_basis rows via Foundational schema, not US2 wiring; concurrent-write/reorg/new-evidence → `pending_verify`; confirmed recurrence → `reopened` with history; unrelated writes ignored; stale results never close) (covers Q5, FR-010/017/018)
+- [ ] T027 [US3] Implement bounded reverify executor in `internal/reconciliation/reverify.go` (depends on T015,T026; enumerates in-scope `closed` items oldest-evidence-first under a bounded budget slice per `data-model.md` §6 and `contracts/discrepancy-lifecycle.md` History section; consumes scan-loop cross-check candidates; Q1 read-only scope + Q5-6 limits; timeout/incomplete/unavailable/insufficient → never `consistent`; bounded retry or stay pending) (covers Q1/Q5, FR-005/018; acceptance: quickstart §11)
+- [ ] T028 [US3] Prove repeat-invocation convergence and document the call path: define the `TXHARBOR_RECON_*` key names (naming owner; pass-through only, no new ordinary-PR long tests), add the `§call-path` section to `specs/014-reconciliation-exception-handling/quickstart.md` (repeated budgeted invocations converge; pause/resume/restart entries), and verify scheduling behavior stays US3-scoped (recovery/reverify focus; no daemon added; no serve/worker auto-start) (depends on T018,T023) (covers user req 4, Q3/ADR-001)
 
 **Checkpoint**: All user stories should now be independently functional
 
@@ -136,7 +136,7 @@
 - **Setup (Phase 1)**: No dependencies - can start immediately
 - **Foundational (Phase 2)**: Depends on Setup completion - BLOCKS all user stories (merge responsibility: migration + state-machine + auth-matrix owner first)
 - **User Stories (Phase 3+)**: All depend on Foundational phase completion
-  - User stories can then proceed in parallel (if staffed)
+  - User stories can then proceed in parallel (if staffed), except the single T015→T027 edge (US3 reverify waits for the US1 event adapter)
   - Or sequentially in priority order (P1 → P2 → P3)
 - **Polish (Final Phase)**: Depends on all desired user stories being complete
 
@@ -144,7 +144,7 @@
 
 - **User Story 1 (P1)**: Can start after Foundational (Phase 2) - No dependencies on other stories
 - **User Story 2 (P2)**: Can start after Foundational (Phase 2) - May integrate with US1 but independently testable
-- **User Story 3 (P3)**: Can start after Foundational (Phase 2) - May integrate with US1/US2 but independently testable
+- **User Story 3 (P3)**: T024/T025/T026 start after Foundational (Phase 2) with no story dependencies; T027 (bounded reverify executor) additionally waits for US1 T015 (event-delivery adapter read path). Subtasks without cross-story edges stay parallel; only the T015→T027 edge is serialized.
 
 ### Within Each User Story
 
@@ -217,7 +217,7 @@ Task: "Event-delivery adapter in internal/reconciliation/eventstate.go"
 
 ## Notes
 
-- Coverage: FR-001–025, SC-001–006, Q1–Q5, quickstart §1–10 all mapped above;重点 six (atomicity, crash-no-miss, legal-duplicate silence, insufficient-evidence conservatism, invalidation on change, unauthorized refusal, unknown-disposal idempotency, pause/budget isolation) land in T010/T016/T017/T021/T022/T023/T026/T027/T028.
+- Coverage: FR-001–025, SC-001–006, Q1–Q5, quickstart §1–11 all mapped above;重点 six (atomicity, crash-no-miss, legal-duplicate silence, insufficient-evidence conservatism, invalidation on change, unauthorized refusal, unknown-disposal idempotency, pause/budget isolation) land in T010/T016/T017/T021/T022/T023/T026/T027/T028.
 - Risk-accept/ignore: NOT approved — zero implementation tasks generated for it; any future need is a business blocker, not a tasks-time decision.
 - Prod thresholds pending do not block local validation; local numbers are never claimed as production thresholds.
 - [P] tasks = different files, no dependencies; [Story] label maps traceability; commit after each task or logical group; stop at any checkpoint to validate independently.
