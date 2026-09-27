@@ -18,8 +18,11 @@ import (
 
 // startIndexerPostgres creates a fresh, uniquely named database inside the
 // package-wide PostgreSQL container booted by TestMain
-// (indexer_shared_pg_test.go), applies the embedded migrations to it, and
-// returns the derived DSN. It never returns sharedBaseDSN.
+// (indexer_shared_pg_test.go) by cloning the migrated template database built
+// there (CREATE DATABASE ... WITH TEMPLATE), and returns the derived DSN. It
+// never returns sharedBaseDSN. The clone is a full copy of the template, so it
+// starts at the template's schema version without re-running the embedded
+// migrations.
 //
 // Docker gating moved to TestMain: when no provider is healthy TestMain exits
 // 0 before m.Run, so the package is skipped (never silently passed) without a
@@ -27,6 +30,46 @@ import (
 // is dropped in t.Cleanup (WITH (FORCE)) unless TXHARBOR_KEEP_DB=1 or the test
 // failed, in which case its name and DSN are logged for triage.
 func startIndexerPostgres(t *testing.T) string {
+	t.Helper()
+	ctx := context.Background()
+	if adminPool == nil || sharedBaseDSN == "" || sharedTemplateDB == "" {
+		t.Fatal("shared postgres not initialized: TestMain must run this package with -tags integration")
+	}
+
+	dbName := uniqueIndexerTestDBName(t)
+	// Serialize CREATE DATABASE ... WITH TEMPLATE: PostgreSQL serializes on
+	// the template database, so ordered creation avoids lock contention.
+	indexerDBMu.Lock()
+	_, err := adminPool.Exec(ctx, "CREATE DATABASE "+pgx.Identifier{dbName}.Sanitize()+
+		" WITH TEMPLATE "+pgx.Identifier{sharedTemplateDB}.Sanitize())
+	indexerDBMu.Unlock()
+	if err != nil {
+		t.Fatalf("create test database %s from template %s: %v", dbName, sharedTemplateDB, err)
+	}
+
+	dsn, err := deriveIndexerDSN(sharedBaseDSN, dbName)
+	if err != nil {
+		_ = dropIndexerTestDB(ctx, dbName)
+		t.Fatalf("derive dsn for %s: %v", dbName, err)
+	}
+
+	t.Cleanup(func() { cleanupIndexerTestDB(t, dbName, dsn) })
+	return dsn
+}
+
+// startIndexerPostgresMigrated is the single migration canary: instead of
+// cloning the template it keeps the legacy path — create an empty database and
+// run the full db.MigrateUp on it — on every package run.
+//
+// Exactly one test uses it, TestLeaseExactlyOneHolderAndExpiryTakeover: that
+// test drives the migrated schema end to end (real INSERT/SELECT on
+// indexer_lease and chain_blocks plus fencing-token takeover semantics), so a
+// broken or incomplete migration fails it immediately with the migration error
+// and cannot hide behind a template that TestMain built successfully earlier in
+// the same binary. Do not add a second caller: the template build already
+// migrates once per run, and this helper is deliberately the one full-path
+// canary (see indexer_shared_pg_test.go).
+func startIndexerPostgresMigrated(t *testing.T) string {
 	t.Helper()
 	ctx := context.Background()
 	if adminPool == nil || sharedBaseDSN == "" {
@@ -167,7 +210,10 @@ func tryWriteWithToken(ctx context.Context, pool *pgxpool.Pool, chainID, number 
 // expiry condition (DB clock) with a bumped fencing token, and a stale
 // owner/token cannot write.
 func TestLeaseExactlyOneHolderAndExpiryTakeover(t *testing.T) {
-	dsn := startIndexerPostgres(t)
+	// Deliberate exception to the template-clone fast path: this is the one
+	// full-migration canary (see startIndexerPostgresMigrated). Its own
+	// assertions/timeouts are unchanged.
+	dsn := startIndexerPostgresMigrated(t)
 	ctx := context.Background()
 
 	const (
