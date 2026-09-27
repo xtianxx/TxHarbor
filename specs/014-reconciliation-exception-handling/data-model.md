@@ -10,6 +10,7 @@ Design only; no implementation in this round. All tables live in PostgreSQL (aut
 
 - `task_id` UUID PK；`scope_chain_id` TEXT；`scope_kind` ENUM('height','time')；`scope_start/scope_end`（bigint/timestamptz，按 kind 其中之一有效）；`business_types` TEXT[]（闭集：withdrawal/deposit/event-delivery…，未知类型拒绝）；`upstream_receipt_source` JSONB（每业务类型的上游回执来源与接入状态：`{business_type: {source, connected}}`，`connected=false` 即未接入；创建时由任务参数写入，运行中仅经任务修订事务变更）；`policy_refs` JSONB（confirm policy_seq、cutover/catalog 版本快照）；`state` ENUM('created','running','paused','suspended_budget','done','cancelled')；`pause_reason` TEXT nullable；`budget` JSONB（并发/单次范围/时长/PG-RPC 配额，含历史复查 slice 见 §5）；`history_sweep_through` JSONB nullable（历史复查水位，见 §6）；`created_by/at`、`updated_at`。
 - Validation: 范围必填可复现；空范围输出“覆盖为空且完整”需任务行 + 零 checkpoint 跨度共同证明（Edge）。
+- 引用（裁决同步，2026-09-27）：`policy_refs` 不承载事件期望声明；期望事件判别与 Q-cutover 选项 B（`cutover_at` 仅审计参考、不参与裁决；标记缺席≠N/A、祖父规则、告警语义）见 [expected-event-discriminator.md](expected-event-discriminator.md)（待实现，T040）。本引用不改 `recon_task` 字段语义。
 
 ### 1.2 `recon_checkpoint`（检查点；FR-003, Q3-2/Q5）
 

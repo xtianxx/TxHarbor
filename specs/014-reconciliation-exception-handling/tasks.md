@@ -146,7 +146,7 @@
 **Purpose**: Observability, evidence honesty, and layered validation (no risk-accept features; no prod-threshold claims)
 
 - [X] T029 [P] Add bounded low-cardinality 014 metrics in `internal/metrics/reconciliation.go` (reuse `internal/metrics/events.go` registry; ENUM labels only; FR-24/27 redaction; duplicates-rate alert separated from fund tickets per Q4; any `recon_audit` aggregation by action MUST exclude management rows via `target ? 'management_action'` — grant/revoke borrow `start`/`close` buckets with `target.management_action` as the discriminator; no new audit token or migration for this)
-- [ ] T030 [P] Evidence-honesty pass in `internal/reconciliation/scan.go` and `internal/reconciliation/lifecycle.go` (paused/incomplete never renders “fully consistent”; uncovered ranges from new data visible; Q3-5; pre-cutover requests without event rows stay pending/gap and never mint event-missing tickets — missing-by-insufficient-evidence is alert-only and MUST NOT bypass dispose/close evidence gates; acceptance: quickstart §3 + §11 gapped-never-close)（2026-09-27 文档收口：pre-cutover 判据现状、三路裁决与待决政策见 `expected-event-discriminator.md`；Q-cutover 未获批前维持 fail-closed 现状；实现落地由 T040 承接，T030 关闭依赖 T040。）
+- [ ] T030 [P] Evidence-honesty pass in `internal/reconciliation/scan.go` and `internal/reconciliation/lifecycle.go` (paused/incomplete never renders “fully consistent”; uncovered ranges from new data visible; Q3-5; pre-cutover requests without event rows stay pending/gap and never mint event-missing tickets — missing-by-insufficient-evidence is alert-only and MUST NOT bypass dispose/close evidence gates; acceptance: quickstart §3 + §11 gapped-never-close)（2026-09-27 文档收口＋裁决：pre-cutover 判据现状、三路裁决与政策见 `expected-event-discriminator.md`；Q-cutover 已裁决选项 B——不批准迁移/业务/区块/未经证明的部署时间近似判定，`cutover_at` 仅审计参考，持久期望证据待实现；实现落地由 T040 承接，T030 关闭仍依赖 T040。）
 - [X] T031 Run `specs/014-reconciliation-exception-handling/quickstart.md` validation matrix and record results as test evidence (not production thresholds); keep ordinary PR CI layered, heavy runs on independent tags
 - [X] T032 [P] Docs touch-up in `specs/014-reconciliation-exception-handling/` (plan/research cross-links; risk-accept explicitly absent; T000-P OPEN restated)
 
@@ -157,7 +157,7 @@
 **Purpose**: 记录 T030 关闭所需缺口与 CI 分类缺口；只定义待办与验收，不做实现。
 
 - [ ] T039 CI 路径补齐（owner: CI）: `.github/workflows/ci.yml` pg 分类臂增列 `internal/reconciliation/*`，并加反向覆盖守卫（分类集遗漏内部路径时显性红，不得默认未分类）。验收: 正例 `internal/reconciliation/scan_integration_test.go`、`internal/reconciliation/window.go`、`internal/app/reconcileadmin/us2admin.go`、`migrations/000016_reconciliation_handling.sql`、`internal/db/migrate.go`、`internal/config/config.go`、`internal/metrics/reconciliation.go` → pg=true；反例 `specs/014-reconciliation-exception-handling/quickstart.md`、`specs/014-reconciliation-exception-handling/contracts/task-lifecycle.md`、`docs/*`、`README*` → pg=false；`.github/workflows/**` 改动全层命中（pg/redis/kafka/e2e=true）；守卫缺配显性红；fault/perf 不进普通 PR；必需检查名不动；Docker 缺位 NOT RUN 链路不变。依赖: 无（可独立）。
-- [ ] T040 期望判别器实现（依赖: Q-cutover 裁决；与 T039 无依赖，可并行）: 按 `expected-event-discriminator.md` 落地数据模型＋读路径三路裁决＋旧任务兼容＋失效规则。验收: 三路矩阵全覆盖（R1 missing / R2 N/A / R3 pending-gap）；跨边界区间、旧实体新转换、重组修订用例；存量 missing 票不静默关闭。T030 的关闭依赖 T040。
+- [ ] T040 期望判别器实现（依赖: Q-cutover 已裁决 B（`expected-event-discriminator.md` §4）；与 T039 无依赖，可并行）: 按 `expected-event-discriminator.md` 落地数据模型＋读路径三路裁决＋旧任务兼容＋失效规则。验收（2026-09-27 裁决补足）: ①期望标记与业务转换同事务提交、任一失败整体回滚、幂等重放零追加；②有预期而事件缺失 → missing；③标记与事件同时缺失、旧生产者未写标记 → 保守 pending（标记缺席≠N/A）；④无新标记但有充分原有证据（祖父规则）不得被无条件降级；⑤已证明不适用 → 该事件维度 N/A，不影响独立链/PG 差异；⑥跨边界区间与旧实体新转换独立判定；⑦重组/版本轮换/旧任务兼容/原始证据保留；⑧不改资金门禁、无付款恢复权限、不新增风险接受/忽略/强制闭合/自动修复。历史未知保持可观察可复查 `pending`/gap，后续有效证据可重判，不要求永远 pending，不按等待时长自动升级为确定差异；已有票据不静默删除/关闭。T030 的关闭依赖 T040。
 
 ---
 
@@ -171,7 +171,7 @@
   - User stories can then proceed in parallel (if staffed), except the single T015→T027 edge (US3 reverify waits for the US1 event adapter)
   - Or sequentially in priority order (P1 → P2 → P3)
 - **Polish (Final Phase)**: Depends on all desired user stories being complete
-- **Phase 7 收口追加**: T039 无依赖（可独立）；T040 依赖 Q-cutover 裁决（`expected-event-discriminator.md` §4），与 T039 可并行；T030 关闭依赖 T040。
+- **Phase 7 收口追加**: T039 无依赖（可独立）；T040 依赖 Q-cutover 裁决（已定：选项 B，2026-09-27，`expected-event-discriminator.md` §4），与 T039 可并行；T030 关闭依赖 T040。
 
 ### User Story Dependencies
 
@@ -251,9 +251,9 @@ Task: "Event-delivery adapter in internal/reconciliation/eventstate.go"
 ## Notes
 
 - Coverage: FR-001–025, SC-001–006, Q1–Q5, quickstart §1–11 all mapped above (40 tasks: T001–T032 original + T033–T038 US1 closure + T039/T040 收口追加);重点 six (atomicity, crash-no-miss, legal-duplicate silence, insufficient-evidence conservatism, invalidation on change, unauthorized refusal, unknown-disposal idempotency, pause/budget isolation) land in T010/T016/T017/T021/T022/T023/T026/T027/T028; chain-first attribution/deposit/identity/window-resolver/policy/budget-accounting land in T033/T034/T035/T036/T037/T038.
-- 完成口径（2026-09-27 文档收口轮，替换 37/38 旧口径）：40 项中已勾选 37，未勾选 3＝T030/T039/T040；T030 关闭依赖 T040（Q-cutover 裁决），T039 为 CI 独立缺口；不得为维持 37/38 隐藏缺口。
+- 完成口径（2026-09-27 文档收口轮，替换 37/38 旧口径）：40 项中已勾选 37，未勾选 3＝T030/T039/T040；T030 关闭依赖 T040（Q-cutover 已裁决 B，阻塞在实现），T039 为 CI 独立缺口；不得为维持 37/38 隐藏缺口。
 - T003/T031 复核（2026-09-27）：两任务原文仅要求矩阵表文档与验证执行/分层维持，不要求 CI 接线，已勾选维持有效，不恢复未勾选；CI 路径补齐转入 T039。
-- Q-cutover 与 pre-cutover 告警处置为待决政策（`expected-event-discriminator.md` §4）；未获批前 T030 维持 fail-closed、T040 不启动。
+- 政策已裁决（2026-09-27，`expected-event-discriminator.md` §4）：Q-cutover 选项 B——不批准迁移/业务/区块/未经证明的部署时间近似判定，`cutover_at` 仅审计参考；告警语义已定——`pending` 常驻可观察，「证据不足」告警是 pending 上的信号而非第二种确定结论。T040 政策阻塞解除（实现仍待排期）；T030 仍依赖 T040；检查口径维持 37/40。
 - 历史测试通过记录（含 `docs/evidence/014/quickstart_matrix_evidence.md`）保留；历史通过不作为缺失能力证据——T030 第三项、`internal/reconciliation/**` CI 分类缺口、期望判别器均不因历史通过而视为完成。
 - Risk-accept/ignore: NOT approved — zero implementation tasks generated for it; any future need is a business blocker, not a tasks-time decision.
 - T000-P stays OPEN: this round is not a release and claims no production readiness; checked boxes mean local-scope completion only (`plan.md` Gate status, `research.md` §7, `quickstart.md` Gate).

@@ -20,6 +20,8 @@
 
 `missing | duplicate_divergent | state_mismatch | unknown | incomplete`；未知形状 → `incomplete` 只告警；证据不足 → 待核验/覆盖不完整。
 
+- 事件维度的期望判别（Q-cutover 已裁决 B，2026-09-27）：标记与事件同时缺失、旧生产者无标记 → 保守 `pending`（标记缺席≠N/A）；已有充分证据不因缺少新标记被无条件降级（祖父规则）；「证据不足」告警是 `pending` 上的可观察信号，不是确定 missing。规则与实现指向见 [expected-event-discriminator.md](../expected-event-discriminator.md) §2–§3（待实现，T040）。
+
 ## History Revalidation Sweep（F4；与 `data-model.md` §6 一致）
 
 - 发现者：扫描主循环顺带 cross-check（落入当前预算区间的已闭合项）＋ 定向复查枚举（本任务范围内 `closed` 且 `close_basis` 版本域落后者，按证据年龄最旧优先）。

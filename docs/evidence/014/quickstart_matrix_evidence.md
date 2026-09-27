@@ -127,8 +127,18 @@
 ## 9. 文档收口补充（2026-09-27；非测试证据，不改动 §1–§8 历史记录）
 
 - 树状态: HEAD `c3a76d2` + 本轮文档工作树（`specs/014-reconciliation-exception-handling/` 文档 + 本补充）；未提交、未推送。
-- T030 第三项（pre-cutover 判别）维持 BLOCKED：最小设计见 `specs/014-reconciliation-exception-handling/expected-event-discriminator.md`（契约依据、三路裁决、最小持久证据提案、Q-cutover 待决）；实现与关闭由 T040 承接，T030 保持未勾选。
+- T030 第三项（pre-cutover 判别）维持 BLOCKED：最小设计见 `specs/014-reconciliation-exception-handling/expected-event-discriminator.md`（契约依据、三路裁决、最小持久证据提案、Q-cutover 待决）；实现与关闭由 T040 承接，T030 保持未勾选。（本节为当时记录；Q-cutover 与告警语义已于 2026-09-27 裁决，见 §10。）
 - CI 分类缺口由 T039 承接（`internal/reconciliation/**` 纳入 pg 集合＋反向覆盖守卫；quickstart L39/L45 已同步为「待 T039 闭环」）；本补充不宣称 CI 已修复。
 - 完成口径更正：tasks.md 40 项中已勾选 37，未完成 T030/T039/T040；37/38 旧口径作废，缺口不隐藏。
-- 政策待决：Q-cutover（选项 A/B）与 pre-cutover 告警处置（pending 常驻 vs alert-only 票据），见设计文档 §4。
+- 政策待决（当时）：Q-cutover（选项 A/B）与 pre-cutover 告警处置（pending 常驻 vs alert-only 票据），见设计文档 §4。（该两项已于 2026-09-27 裁决，见 §10；本行为历史记录。）
 - 本轮不运行产品测试、不改产品代码/CI；§1–§8 的测试结论与 NOT RUN 清单继续有效。
+
+## 10. Q-cutover 与告警语义裁决记录（2026-09-27；非测试证据，不改动 §1–§8 历史）
+
+- 树状态: HEAD `478f751` + 本轮文档工作树（`specs/014-reconciliation-exception-handling/` 文档 + 本补充）；未提交、未推送。
+- Q-cutover：已裁决**选项 B**——不批准迁移时间、业务时间、区块时间或未经证明的部署时间的近似判定；`event_system_state.cutover_at` 仅作审计参考、不参与裁决；期望证据须为持久、可追溯的期望标记（设计方向，见 `expected-event-discriminator.md` §3–§4）。能力边界：标记不能独立证明所有生产者路径正确生成事件，实现时由生产者侧原子性证据补足（工程事项，本轮不证明）。
+- 告警语义：`pending` 常驻可观察；「证据不足」告警是 `pending` 上的可观察信号，不是第二种确定结论（消除 pending vs alert-only 歧义；不得判一致或闭合）。
+- 三路判别补充：标记缺席≠N/A；祖父规则（已有充分证据不因缺少新标记被无条件降级）；历史未知保持可观察可复查 `pending`/gap、后续有效证据可重判、不按等待时长自动升级；不新增风险接受/忽略/强制闭合/自动修复。
+- 边界：不伪造历史标记、不回填未经证明的 cutover；旧实体新转换独立判定；已有票据不静默删除/关闭，新证据走已批准失效/复核/审计流程。
+- 任务口径：T030/T039/T040 保持未勾选，维持 37/40（不宣称 40/40）；T030 关闭仍依赖 T040；T000-P 保持 OPEN。本轮不改产品代码/CI、不跑产品测试。
+- 遗留业务问题（需业务裁决）：祖父证据清单边界、旧生产者标记缺席的 permanent pending 治理、期望义务目录变更权，见设计文档 §6。
