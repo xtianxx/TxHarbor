@@ -60,6 +60,7 @@ import (
 	"github.com/xtianxx/txharbor/internal/events"
 	"github.com/xtianxx/txharbor/internal/logx"
 	"github.com/xtianxx/txharbor/internal/reconciliation"
+	"github.com/xtianxx/txharbor/internal/txlifecycle"
 )
 
 // parseReconcileSweepBound parses one required positive integer slice bound.
@@ -313,6 +314,238 @@ func reconcileAdminReverify(ctx context.Context, args []string, d Deps) int {
 		return 1
 	}
 	return 0
+}
+
+// reconcileAdminReverifyTicket implements `reverify-ticket`: the production
+// pending_verify re-verification entry. One `pending_verify` ticket is
+// re-compared through the real chain/PG/event adapters and the T040
+// expectation discriminator, under the same authority, budget, pause and
+// concurrency rules as the scan/reverify entries:
+//
+//   - authorization is the task-scope scan-management operation `scan` runs
+//     (principal x ActionScanStart x the task's recorded scope): the
+//     auth-matrix reverify row is system-only and ActionReverify is never
+//     operator-grantable, so no reverify permission is invented for a bounded
+//     read-only re-check;
+//   - the required slice bounds are refused by name when missing (no
+//     defaults), and the slice's charges also consume the task's configured
+//     total budget (no unaccounted re-read);
+//   - the evidence read is the exact full-comparison path: T013 chain facts,
+//     T014 PG state, T015 event delivery, T040 expectation carrier, T036
+//     window resolution. `consistent` is persisted only when the real
+//     comparison agrees on complete, fresh evidence and the recorded
+//     conclusion guards pass; every other outcome is unknown/stale/divergent
+//     plus a visible gap (single-party-unchanged, missing candidate, both
+//     absent, query failure, possible trim, unknown coverage and legacy
+//     insufficient recorded evidence can never produce consistent);
+//   - the ticket must be in pending_verify and inside the task scope; the
+//     verdict is written under the ticket row lock with a state CAS, so a
+//     close that raced the evidence read discards the outcome instead of
+//     seeing it as fresh evidence;
+//   - output is one honest line: observable verdict booleans, the re-read
+//     range, gaps and budget usage. No daemon, no serve/worker auto-start is
+//     added (ADR-001); repeated invocations are the documented convergence
+//     mechanism and only append new verdict rows.
+func reconcileAdminReverifyTicket(ctx context.Context, args []string, d Deps) int {
+	stdout, stderr := d.stdout(), d.stderr()
+	fs := flag.NewFlagSet("reconcile-admin reverify-ticket", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	taskID := fs.String("task-id", "", "running task whose scope owns the ticket (required)")
+	discrepancyID := fs.String("discrepancy-id", "", "pending_verify discrepancy to re-verify (required)")
+	maxPGRequests := fs.String("max-pg-requests", "", "bounded PostgreSQL requests per invocation (required, integer >= 1; no default)")
+	maxItemAttempts := fs.String("max-item-attempts", "", "bounded cumulative evidence re-read attempts of the ticket (required, integer >= 1; no default)")
+	maxItemDuration := fs.String("max-item-duration", "", "optional evidence re-read timeout (zero/omitted: the parent context bounds it)")
+	reason := fs.String("reason", "", "audit annotation (optional)")
+	if err := fs.Parse(args); err != nil {
+		return 2
+	}
+	if fs.NArg() > 0 || strings.TrimSpace(*taskID) == "" || strings.TrimSpace(*discrepancyID) == "" ||
+		strings.TrimSpace(*maxPGRequests) == "" || strings.TrimSpace(*maxItemAttempts) == "" {
+		reconcileAdminUsage(stderr)
+		return 2
+	}
+	taskUUID, err := reconciliation.RequireTaskID(*taskID)
+	if err != nil {
+		fmt.Fprintf(stderr, "txharbor reconcile-admin: %s\n", logx.Redact(err.Error()))
+		return 2
+	}
+	discrepancyUUID, err := parseReconcileDiscrepancyID(*discrepancyID)
+	if err != nil {
+		fmt.Fprintf(stderr, "txharbor reconcile-admin: %s\n", logx.Redact(err.Error()))
+		return 2
+	}
+	slicePGRequests, err := parseReconcileSweepBound(*maxPGRequests, "--max-pg-requests")
+	if err != nil {
+		fmt.Fprintf(stderr, "txharbor reconcile-admin: %s\n", err)
+		return 2
+	}
+	sliceAttempts, err := parseReconcileSweepBound(*maxItemAttempts, "--max-item-attempts")
+	if err != nil {
+		fmt.Fprintf(stderr, "txharbor reconcile-admin: %s\n", err)
+		return 2
+	}
+	itemDuration, err := parseReconcileItemDuration(*maxItemDuration)
+	if err != nil {
+		fmt.Fprintf(stderr, "txharbor reconcile-admin: %s\n", err)
+		return 2
+	}
+
+	env, code := reconcileAdminOpen(ctx, d)
+	if env == nil {
+		return code
+	}
+	defer env.pool.Close()
+
+	// The operator invocation reuses the scan-management authority of the
+	// task scope (the auth-matrix reverify row is system-only; no reverify
+	// permission exists to demand).
+	if _, ok := env.authorizeTaskAction(ctx, stderr, taskUUID, reconciliation.ActionScanStart); !ok {
+		return 1
+	}
+	limits, err := reconcileScanLimits(env.cfg)
+	if err != nil {
+		fmt.Fprintf(stderr, "txharbor reconcile-admin: %s\n", err)
+		return 1
+	}
+	_, freshness, tipLag, maxCandidates, maxEventRows, err := reconcileScanBounds(env.cfg)
+	if err != nil {
+		fmt.Fprintf(stderr, "txharbor reconcile-admin: %s\n", err)
+		return 1
+	}
+	probes, err := reconcileWindowProbes(env.cfg)
+	if err != nil {
+		fmt.Fprintf(stderr, "txharbor reconcile-admin: %s\n", err)
+		return 1
+	}
+
+	// The full comparison needs every production adapter: a nil party would
+	// make consistency unclaimable, and the store refuses the invocation
+	// instead of silently downgrading it.
+	chainFacts, err := reconciliation.NewChainFactsAdapter(env.pool, reconciliation.ChainFactsConfig{
+		MaxSourceAge: freshness,
+		MaxTipLag:    tipLag,
+		MaxRangeSpan: limits.MaxSpanPerClaim,
+	})
+	if err != nil {
+		fmt.Fprintf(stderr, "txharbor reconcile-admin: chain-facts adapter refused: %s\n", logx.Redact(err.Error()))
+		return 1
+	}
+	pgState, err := reconciliation.NewPGStateAdapter(env.pool, txlifecycle.NewStore(env.pool), reconciliation.PGStateOptions{
+		FreshnessWindow: freshness,
+	})
+	if err != nil {
+		fmt.Fprintf(stderr, "txharbor reconcile-admin: PG-state adapter refused: %s\n", logx.Redact(err.Error()))
+		return 1
+	}
+	eventState, err := reconciliation.NewEventStateAdapter(env.pool, reconciliation.EventStateConfig{
+		FreshnessTolerance: freshness,
+		MaxEntries:         maxEventRows,
+	})
+	if err != nil {
+		fmt.Fprintf(stderr, "txharbor reconcile-admin: event-state adapter refused: %s\n", logx.Redact(err.Error()))
+		return 1
+	}
+	obligations, err := reconciliation.NewEventObligationAdapter(env.pool, reconciliation.EventObligationConfig{
+		MaxExpectations:    maxCandidates * 8,
+		MaxRetentionAudits: 64,
+	})
+	if err != nil {
+		fmt.Fprintf(stderr, "txharbor reconcile-admin: event-obligation adapter refused: %s\n", logx.Redact(err.Error()))
+		return 1
+	}
+	windowClient, err := eth.Dial(ctx, env.cfg.RPCURL, env.cfg.IndexRPCTimeout)
+	if err != nil {
+		fmt.Fprintf(stderr, "txharbor reconcile-admin: window resolver RPC refused: %s\n", logx.Redact(err.Error()))
+		return 1
+	}
+	defer windowClient.Close()
+	blockTimeReader, err := reconciliation.NewHeaderBlockTimeReader(env.pool, windowClient, env.cfg.IndexRPCTimeout)
+	if err != nil {
+		fmt.Fprintf(stderr, "txharbor reconcile-admin: block-time reader refused: %s\n", logx.Redact(err.Error()))
+		return 1
+	}
+	windowResolver, err := reconciliation.NewTimeHeightResolver(blockTimeReader, reconciliation.TimeHeightResolverConfig{
+		MaxProbes:  probes,
+		RPCTimeout: env.cfg.IndexRPCTimeout,
+	})
+	if err != nil {
+		fmt.Fprintf(stderr, "txharbor reconcile-admin: window resolver refused: %s\n", logx.Redact(err.Error()))
+		return 1
+	}
+	reference, err := events.NewReferenceConsumer(env.pool, events.ConsumerOptions{
+		GapWait:     env.cfg.Events.Consumer.GapWait,
+		BackoffBase: env.cfg.Events.Consumer.BackoffBase,
+		BackoffMax:  env.cfg.Events.Consumer.BackoffMax,
+		RetryLimit:  env.cfg.Events.Consumer.RetryLimit,
+		ChainID:     int64(env.cfg.ChainID),
+	})
+	if err != nil {
+		fmt.Fprintf(stderr, "txharbor reconcile-admin: event consumer registration refused: %s\n", logx.Redact(err.Error()))
+		return 1
+	}
+
+	result, verifyErr := env.store.VerifyPendingDiscrepancy(ctx, reconciliation.TicketVerifyRequest{
+		TaskID:             taskUUID,
+		DiscrepancyID:      discrepancyUUID,
+		Actor:              env.principal.String(),
+		Reason:             strings.TrimSpace(*reason),
+		Limits:             limits,
+		FreshnessTolerance: freshness,
+		Bounds: reconciliation.TicketVerifyBounds{
+			MaxPGRequests:   slicePGRequests,
+			MaxItemAttempts: sliceAttempts,
+			MaxItemDuration: itemDuration,
+		},
+		Sources: reconciliation.ScanSources{
+			Chain:       chainFacts,
+			PG:          pgState,
+			Events:      eventState,
+			Obligations: obligations,
+		},
+		WindowResolver:       windowResolver,
+		HeightWindowResolver: windowResolver,
+		EventConsumers: []reconciliation.EventConsumerRegistration{{
+			Name:     events.RefConsumerName,
+			Progress: reference.Consumer,
+		}},
+		EventQuarantine: &events.QuarantineStore{Pool: env.pool},
+	})
+	fmt.Fprintf(stdout,
+		"txharbor reconcile-admin: reverify-ticket task_id=%s discrepancy_id=%s observed_state=%s state=%s verdict=%s consistent=%t pending=%t failed=%t gap=%t discarded=%t retry_exhausted=%t range=%s slice_pg=%d/%d parent_pg=%d/%d principal=%s detail=%q\n",
+		result.TaskID, result.DiscrepancyID, result.ObservedState, result.State, result.Verdict,
+		result.Consistent, result.Pending, result.Failed, result.GapWritten, result.Discarded, result.RetryExhausted,
+		reconcileIntervalText(result.Range), result.SlicePGUsed, slicePGRequests,
+		result.BudgetUsage.PGUsed, limits.MaxPGRequests, env.principal, result.Detail)
+	if verifyErr != nil {
+		switch {
+		case errors.Is(verifyErr, reconciliation.ErrTicketNotPendingVerify):
+			fmt.Fprintf(stderr, "txharbor reconcile-admin: reverify-ticket refused (only pending_verify tickets are re-verifiable): %s\n", logx.Redact(verifyErr.Error()))
+		case errors.Is(verifyErr, reconciliation.ErrTicketOutsideTaskScope):
+			fmt.Fprintf(stderr, "txharbor reconcile-admin: reverify-ticket refused (ticket scope is outside the task scope): %s\n", logx.Redact(verifyErr.Error()))
+		case errors.Is(verifyErr, reconciliation.ErrTicketVerifyExhausted):
+			fmt.Fprintf(stderr, "txharbor reconcile-admin: reverify-ticket refused (bounded attempts exhausted; gap stays visible): %s\n", logx.Redact(verifyErr.Error()))
+		default:
+			fmt.Fprintf(stderr, "txharbor reconcile-admin: reverify-ticket stopped with error: %s\n", logx.Redact(verifyErr.Error()))
+		}
+		return 1
+	}
+	if result.Discarded {
+		fmt.Fprintf(stderr, "txharbor reconcile-admin: reverify-ticket discarded: %s\n", logx.Redact(result.DiscardReason))
+		return 1
+	}
+	return 0
+}
+
+// reconcileIntervalText renders one re-read interval for operator output.
+func reconcileIntervalText(interval reconciliation.ScanInterval) string {
+	switch interval.From.Kind {
+	case reconciliation.ScopeHeight:
+		return fmt.Sprintf("height:%d..%d", interval.From.Height, interval.To.Height)
+	case reconciliation.ScopeTime:
+		return fmt.Sprintf("time:%s..%s", interval.From.Time.UTC().Format(time.RFC3339Nano),
+			interval.To.Time.UTC().Format(time.RFC3339Nano))
+	}
+	return "none"
 }
 
 // reconcileAdminClose implements `close`: the evidence-gated closure of one

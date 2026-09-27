@@ -671,42 +671,119 @@ type DiscrepancyCloseRequest struct {
 	ReverifyTolerance time.Duration
 }
 
-// CloseDiscrepancy closes one ticket through the T007 guard using the latest
-// reverify row as persisted (LoadDiscrepancyEvidence): the caller cannot
-// substitute fresher evidence than the database holds, and an expired,
-// unknown, divergent or missing verdict is refused with ErrReverifyRequired
-// and audited. It writes the close_basis snapshot and reopen history only; no
-// disposal, recovery or payment path is ever involved.
+// CloseDiscrepancy closes one ticket through the T007 guard. Unlike a caller
+// that loads evidence before the transition, the close reads the latest
+// reverify row inside the same row-locked transaction as the state CAS
+// (latest-row-wins): a concurrent re-validation write that commits before the
+// close lock is what the close sees, and one that commits after the close
+// linearizes after it. An expired, unknown, divergent or missing verdict is
+// refused with ErrReverifyRequired and audited. It writes the close_basis
+// snapshot and reopen history only; no disposal, recovery or payment path is
+// ever involved.
 func (s *Store) CloseDiscrepancy(ctx context.Context, req DiscrepancyCloseRequest) (DiscrepancyTransitionResult, error) {
 	if s == nil || s.db == nil {
 		return DiscrepancyTransitionResult{}, contractErrorf("store has no database")
 	}
-	if strings.TrimSpace(req.Actor) == "" {
+	actor := strings.TrimSpace(req.Actor)
+	if actor == "" {
 		return DiscrepancyTransitionResult{}, contractErrorf("close requires an actor")
 	}
-	evidence, err := s.LoadDiscrepancyEvidence(ctx, req.DiscrepancyID)
-	if err != nil {
-		return DiscrepancyTransitionResult{}, err
+	id := strings.TrimSpace(req.DiscrepancyID)
+	if _, err := uuid.Parse(id); err != nil {
+		return DiscrepancyTransitionResult{}, fmt.Errorf("%w: discrepancy evidence requires a UUID discrepancy_id: %v",
+			ErrDiscrepancyNotFound, err)
 	}
 	now := req.Now
 	if now.IsZero() {
 		now = time.Now().UTC()
 	}
+
+	tx, err := s.db.Begin(ctx)
+	if err != nil {
+		return DiscrepancyTransitionResult{}, fmt.Errorf("begin discrepancy close: %w", err)
+	}
+	defer func() { _ = tx.Rollback(context.WithoutCancel(ctx)) }()
+
+	var (
+		from        DiscrepancyState
+		reopenCount int64
+	)
+	if err := tx.QueryRow(ctx, lockDiscrepancySQL, id).Scan(&from, &reopenCount); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return DiscrepancyTransitionResult{}, fmt.Errorf("%w: discrepancy_id %s", ErrDiscrepancyNotFound, id)
+		}
+		return DiscrepancyTransitionResult{}, fmt.Errorf("lock discrepancy for close: %w", err)
+	}
+	if !from.Valid() {
+		return DiscrepancyTransitionResult{}, contractErrorf("discrepancy %s has unknown state %q", id, from)
+	}
+	// The persisted latest row is the only acceptable evidence: a caller
+	// cannot close over a reverify this database does not hold, and the row
+	// lock above prevents a concurrent re-validation insert from landing
+	// between this read and the CAS.
+	latest, err := readLatestReverifyTx(ctx, tx, id)
+	if err != nil {
+		return DiscrepancyTransitionResult{}, err
+	}
 	guard := TransitionGuard{
-		// The persisted row is the only acceptable evidence: a caller cannot
-		// close over a reverify this database does not hold.
-		LatestReverify:    evidence.LatestReverify,
+		LatestReverify:    latest,
 		CloseBasis:        req.CloseBasis,
 		Now:               now,
 		ReverifyTolerance: req.ReverifyTolerance,
 	}
-	return s.TransitionDiscrepancy(ctx, DiscrepancyTransitionRequest{
-		DiscrepancyID: evidence.DiscrepancyID,
+	result, applyErr := applyLockedDiscrepancyTransition(ctx, tx, DiscrepancyTransitionRequest{
+		DiscrepancyID: id,
 		To:            DiscrepancyStateClosed,
-		Actor:         strings.TrimSpace(req.Actor),
+		Actor:         actor,
 		Reason:        strings.TrimSpace(req.Reason),
 		Guard:         guard,
-	})
+	}, from, reopenCount)
+	if applyErr != nil {
+		if err := tx.Commit(ctx); err != nil {
+			return result, fmt.Errorf("commit close refusal audit: %w", err)
+		}
+		return result, applyErr
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return result, fmt.Errorf("commit discrepancy close: %w", err)
+	}
+	return result, nil
+}
+
+// readLatestReverifyTx reads the newest reverify row inside the caller's
+// transaction (the close guard's evidence read under the discrepancy row
+// lock).
+const readLatestReverifyTxSQL = `
+SELECT verdict, evidence_ref, freshness_at
+FROM reverify
+WHERE discrepancy_id = $1
+ORDER BY created_at DESC, reverify_id DESC
+LIMIT 1`
+
+func readLatestReverifyTx(ctx context.Context, tx pgx.Tx, id string) (*ReverifyEvidence, error) {
+	var (
+		verdict   string
+		evidence  *string
+		freshness *time.Time
+	)
+	err := tx.QueryRow(ctx, readLatestReverifyTxSQL, id).Scan(&verdict, &evidence, &freshness)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("read latest reverify row: %w", err)
+	}
+	latest := &ReverifyEvidence{
+		Verdict:     ReverifyVerdict(verdict),
+		EvidenceRef: derefString(evidence),
+	}
+	if !latest.Verdict.Valid() {
+		return nil, contractErrorf("discrepancy %s has a reverify row with unknown verdict %q", id, verdict)
+	}
+	if freshness != nil {
+		latest.FreshnessAt = *freshness
+	}
+	return latest, nil
 }
 
 // joinInvalidationReason appends one bounded audit clause.
@@ -804,6 +881,28 @@ func (s *Store) TransitionDiscrepancy(ctx context.Context, req DiscrepancyTransi
 	}
 	result := DiscrepancyTransitionResult{DiscrepancyID: req.DiscrepancyID, From: from, To: req.To, ReopenCount: reopenCount}
 
+	result, applyErr := applyLockedDiscrepancyTransition(ctx, tx, req, from, reopenCount)
+	if applyErr != nil {
+		if err := tx.Commit(ctx); err != nil {
+			return result, fmt.Errorf("commit refusal audit: %w", err)
+		}
+		return result, applyErr
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return result, fmt.Errorf("commit discrepancy transition: %w", err)
+	}
+	return result, nil
+}
+
+// applyLockedDiscrepancyTransition validates and persists one transition under
+// the caller's row lock; it never commits. A guard refusal is audited inside
+// the same transaction (the caller commits the refusal audit and returns the
+// error); a caller that holds a pre-read evidence set (close) still validates
+// against the rows read under that same lock.
+func applyLockedDiscrepancyTransition(ctx context.Context, tx pgx.Tx, req DiscrepancyTransitionRequest,
+	from DiscrepancyState, reopenCount int64) (DiscrepancyTransitionResult, error) {
+	result := DiscrepancyTransitionResult{DiscrepancyID: req.DiscrepancyID, From: from, To: req.To, ReopenCount: reopenCount}
 	guardErr := ValidateDiscrepancyTransition(from, req.To, req.Guard)
 	if guardErr != nil {
 		if err := insertAuditTx(ctx, tx, AuditRecord{
@@ -815,21 +914,14 @@ func (s *Store) TransitionDiscrepancy(ctx context.Context, req DiscrepancyTransi
 		}); err != nil {
 			return result, err
 		}
-		if err := tx.Commit(ctx); err != nil {
-			return result, fmt.Errorf("commit refusal audit: %w", err)
-		}
 		return result, guardErr
 	}
 
-	reopenCount, err = persistDiscrepancyTransitionTx(ctx, tx, req.DiscrepancyID, from, req.To, req.Guard, req.Actor, req.Reason)
+	reopenCount, err := persistDiscrepancyTransitionTx(ctx, tx, req.DiscrepancyID, from, req.To, req.Guard, req.Actor, req.Reason)
 	if err != nil {
 		return result, err
 	}
 	result.ReopenCount = reopenCount
-
-	if err := tx.Commit(ctx); err != nil {
-		return result, fmt.Errorf("commit discrepancy transition: %w", err)
-	}
 	return result, nil
 }
 

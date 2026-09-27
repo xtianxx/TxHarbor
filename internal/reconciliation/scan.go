@@ -1557,6 +1557,35 @@ func scanEventTimeWindow(ctx context.Context, req *ScanOnceRequest, task *Task,
 	}
 }
 
+// detectionIntervalOf projects one claimed scan interval onto the persisted
+// detection interval metadata (the re-verification window).
+func detectionIntervalOf(interval ScanInterval) *DetectionInterval {
+	detection := &DetectionInterval{Kind: interval.From.Kind}
+	switch interval.From.Kind {
+	case ScopeHeight:
+		detection.From, detection.To = interval.From.Height, interval.To.Height
+	case ScopeTime:
+		detection.From, detection.To = interval.From.Time.UnixMicro(), interval.To.Time.UnixMicro()
+	}
+	return detection
+}
+
+// ScanInterval projects a persisted detection interval back onto a scan
+// interval; invalid shapes are refused.
+func (d DetectionInterval) ScanInterval() (ScanInterval, error) {
+	if err := d.Validate(); err != nil {
+		return ScanInterval{}, err
+	}
+	interval := ScanInterval{}
+	switch d.Kind {
+	case ScopeHeight:
+		interval.From, interval.To = HeightBound(d.From), HeightBound(d.To)
+	case ScopeTime:
+		interval.From, interval.To = TimeBound(time.UnixMicro(d.From)), TimeBound(time.UnixMicro(d.To))
+	}
+	return interval, nil
+}
+
 // scanIntervalOutcome accumulates one interval's classifications plus the
 // bounded side-effect counters that are applied to the invocation result only
 // after the commit transaction succeeds.
@@ -1799,166 +1828,30 @@ func compareScanInterval(ctx context.Context, req *ScanOnceRequest, task *Task, 
 		}
 	}
 
+	compare := &scanCandidateCompare{
+		sources: req.Sources,
+		upstreamFor: func(businessType BusinessType) UpstreamReceiptSource {
+			return scanUpstreamReceiptSource(task, businessType)
+		},
+		freshness:     req.FreshnessTolerance,
+		scope:         scope,
+		chainID:       chainID,
+		chainIDOK:     chainIDOK,
+		now:           now,
+		chainBundle:   chainBundle,
+		chainUsable:   chainUsable,
+		eventEvidence: eventEvidence,
+		eventUsable:   eventUsable,
+		obligation:    obligationEvidence,
+	}
 	for i := range candidates {
 		candidate := candidates[i]
 		if err := scanValidateCandidate(&candidate, scope); err != nil {
 			return nil, err
 		}
-		eventKey := candidate.EventKey
-		if strings.TrimSpace(eventKey.Value) == "" {
-			eventKey = candidate.BusinessKey
-		}
-
-		// Chain party.
-		var (
-			chainParty PartyObservation
-			chainBlock *ChainFactBlock
-			chainLogs  []ChainFactLog
-		)
-		switch {
-		case chainBundle == nil:
-			chainParty = PartyObservation{Status: PartyUnknown, Content: chainUnavailableSnapshot(candidate.ChainFact)}
-		default:
-			match := matchChainCandidateFacts(chainBundle, candidate.ChainFact)
-			switch {
-			case match.orphaned:
-				chainParty = PartyObservation{Status: PartyAbsent, Orphaned: true,
-					Content: chainAbsenceSnapshot(chainID, candidate.ChainFact)}
-			case match.ambiguous:
-				chainParty = PartyObservation{Status: PartyUnknown, Content: chainUnavailableSnapshot(candidate.ChainFact)}
-			case match.present:
-				chainParty = PartyObservation{Status: PartyPresent,
-					Content: chainCandidateSnapshot(chainID, candidate.ChainFact, match.block, match.logs)}
-				chainBlock = match.block
-				chainLogs = match.logs
-			case !chainUsable:
-				chainParty = PartyObservation{Status: PartyUnknown, Content: chainUnavailableSnapshot(candidate.ChainFact)}
-			default:
-				chainParty = PartyObservation{Status: PartyAbsent,
-					Content: chainAbsenceSnapshot(chainID, candidate.ChainFact)}
-			}
-		}
-
-		// Event party.
-		var (
-			eventParty PartyObservation
-			eventObs   *EventDeliveryObservation
-		)
-		if eventEvidence == nil {
-			eventParty = PartyObservation{Status: PartyUnknown, Content: eventUnavailableSnapshot(eventKey)}
-		} else {
-			observation, match := matchCandidateEventObservation(eventEvidence, eventKey)
-			switch match {
-			case eventMatchFound:
-				eventParty = observation.PartyObservation()
-				eventObs = observation
-			case eventMatchAmbiguous:
-				eventParty = PartyObservation{Status: PartyUnknown, Content: eventUnavailableSnapshot(eventKey)}
-			default:
-				if eventUsable {
-					eventParty = PartyObservation{Status: PartyAbsent, Content: EventAbsenceSnapshot(eventKey)}
-				} else {
-					eventParty = PartyObservation{Status: PartyUnknown, Content: eventUnavailableSnapshot(eventKey)}
-				}
-			}
-		}
-
-		// PG party (one read per candidate; outside any transaction).
-		var pgRecord *PGStateRecord
-		pgParty := PartyObservation{Status: PartyUnknown, Content: pgUnavailableSnapshot(candidate.BusinessKey)}
-		if req.Sources.PG != nil && chainIDOK {
-			if err := budget.ConsumePG(ctx, 1); err != nil {
-				return nil, err
-			}
-			record, readErr := req.Sources.PG.Read(ctx, PGReadRequest{
-				ChainID:      chainID,
-				BusinessType: candidate.BusinessType,
-				Key:          candidate.BusinessKey,
-			})
-			if ctxErr := scanContextError(readErr); ctxErr != nil {
-				return nil, ctxErr
-			}
-			pgRecord = &record
-			switch record.Status {
-			case PGStateComplete:
-				pgParty = PartyObservation{Status: PartyPresent, Content: record.CanonicalBytes()}
-			case PGStateAbsent:
-				pgParty = PartyObservation{Status: PartyAbsent, Content: record.CanonicalBytes()}
-			default:
-				pgParty = PartyObservation{Status: PartyUnknown, Content: record.CanonicalBytes()}
-			}
-		}
-
-		// T040 expected-event discriminator: only the decisive event-only
-		// absence (chain fact and PG business record both present, event
-		// delivery absent) consults the expectation carrier. Where another
-		// party's divergence already owns the ticket, the event party status
-		// and its canonical content are left untouched, so no identity
-		// content hash and no existing ticket is perturbed:
-		//   - proven obligation   → keep absent (R1, existing missing ticket);
-		//   - provably no catalog event aggregate → N/A (R2), chain/PG
-		//     differences still classify independently;
-		//   - unproven obligation → unknown/pending (R3), alert-only.
-		var eventObligation EventObligationState
-		if eventParty.Status == PartyAbsent && chainParty.Status == PartyPresent && pgParty.Status == PartyPresent {
-			var aggregate *EventObligationAggregate
-			if bound, ok := EventObligationAggregateOf(eventKey); ok {
-				aggregate = &bound
-			}
-			verdict := DiscriminateEventObligation(aggregate, obligationEvidence)
-			switch verdict.State {
-			case EventObligationProven:
-				eventObligation = EventObligationProven
-			case EventObligationNotApplicable:
-				eventObligation = EventObligationNotApplicable
-				eventParty = PartyObservation{Status: PartyNotApplicable,
-					Content: EventNotApplicableSnapshot(eventKey)}
-			case EventObligationUnproven:
-				eventObligation = EventObligationUnproven
-				eventParty = PartyObservation{Status: PartyUnknown,
-					Content: eventUnavailableSnapshot(eventKey)}
-			default:
-				return nil, contractErrorf("event obligation discriminator returned unknown state %q", verdict.State)
-			}
-		}
-
-		// Q4 duplicate evidence: the event adapter owns the delivery-side
-		// facts, the candidate owns the PG-side repeated-effect facts.
-		duplicates := candidate.PGDuplicate
-		if eventObs != nil {
-			duplicates = mergeDuplicateEvidence(eventObs.DuplicateEvidence(), candidate.PGDuplicate)
-		}
-		if eventParty.Status != PartyPresent && duplicates.Deliveries > 1 {
-			// The classifier refuses duplicate evidence without a present
-			// event party; keep the shape valid instead of dropping the
-			// divergence facts.
-			duplicates.Deliveries = 1
-		}
-
-		evidenceAt := stableScanEvidenceInstant(chainBlock, eventObs, pgRecord, now)
-		classification := Classify(Observation{
-			Scope:        scope,
-			BusinessKey:  candidate.BusinessKey,
-			BusinessType: candidate.BusinessType,
-			Chain:        chainParty,
-			PG:           pgParty,
-			Event:        eventParty,
-			Mismatch:     candidate.Mismatch,
-			Duplicates:   duplicates,
-			Coverage: Coverage{
-				ScanComplete:       chainUsable && eventUsable,
-				OpenGaps:           0,
-				EvidenceAt:         evidenceAt,
-				Now:                now,
-				FreshnessTolerance: req.FreshnessTolerance,
-			},
-			Upstream:        scanUpstreamReceiptSource(task, candidate.BusinessType),
-			Version:         mergeScanVersionDomain(chainBundle, chainBlock, chainLogs, eventObs, pgRecord, candidate.ChainFact, now),
-			EvidenceRef:     candidate.EvidenceRef,
-			EventObligation: eventObligation,
-		})
-		if members := scanCandidateMembers(candidate, chainLogs); len(members) > 0 {
-			classification.Members = members
+		classification, _, err := compareScanCandidate(ctx, compare, candidate, budget)
+		if err != nil {
+			return nil, err
 		}
 		outcome.classifications = append(outcome.classifications, classification)
 
@@ -1975,6 +1868,199 @@ func compareScanInterval(ctx context.Context, req *ScanOnceRequest, task *Task, 
 		}
 	}
 	return outcome, nil
+}
+
+// scanCandidateCompare is the interval-level read context one candidate
+// comparison consumes: the three read-only adapters, the resolved interval
+// reads and the per-invocation knobs. The scan compare loop and the production
+// pending_verify re-verification both build it, so a candidate is classified
+// through exactly one three-way path (T017 classifier + T040 discriminator).
+type scanCandidateCompare struct {
+	sources       ScanSources
+	upstreamFor   func(BusinessType) UpstreamReceiptSource
+	freshness     time.Duration
+	scope         IdentityScope
+	chainID       int64
+	chainIDOK     bool
+	now           time.Time
+	chainBundle   *ChainFactsBundle
+	chainUsable   bool
+	eventEvidence *EventStateEvidence
+	eventUsable   bool
+	obligation    EventObligationEvidence
+}
+
+// compareScanCandidate classifies one candidate against the interval-level
+// reads (chain bundle, event evidence, expectation carrier) plus its own PG
+// read. It performs one charged PG read and no write. An adapter read failure
+// keeps the affected party unknown (evidence-unknown, never a conclusion); a
+// context cancellation is returned as such. A nil PG adapter leaves the PG
+// party unknown.
+func compareScanCandidate(ctx context.Context, cc *scanCandidateCompare, candidate ScanCandidate, budget *Budget) (Classification, *PGStateRecord, error) {
+	if cc == nil {
+		return Classification{}, nil, contractErrorf("candidate comparison has no context")
+	}
+	eventKey := candidate.EventKey
+	if strings.TrimSpace(eventKey.Value) == "" {
+		eventKey = candidate.BusinessKey
+	}
+
+	// Chain party.
+	var (
+		chainParty PartyObservation
+		chainBlock *ChainFactBlock
+		chainLogs  []ChainFactLog
+	)
+	switch {
+	case cc.chainBundle == nil:
+		chainParty = PartyObservation{Status: PartyUnknown, Content: chainUnavailableSnapshot(candidate.ChainFact)}
+	default:
+		match := matchChainCandidateFacts(cc.chainBundle, candidate.ChainFact)
+		switch {
+		case match.orphaned:
+			chainParty = PartyObservation{Status: PartyAbsent, Orphaned: true,
+				Content: chainAbsenceSnapshot(cc.chainID, candidate.ChainFact)}
+		case match.ambiguous:
+			chainParty = PartyObservation{Status: PartyUnknown, Content: chainUnavailableSnapshot(candidate.ChainFact)}
+		case match.present:
+			chainParty = PartyObservation{Status: PartyPresent,
+				Content: chainCandidateSnapshot(cc.chainID, candidate.ChainFact, match.block, match.logs)}
+			chainBlock = match.block
+			chainLogs = match.logs
+		case !cc.chainUsable:
+			chainParty = PartyObservation{Status: PartyUnknown, Content: chainUnavailableSnapshot(candidate.ChainFact)}
+		default:
+			chainParty = PartyObservation{Status: PartyAbsent,
+				Content: chainAbsenceSnapshot(cc.chainID, candidate.ChainFact)}
+		}
+	}
+
+	// Event party.
+	var (
+		eventParty PartyObservation
+		eventObs   *EventDeliveryObservation
+	)
+	if cc.eventEvidence == nil {
+		eventParty = PartyObservation{Status: PartyUnknown, Content: eventUnavailableSnapshot(eventKey)}
+	} else {
+		observation, match := matchCandidateEventObservation(cc.eventEvidence, eventKey)
+		switch match {
+		case eventMatchFound:
+			eventParty = observation.PartyObservation()
+			eventObs = observation
+		case eventMatchAmbiguous:
+			eventParty = PartyObservation{Status: PartyUnknown, Content: eventUnavailableSnapshot(eventKey)}
+		default:
+			if cc.eventUsable {
+				eventParty = PartyObservation{Status: PartyAbsent, Content: EventAbsenceSnapshot(eventKey)}
+			} else {
+				eventParty = PartyObservation{Status: PartyUnknown, Content: eventUnavailableSnapshot(eventKey)}
+			}
+		}
+	}
+
+	// PG party (one read per candidate; outside any transaction).
+	var pgRecord *PGStateRecord
+	pgParty := PartyObservation{Status: PartyUnknown, Content: pgUnavailableSnapshot(candidate.BusinessKey)}
+	if cc.sources.PG != nil && cc.chainIDOK {
+		if err := budget.ConsumePG(ctx, 1); err != nil {
+			return Classification{}, nil, err
+		}
+		record, readErr := cc.sources.PG.Read(ctx, PGReadRequest{
+			ChainID:      cc.chainID,
+			BusinessType: candidate.BusinessType,
+			Key:          candidate.BusinessKey,
+		})
+		if ctxErr := scanContextError(readErr); ctxErr != nil {
+			return Classification{}, nil, ctxErr
+		}
+		pgRecord = &record
+		switch record.Status {
+		case PGStateComplete:
+			pgParty = PartyObservation{Status: PartyPresent, Content: record.CanonicalBytes()}
+		case PGStateAbsent:
+			pgParty = PartyObservation{Status: PartyAbsent, Content: record.CanonicalBytes()}
+		default:
+			pgParty = PartyObservation{Status: PartyUnknown, Content: record.CanonicalBytes()}
+		}
+	}
+
+	// T040 expected-event discriminator: only the decisive event-only
+	// absence (chain fact and PG business record both present, event
+	// delivery absent) consults the expectation carrier. Where another
+	// party's divergence already owns the ticket, the event party status
+	// and its canonical content are left untouched, so no identity
+	// content hash and no existing ticket is perturbed:
+	//   - proven obligation   -> keep absent (R1, existing missing ticket);
+	//   - provably no catalog event aggregate -> N/A (R2), chain/PG
+	//     differences still classify independently;
+	//   - unproven obligation -> unknown/pending (R3), alert-only.
+	var eventObligation EventObligationState
+	if eventParty.Status == PartyAbsent && chainParty.Status == PartyPresent && pgParty.Status == PartyPresent {
+		var aggregate *EventObligationAggregate
+		if bound, ok := EventObligationAggregateOf(eventKey); ok {
+			aggregate = &bound
+		}
+		verdict := DiscriminateEventObligation(aggregate, cc.obligation)
+		switch verdict.State {
+		case EventObligationProven:
+			eventObligation = EventObligationProven
+		case EventObligationNotApplicable:
+			eventObligation = EventObligationNotApplicable
+			eventParty = PartyObservation{Status: PartyNotApplicable,
+				Content: EventNotApplicableSnapshot(eventKey)}
+		case EventObligationUnproven:
+			eventObligation = EventObligationUnproven
+			eventParty = PartyObservation{Status: PartyUnknown,
+				Content: eventUnavailableSnapshot(eventKey)}
+		default:
+			return Classification{}, nil, contractErrorf("event obligation discriminator returned unknown state %q", verdict.State)
+		}
+	}
+
+	// Q4 duplicate evidence: the event adapter owns the delivery-side
+	// facts, the candidate owns the PG-side repeated-effect facts.
+	duplicates := candidate.PGDuplicate
+	if eventObs != nil {
+		duplicates = mergeDuplicateEvidence(eventObs.DuplicateEvidence(), candidate.PGDuplicate)
+	}
+	if eventParty.Status != PartyPresent && duplicates.Deliveries > 1 {
+		// The classifier refuses duplicate evidence without a present
+		// event party; keep the shape valid instead of dropping the
+		// divergence facts.
+		duplicates.Deliveries = 1
+	}
+
+	evidenceAt := stableScanEvidenceInstant(chainBlock, eventObs, pgRecord, cc.now)
+	upstream := UpstreamReceiptSource{}
+	if cc.upstreamFor != nil {
+		upstream = cc.upstreamFor(candidate.BusinessType)
+	}
+	classification := Classify(Observation{
+		Scope:        cc.scope,
+		BusinessKey:  candidate.BusinessKey,
+		BusinessType: candidate.BusinessType,
+		Chain:        chainParty,
+		PG:           pgParty,
+		Event:        eventParty,
+		Mismatch:     candidate.Mismatch,
+		Duplicates:   duplicates,
+		Coverage: Coverage{
+			ScanComplete:       cc.chainUsable && cc.eventUsable,
+			OpenGaps:           0,
+			EvidenceAt:         evidenceAt,
+			Now:                cc.now,
+			FreshnessTolerance: cc.freshness,
+		},
+		Upstream:        upstream,
+		Version:         mergeScanVersionDomain(cc.chainBundle, chainBlock, chainLogs, eventObs, pgRecord, candidate.ChainFact, cc.now),
+		EvidenceRef:     candidate.EvidenceRef,
+		EventObligation: eventObligation,
+	})
+	if members := scanCandidateMembers(candidate, chainLogs); len(members) > 0 {
+		classification.Members = members
+	}
+	return classification, pgRecord, nil
 }
 
 // scanCandidateMembers returns the canonical member facts of one candidate:
@@ -2563,7 +2649,7 @@ func scanTicketGroupKey(c Classification) (string, bool) {
 // persistTicketGroup persists one group of same-ticket detections.
 func (o *scanIntervalOutcome) persistTicketGroup(ctx context.Context, tx pgx.Tx, group *scanTicketGroup) error {
 	if !group.aggregate {
-		inserted, err := insertScanDiscrepancyTx(ctx, tx, group.primary, o.scope)
+		inserted, err := o.insertScanDiscrepancyTx(ctx, tx, group.primary, nil)
 		if err != nil {
 			return err
 		}
@@ -2584,7 +2670,7 @@ func (o *scanIntervalOutcome) persistTicketGroup(ctx context.Context, tx pgx.Tx,
 		return err
 	}
 	if root == nil {
-		inserted, err := insertScanDiscrepancyTx(ctx, tx, group.primary, o.scope)
+		inserted, err := o.insertScanDiscrepancyTx(ctx, tx, group.primary, members)
 		if err != nil {
 			return err
 		}
@@ -2608,7 +2694,7 @@ func (o *scanIntervalOutcome) persistTicketGroup(ctx context.Context, tx pgx.Tx,
 		return err
 	}
 	if changed {
-		if err := o.invalidateTxAggregateTx(ctx, tx, root, group.primary); err != nil {
+		if err := o.invalidateTxAggregateTx(ctx, tx, root, group.primary, members); err != nil {
 			return err
 		}
 	}
@@ -2723,8 +2809,9 @@ func txAggregateEvidenceChanged(root *scanAggregateRoot, primary Classification)
 // recorded evidence, and an append-only reverify audit row records the
 // invalidation. No automatic disposal/recovery/payment is ever triggered.
 func (o *scanIntervalOutcome) invalidateTxAggregateTx(ctx context.Context, tx pgx.Tx,
-	root *scanAggregateRoot, primary Classification) error {
-	domain, err := PersistedEvidenceDomainJSON(primary.Identity.VersionDomain(), &o.scope)
+	root *scanAggregateRoot, primary Classification, members []TxAggregateMember) error {
+	domain, err := PersistedEvidenceDomainJSONFor(primary.Identity.VersionDomain(), &o.scope,
+		primary.BusinessType, detectionIntervalOf(o.interval), members)
 	if err != nil {
 		return err
 	}
@@ -2757,11 +2844,16 @@ func (o *scanIntervalOutcome) scanBusinessKey(c Classification) string {
 // insertScanDiscrepancyTx inserts the stable-identity ticket row if it does
 // not exist yet; a conflict means the same identity was already recorded
 // (dedup) and the existing lifecycle state is left untouched. The persisted
-// evidence domain carries the detection scope so a later scan can match the
-// tx-aggregate aggregate root without guessing (T035).
-func insertScanDiscrepancyTx(ctx context.Context, tx pgx.Tx, classification Classification, scope IdentityScope) (bool, error) {
+// evidence domain carries the detection scope (T035 aggregate-root matching),
+// the detection business type and claimed interval, and (for tx-aggregate
+// groups) the member log set, so the production pending_verify
+// re-verification can re-read exactly the same window and prove member
+// completeness.
+func (o *scanIntervalOutcome) insertScanDiscrepancyTx(ctx context.Context, tx pgx.Tx,
+	classification Classification, members []TxAggregateMember) (bool, error) {
 	identity := classification.Identity
-	versionDomain, err := PersistedEvidenceDomainJSON(identity.VersionDomain(), &scope)
+	versionDomain, err := PersistedEvidenceDomainJSONFor(identity.VersionDomain(), &o.scope,
+		classification.BusinessType, detectionIntervalOf(o.interval), members)
 	if err != nil {
 		return false, err
 	}

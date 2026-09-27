@@ -2,6 +2,7 @@
 
 - Feature: `014-reconciliation-exception-handling`
 - 批次: T031（Polish）｜日期: 2026-09-27
+- 后续补充（2026-09-27 pending_verify 复核补齐轮）：本文件的 T026–T028 口径不覆盖 pending_verify 生产复核入口；该轮证据与状态更正见 `docs/evidence/014/pending_verify_reverify_evidence.md`。
 - 树状态: HEAD `1f18d88` + 未提交工作树（T029 metrics、T030 honesty 测试、T031 单元证据钉与本文）；迁移 tip `000016_reconciliation_handling.sql`
 - 任务边界: 本文件只记录**本地测试证据**，不宣称生产阈值、不宣称生产就绪；T000-P 保持 OPEN；未提交、未推送。
 

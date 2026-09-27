@@ -12,7 +12,8 @@
 - `claim(owner)`：单 owner CAS；B 抢占返回归属并审计。
 - `dispose(kind, action_ref, idempotency_key)`：`ack_only` 默认；`reuse_recovery` 仅引用既有入口（014 不自动执行）；`new_fix_rule` 仅 `dry_run`。重复 key 读回收敛。
 - 系统复核写 `reverify` 行；`consistent` 仅证据完整新鲜且规则满足。
-- `close`: 需闭合权限 + 最新 consistent 未过期；写 `close_basis`（范围/区块/版本/时点）。
+- 生产复核入口（`reconcile-admin reverify-ticket`，2026-09-27 补齐）：对 `pending_verify` 票做一次有界、受任务 scope 的 scan-management 授权（auth-matrix `reverify` 行仍 system-only）的全量三路再比较，复用真实 chain/PG/event 适配器与 R1/R2/R3 期望判别；仅三方完整、新鲜、覆盖闭合且记录结论守卫（区块身份、记录 recovery 版本、聚合成员完整性）通过时写 `consistent`，其余写 unknown/stale/divergent + gap；裁决在票行锁 + 状态 CAS 内写入，票在读取期间离开 `pending_verify` 则丢弃并审计；不放宽处置/闭合/恢复/付款门禁。
+- `close`: 需闭合权限 + 最新 consistent 未过期；写 `close_basis`（范围/区块/版本/时点）。最新 `reverify` 行在**票行锁内**读取（与状态 CAS 同一事务，latest-row-wins），旧结果不得覆盖新裁决。
 - 失效/重开：并发变化/重组/新证据/来源或版本轮换 → `pending_verify`（仅触发已批准的重验证流程，不扩大为自动处置）；确认再现 → `reopened`（`reopen_count+1`，历史保留）；无关写入不触发；过期结果不得闭合。
 - 非法跳转拒绝并审计。差异 MUST NOT 解释为重付许可（FR-015）。
 

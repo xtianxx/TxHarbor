@@ -1116,6 +1116,26 @@ func (o EventDeliveryObservation) AggregateBusinessKey() BusinessKey {
 	return BusinessKey{Kind: EventBusinessKeyAggregate, Value: o.AggregateType + "/" + o.AggregateID}
 }
 
+// EventAggregateBusinessKey maps one business identity onto the real event
+// aggregate identity of the same business object, following the frozen 013
+// business-object convention (`<aggregate_type>/<aggregate_id>`, with
+// `withdrawal_request:<request_id>` and `withdrawal_intent:<intent_id>`). It
+// is the single shared derivation of the scan enumeration (reconcile-admin)
+// and the production pending_verify re-verification, so both match the same
+// delivered event with the same key. The zero value means the identity has no
+// event aggregate in the frozen catalog (for example a bare tx_hash): no join
+// is invented, and the caller must not guess one.
+func EventAggregateBusinessKey(key BusinessKey) BusinessKey {
+	switch key.Kind {
+	case BusinessKeyRequestID:
+		return BusinessKey{Kind: EventBusinessKeyAggregate, Value: "withdrawal_request/" + key.Value}
+	case BusinessKeyIntentID:
+		return BusinessKey{Kind: EventBusinessKeyAggregate, Value: "withdrawal_intent/" + key.Value}
+	default:
+		return BusinessKey{}
+	}
+}
+
 // EvidenceRef returns the bounded evidence reference of this event for
 // occurrence/reverify/audit rows (1..512 bytes).
 func (o EventDeliveryObservation) EvidenceRef() string {

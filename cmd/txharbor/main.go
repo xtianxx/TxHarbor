@@ -15,7 +15,7 @@
 //	txharbor event-consumer   run the 013 reference consumer loop (skeleton)
 //	txharbor events-admin     operate 013 events (replay/unblock/prune; skeleton)
 //	txharbor reconcile-admin  operate 014 reconciliation (tasks: start/scan/pause/resume/cancel/show;
-//	                          discrepancy: claim/dispose/show; permissions: grant/revoke/show)
+//	                          discrepancy: claim/dispose/reverify-ticket/show; permissions: grant/revoke/show)
 package main
 
 import (
@@ -104,7 +104,7 @@ commands:
   event-publisher   run the 013 outbox publisher loop (skeleton)
   event-consumer    run the 013 reference consumer loop (skeleton)
   events-admin      operate 013 events (replay/unblock/prune; skeleton)
-  reconcile-admin   operate 014 reconciliation (tasks/discrepancy claim+dispose/permissions)
+  reconcile-admin   operate 014 reconciliation (scan/reverify/reverify-ticket/close/permissions)
   help              show this help
 `)
 }

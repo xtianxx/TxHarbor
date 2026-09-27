@@ -69,6 +69,11 @@ txharbor reconcile-admin scan --task-id UUID
 txharbor reconcile-admin reverify --task-id UUID \
   --max-items N --max-pg-requests N --max-item-attempts N [--max-item-duration D] [--reason R]
 
+# 4b) pending_verify 生产复核：单个待核验票的全量三路再比较（chain/PG/event +
+#     R1/R2/R3 期望判别）；任何一次调用只做一个有界只读复核
+txharbor reconcile-admin reverify-ticket --task-id UUID --discrepancy-id UUID \
+  --max-pg-requests N --max-item-attempts N [--max-item-duration D] [--reason R]
+
 # 5) US2 处置闭环：claim（仅归属）→ dispose（ack_only/reuse_recovery/new_fix_rule）→ show
 txharbor reconcile-admin claim --discrepancy-id UUID --operator NAME --reason R --operation-id OP
 txharbor reconcile-admin dispose --discrepancy-id UUID --kind ack_only [--result done] \
@@ -90,7 +95,8 @@ txharbor reconcile-admin cancel --task-id UUID --reason R
 
 - `scan` 可重复：幂等重调在**同一 DB 事务**内推进 `result_persisted_through` + checkpoint 行；崩溃/中断后从指针恢复，已持久范围不重报、未覆盖范围继续（quickstart §7）；配额耗尽 → 可观察暂停 + gap 行（§8）。
 - `reverify` 可重复：每个 slice 严格有界（`--max-items` / `--max-pg-requests` / `--max-item-attempts`；`--max-item-duration` 可选，零=由父 context 界定），切片消耗同时计入任务总预算；失败项记 `query_failed` gap 并按**失败次数升序 + 证据年龄降序**有界重试（不饿死任何项），成功即消除 gap。**遍历游标（`history_sweep_through`）≠ 已验证完整**：只有 `verified_complete=true`（水位到底 + 零开放 gap + 无重试耗尽/失败且未被配额截断）才可称为完整；`stop=slice_exhausted` 表示仍有剩余，下一次调用继续。命令只做有界只读复核与自身记录（reverify/gap/audit/游标），不自动处置、不自动闭合、不触发恢复/重放/付款。
-- `close` 证据门控：授权 = principal × verify_close × 票据记录范围（默认拒绝，拒绝亦审计）；`Store.CloseDiscrepancy` 始终读取 DB 中**最新** reverify 行，过期/未知/分歧/gap 受限一律拒绝并审计（disposed ≠ reverified ≠ closed）；`close_basis` 记录范围/区块/版本/时点。
+- `reverify-ticket` 可重复：对**单个 `pending_verify` 票**做一次有界全量三路再比较（T013 chain / T014 PG / T015 event + T040 R1/R2/R3 期望判别；身份支持 request_id/intent_id/tx_hash 聚合，tx_hash 聚合另做成员完整性检查），授权沿用任务 scope 的 scan-management 模式（auth-matrix reverify 行仍为 system-only；不新增权限），必填正数 `--max-pg-requests` / `--max-item-attempts`（无默认）且消耗计入任务总预算；仅当三方证据完整、新鲜、覆盖闭合且记录结论守卫（区块身份未变、记录 recovery 版本未轮换、聚合未部分缺失）全部通过时才写 `consistent`。单方未变、候选不存在、双缺、查询失败、可能裁剪、未知覆盖、越界/非 `pending_verify`、旧票缺检测元数据一律写 unknown/stale/divergent + gap（或拒绝并审计），不得闭合。裁决行在票行锁 + 状态 CAS 内写入：证据读取期间票离开 `pending_verify`（如并发 close 胜出）则丢弃结果并审计，绝不作为新证据。重复调用只追加裁决行（latest-row-wins），不移动生命周期、不触发处置/恢复/重放/付款。
+- `close` 证据门控：授权 = principal × verify_close × 票据记录范围（默认拒绝，拒绝亦审计）；`Store.CloseDiscrepancy` 在**票行锁内**读取 DB 中**最新** reverify 行（读取与状态 CAS 同一事务，latest-row-wins），过期/未知/分歧/gap 受限一律拒绝并审计（disposed ≠ reverified ≠ closed）；`close_basis` 记录范围/区块/版本/时点。
 - 失效/重开（Q5）：结论相关变化（并发写入/重组/新证据/来源或版本轮换）把 `closed` 退回 `pending_verify`（仅触发已批准的重验证流程）；确认再现 → `reopened`（`reopen_count+1`，历史保留）；无关写入不触发。**旧 consistent 结果不能直接闭合**：重验证写入新的裁决行后，close 以最新行为准；被取代的旧结果再次 close 会被拒绝并审计。
 - `pause`/`resume`/`restart`：pause/cancel 仅作用于 014 范围（在途 attempt 有界结清、留 gap，不暂停上游资金流程）；`resume` 从 `result_persisted_through` 指针与 `history_sweep_through` 游标继续，不重报已持久范围；进程 kill/restart 不丢状态——重启用的是同一 DB 指针/游标（无内存态依赖），重启后的重复调用等价于一次新的有界步进。
 - 调度：operator/外部调度器重复调用同一二进制即可（频率/间隔是部署决策）；014 不新增 daemon、不在 serve/worker 内自动启动或自动恢复（ADR-001）；所有调用都是前台的、有界的、可暂停的。

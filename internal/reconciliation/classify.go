@@ -435,6 +435,10 @@ type Classification struct {
 	// same identity reopens the original ticket, a different identity
 	// creates a linked ticket (FR-007).
 	Identity Identity
+	// BusinessType is the observation's closed business type (the PG read
+	// dimension), carried verbatim for the detection persistence and the
+	// production re-verification.
+	BusinessType BusinessType
 	// Members enumerates the member log facts of a tx-aggregate detection
 	// (T035): they are persisted as occurrence evidence and never split the
 	// transaction into several tickets.
@@ -452,6 +456,16 @@ type Classification struct {
 	EvidenceRef string
 	// Detail is a short human-readable explanation (no secrets).
 	Detail string
+	// EvidenceAt is the observation's evidence instant (the Coverage instant
+	// the freshness gate used). A consistent conclusion is no fresher than
+	// this instant; the production re-verification records it as the
+	// reverify freshness.
+	EvidenceAt time.Time
+	// Version is the observation's evidence version domain (block identity
+	// and business versions) as derived by the compare loop. The production
+	// re-verification records it in the revertify audit trail and applies the
+	// recorded-recovery rotation guard against it.
+	Version VersionDomain
 }
 
 // HasDiscrepancy reports whether a discrepancy category was classified.
@@ -496,6 +510,9 @@ func Classify(obs Observation) Classification {
 		ExternalCredit: obs.Upstream.externalState(),
 		Duplicate:      classifyDuplicate(obs.Duplicates),
 		EvidenceRef:    obs.EvidenceRef,
+		BusinessType:   obs.BusinessType,
+		EvidenceAt:     obs.Coverage.EvidenceAt,
+		Version:        obs.Version,
 	}
 
 	if err := obs.validateShape(); err != nil {

@@ -251,6 +251,16 @@ func (d ClosedDiscrepancy) EvidenceAge(now time.Time) time.Duration {
 	return now.UTC().Sub(d.EvidenceAt.UTC())
 }
 
+// reverifyItem projects the closed item onto the shared persistence carrier.
+func (d ClosedDiscrepancy) reverifyItem() reverifyItem {
+	return reverifyItem{
+		DiscrepancyID: d.DiscrepancyID,
+		Version:       d.Version,
+		EvidenceAt:    d.EvidenceAt,
+		FailCount:     d.FailCount,
+	}
+}
+
 // ReverifyFinding is one fail-closed evidence re-read outcome. Only a
 // consistent verdict with an evidence reference and a non-zero freshness may
 // support a close; everything else stays pending/invalidated.
@@ -264,6 +274,13 @@ type ReverifyFinding struct {
 	Trigger InvalidationTrigger
 	// Detail is a bounded, secret-free audit annotation.
 	Detail string
+	// Scope optionally names the re-read range in bounded text form
+	// ("height:2..5" / "time:..."); it is recorded in the audit trail so a
+	// consistent verdict is traceable to the range it was derived from.
+	Scope string
+	// Version is the re-read evidence version domain (block identity and
+	// business versions) recorded in the audit trail.
+	Version *VersionDomain
 }
 
 // normalizeReverifyFinding enforces the fail-closed verdict rules: an unknown
@@ -280,8 +297,19 @@ func normalizeReverifyFinding(f ReverifyFinding) (ReverifyFinding, error) {
 	if len(f.Detail) > scanEvidenceRefMax || strings.ContainsRune(f.Detail, 0) {
 		return f, contractErrorf("reverify finding detail is malformed")
 	}
+	if len(f.Scope) > scanEvidenceRefMax || strings.ContainsRune(f.Scope, 0) {
+		return f, contractErrorf("reverify finding scope is malformed")
+	}
+	if f.Version != nil {
+		if err := f.Version.Validate(); err != nil {
+			return f, err
+		}
+		copied := *f.Version
+		f.Version = &copied
+	}
 	f.EvidenceRef = strings.TrimSpace(f.EvidenceRef)
 	f.Detail = strings.TrimSpace(f.Detail)
+	f.Scope = strings.TrimSpace(f.Scope)
 	if f.Verdict == ReverifyConsistent {
 		if f.EvidenceRef == "" || f.FreshnessAt.IsZero() {
 			f.Detail = joinInvalidationReason(f.Detail,
@@ -960,7 +988,7 @@ func (s *Store) reverifyOne(ctx context.Context, req ReverifySweepRequest, budge
 	failed := finding.Verdict != ReverifyConsistent && finding.Verdict != ReverifyDivergent
 	outcome.failed = failed
 	gapWritten, gapResolved, err := persistReverifyOutcomeTx(ctx, tx, req.TaskID,
-		actor, item, finding, planned.source, failureToken, req.Reason)
+		actor, "history", item.reverifyItem(), item.Scope, finding, planned.source, failureToken, req.Reason)
 	if err != nil {
 		return outcome, err
 	}
@@ -980,7 +1008,8 @@ func (s *Store) reverifyOne(ctx context.Context, req ReverifySweepRequest, budge
 			if err := budget.ConsumePG(ctx, 1); err != nil {
 				return outcome, err
 			}
-			if err := s.recordReverifyRetryExhausted(ctx, item, actor, now, req.Slice.MaxItemAttempts, planned.source); err != nil {
+			if err := s.recordReverifyRetryExhausted(ctx, item.reverifyItem(), actor, now,
+				req.Slice.MaxItemAttempts, "history", planned.source); err != nil {
 				return outcome, err
 			}
 		}
@@ -1435,6 +1464,17 @@ type reverifyGapPosition struct {
 	end   RangeBound
 }
 
+// reverifyItem is the common carrier of one re-verification subject: the
+// closed-history sweep and the production pending_verify entry both persist
+// their outcome through the same writer. The fields are exactly what the
+// verdict row, the coverage gap and the audit trail need.
+type reverifyItem struct {
+	DiscrepancyID string
+	Version       VersionDomain
+	EvidenceAt    time.Time
+	FailCount     int64
+}
+
 // gapPosition derives the deterministic gap position of one item. ok=false
 // means no position can be represented; the failure stays visible through the
 // reverify/audit rows instead of fabricating coverage. The position is the
@@ -1443,26 +1483,26 @@ type reverifyGapPosition struct {
 // bookkeeping lives in the append-only reverify/audit trail, not in the gap
 // row, so two items sharing one evidence position still stay individually
 // visible and retryable.
-func (d ClosedDiscrepancy) gapPosition() (reverifyGapPosition, bool) {
-	if d.Version.BlockNumber > 0 && d.Version.BlockNumber <= math.MaxInt64 {
-		n := int64(d.Version.BlockNumber)
+func (i reverifyItem) gapPosition(scope *IdentityScope) (reverifyGapPosition, bool) {
+	if i.Version.BlockNumber > 0 && i.Version.BlockNumber <= math.MaxInt64 {
+		n := int64(i.Version.BlockNumber)
 		return reverifyGapPosition{start: HeightBound(n), end: HeightBound(n)}, true
 	}
-	if !d.EvidenceAt.IsZero() {
-		at := TimeBound(d.EvidenceAt)
+	if !i.EvidenceAt.IsZero() {
+		at := TimeBound(i.EvidenceAt)
 		return reverifyGapPosition{start: at, end: at}, true
 	}
-	if d.Scope != nil {
-		switch d.Scope.Kind {
+	if scope != nil {
+		switch scope.Kind {
 		case ScopeHeight:
 			return reverifyGapPosition{
-				start: HeightBound(d.Scope.From),
-				end:   HeightBound(d.Scope.To),
+				start: HeightBound(scope.From),
+				end:   HeightBound(scope.To),
 			}, true
 		case ScopeTime:
 			return reverifyGapPosition{
-				start: TimeBound(time.UnixMicro(d.Scope.From).UTC()),
-				end:   TimeBound(time.UnixMicro(d.Scope.To).UTC()),
+				start: TimeBound(time.UnixMicro(scope.From).UTC()),
+				end:   TimeBound(time.UnixMicro(scope.To).UTC()),
 			}, true
 		}
 	}
@@ -1471,14 +1511,16 @@ func (d ClosedDiscrepancy) gapPosition() (reverifyGapPosition, bool) {
 
 // persistReverifyOutcomeTx writes one item's verdict, coverage marker and
 // audit row inside the caller's short transaction. It writes only the
-// 014-owned reverify/recon_gap/recon_audit tables.
-func persistReverifyOutcomeTx(ctx context.Context, tx pgx.Tx, taskID, actor string,
-	item ClosedDiscrepancy, finding ReverifyFinding, source, failureToken, reason string) (gapWritten, gapResolved bool, err error) {
+// 014-owned reverify/recon_gap/recon_audit tables. sweep names the audit
+// source discriminator ("history" for the closed sweep, "ticket" for the
+// pending_verify entry).
+func persistReverifyOutcomeTx(ctx context.Context, tx pgx.Tx, taskID, actor string, sweep string,
+	item reverifyItem, scope *IdentityScope, finding ReverifyFinding, source, failureToken, reason string) (gapWritten, gapResolved bool, err error) {
 	if _, err := tx.Exec(ctx, insertReverifySQL, item.DiscrepancyID, string(finding.Verdict),
 		finding.EvidenceRef, nullableReverifyFreshness(finding)); err != nil {
 		return false, false, fmt.Errorf("insert reverify row: %w", err)
 	}
-	if position, ok := item.gapPosition(); ok {
+	if position, ok := item.gapPosition(scope); ok {
 		startHeight, startAt := rangePairArgs(position.start)
 		endHeight, endAt := rangePairArgs(position.end)
 		if finding.Verdict == ReverifyConsistent {
@@ -1508,7 +1550,7 @@ func persistReverifyOutcomeTx(ctx context.Context, tx pgx.Tx, taskID, actor stri
 		result = failureToken
 	}
 	target := map[string]any{
-		"sweep":          "history",
+		"sweep":          sweep,
 		"task_id":        taskID,
 		"discrepancy_id": item.DiscrepancyID,
 		"source":         source,
@@ -1524,6 +1566,20 @@ func persistReverifyOutcomeTx(ctx context.Context, tx pgx.Tx, taskID, actor stri
 	}
 	if finding.Detail != "" {
 		target["detail"] = finding.Detail
+	}
+	if finding.Scope != "" {
+		target["scope"] = finding.Scope
+	}
+	if finding.Version != nil {
+		target["version"] = map[string]any{
+			"block_number":          finding.Version.BlockNumber,
+			"block_hash":            finding.Version.BlockHash,
+			"recovery_version":      finding.Version.RecoveryVersion,
+			"authorization_version": finding.Version.AuthorizationVersion,
+			"scope_version":         finding.Version.ScopeVersion,
+			"state_version":         finding.Version.StateVersion,
+			"evidence_at":           finding.Version.EvidenceAt.UTC().Format(time.RFC3339Nano),
+		}
 	}
 	auditReason := strings.TrimSpace(reason)
 	if auditReason == "" {
@@ -1565,23 +1621,27 @@ func (s *Store) reverifyRetryExhaustedRecorded(ctx context.Context, discrepancyI
 // recordReverifyRetryExhausted appends the one-time escalation row for an item
 // that exhausted its bounded retry cap: the gap stays visible and the row is
 // the alert hook, but the item stops occupying slice slots.
-func (s *Store) recordReverifyRetryExhausted(ctx context.Context, item ClosedDiscrepancy, actor string,
-	now time.Time, maxAttempts int, source string) error {
+func (s *Store) recordReverifyRetryExhausted(ctx context.Context, item reverifyItem, actor string,
+	now time.Time, maxAttempts int, sweep, source string) error {
 	tx, err := s.db.Begin(ctx)
 	if err != nil {
 		return fmt.Errorf("begin retry exhaustion audit: %w", err)
 	}
 	defer func() { _ = tx.Rollback(context.WithoutCancel(ctx)) }()
 	target := map[string]any{
-		"sweep":          "history",
+		"sweep":          sweep,
 		"discrepancy_id": item.DiscrepancyID,
 		"source":         source,
 		"max_attempts":   maxAttempts,
 		"auto_disposal":  false,
 	}
 	if !item.EvidenceAt.IsZero() {
+		age := now.UTC().Sub(item.EvidenceAt.UTC())
+		if age < 0 {
+			age = 0
+		}
 		target["evidence_at"] = item.EvidenceAt.UTC().Format(time.RFC3339Nano)
-		target["evidence_age"] = item.EvidenceAge(now).String()
+		target["evidence_age"] = age.String()
 	}
 	if err := insertAuditTx(ctx, tx, AuditRecord{
 		Actor:  actor,

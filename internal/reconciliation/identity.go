@@ -674,22 +674,76 @@ func (id Identity) String() string {
 		id.scope, id.category, id.businessKey.Kind, id.businessKey.Value, id.id)
 }
 
+// DetectionInterval records the claimed detect interval a ticket was observed
+// in (the scan invocation's one claimed range), so a later production
+// re-verification can re-read exactly the evidence window the conclusion was
+// derived from without re-scanning the whole task scope or inventing one. It
+// is evidence metadata only: it never participates in the identity key. Bounds
+// use the scope kind's unit (heights, or UTC Unix microseconds for time).
+type DetectionInterval struct {
+	Kind ScopeKind `json:"kind"`
+	From int64     `json:"from"`
+	To   int64     `json:"to"`
+}
+
+// Validate checks the interval shape conservatively.
+func (d DetectionInterval) Validate() error {
+	switch d.Kind {
+	case ScopeHeight:
+		if d.From < 0 || d.To < d.From {
+			return fmt.Errorf("%w: detection interval %d..%d is not an inclusive ascending height range",
+				ErrInvalidIdentityShape, d.From, d.To)
+		}
+	case ScopeTime:
+		if d.From <= 0 || d.To < d.From {
+			return fmt.Errorf("%w: detection interval %d..%d is not an inclusive ascending unix-microsecond range",
+				ErrInvalidIdentityShape, d.From, d.To)
+		}
+	default:
+		return fmt.Errorf("%w: detection interval has unknown scope kind %q", ErrInvalidIdentityShape, d.Kind)
+	}
+	return nil
+}
+
 // PersistedEvidenceDomain is the JSONB document stored in
 // discrepancy.evidence_version_domain: the identity's version domain plus the
 // scope it was detected under, so a later scan can distinguish "the same
 // tx-aggregate identity in the same scope" from a same-key fact in a different
 // scope (T035). The extra scope fields are evidence metadata; the identity
 // derivation itself is untouched.
+//
+// The detection metadata (business type, claimed interval, tx-aggregate member
+// set) is appended additively for the production pending_verify
+// re-verification entry: old rows without it stay conservatively unverifiable
+// (unknown), never guessed.
 type PersistedEvidenceDomain struct {
 	VersionDomain
 	Scope *IdentityScope `json:"scope,omitempty"`
+	// BusinessType is the detection's closed business type (the PG read
+	// dimension). Written for tickets detected from this revision on.
+	BusinessType BusinessType `json:"business_type,omitempty"`
+	// Detection is the claimed interval the ticket was detected in.
+	Detection *DetectionInterval `json:"detection,omitempty"`
+	// TxMembers is the tx-aggregate member set at the latest detection
+	// (missing member logs keyed by tx_hash). It is the completeness basis of
+	// a re-verification: every recorded member log must have its business
+	// record for the aggregate to be verifiable as fixed.
+	TxMembers []TxAggregateMember `json:"tx_members,omitempty"`
 }
 
 // PersistedEvidenceDomainJSON marshals the version domain plus the detection
 // scope for the discrepancy row. A scope whose business types cannot be
 // canonicalized is refused instead of persisted without its scope marker.
 func PersistedEvidenceDomainJSON(version VersionDomain, scope *IdentityScope) ([]byte, error) {
-	doc := PersistedEvidenceDomain{VersionDomain: version}
+	return PersistedEvidenceDomainJSONFor(version, scope, "", nil, nil)
+}
+
+// PersistedEvidenceDomainJSONFor marshals the version domain plus the full
+// detection metadata (scope, business type, claimed interval, tx-aggregate
+// member set). Invalid shapes are refused instead of persisted half-recorded.
+func PersistedEvidenceDomainJSONFor(version VersionDomain, scope *IdentityScope,
+	businessType BusinessType, detection *DetectionInterval, members []TxAggregateMember) ([]byte, error) {
+	doc := PersistedEvidenceDomain{VersionDomain: version, BusinessType: businessType}
 	if scope != nil {
 		copied := *scope
 		copied.BusinessTypes = copyBusinessTypes(scope.BusinessTypes)
@@ -697,6 +751,23 @@ func PersistedEvidenceDomainJSON(version VersionDomain, scope *IdentityScope) ([
 			return nil, err
 		}
 		doc.Scope = &copied
+	}
+	if businessType != "" && !businessType.Known() {
+		return nil, fmt.Errorf("%w: persisted business type %q is unknown", ErrInvalidIdentityShape, businessType)
+	}
+	if detection != nil {
+		if err := detection.Validate(); err != nil {
+			return nil, err
+		}
+		copied := *detection
+		doc.Detection = &copied
+	}
+	if len(members) > 0 {
+		canonical, err := CanonicalizeTxAggregateMembers(members)
+		if err != nil {
+			return nil, err
+		}
+		doc.TxMembers = canonical
 	}
 	raw, err := json.Marshal(doc)
 	if err != nil {
