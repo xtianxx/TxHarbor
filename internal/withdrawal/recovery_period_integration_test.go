@@ -458,13 +458,20 @@ func recoveryPeriodTableCounts(t *testing.T, ctx context.Context, pool *pgxpool.
 // query.go.
 //
 // 013 adjustment (B3/T029, documented, not a weakened guarantee):
-// outbox_events is the one above-007 table allowed to change, because the
+// outbox_events is one above-007 table allowed to change, because the
 // approved 013 contract commits the receive fact
 // (withdrawal.request.received) in the SAME receipt transaction (FR-07;
 // contracts/events.md §3). The delta is pinned to exactly that one fact for
 // the created request; every 008–011 execution-state table and every other
 // 013 table (consumer_*/event_ops_audit/event_system_state) must stay
 // bit-identical, which is the execution-artefact guarantee this test owns.
+//
+// T040 adjustment (documented, same guarantee shape): event_obligation (the
+// 000017 expectation carrier) is the second allowed delta, because
+// internal/events.Append writes the durable expectation marker in that same
+// producer transaction. The delta is pinned to exactly one marker row for the
+// created request (withdrawal_request/<request_id>,
+// withdrawal.request.received); no execution-state table gains anything.
 func TestWithdrawalRecoveryPeriodNoExecutionArtefacts(t *testing.T) {
 	// Phase A: 007 historical range — the original absence proof, unchanged.
 	dsnA := withdrawalStartPostgres(t)
@@ -505,11 +512,13 @@ func TestWithdrawalRecoveryPeriodNoExecutionArtefacts(t *testing.T) {
 			above007 = append(above007, tbl)
 		}
 	}
-	// Every above-007 table except outbox_events must stay bit-identical; the
-	// 013 outbox may gain exactly the receive fact below (see the doc note).
+	// Every above-007 table except the two documented producer-transaction
+	// tables (013 outbox, T040 expectation carrier) must stay bit-identical;
+	// both may gain exactly one row for the receive fact below (see the doc
+	// note).
 	var executionStateTables []string
 	for _, tbl := range above007 {
-		if tbl != "outbox_events" {
+		if tbl != "outbox_events" && tbl != "event_obligation" {
 			executionStateTables = append(executionStateTables, tbl)
 		}
 	}
@@ -543,6 +552,16 @@ func TestWithdrawalRecoveryPeriodNoExecutionArtefacts(t *testing.T) {
 	}
 	if receiveFacts != 1 {
 		t.Fatalf("receive facts for %s = %d, want exactly 1", res.RequestID, receiveFacts)
+	}
+	// The T040 delta is exactly the expectation marker of that one fact.
+	var obligationFacts int64
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM event_obligation
+		WHERE aggregate_type = 'withdrawal_request' AND aggregate_id = $1
+		  AND expected_event_type = 'withdrawal.request.received'`, res.RequestID).Scan(&obligationFacts); err != nil {
+		t.Fatalf("count obligation markers: %v", err)
+	}
+	if obligationFacts != 1 {
+		t.Fatalf("obligation markers for %s = %d, want exactly 1 (the receive fact's expectation)", res.RequestID, obligationFacts)
 	}
 	afterTables := recoveryPeriodPublicBaseTables(t, ctx, pool)
 	for tbl := range afterTables {

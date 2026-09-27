@@ -32,8 +32,11 @@ var eventInfrastructureTables = []string{
 }
 
 // TestEventInfrastructureMigrationUpDownUp covers T009 (data-model §7):
-// 000015 applies on a scratch database, reverts cleanly with `down`, and
-// applies again; the seven tables and the single-row cutover seed exist.
+// 000015 applies on a scratch database, the joint tips revert first (000018,
+// then 000017, then 000016), 000015 then reverts cleanly with `down`, and all
+// apply again; the seven tables and the single-row cutover seed exist on the
+// 18 tip (000018 adds only the 014 reverify-generation column, 000017 only
+// the T040 event_obligation carrier).
 func TestEventInfrastructureMigrationUpDownUp(t *testing.T) {
 	dsn := startPostgres(t)
 	ctx := context.Background()
@@ -45,19 +48,52 @@ func TestEventInfrastructureMigrationUpDownUp(t *testing.T) {
 	}
 	sqlDB := openTestSQL(t, dsn)
 	assertEventInfrastructureTables(t, sqlDB)
+	assertEventObligationTable(t, sqlDB)
 
 	provider, err := newProvider(sqlDB, opts)
 	if err != nil {
 		t.Fatalf("newProvider() error = %v", err)
 	}
+	// 000018, 000017 and 000016 are the joint tips, so the first downs revert
+	// them before 000015.
 	result, err := provider.Down(ctx)
 	if err != nil {
 		t.Fatalf("Down() error = %v", err)
 	}
-	if result.Source.Version != 15 {
-		t.Fatalf("Down() reverted version %d, want 15 (the last migration)", result.Source.Version)
+	if result.Source.Version != 18 {
+		t.Fatalf("Down() reverted version %d, want 18 (the last migration)", result.Source.Version)
 	}
-	for _, table := range eventInfrastructureTables {
+	var tokenColumns int
+	if err := sqlDB.QueryRowContext(ctx, `
+		SELECT count(*) FROM information_schema.columns
+		WHERE table_name = 'discrepancy' AND column_name = 'reverify_generation'`).Scan(&tokenColumns); err != nil {
+		t.Fatalf("inspect reverify_generation column: %v", err)
+	}
+	if tokenColumns != 0 {
+		t.Fatalf("000018 down left %d reverify_generation column(s)", tokenColumns)
+	}
+	result, err = provider.Down(ctx)
+	if err != nil {
+		t.Fatalf("Down() of 000017 error = %v", err)
+	}
+	if result.Source.Version != 17 {
+		t.Fatalf("Down() reverted version %d, want 17 (000017)", result.Source.Version)
+	}
+	result, err = provider.Down(ctx)
+	if err != nil {
+		t.Fatalf("Down() of 000016 error = %v", err)
+	}
+	if result.Source.Version != 16 {
+		t.Fatalf("Down() reverted version %d, want 16 (000016)", result.Source.Version)
+	}
+	result, err = provider.Down(ctx)
+	if err != nil {
+		t.Fatalf("Down() of 000015 error = %v", err)
+	}
+	if result.Source.Version != 15 {
+		t.Fatalf("Down() reverted version %d, want 15 (000015)", result.Source.Version)
+	}
+	for _, table := range append(append([]string(nil), eventInfrastructureTables...), "event_obligation") {
 		var reg *string
 		if err := sqlDB.QueryRowContext(ctx, "SELECT to_regclass($1)::text", "public."+table).Scan(&reg); err != nil {
 			t.Fatalf("to_regclass(%s): %v", table, err)
@@ -72,6 +108,35 @@ func TestEventInfrastructureMigrationUpDownUp(t *testing.T) {
 		t.Fatalf("MigrateUp() after down error = %v", err)
 	}
 	assertEventInfrastructureTables(t, sqlDB)
+	assertEventObligationTable(t, sqlDB)
+	state, err := Inspect(ctx, opts)
+	if err != nil {
+		t.Fatalf("Inspect() after up error = %v", err)
+	}
+	if state.Current != 18 {
+		t.Fatalf("current migration after up = %d, want 18 (the last migration)", state.Current)
+	}
+}
+
+// assertEventObligationTable checks the T040 carrier exists with the documented
+// identity UNIQUE, and that the Up left it empty (no seed, no backfill).
+func assertEventObligationTable(t *testing.T, sqlDB *sql.DB) {
+	t.Helper()
+	ctx := context.Background()
+	var reg *string
+	if err := sqlDB.QueryRowContext(ctx, "SELECT to_regclass('public.event_obligation')::text").Scan(&reg); err != nil {
+		t.Fatalf("to_regclass(event_obligation): %v", err)
+	}
+	if reg == nil {
+		t.Fatal("event_obligation missing after up")
+	}
+	var count int64
+	if err := sqlDB.QueryRowContext(ctx, "SELECT count(*)::bigint FROM event_obligation").Scan(&count); err != nil {
+		t.Fatalf("count event_obligation: %v", err)
+	}
+	if count != 0 {
+		t.Fatalf("event_obligation rows after migration = %d, want 0 (no seed, no historical backfill)", count)
+	}
 }
 
 // assertEventInfrastructureTables checks the seven tables plus the seeded
@@ -247,9 +312,10 @@ func TestEventInfrastructureConstraintProbes(t *testing.T) {
 }
 
 // TestEventInfrastructureAdditiveOnly covers the T009 additive-only diff:
-// migrate to 000014, snapshot the schema, apply 000015, snapshot again and
-// require that nothing pre-existing changed and every new object belongs to
-// the seven 013 tables.
+// migrate to 000014, snapshot the schema, apply 000015 only (000016 and
+// later excluded by filter to keep this test scoped to 000015), snapshot
+// again and require that nothing pre-existing changed and every new object
+// belongs to the seven 013 tables.
 func TestEventInfrastructureAdditiveOnly(t *testing.T) {
 	dsn := startPostgres(t)
 	ctx := context.Background()
@@ -279,7 +345,20 @@ func TestEventInfrastructureAdditiveOnly(t *testing.T) {
 	sqlDB := openTestSQL(t, dsn)
 	before := schemaSnapshot(t, sqlDB)
 
-	if err := MigrateUp(ctx, testMigrateOptions(dsn), io.Discard); err != nil {
+	filtered15 := fstest.MapFS{}
+	for _, f := range all {
+		if f.Version > 15 {
+			continue
+		}
+		data, err := fs.ReadFile(Migrations, f.Name)
+		if err != nil {
+			t.Fatalf("read %s: %v", err, f.Name)
+		}
+		filtered15[f.Name] = &fstest.MapFile{Data: data}
+	}
+	opts15 := testMigrateOptions(dsn)
+	opts15.FS = filtered15
+	if err := MigrateUp(ctx, opts15, io.Discard); err != nil {
 		t.Fatalf("MigrateUp(000015) error = %v", err)
 	}
 	after := schemaSnapshot(t, sqlDB)

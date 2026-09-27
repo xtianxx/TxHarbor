@@ -212,6 +212,13 @@ type Metrics struct {
 	// signals. Fixed-vocabulary labels only; never credentials or payloads.
 	events eventsMetrics
 
+	// 014 reconciliation-exception-handling surface (internal/metrics/
+	// reconciliation.go; T029): task/scan/history-sweep progress, verification
+	// completeness, open gaps, fund tickets, absorbed duplicates,
+	// dispositions and audit actions. Fixed-vocabulary labels only; never a
+	// task id, business key, principal or payload.
+	recon reconciliationMetrics
+
 	handler http.Handler
 }
 
@@ -610,6 +617,7 @@ func New(ready func() bool) *Metrics {
 	}
 	m.registerSigner(registry)
 	m.events = registerEvents(registry)
+	m.recon = registerReconciliation(registry)
 	return m
 }
 

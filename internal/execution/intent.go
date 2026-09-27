@@ -15,6 +15,13 @@ import (
 const (
 	withdrawalIntentAggregateType = "withdrawal_intent"
 	withdrawalExecutionSourceKind = "withdrawal_execution"
+
+	// IntentAggregateType is the exported alias of the withdrawal execution
+	// intent event aggregate_type (`withdrawal_intent:<intent_id>`; specs/013
+	// data-model §2). Evidence consumers (for example the 014 compare loop's
+	// candidate enumeration) use it to join the event identity to the intent
+	// business key without re-deriving the literal.
+	IntentAggregateType = withdrawalIntentAggregateType
 )
 
 // Intent state values (data-model state machine A).

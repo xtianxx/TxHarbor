@@ -14,6 +14,8 @@
 //	txharbor event-publisher  run the 013 outbox publisher loop (skeleton)
 //	txharbor event-consumer   run the 013 reference consumer loop (skeleton)
 //	txharbor events-admin     operate 013 events (replay/unblock/prune; skeleton)
+//	txharbor reconcile-admin  operate 014 reconciliation (tasks: start/scan/pause/resume/cancel/show;
+//	                          discrepancy: claim/dispose/reverify-ticket/show; permissions: grant/revoke/show)
 package main
 
 import (
@@ -25,6 +27,7 @@ import (
 	"syscall"
 
 	"github.com/xtianxx/txharbor/internal/app"
+	"github.com/xtianxx/txharbor/internal/app/reconcileadmin"
 	"github.com/xtianxx/txharbor/internal/jointwire"
 )
 
@@ -69,6 +72,10 @@ func run(args []string) int {
 		return app.EventConsumer(ctx, args[1:], d)
 	case "events-admin":
 		return app.EventsAdmin(ctx, args[1:], d)
+	case "reconcile-admin":
+		return reconcileadmin.Run(ctx, args[1:], reconcileadmin.Deps{
+			Getenv: os.LookupEnv, Stdout: os.Stdout, Stderr: os.Stderr,
+		})
 	case "help", "-h", "--help":
 		usage(os.Stdout)
 		return 0
@@ -97,6 +104,7 @@ commands:
   event-publisher   run the 013 outbox publisher loop (skeleton)
   event-consumer    run the 013 reference consumer loop (skeleton)
   events-admin      operate 013 events (replay/unblock/prune; skeleton)
+  reconcile-admin   operate 014 reconciliation (scan/reverify/reverify-ticket/close/permissions)
   help              show this help
 `)
 }
