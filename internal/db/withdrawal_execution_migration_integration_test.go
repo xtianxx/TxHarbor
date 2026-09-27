@@ -322,6 +322,7 @@ func TestWithdrawalExecutionMigrationNumberIsProvisional(t *testing.T) {
 		15: "000015_event_infrastructure.sql",
 		16: "000016_reconciliation_handling.sql",
 		17: "000017_event_obligations.sql",
+		18: "000018_reverify_generation.sql",
 	}
 	for version, name := range want {
 		if got := byVersion[version]; got != name {
@@ -329,11 +330,11 @@ func TestWithdrawalExecutionMigrationNumberIsProvisional(t *testing.T) {
 		}
 	}
 	if len(files) != len(want)+9 {
-		t.Fatalf("embedded migration count = %d, want %d (versions 1..17)", len(files), len(want)+9)
+		t.Fatalf("embedded migration count = %d, want %d (versions 1..18)", len(files), len(want)+9)
 	}
 	for i, f := range files {
 		if f.Version != int64(i+1) {
-			t.Fatalf("embedded versions %v are not exactly 1..17", files)
+			t.Fatalf("embedded versions %v are not exactly 1..18", files)
 		}
 	}
 }

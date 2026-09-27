@@ -31,10 +31,15 @@
 //   - the entry is bounded (required positive slice bounds, parent-budget
 //     charges, bounded per-item duration/attempts) and only runs on a running
 //     task: a paused/cancelled task stops 014 work exactly like the scan;
-//   - the verdict is written under the discrepancy row lock with a
-//     state-predicate CAS: if the ticket left `pending_verify` while the slow
-//     evidence read was in flight (an operator close won the race), the
-//     outcome is discarded and audited, never written as fresh evidence.
+//   - the verdict is written under the common discrepancy row lock with the
+//     write-write ordering protocol (data-model.md §3 "复核有效性令牌"): the
+//     validity token captured before the evidence read (generation + state +
+//     recorded evidence version) must still match, so a ticket that left
+//     `pending_verify` (an operator close won the race) or whose conclusion
+//     was superseded by a newer committed reverify write while the slow
+//     evidence read was in flight is discarded and audited, never written as
+//     fresh evidence. The stale finding is not replaced by a substitute
+//     `unknown` row: the rejection path writes only the discard audit.
 package reconciliation
 
 import (
@@ -195,6 +200,9 @@ type pendingTicket struct {
 	BusinessType  BusinessType
 	EvidenceAt    time.Time
 	FailCount     int64
+	// Token is the validity token captured with the ticket row, before any
+	// evidence is read (see reverifyToken).
+	Token reverifyToken
 }
 
 // reverifyItem projects the pending ticket onto the shared persistence carrier.
@@ -204,12 +212,14 @@ func (t pendingTicket) reverifyItem() reverifyItem {
 		Version:       t.Version,
 		EvidenceAt:    t.EvidenceAt,
 		FailCount:     t.FailCount,
+		Token:         t.Token,
 	}
 }
 
 // readPendingDiscrepancySQL loads one ticket plus its bounded prior failed
 // re-validation attempt count ($2 bounds the counted history so the cap check
-// is O(bound)).
+// is O(bound)). `d.reverify_generation` is the token generation captured with
+// the ticket, before any evidence is read.
 const readPendingDiscrepancySQL = `
 SELECT d.discrepancy_id::text, d.state, d.category, d.business_key, d.evidence_version_domain,
        COALESCE((
@@ -219,7 +229,8 @@ SELECT d.discrepancy_id::text, d.state, d.category, d.business_key, d.evidence_v
                  AND a.result IN ('query_failed', 'timeout', 'unknown', 'stale')
                  AND a.target->>'discrepancy_id' = d.discrepancy_id::text
                LIMIT $2
-           ) bounded), 0)::bigint
+           ) bounded), 0)::bigint,
+       d.reverify_generation
 FROM discrepancy d
 WHERE d.discrepancy_id = $1`
 
@@ -327,10 +338,12 @@ func (s *Store) loadPendingDiscrepancy(ctx context.Context, id string, maxAttemp
 	var (
 		rawState, rawCategory, rawBusinessKey string
 		domainBytes                           []byte
+		generation                            int64
 		item                                  pendingTicket
 	)
 	err := s.db.QueryRow(ctx, readPendingDiscrepancySQL, strings.TrimSpace(id), maxAttempts).Scan(
-		&item.DiscrepancyID, &rawState, &rawCategory, &rawBusinessKey, &domainBytes, &item.FailCount)
+		&item.DiscrepancyID, &rawState, &rawCategory, &rawBusinessKey, &domainBytes, &item.FailCount,
+		&generation)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return pendingTicket{}, false, nil
 	}
@@ -341,6 +354,9 @@ func (s *Store) loadPendingDiscrepancy(ctx context.Context, id string, maxAttemp
 	if !item.State.Valid() {
 		return pendingTicket{}, false, contractErrorf("discrepancy %s has unknown state %q", item.DiscrepancyID, rawState)
 	}
+	// Capture the validity token in the same read that materializes the
+	// ticket, before any evidence is gathered.
+	item.Token = reverifyTokenFor(item.State, generation, domainBytes)
 	item.Category = Category(rawCategory)
 	if !item.Category.Known() {
 		return pendingTicket{}, false, contractErrorf("discrepancy %s has unknown category %q", item.DiscrepancyID, rawCategory)
@@ -523,9 +539,13 @@ func (s *Store) VerifyPendingDiscrepancy(ctx context.Context, req TicketVerifyRe
 	result.FreshnessAt = finding.FreshnessAt
 	result.Detail = finding.Detail
 
-	// Persist the verdict under the discrepancy row lock with a state CAS: a
-	// ticket that left pending_verify while the evidence read was in flight is
-	// discarded and audited, never written as fresh evidence.
+	// Persist the verdict under the common discrepancy row lock: the captured
+	// validity token (generation + pending_verify state + recorded evidence
+	// version) is validated inside persistReverifyOutcomeTx before anything is
+	// written. A ticket that left pending_verify, or whose recorded conclusion
+	// was superseded by a newer committed reverify write, while the evidence
+	// read was in flight is discarded and audited, never written as fresh
+	// evidence.
 	if err := slice.ConsumePG(ctx, 1); err != nil {
 		return result, err
 	}
@@ -535,47 +555,22 @@ func (s *Store) VerifyPendingDiscrepancy(ctx context.Context, req TicketVerifyRe
 	}
 	defer func() { _ = tx.Rollback(context.WithoutCancel(ctx)) }()
 
-	var (
-		lockedState  DiscrepancyState
-		lockedReopen int64
-	)
-	if err := tx.QueryRow(ctx, lockDiscrepancySQL, item.DiscrepancyID).Scan(&lockedState, &lockedReopen); err != nil {
-		if errors.Is(err, pgx.ErrNoRows) {
-			return result, fmt.Errorf("%w: discrepancy_id %s", ErrDiscrepancyNotFound, item.DiscrepancyID)
-		}
-		return result, fmt.Errorf("lock discrepancy for ticket verify: %w", err)
-	}
-	if lockedState != DiscrepancyStatePendingVerify {
-		result.Discarded = true
-		result.DiscardReason = fmt.Sprintf("state changed during the evidence read: %s -> %s", item.State, lockedState)
-		result.State = lockedState
-		if err := insertAuditTx(ctx, tx, AuditRecord{
-			Actor:  actor,
-			Action: AuditActionReverify,
-			Target: map[string]any{
-				"discrepancy_id": item.DiscrepancyID,
-				"task_id":        result.TaskID,
-				"action":         "reverify_ticket",
-			},
-			Reason: "ticket left pending_verify during the evidence read; outcome discarded",
-			Result: "discarded",
-		}); err != nil {
-			return result, err
-		}
-		if err := tx.Commit(ctx); err != nil {
-			return result, fmt.Errorf("commit ticket verify discard: %w", err)
-		}
-		return result, nil
-	}
-
-	gapWritten, _, err := persistReverifyOutcomeTx(ctx, tx, result.TaskID, actor, ReverifySourceTicket,
+	persist, err := persistReverifyOutcomeTx(ctx, tx, result.TaskID, actor, ReverifySourceTicket,
 		item.reverifyItem(), item.Scope, finding, ReverifySourceTicket, failureToken, req.Reason)
 	if err != nil {
 		return result, err
 	}
-	result.GapWritten = gapWritten
+	result.GapWritten = persist.GapWritten
+	if persist.Discarded {
+		result.Discarded = true
+		result.DiscardReason = persist.DiscardReason
+		result.State = persist.ObservedState
+	}
 	if err := tx.Commit(ctx); err != nil {
 		return result, fmt.Errorf("commit ticket verify outcome: %w", err)
+	}
+	if result.Discarded {
+		return result, nil
 	}
 
 	switch finding.Verdict {

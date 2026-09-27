@@ -304,9 +304,9 @@ func reconcileAdminReverify(ctx context.Context, args []string, d Deps) int {
 	})
 	parentUsage := parentBudget.Usage()
 	fmt.Fprintf(stdout,
-		"txharbor reconcile-admin: reverify task_id=%s rechecked=%d consistent=%d divergent=%d pending=%d failed=%d gaps=%d open_gaps=%d open_reverify_gaps=%d retry_exhausted=%d cursor=%s cursor_advanced=%t stop=%s verified_complete=%t budget_pg=%d/%d parent_pg=%d/%d principal=%s\n",
+		"txharbor reconcile-admin: reverify task_id=%s rechecked=%d consistent=%d divergent=%d pending=%d failed=%d discarded=%d gaps=%d open_gaps=%d open_reverify_gaps=%d retry_exhausted=%d cursor=%s cursor_advanced=%t stop=%s verified_complete=%t budget_pg=%d/%d parent_pg=%d/%d principal=%s\n",
 		result.TaskID, result.Rechecked, result.Consistent, result.Divergent, result.Pending, result.Failed,
-		result.GapsWritten, result.OpenGaps, result.OpenReverifyGaps, result.RetryExhausted,
+		result.Discarded, result.GapsWritten, result.OpenGaps, result.OpenReverifyGaps, result.RetryExhausted,
 		reconcileSweepCursorText(result.Cursor), result.CursorAdvanced, result.Stop, result.VerifiedComplete(),
 		result.PGUsed, slice.MaxPGRequests, parentUsage.PGUsed, limits.MaxPGRequests, env.principal)
 	if sweepErr != nil {
@@ -530,8 +530,13 @@ func reconcileAdminReverifyTicket(ctx context.Context, args []string, d Deps) in
 		return 1
 	}
 	if result.Discarded {
+		// A superseded in-flight outcome is a completed no-op, not a failed
+		// invocation: the write-write ordering protocol rejected it because a
+		// newer committed conclusion (or a state/evidence change) exists, the
+		// discard is audited, and nothing was written. Concurrent
+		// re-verifications therefore stay safe to run: exactly one commits.
 		fmt.Fprintf(stderr, "txharbor reconcile-admin: reverify-ticket discarded: %s\n", logx.Redact(result.DiscardReason))
-		return 1
+		return 0
 	}
 	return 0
 }

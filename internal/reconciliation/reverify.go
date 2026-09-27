@@ -35,6 +35,7 @@ package reconciliation
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -241,6 +242,8 @@ type ClosedDiscrepancy struct {
 	EvidenceAt time.Time
 	// FailCount is the bounded count of prior failed/inconclusive attempts.
 	FailCount int64
+	// Token is the captured validity token of this item (see reverifyToken).
+	Token reverifyToken
 }
 
 // EvidenceAge reports how old the recorded evidence is at now.
@@ -258,6 +261,7 @@ func (d ClosedDiscrepancy) reverifyItem() reverifyItem {
 		Version:       d.Version,
 		EvidenceAt:    d.EvidenceAt,
 		FailCount:     d.FailCount,
+		Token:         d.Token,
 	}
 }
 
@@ -635,26 +639,34 @@ type ReverifySweepResult struct {
 	GapsResolved       int
 	RetryExhausted     int
 	InvalidationErrors int
-	Cursor             *HistorySweepCursor
-	CursorAdvanced     bool
-	WaterlineEnd       bool
-	OpenReverifyGaps   int64
-	OpenGaps           int64
-	Stop               ReverifyStop
-	PGUsed             int
-	Warnings           []string
-	WarningsTruncated  int
+	// Discarded counts in-flight outcomes that were rejected by the
+	// write-write ordering protocol because a newer committed write (or a
+	// state/evidence change) superseded them. A discarded item is not
+	// progress: it is neither rechecked nor counted in the verdict counters,
+	// and the traversal cursor never advances past it.
+	Discarded         int
+	Cursor            *HistorySweepCursor
+	CursorAdvanced    bool
+	WaterlineEnd      bool
+	OpenReverifyGaps  int64
+	OpenGaps          int64
+	Stop              ReverifyStop
+	PGUsed            int
+	Warnings          []string
+	WarningsTruncated int
 }
 
 // VerifiedComplete reports the only honest completeness claim: the directed
 // waterline was reached, zero open uncovered-range rows remain for the task,
-// no retry was exhausted, no revalidation failed, and the slice was not cut
-// short. Any gap, any exhausted retry or any unswept remainder keeps it false
-// (data-model.md §6: traversal cursor ≠ verified completeness; §1.3: a
-// "fully consistent" conclusion requires zero open gaps).
+// no retry was exhausted, no revalidation failed, no outcome was discarded by
+// the write-write ordering protocol, and the slice was not cut short. Any
+// gap, any exhausted retry, any discarded item or any unswept remainder keeps
+// it false (data-model.md §6: traversal cursor ≠ verified completeness; §1.3:
+// a "fully consistent" conclusion requires zero open gaps).
 func (r ReverifySweepResult) VerifiedComplete() bool {
 	return r.WaterlineEnd && r.OpenGaps == 0 && r.OpenReverifyGaps == 0 &&
-		r.RetryExhausted == 0 && r.Failed == 0 && r.Stop != ReverifyStopSliceExhausted
+		r.RetryExhausted == 0 && r.Failed == 0 && r.Discarded == 0 &&
+		r.Stop != ReverifyStopSliceExhausted
 }
 
 // addWarning records one bounded sweep warning.
@@ -766,6 +778,12 @@ func (s *Store) RunReverifySweep(ctx context.Context, req ReverifySweepRequest) 
 		return finalize(stop)
 	}
 
+	// cursorBlocked is set once any outcome in this slice is discarded: the
+	// traversal cursor must never advance past an item that was not actually
+	// revalidated (its position may lie anywhere in the evidence order, so a
+	// later accepted item must not move the cursor over it). The next
+	// invocation re-enumerates from the last accepted position.
+	cursorBlocked := false
 	for _, planned := range plan.items {
 		if err := ctx.Err(); err != nil {
 			return result, err
@@ -777,8 +795,21 @@ func (s *Store) RunReverifySweep(ctx context.Context, req ReverifySweepRequest) 
 			}
 			return result, err
 		}
-		result.Rechecked++
 		result.PGUsed = budget.usedPG
+		if outcome.discarded {
+			// The in-flight outcome was superseded by a newer committed write
+			// (or a state/evidence change): it is not progress. No verdict
+			// counter, no gap change and — critically — no cursor advance
+			// past an item that was never revalidated; the item is re-read on
+			// the next invocation (or dropped by the predicate if it left
+			// `closed`).
+			result.Discarded++
+			cursorBlocked = true
+			result.addWarning(fmt.Sprintf("discrepancy %s: %s",
+				planned.item.DiscrepancyID, outcome.discardReason))
+			continue
+		}
+		result.Rechecked++
 		switch outcome.verdict {
 		case ReverifyConsistent:
 			result.Consistent++
@@ -817,7 +848,7 @@ func (s *Store) RunReverifySweep(ctx context.Context, req ReverifySweepRequest) 
 			result.Retried++
 		case reverifySourceEnumeration:
 			result.Enumerated++
-			if cursorAdvance(cursor, outcome.cursor) {
+			if !cursorBlocked && cursorAdvance(cursor, outcome.cursor) {
 				cursor = outcome.cursor
 				result.Cursor = cursor
 				result.CursorAdvanced = true
@@ -935,6 +966,11 @@ type reverifyOutcome struct {
 	invalidationDetail string
 	cursor             *HistorySweepCursor
 	warning            string
+	// discarded reports that the write-write ordering protocol rejected the
+	// in-flight outcome; observedState/discardReason carry the audit detail.
+	discarded     bool
+	observedState DiscrepancyState
+	discardReason string
 }
 
 // reverifyOne re-reads one item's evidence and persists the outcome in one
@@ -987,14 +1023,24 @@ func (s *Store) reverifyOne(ctx context.Context, req ReverifySweepRequest, budge
 
 	failed := finding.Verdict != ReverifyConsistent && finding.Verdict != ReverifyDivergent
 	outcome.failed = failed
-	gapWritten, gapResolved, err := persistReverifyOutcomeTx(ctx, tx, req.TaskID,
+	persist, err := persistReverifyOutcomeTx(ctx, tx, req.TaskID,
 		actor, "history", item.reverifyItem(), item.Scope, finding, planned.source, failureToken, req.Reason)
 	if err != nil {
 		return outcome, err
 	}
-	outcome.gapWritten, outcome.gapResolved = gapWritten, gapResolved
+	outcome.gapWritten, outcome.gapResolved = persist.GapWritten, persist.GapResolved
 	if err := tx.Commit(ctx); err != nil {
 		return outcome, fmt.Errorf("commit reverify outcome: %w", err)
+	}
+	if persist.Discarded {
+		// A newer committed write (or a state/evidence change) superseded this
+		// in-flight re-read: the audit row is committed, nothing else. No
+		// retry bookkeeping, no invalidation, no cursor: the stale finding is
+		// not evidence and must not change any conclusion or progress.
+		outcome.discarded = true
+		outcome.observedState = persist.ObservedState
+		outcome.discardReason = persist.DiscardReason
+		return outcome, nil
 	}
 
 	// Bounded retry bookkeeping: an item that exhausted its attempts is
@@ -1114,7 +1160,8 @@ const reverifyScopePredicate = `
   AND (d.evidence_version_domain->'scope'->>'to')::bigint <= $4`
 
 // readClosedDiscrepancySQL loads one closed item by id; $2 bounds the failure
-// count (the bounded retry cap).
+// count (the bounded retry cap). `d.reverify_generation` is the token
+// generation captured with the item.
 const readClosedDiscrepancySQL = `
 SELECT d.discrepancy_id::text, d.category, d.business_key, d.content_hash,
        d.evidence_version_domain, COALESCE(d.close_basis, '{}'::jsonb),
@@ -1127,7 +1174,8 @@ SELECT d.discrepancy_id::text, d.category, d.business_key, d.content_hash,
                  AND a.result IN ('query_failed', 'timeout', 'unknown', 'stale')
                  AND a.target->>'discrepancy_id' = d.discrepancy_id::text
                LIMIT $2
-           ) bounded), 0)::bigint
+           ) bounded), 0)::bigint,
+       d.reverify_generation
 FROM discrepancy d
 WHERE d.discrepancy_id = $1 AND d.state = 'closed'`
 
@@ -1139,7 +1187,7 @@ WHERE d.discrepancy_id = $1 AND d.state = 'closed'`
 // size.
 const listReverifyRetryCandidatesSQL = `
 SELECT q.id::text, q.category, q.business_key, q.content_hash, q.domain, q.close_basis,
-       q.reopen_count, q.evidence_at, q.fail_count
+       q.reopen_count, q.evidence_at, q.fail_count, q.generation
 FROM (
     SELECT d.discrepancy_id AS id, d.category, d.business_key, d.content_hash,
            d.evidence_version_domain AS domain, COALESCE(d.close_basis, '{}'::jsonb) AS close_basis,
@@ -1153,6 +1201,7 @@ FROM (
                      AND a.target->>'discrepancy_id' = d.discrepancy_id::text
                    LIMIT $5
                ) bounded), 0)::bigint AS fail_count,
+           d.reverify_generation AS generation,
            COALESCE((
                SELECT r.verdict FROM reverify r
                WHERE r.discrepancy_id = d.discrepancy_id
@@ -1174,10 +1223,10 @@ LIMIT $6`
 // finished early.
 const listReverifyNewCandidatesSQL = `
 SELECT q.id::text, q.category, q.business_key, q.content_hash, q.domain, q.close_basis,
-       q.reopen_count, q.evidence_at, q.fail_count
+       q.reopen_count, q.evidence_at, q.fail_count, q.generation
 FROM (
     SELECT f.id AS id, f.category, f.business_key, f.content_hash, f.domain, f.close_basis,
-           f.reopen_count, f.evidence_at, f.fail_count
+           f.reopen_count, f.evidence_at, f.fail_count, f.generation
     FROM (
         SELECT d.discrepancy_id AS id, d.category, d.business_key, d.content_hash,
                d.evidence_version_domain AS domain, COALESCE(d.close_basis, '{}'::jsonb) AS close_basis,
@@ -1190,7 +1239,8 @@ FROM (
                          AND a.result IN ('query_failed', 'timeout', 'unknown', 'stale')
                          AND a.target->>'discrepancy_id' = d.discrepancy_id::text
                        LIMIT $7
-                   ) bounded), 0)::bigint AS fail_count
+                   ) bounded), 0)::bigint AS fail_count,
+               d.reverify_generation AS generation
         FROM discrepancy d
         WHERE ` + reverifyScopePredicate + `
     ) f
@@ -1250,13 +1300,15 @@ type reverifyItemRow struct {
 	reopenCount int64
 	evidenceAt  time.Time
 	failCount   int64
+	generation  int64
 }
 
 // scanReverifyItemRow scans the shared closed-item column list.
 func scanReverifyItemRow(row pgx.Row) (reverifyItemRow, error) {
 	var raw reverifyItemRow
 	err := row.Scan(&raw.id, &raw.category, &raw.businessKey, &raw.contentHash,
-		&raw.domain, &raw.closeBasis, &raw.reopenCount, &raw.evidenceAt, &raw.failCount)
+		&raw.domain, &raw.closeBasis, &raw.reopenCount, &raw.evidenceAt, &raw.failCount,
+		&raw.generation)
 	if err != nil {
 		return raw, err
 	}
@@ -1274,6 +1326,11 @@ func materializeClosedDiscrepancy(raw reverifyItemRow) (ClosedDiscrepancy, error
 		ReopenCount:   raw.reopenCount,
 		EvidenceAt:    raw.evidenceAt.UTC(),
 		FailCount:     raw.failCount,
+		// The token is captured from the same read that materializes the
+		// item (before any evidence is gathered); the hash is taken over the
+		// raw persisted domain bytes so a rewritten evidence domain is
+		// detected even if parsing would tolerate it.
+		Token: reverifyTokenFor(DiscrepancyStateClosed, raw.generation, raw.domain),
 	}
 	kind, value, ok := strings.Cut(raw.businessKey, "=")
 	if !ok || strings.TrimSpace(value) == "" {
@@ -1473,6 +1530,107 @@ type reverifyItem struct {
 	Version       VersionDomain
 	EvidenceAt    time.Time
 	FailCount     int64
+	// Token is the validity token captured before the evidence re-read; the
+	// shared writer validates it under the common ticket row lock.
+	Token reverifyToken
+}
+
+// ---------------------------------------------------------------------------
+// Write-write ordering protocol: revalidation validity token
+//
+// One in-flight evidence re-read is only allowed to persist while nothing
+// conclusion-relevant has been committed for the same ticket since the item
+// was loaded. The token is captured in the same read that materializes the
+// item (before any evidence is gathered) and validated under the common
+// discrepancy row lock at persistence time:
+//
+//   - Generation is `discrepancy.reverify_generation` (migration 000018). It
+//     is advanced by every accepted reverify verdict write (ticket entry and
+//     history sweep) and by every ticket-row mutation (claim, dispose,
+//     invalidation, close, reopen, aggregate evidence replacement), all in
+//     the same transaction as the write.
+//   - State is the lifecycle state the verdict was derived for
+//     (pending_verify for the ticket entry, closed for the history sweep).
+//   - EvidenceHash pins the recorded `evidence_version_domain` the verdict
+//     was derived from, so a scan invalidation that rewrites the recorded
+//     evidence also invalidates an in-flight re-read.
+//
+// A mismatch means a newer committed conclusion (or a state/evidence change)
+// exists: the stale outcome is discarded and audited, never written. The
+// rejection path inserts no verdict, touches no gap and advances no cursor,
+// so a stale consistent can never overwrite a newer divergent/unknown, delete
+// its gap, or make a close accept it. Timestamps and verdict types are never
+// part of the protection.
+// ---------------------------------------------------------------------------
+
+// reverifyToken is the captured validity token of one in-flight re-read.
+type reverifyToken struct {
+	Generation   int64
+	State        DiscrepancyState
+	EvidenceHash [sha256.Size]byte
+}
+
+// reverifyTokenFor captures one token from a loaded ticket row.
+func reverifyTokenFor(state DiscrepancyState, generation int64, domain []byte) reverifyToken {
+	return reverifyToken{Generation: generation, State: state, EvidenceHash: sha256.Sum256(domain)}
+}
+
+// matches reports whether the locked persisted target still equals the
+// captured token. All three components must match; a newer committed write
+// changes at least one of them.
+func (t reverifyToken) matches(lockedState DiscrepancyState, lockedGeneration int64, lockedDomain []byte) bool {
+	return t.Generation == lockedGeneration && t.State == lockedState &&
+		t.EvidenceHash == sha256.Sum256(lockedDomain)
+}
+
+// evidenceMatches reports whether the locked evidence domain is the recorded
+// evidence the token was captured from.
+func (t reverifyToken) evidenceMatches(lockedDomain []byte) bool {
+	return t.EvidenceHash == sha256.Sum256(lockedDomain)
+}
+
+// lockReverifyTokenSQL takes the common per-ticket lock — the same
+// discrepancy row lock the lifecycle transitions and the close guard take —
+// and reads the fields the captured token is validated against.
+const lockReverifyTokenSQL = `
+SELECT state, reverify_generation, COALESCE(evidence_version_domain, '{}'::jsonb)
+FROM discrepancy
+WHERE discrepancy_id = $1
+FOR UPDATE`
+
+// bumpReverifyGenerationSQL advances the ticket's revalidation generation as
+// part of one accepted outcome write, so every concurrent in-flight re-read
+// of the same ticket is invalidated at its own persistence point.
+const bumpReverifyGenerationSQL = `
+UPDATE discrepancy
+SET reverify_generation = reverify_generation + 1
+WHERE discrepancy_id = $1`
+
+// lockedReverifyTarget is the persisted ticket state read under the common
+// lock.
+type lockedReverifyTarget struct {
+	State      DiscrepancyState
+	Generation int64
+	Domain     []byte
+}
+
+// lockReverifyTargetTx locks one ticket row and returns its persisted
+// revalidation target. The caller holds the lock inside its short persistence
+// transaction only (never across an evidence read).
+func lockReverifyTargetTx(ctx context.Context, tx pgx.Tx, discrepancyID string) (lockedReverifyTarget, error) {
+	var locked lockedReverifyTarget
+	err := tx.QueryRow(ctx, lockReverifyTokenSQL, discrepancyID).
+		Scan(&locked.State, &locked.Generation, &locked.Domain)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return locked, fmt.Errorf("%w: discrepancy_id %s", ErrDiscrepancyNotFound, discrepancyID)
+	}
+	if err != nil {
+		return locked, fmt.Errorf("lock reverify target: %w", err)
+	}
+	if !locked.State.Valid() {
+		return locked, contractErrorf("discrepancy %s has unknown state %q", discrepancyID, locked.State)
+	}
+	return locked, nil
 }
 
 // gapPosition derives the deterministic gap position of one item. ok=false
@@ -1509,16 +1667,61 @@ func (i reverifyItem) gapPosition(scope *IdentityScope) (reverifyGapPosition, bo
 	return reverifyGapPosition{}, false
 }
 
+// reverifyPersistOutcome reports one verdict-write attempt.
+type reverifyPersistOutcome struct {
+	GapWritten  bool
+	GapResolved bool
+	// Discarded reports that the write-write ordering protocol rejected the
+	// in-flight outcome: a newer committed write (or a state/evidence change)
+	// superseded it. Nothing was written except the discard audit row.
+	Discarded bool
+	// ObservedState is the lifecycle state read under the common lock (the
+	// discard audit's observed state).
+	ObservedState DiscrepancyState
+	// DiscardReason is the bounded discard reason.
+	DiscardReason string
+}
+
 // persistReverifyOutcomeTx writes one item's verdict, coverage marker and
 // audit row inside the caller's short transaction. It writes only the
 // 014-owned reverify/recon_gap/recon_audit tables. sweep names the audit
 // source discriminator ("history" for the closed sweep, "ticket" for the
 // pending_verify entry).
+//
+// Write-write ordering (the one shared gate of every reverify write path): the
+// caller's transaction first takes the common discrepancy row lock and
+// validates the captured validity token against the persisted row. A token
+// mismatch discards the stale outcome and records only a discard audit row:
+// no verdict row, no gap insert/delete, no generation advance. The rejection
+// path therefore can never clear a newer gap, replace a newer conclusion or
+// advance verification progress, and a stale `consistent` can never make a
+// close accept it. Only an accepted outcome inserts the verdict row and
+// advances `discrepancy.reverify_generation`, which invalidates every other
+// in-flight re-read of the same ticket at its own persistence point.
 func persistReverifyOutcomeTx(ctx context.Context, tx pgx.Tx, taskID, actor string, sweep string,
-	item reverifyItem, scope *IdentityScope, finding ReverifyFinding, source, failureToken, reason string) (gapWritten, gapResolved bool, err error) {
+	item reverifyItem, scope *IdentityScope, finding ReverifyFinding, source, failureToken, reason string) (reverifyPersistOutcome, error) {
+	var outcome reverifyPersistOutcome
+
+	locked, err := lockReverifyTargetTx(ctx, tx, item.DiscrepancyID)
+	if err != nil {
+		return outcome, err
+	}
+	if !item.Token.matches(locked.State, locked.Generation, locked.Domain) {
+		outcome.Discarded = true
+		outcome.ObservedState = locked.State
+		outcome.DiscardReason = reverifyDiscardReason(item, sweep, locked)
+		if err := insertReverifyDiscardAuditTx(ctx, tx, taskID, actor, sweep, item, source, locked); err != nil {
+			return outcome, err
+		}
+		return outcome, nil
+	}
+
 	if _, err := tx.Exec(ctx, insertReverifySQL, item.DiscrepancyID, string(finding.Verdict),
 		finding.EvidenceRef, nullableReverifyFreshness(finding)); err != nil {
-		return false, false, fmt.Errorf("insert reverify row: %w", err)
+		return outcome, fmt.Errorf("insert reverify row: %w", err)
+	}
+	if _, err := tx.Exec(ctx, bumpReverifyGenerationSQL, item.DiscrepancyID); err != nil {
+		return outcome, fmt.Errorf("advance reverify generation: %w", err)
 	}
 	if position, ok := item.gapPosition(scope); ok {
 		startHeight, startAt := rangePairArgs(position.start)
@@ -1528,9 +1731,9 @@ func persistReverifyOutcomeTx(ctx context.Context, tx pgx.Tx, taskID, actor stri
 				[]string{string(GapQueryFailed), string(GapFreshnessHold)},
 				startHeight, endHeight, startAt, endAt)
 			if err != nil {
-				return false, false, fmt.Errorf("delete reverify gap: %w", err)
+				return outcome, fmt.Errorf("delete reverify gap: %w", err)
 			}
-			gapResolved = tag.RowsAffected() > 0
+			outcome.GapResolved = tag.RowsAffected() > 0
 		} else {
 			gapReason := string(GapQueryFailed)
 			if finding.Verdict == ReverifyStale {
@@ -1539,9 +1742,9 @@ func persistReverifyOutcomeTx(ctx context.Context, tx pgx.Tx, taskID, actor stri
 			tag, err := tx.Exec(ctx, insertReverifyGapSQL, taskID,
 				startHeight, endHeight, startAt, endAt, gapReason)
 			if err != nil {
-				return false, false, fmt.Errorf("insert reverify gap: %w", err)
+				return outcome, fmt.Errorf("insert reverify gap: %w", err)
 			}
-			gapWritten = tag.RowsAffected() > 0
+			outcome.GapWritten = tag.RowsAffected() > 0
 		}
 	}
 
@@ -1593,9 +1796,69 @@ func persistReverifyOutcomeTx(ctx context.Context, tx pgx.Tx, taskID, actor stri
 		Evidence: finding.EvidenceRef,
 		Result:   result,
 	}); err != nil {
-		return gapWritten, gapResolved, err
+		return outcome, err
 	}
-	return gapWritten, gapResolved, nil
+	return outcome, nil
+}
+
+// reverifyDiscardReason renders the bounded, secret-free reason of one
+// discarded stale outcome: which component of the captured token no longer
+// matches the persisted ticket.
+func reverifyDiscardReason(item reverifyItem, sweep string, locked lockedReverifyTarget) string {
+	entry := "history revalidation"
+	if sweep == ReverifySourceTicket {
+		entry = "ticket re-verification"
+	}
+	reasons := make([]string, 0, 3)
+	if locked.State != item.Token.State {
+		reasons = append(reasons, fmt.Sprintf("state changed during the evidence read: %s -> %s",
+			item.Token.State, locked.State))
+	}
+	if locked.Generation != item.Token.Generation {
+		reasons = append(reasons, fmt.Sprintf("generation advanced during the evidence read: %d -> %d",
+			item.Token.Generation, locked.Generation))
+	}
+	if !item.Token.evidenceMatches(locked.Domain) {
+		reasons = append(reasons, "recorded evidence version changed during the evidence read")
+	}
+	if len(reasons) == 0 {
+		// matches() failed without a named component: never happens with the
+		// current comparison, but the reason must stay explicit.
+		reasons = append(reasons, "captured validity token no longer matches the persisted ticket")
+	}
+	return boundedReverifyDetail(entry + " outcome discarded: " + strings.Join(reasons, "; "))
+}
+
+// insertReverifyDiscardAuditTx records one rejected stale outcome. The audit
+// row is the only write of the rejection path: no verdict row is inserted
+// (never a substitute `unknown` pretending to be the latest result), no gap is
+// inserted or deleted, and no progress counter is advanced.
+func insertReverifyDiscardAuditTx(ctx context.Context, tx pgx.Tx, taskID, actor, sweep string,
+	item reverifyItem, source string, locked lockedReverifyTarget) error {
+	target := map[string]any{
+		"sweep":               sweep,
+		"action":              "reverify_" + sweep,
+		"task_id":             taskID,
+		"discrepancy_id":      item.DiscrepancyID,
+		"source":              source,
+		"attempt":             item.FailCount + 1,
+		"auto_disposal":       false,
+		"captured_state":      string(item.Token.State),
+		"observed_state":      string(locked.State),
+		"captured_generation": item.Token.Generation,
+		"observed_generation": locked.Generation,
+		"evidence_changed":    !item.Token.evidenceMatches(locked.Domain),
+	}
+	if !item.EvidenceAt.IsZero() {
+		target["evidence_at"] = item.EvidenceAt.UTC().Format(time.RFC3339Nano)
+	}
+	return insertAuditTx(ctx, tx, AuditRecord{
+		Actor:  actor,
+		Action: AuditActionReverify,
+		Target: target,
+		Reason: reverifyDiscardReason(item, sweep, locked),
+		Result: "discarded",
+	})
 }
 
 // nullableReverifyFreshness keeps the reverify freshness NULL for verdicts

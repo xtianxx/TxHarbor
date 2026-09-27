@@ -24,7 +24,7 @@ Design only; no implementation in this round. All tables live in PostgreSQL (aut
 
 ### 1.4 `discrepancy`（差异；FR-007/009/010, Q4/Q5）
 
-- `discrepancy_id` UUID PK（稳定身份，见 §2）；`category` ENUM('missing','duplicate_divergent','state_mismatch','unknown','incomplete')；`business_key` TEXT（request_id/intent_id/event 身份等）；`content_hash` BYTEA；`evidence_version_domain` JSONB（范围/区块身份/业务版本/证据时点）；`state` ENUM('open_claimable','claimed','disposing','pending_verify','closed','reopened')；`claim_owner/claimed_at`；`close_basis` JSONB nullable；`reopen_count` INT default 0；`linked_to` UUID nullable（不同身份关联单）；`created_at/updated_at`。
+- `discrepancy_id` UUID PK（稳定身份，见 §2）；`category` ENUM('missing','duplicate_divergent','state_mismatch','unknown','incomplete')；`business_key` TEXT（request_id/intent_id/event 身份等）；`content_hash` BYTEA；`evidence_version_domain` JSONB（范围/区块身份/业务版本/证据时点）；`state` ENUM('open_claimable','claimed','disposing','pending_verify','closed','reopened')；`claim_owner/claimed_at`；`close_basis` JSONB nullable；`reopen_count` INT default 0；`linked_to` UUID nullable（不同身份关联单）；`reverify_generation` BIGINT NOT NULL default 0（复核有效性令牌代次，migration 000018，见 §3）；`created_at/updated_at`。
 - 保守默认：未知形状 → `incomplete` 只告警（Edge）。幂等吸收零分歧 MUST NOT 建单（Q4）。
 
 ### 1.5 `discrepancy_occurrence`（重复发生记录；FR-007/SC-002, Q4/Q5）
@@ -71,6 +71,15 @@ Design only; no implementation in this round. All tables live in PostgreSQL (aut
 - 处置：需具体动作权限；`idempotency_key` 唯一冲突读回（011/013 `operation_conflict` 同形）；调用既有恢复入口时在同一 014 事务外另行满足其门禁（010 锁序、011 claim 验证、013 inbox/version 守卫、006 版本捕获），014 不代行授权。
 - 闭合：需闭合权限 + 最新 `reverify=consistent` 且证据未过期；闭合写 `close_basis`（范围/区块/版本/时点快照）。
 - 失效/重开：影响结论的并发写入/重组/新证据/来源或版本轮换 → `pending_verify`（失效，仅触发已批准的重验证流程，不扩大为自动处置），确认再现 → `reopened`；无关写入不触发；历史闭合/重开原因与证据保留。
+
+### 3.1 复核有效性令牌（写写反序协议；T026/T027）
+
+- 问题：取证在事务外进行，若 A 先取证、B 后取证但 B 先提交，A 恢复提交时不得用过期结果覆盖 B 的有效结论、删除 B 的 gap、推进验证进度或让 close 接受旧 consistent。仅凭 `created_at`、进程时钟或裁决类型（如"consistent 覆盖 consistent 无害"）都不是时序保护。
+- 令牌捕获（取证前）：读取待复核项的同一条语句捕获 `(reverify_generation, state, hash(evidence_version_domain))`。`reverify_generation` 是 ticket 行代次，捕获后由每一次**被接受的**裁决写入与每一次 ticket 行变更推进；`state` 是裁决所依据的生命周期状态（单票入口=`pending_verify`，历史 sweep=`closed`）；证据哈希钉住所依据的记录证据版本域。
+- 有界取证（事务外）：证据重读不持有数据库事务/行锁，由 slice 预算与时长/尝试上限约束。
+- 提交校验（共同锁内）：所有裁决写入路径（`reverify.go persistReverifyOutcomeTx`，被单票入口与 sweep 共用）在**同一个 discrepancy 行锁**（`SELECT … FOR UPDATE`，与 close 守卫同一把锁）下重新读取 `(state, reverify_generation, evidence_version_domain)` 并逐项校验令牌；任一不符 → 丢弃结果，仅追加 `recon_audit`（action=`reverify`，result=`discarded`，含 captured/observed 代次与状态），不写裁决行、不插替代性 `unknown`、不增删 gap、不推进游标。
+- 失效路径全覆盖：被接受的裁决写入推进代次；`TransitionDiscrepancy`/`updateDiscrepancySQL`（claim/dispose/失效/重开/close）与 `invalidateTxAggregateSQL`（扫描聚合证据替换）同样在同一事务推进代次。因此任何能使令牌失效的复核/失效/状态写入都遵循同一协议。
+- close：仍只从 DB 在票行锁内读最新 `reverify` 行（latest-row-wins）；因过期写入已被拒绝，最新行只会是被接受（即已序列化）的结论。`created_at` 相同时以 `reverify_id`（提交序）裁决。
 
 ## 4. 证据包内容
 

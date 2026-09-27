@@ -89,3 +89,7 @@ txharbor reconcile-admin reverify-ticket --task-id UUID --discrepancy-id UUID \
 2. 记录 recovery 版本在生产任务中通常为空；一旦记录非空且重读不可观察，结果为 unknown（保守）。
 3. 未新增自动失效检测器：`close` 后的事实变化仍依赖 scan/巡检的差异发现（既有路径）或下次复核；close 的窗口由最新行 + tolerance 界定，不承诺跨链/PG 全局瞬时快照。
 4. 阈值仍为部署/测试参数（无默认）：`--reverify-tolerance` 默认取 `TXHARBOR_RECON_FRESHNESS_TOLERANCE`；本文件数值不构成生产阈值声明。
+
+## 6. 后续更正（2026-09-27 复核写写反序修复轮）
+
+本文件 §2.4/§3.2 的并发守卫（票行锁 + 状态 CAS、close 行锁内 latest-row-wins）**不构成完整的写写时序保护**：已证实“A 先取证、B 后取证但先提交”时，A 恢复提交仍会用过期结果覆盖 B 的有效结论、删除 B 的 gap、推进验证进度并使 close 接受旧 consistent。修复轮为所有裁决写入引入复核有效性令牌协议（`reverify_generation` + state + 证据版本哈希，共同行锁内校验；丢弃只审计），受影响任务 T026/T027/T028 曾恢复未完成并重新验收。**本文件的旧结论“复核入口已无合入前缺陷”撤回**；完整根因、负对照与修后证据见 `docs/evidence/014/reverify_write_order_evidence.md`。其余证据（真实二进制闭环、R1/R2/R3、失败语义等）不撤销。

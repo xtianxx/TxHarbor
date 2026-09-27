@@ -752,7 +752,12 @@ func (s *Store) CloseDiscrepancy(ctx context.Context, req DiscrepancyCloseReques
 
 // readLatestReverifyTx reads the newest reverify row inside the caller's
 // transaction (the close guard's evidence read under the discrepancy row
-// lock).
+// lock). The ordering is commit order, not wall-clock order: only an accepted
+// re-read can insert a reverify row (the write-write ordering protocol
+// validates the captured token under this same lock and discards stale
+// outcomes), so reverify_id — assigned at insert under that lock — is the
+// insertion-order tiebreaker when two accepted rows share a timestamp
+// (created_at is the transaction start time).
 const readLatestReverifyTxSQL = `
 SELECT verdict, evidence_ref, freshness_at
 FROM reverify
@@ -1000,10 +1005,17 @@ FROM discrepancy
 WHERE discrepancy_id = $1
 FOR UPDATE`
 
+// updateDiscrepancySQL writes one guarded transition and advances the
+// ticket's revalidation generation in the same statement: every ticket-row
+// mutation (claim, dispose, invalidation, reopen, close) invalidates the
+// validity token of any concurrent in-flight re-read, so a stale outcome can
+// never land after a newer committed transition (data-model.md §3
+// "复核有效性令牌"; migration 000018).
 const updateDiscrepancySQL = `
 UPDATE discrepancy
 SET state = $2,
     updated_at = now(),
+    reverify_generation = reverify_generation + 1,
     claim_owner = CASE WHEN $2 IN ('claimed', 'disposing')
         THEN COALESCE(NULLIF($5, ''), claim_owner) ELSE claim_owner END,
     claimed_at = CASE WHEN $2 = 'claimed'

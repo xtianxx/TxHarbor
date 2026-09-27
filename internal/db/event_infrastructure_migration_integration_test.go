@@ -32,10 +32,11 @@ var eventInfrastructureTables = []string{
 }
 
 // TestEventInfrastructureMigrationUpDownUp covers T009 (data-model §7):
-// 000015 applies on a scratch database, the joint tips revert first (000017,
-// then 000016), 000015 then reverts cleanly with `down`, and all apply again;
-// the seven tables and the single-row cutover seed exist on the 17 tip
-// (000017 adds only the T040 event_obligation carrier).
+// 000015 applies on a scratch database, the joint tips revert first (000018,
+// then 000017, then 000016), 000015 then reverts cleanly with `down`, and all
+// apply again; the seven tables and the single-row cutover seed exist on the
+// 18 tip (000018 adds only the 014 reverify-generation column, 000017 only
+// the T040 event_obligation carrier).
 func TestEventInfrastructureMigrationUpDownUp(t *testing.T) {
 	dsn := startPostgres(t)
 	ctx := context.Background()
@@ -53,14 +54,30 @@ func TestEventInfrastructureMigrationUpDownUp(t *testing.T) {
 	if err != nil {
 		t.Fatalf("newProvider() error = %v", err)
 	}
-	// 000017 and 000016 are the joint tips, so the first downs revert them
-	// before 000015.
+	// 000018, 000017 and 000016 are the joint tips, so the first downs revert
+	// them before 000015.
 	result, err := provider.Down(ctx)
 	if err != nil {
 		t.Fatalf("Down() error = %v", err)
 	}
+	if result.Source.Version != 18 {
+		t.Fatalf("Down() reverted version %d, want 18 (the last migration)", result.Source.Version)
+	}
+	var tokenColumns int
+	if err := sqlDB.QueryRowContext(ctx, `
+		SELECT count(*) FROM information_schema.columns
+		WHERE table_name = 'discrepancy' AND column_name = 'reverify_generation'`).Scan(&tokenColumns); err != nil {
+		t.Fatalf("inspect reverify_generation column: %v", err)
+	}
+	if tokenColumns != 0 {
+		t.Fatalf("000018 down left %d reverify_generation column(s)", tokenColumns)
+	}
+	result, err = provider.Down(ctx)
+	if err != nil {
+		t.Fatalf("Down() of 000017 error = %v", err)
+	}
 	if result.Source.Version != 17 {
-		t.Fatalf("Down() reverted version %d, want 17 (the last migration)", result.Source.Version)
+		t.Fatalf("Down() reverted version %d, want 17 (000017)", result.Source.Version)
 	}
 	result, err = provider.Down(ctx)
 	if err != nil {
@@ -96,8 +113,8 @@ func TestEventInfrastructureMigrationUpDownUp(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Inspect() after up error = %v", err)
 	}
-	if state.Current != 17 {
-		t.Fatalf("current migration after up = %d, want 17 (the last migration)", state.Current)
+	if state.Current != 18 {
+		t.Fatalf("current migration after up = %d, want 18 (the last migration)", state.Current)
 	}
 }
 

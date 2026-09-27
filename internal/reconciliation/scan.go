@@ -2523,6 +2523,7 @@ SET state = CASE WHEN state IN ('open_claimable', 'reopened', 'closed', 'pending
                  THEN 'pending_verify' ELSE state END,
     content_hash = $2,
     evidence_version_domain = $3::jsonb,
+    reverify_generation = reverify_generation + 1,
     updated_at = now()
 WHERE discrepancy_id = $1`
 

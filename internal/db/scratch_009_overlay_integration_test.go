@@ -332,16 +332,17 @@ func TestT041GapFillSequenceD(t *testing.T) {
 }
 
 // TestT042RollbackRevertsTenBeforeNine asserts the applied-descending rollback
-// order from the full joint chain {1..17}: `down` walks the joint head
-// 17,16,15,14,13,12,11 first, then reverts 10 before 9, dropping the carrier
-// while the signer tables survive until 9's own down. The 10-down drops
-// withdrawal_authorization_scopes AND its rows — that is the designed-for-
-// scratch limit (T042): carrier rollback is never a production operation.
+// order from the full joint chain {1..18}: `down` walks the joint head
+// 18,17,16,15,14,13,12,11 first, then reverts 10 before 9, dropping the
+// carrier while the signer tables survive until 9's own down. The 10-down
+// drops withdrawal_authorization_scopes AND its rows — that is the
+// designed-for-scratch limit (T042): carrier rollback is never a production
+// operation.
 func TestT042RollbackRevertsTenBeforeNine(t *testing.T) {
 	dsn := startPostgres(t)
 	ctx := context.Background()
 	opts := testMigrateOptions(dsn)
-	opts.FS = pb009Overlay(t, true) // unpinned joint head {1..17}
+	opts.FS = pb009Overlay(t, true) // unpinned joint head {1..18}
 
 	var out bytes.Buffer
 	if err := MigrateUp(ctx, opts, &out); err != nil {
@@ -353,9 +354,9 @@ func TestT042RollbackRevertsTenBeforeNine(t *testing.T) {
 		t.Fatalf("newProvider: %v", err)
 	}
 
-	// The joint head reverts strictly descending (17 -> 11) before the PB
+	// The joint head reverts strictly descending (18 -> 11) before the PB
 	// carrier reaches the 10-before-9 assertion: every applied number, exact.
-	for _, want := range []int64{17, 16, 15, 14, 13, 12, 11} {
+	for _, want := range []int64{18, 17, 16, 15, 14, 13, 12, 11} {
 		result, err := provider.Down(ctx)
 		if err != nil {
 			t.Fatalf("Down() of version %d: %v", want, err)
@@ -393,10 +394,10 @@ func TestT042RollbackRevertsTenBeforeNine(t *testing.T) {
 
 // TestT042DownOfAppliedThenRenumberedNumberForbidden pins the renumber rule:
 // migration numbers are immutable once applied. Simulate a merge-time
-// renumber that removes the applied head's file (FS {1..16} while the DB
-// still has 17 applied): `down` must refuse rather than silently roll back a
-// different version, the DB must be untouched, and the serve gate must refuse
-// (unknown/newer applied version).
+// renumber that removes the applied head's file (an FS without 18 while the
+// DB still has 18 applied): `down` must refuse rather than silently roll back
+// a different version, the DB must be untouched, and the serve gate must
+// refuse (unknown/newer applied version).
 func TestT042DownOfAppliedThenRenumberedNumberForbidden(t *testing.T) {
 	dsn := startPostgres(t)
 	ctx := context.Background()
@@ -410,13 +411,13 @@ func TestT042DownOfAppliedThenRenumberedNumberForbidden(t *testing.T) {
 	sqlDB := openTestSQL(t, dsn)
 
 	renumbered := testMigrateOptions(dsn)
-	renumbered.FS = pb009Overlay(t, true, 17) // applied head 17's file is gone
+	renumbered.FS = pb009Overlay(t, true, 18) // applied head 18's file is gone
 	files, err := MigrationFiles(renumbered.FS)
 	if err != nil {
 		t.Fatalf("list renumbered migrations: %v", err)
 	}
-	if got := files[len(files)-1].Version; got != 16 {
-		t.Fatalf("renumbered FS target = %d, want 16", got)
+	if got := files[len(files)-1].Version; got != 17 {
+		t.Fatalf("renumbered FS target = %d, want 17", got)
 	}
 
 	provider, err := newProvider(sqlDB, renumbered)
@@ -436,8 +437,8 @@ func TestT042DownOfAppliedThenRenumberedNumberForbidden(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Inspect(applied) error = %v", err)
 	}
-	if state.Current != 17 {
-		t.Fatalf("applied state changed by a forbidden down: current = %d, want 17", state.Current)
+	if state.Current != 18 {
+		t.Fatalf("applied state changed by a forbidden down: current = %d, want 18", state.Current)
 	}
 	if _, err := CheckCompatibility(ctx, renumbered); err == nil {
 		t.Fatal("serve gate must refuse an applied version with no resolvable file")
