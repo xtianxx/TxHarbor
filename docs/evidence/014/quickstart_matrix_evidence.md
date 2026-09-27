@@ -123,3 +123,12 @@
 - 普通 PR 相关层（gofmt/vet、unit、race 抽样、contract、integration-PG）在本地真实 PG 上全部通过；fault/perf 保持独立通道，普通 PR 未新增长测。
 - 首跑暴露的两处迁移链断言已按既有 lane 模式修正并复跑全绿；`internal/reconciliation/**` 未列入 PG 路径集合属已知缺口，仅回报。
 - 本文件与测试证据不构成发布或生产就绪声明；T000-P 保持 OPEN。
+
+## 9. 文档收口补充（2026-09-27；非测试证据，不改动 §1–§8 历史记录）
+
+- 树状态: HEAD `c3a76d2` + 本轮文档工作树（`specs/014-reconciliation-exception-handling/` 文档 + 本补充）；未提交、未推送。
+- T030 第三项（pre-cutover 判别）维持 BLOCKED：最小设计见 `specs/014-reconciliation-exception-handling/expected-event-discriminator.md`（契约依据、三路裁决、最小持久证据提案、Q-cutover 待决）；实现与关闭由 T040 承接，T030 保持未勾选。
+- CI 分类缺口由 T039 承接（`internal/reconciliation/**` 纳入 pg 集合＋反向覆盖守卫；quickstart L39/L45 已同步为「待 T039 闭环」）；本补充不宣称 CI 已修复。
+- 完成口径更正：tasks.md 40 项中已勾选 37，未完成 T030/T039/T040；37/38 旧口径作废，缺口不隐藏。
+- 政策待决：Q-cutover（选项 A/B）与 pre-cutover 告警处置（pending 常驻 vs alert-only 票据），见设计文档 §4。
+- 本轮不运行产品测试、不改产品代码/CI；§1–§8 的测试结论与 NOT RUN 清单继续有效。
