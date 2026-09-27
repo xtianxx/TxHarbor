@@ -106,3 +106,13 @@ txharbor reconcile-admin cancel --task-id UUID --reason R
 `TXHARBOR_RECON_PRINCIPAL`、`TXHARBOR_RECON_CONCURRENCY`、`TXHARBOR_RECON_MAX_SPAN_PER_CLAIM`、`TXHARBOR_RECON_MAX_DURATION`、`TXHARBOR_RECON_MAX_PG_REQUESTS`、`TXHARBOR_RECON_MAX_RPC_REQUESTS`、`TXHARBOR_RECON_LEASE_TTL`、`TXHARBOR_RECON_FRESHNESS_TOLERANCE`（亦为 `close` 的 `--reverify-tolerance` 默认来源）、`TXHARBOR_RECON_MAX_TIP_LAG`、`TXHARBOR_RECON_MAX_CANDIDATES`、`TXHARBOR_RECON_MAX_EVENT_ROWS`、`TXHARBOR_RECON_SETTLE_LIMIT`、`TXHARBOR_RECON_WINDOW_MAX_PROBES`、`TXHARBOR_RECON_MANAGEMENT_TRUST`（仅管理面信任根）。
 
 所有数值均为部署/测试参数：缺失/非正值由命令**按名拒绝**（无默认）；本文件不宣称任何生产阈值（Q3-6）。
+
+### 000018 升级与回滚（复核有效性令牌协议；见 `data-model.md` §3.1 与 `contracts/discrepancy-lifecycle.md`「Revalidation Token Protocol」）
+
+`migrations/000018_reverify_generation.sql` 为纯增列（`discrepancy.reverify_generation`，Up/Down 均已随 db 迁移层集成测试验证；反序修复证据见 `docs/evidence/014/reverify_write_order_evidence.md`）。旧实现（无代次捕获/校验）与新实现**不得混跑**：旧写入者既不推进代次也不校验令牌，混跑期间仍可用过期结果覆盖新结论。升级与回滚均按以下检查清单在受控窗口执行（部署工具各异，此处只列检查项，不编造命令；本轮未做升级演练，不虚构演练结论；不新增滚动升级或自动部署能力）：
+
+- [ ] 升级前暂停一切 014 调用入口：外部自动调度与脚本、人工 `reconcile-admin` 调用（含 `scan` / `reverify` / `reverify-ticket` / `close` / `claim` / `dispose`）；在途任务可用 `pause --task-id UUID --reason R` 暂停（仅作用于 014 范围）。
+- [ ] 确认在途调用已完成或安全终止、相关 DB 事务已退出（无残留 `reconcile-admin` 进程稍后恢复写入），再执行迁移并部署含代次协议的统一版本。
+- [ ] 核验迁移版本已到 000018、运行中二进制均为新版本、旧写入者已退出后，再恢复调度与人工调用。
+- [ ] 回滚同样先停止全部相关调用者，再按“先程序后 schema”顺序执行 Down 并回退二进制；Down 可执行只证明 schema 回滚语句有效，**不等于**旧程序已安全。
+- [ ] 明确：回退到旧实现即失去本次写写反序保护；不得自动恢复旧版复核/闭合入口并宣称其具备同等保证（旧版 `consistent` 覆盖新结论的缺陷见上述反序证据）。

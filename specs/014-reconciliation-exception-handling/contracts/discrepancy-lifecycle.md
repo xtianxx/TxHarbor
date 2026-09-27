@@ -24,6 +24,7 @@
 - **提交校验（共同锁内）**：在 discrepancy 行锁（与 close 同一把锁）下重读并逐项校验令牌；不符即丢弃，只写 `result=discarded` 审计，不写裁决行（不插替代 unknown）、不增删 gap、不推进游标/计数。
 - **时序保护不使用** `created_at`、进程时钟或裁决类型；`consistent` 覆盖 `consistent` 同样被拒。最新行读取以提交序（`reverify_id`）为同时间戳的裁决序。
 - 失效/重开：并发变化/重组/新证据/来源或版本轮换 → `pending_verify`（仅触发已批准的重验证流程，不扩大为自动处置）；确认再现 → `reopened`（`reopen_count+1`，历史保留）；无关写入不触发；过期结果不得闭合。
+- 升级与回滚：旧实现与本协议**不得混跑**；检查清单见 `quickstart.md` §call-path「000018 升级与回滚」（回滚到旧实现即失去反序保护）。
 - 非法跳转拒绝并审计。差异 MUST NOT 解释为重付许可（FR-015）。
 
 ## Classification (machine)

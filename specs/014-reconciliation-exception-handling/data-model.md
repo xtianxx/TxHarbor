@@ -80,6 +80,7 @@ Design only; no implementation in this round. All tables live in PostgreSQL (aut
 - 提交校验（共同锁内）：所有裁决写入路径（`reverify.go persistReverifyOutcomeTx`，被单票入口与 sweep 共用）在**同一个 discrepancy 行锁**（`SELECT … FOR UPDATE`，与 close 守卫同一把锁）下重新读取 `(state, reverify_generation, evidence_version_domain)` 并逐项校验令牌；任一不符 → 丢弃结果，仅追加 `recon_audit`（action=`reverify`，result=`discarded`，含 captured/observed 代次与状态），不写裁决行、不插替代性 `unknown`、不增删 gap、不推进游标。
 - 失效路径全覆盖：被接受的裁决写入推进代次；`TransitionDiscrepancy`/`updateDiscrepancySQL`（claim/dispose/失效/重开/close）与 `invalidateTxAggregateSQL`（扫描聚合证据替换）同样在同一事务推进代次。因此任何能使令牌失效的复核/失效/状态写入都遵循同一协议。
 - close：仍只从 DB 在票行锁内读最新 `reverify` 行（latest-row-wins）；因过期写入已被拒绝，最新行只会是被接受（即已序列化）的结论。`created_at` 相同时以 `reverify_id`（提交序）裁决。
+- 升级与回滚：旧实现与本协议**不得混跑**（旧写入者不推进代次也不校验令牌）；升级/回滚检查清单见 `quickstart.md` §call-path「000018 升级与回滚」。
 
 ## 4. 证据包内容
 
