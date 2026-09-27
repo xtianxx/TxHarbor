@@ -145,10 +145,10 @@
 
 **Purpose**: Observability, evidence honesty, and layered validation (no risk-accept features; no prod-threshold claims)
 
-- [ ] T029 [P] Add bounded low-cardinality 014 metrics in `internal/metrics/reconciliation.go` (reuse `internal/metrics/events.go` registry; ENUM labels only; FR-24/27 redaction; duplicates-rate alert separated from fund tickets per Q4; any `recon_audit` aggregation by action MUST exclude management rows via `target ? 'management_action'` — grant/revoke borrow `start`/`close` buckets with `target.management_action` as the discriminator; no new audit token or migration for this)
+- [X] T029 [P] Add bounded low-cardinality 014 metrics in `internal/metrics/reconciliation.go` (reuse `internal/metrics/events.go` registry; ENUM labels only; FR-24/27 redaction; duplicates-rate alert separated from fund tickets per Q4; any `recon_audit` aggregation by action MUST exclude management rows via `target ? 'management_action'` — grant/revoke borrow `start`/`close` buckets with `target.management_action` as the discriminator; no new audit token or migration for this)
 - [ ] T030 [P] Evidence-honesty pass in `internal/reconciliation/scan.go` and `internal/reconciliation/lifecycle.go` (paused/incomplete never renders “fully consistent”; uncovered ranges from new data visible; Q3-5; pre-cutover requests without event rows stay pending/gap and never mint event-missing tickets — missing-by-insufficient-evidence is alert-only and MUST NOT bypass dispose/close evidence gates; acceptance: quickstart §3 + §11 gapped-never-close)
-- [ ] T031 Run `specs/014-reconciliation-exception-handling/quickstart.md` validation matrix and record results as test evidence (not production thresholds); keep ordinary PR CI layered, heavy runs on independent tags
-- [ ] T032 [P] Docs touch-up in `specs/014-reconciliation-exception-handling/` (plan/research cross-links; risk-accept explicitly absent; T000-P OPEN restated)
+- [X] T031 Run `specs/014-reconciliation-exception-handling/quickstart.md` validation matrix and record results as test evidence (not production thresholds); keep ordinary PR CI layered, heavy runs on independent tags
+- [X] T032 [P] Docs touch-up in `specs/014-reconciliation-exception-handling/` (plan/research cross-links; risk-accept explicitly absent; T000-P OPEN restated)
 
 ---
 
@@ -242,6 +242,7 @@ Task: "Event-delivery adapter in internal/reconciliation/eventstate.go"
 
 - Coverage: FR-001–025, SC-001–006, Q1–Q5, quickstart §1–11 all mapped above (38 tasks: T001–T032 original + T033–T038 US1 closure);重点 six (atomicity, crash-no-miss, legal-duplicate silence, insufficient-evidence conservatism, invalidation on change, unauthorized refusal, unknown-disposal idempotency, pause/budget isolation) land in T010/T016/T017/T021/T022/T023/T026/T027/T028; chain-first attribution/deposit/identity/window-resolver/policy/budget-accounting land in T033/T034/T035/T036/T037/T038.
 - Risk-accept/ignore: NOT approved — zero implementation tasks generated for it; any future need is a business blocker, not a tasks-time decision.
+- T000-P stays OPEN: this round is not a release and claims no production readiness; checked boxes mean local-scope completion only (`plan.md` Gate status, `research.md` §7, `quickstart.md` Gate).
 - Management authorization decided (014-only, 2026-09-26): first and subsequent grants/queries/revokes are single-executed by an authenticated local-ops principal explicitly granted management permission; ordinary holders cannot self-grant; first trust root comes from controlled deploy config, default-deny without valid config; no admin role created, no existing permission expanded; grants/revokes record before/after state, operator, and result.
 - Prod thresholds pending do not block local validation; local numbers are never claimed as production thresholds.
 - [P] tasks = different files, no dependencies; [Story] label maps traceability; commit after each task or logical group; stop at any checkpoint to validate independently.

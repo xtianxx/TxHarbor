@@ -1,8 +1,10 @@
 # Research: 014 Reconciliation and Exception Handling (Phase 0)
 
-**Branch**: `014-reconciliation-exception-handling` | **Date**: 2026-09-26 | **Spec**: [spec.md](spec.md)
+**Branch**: `014-reconciliation-exception-handling` | **Date**: 2026-09-26 | **Spec**: [spec.md](spec.md) | **Plan**: [plan.md](plan.md) | **Design**: [data-model.md](data-model.md), [contracts/](contracts/), [quickstart.md](quickstart.md), [ADR-001](adr/ADR-001-carrier-and-isolation.md)
 
 All NEEDS CLARIFICATION from spec are resolved (Q1–Q5, 2026-09-26). No new technical unknowns remain that block design; test-budget numbers are intentionally left as待测参数 (see §7).
+
+**Gate status**: **T000-P stays OPEN** — this round is not a release and makes no production-readiness claim; results here are local-scope evidence only. **Risk-accept/ignore is explicitly absent**: not approved, not designed, no contract row ([contracts/auth-matrix.md](contracts/auth-matrix.md): 未批准), no migration table, no task (see §7).
 
 ## 1. 既有能力复用（逐项核对真实入口；结论：全部只读复用，不自动触发）
 
@@ -29,18 +31,18 @@ All NEEDS CLARIFICATION from spec are resolved (Q1–Q5, 2026-09-26). No new tec
 
 - Decision: 稳定身份 =（范围， 差异类别， 业务主键， 内容哈希， 证据版本域）组合键；同一身份追加证据/重开原单，不同身份建关联单。Rationale: 满足 FR-007/SC-002 且避免重组重扫无限建单。Alternatives: 纯内容哈希——rejected（跨范围碰撞）；纯自增单号——rejected（重复检出无法归并）。
 - Decision: 生命周期沿 FR-010 五态 + 驳回/转人工；复核一致为系统标记，验证闭合为操作员确认；失效/重开为显式转换并保留历史。Alternatives: 闭合即终局——rejected（违反 Q5）。
-- Decision: 检查点与结果同库事务一致（见 data-model.md §5），崩溃恢复可重扫但不漏扫不重复副作用。
+- Decision: 检查点与结果同库事务一致（见 [data-model.md](data-model.md) §5），崩溃恢复可重扫但不漏扫不重复副作用。
 
 ## 4. 授权与处置接线
 
 - 复用 `operation_id` 审计幂等（011 execOperatorOp、013 Unblock/Replay、012 supply、005 confirmauth）与现有固定权限（009 401/403、011 `can_execute`、012 `--operator` 仅审计）。
-- 014 动作×权限×范围矩阵见 `contracts/auth-matrix.md`；认领≠执行权；字段填写≠授权；既有恢复入口保留其门禁（010 锁序、011 claim 验证、013 inbox/version 守卫、006 版本捕获）。
+- 014 动作×权限×范围矩阵见 [contracts/auth-matrix.md](contracts/auth-matrix.md)；认领≠执行权；字段填写≠授权；既有恢复入口保留其门禁（010 锁序、011 claim 验证、013 inbox/version 守卫、006 版本捕获）。
 - 请求重复/响应丢失/结果未知：operation_id 去重读回、丢失按未知观察、超时有界重试或保持待验证（Q5-4）。
 
 ## 5. 承载形态与隔离（取舍见 ADR-001）
 
 - Decision: 核心库 `ScanOnce` + 薄 `reconcile-admin` 命令；本阶段不在 serve/worker 自动启动。Rationale: Q3 只锁验收（独立暂停/在途有界/故障隔离/预算/状态诚实），实际调用链显示 serve 已承载 scanner/logscanner/confirmation/recovery + nonce loop，叠加自动扫描会耦合资金节拍；独立命令最易满足暂停不影响资金流程。Alternatives: 复用 worker 节拍——rejected（暂停/预算与资金调度共享，难以证明隔离）；常驻独立进程——deferred（本阶段用 admin 命令+预算即可验证，无需新超进程）。
-- 隔离验证：故障注入（扫描错误/依赖超时/重试风暴）+ 并发资金负载下资金流程 SLO 不受影响；方法与预算见 quickstart.md。
+- 隔离验证：故障注入（扫描错误/依赖超时/重试风暴）+ 并发资金负载下资金流程 SLO 不受影响；方法与预算见 [quickstart.md](quickstart.md)。
 
 ## 6. CI 分层与测试路径
 
@@ -52,4 +54,5 @@ All NEEDS CLARIFICATION from spec are resolved (Q1–Q5, 2026-09-26). No new tec
 
 - 实际最大 `migrations/000015_event_infrastructure.sql`；`000014` 被 intent-FK 修复占用；014 新迁移用 **`000016_reconciliation_handling.sql`**（已核对目录，不预猜）。
 - 待测参数（非阻塞，需实现后测量填入，不编造）：暂停响应时间、单次扫描范围/时长配额、并发上限、PG/RPC 配额、新鲜度容忍窗、证据保留期、重复率告警阈值；生产阈值单独立项裁决。
-- 真正阻塞项：风险接受/忽略差异政策未批准——本阶段不建该功能；若后续方案依赖，列为业务阻塞（见 plan.md）。
+- 真正阻塞项：风险接受/忽略差异政策未批准——本阶段明确缺席：无设计、无契约行（[contracts/auth-matrix.md](contracts/auth-matrix.md) 标记“未批准”）、无迁移表、无任务；若后续方案依赖，列为业务阻塞（见 [plan.md](plan.md) Constraints）。
+- 发布门禁：T000-P 保持 OPEN，本轮不发布、不宣称生产就绪；本目录全部结论仅限本地范围。

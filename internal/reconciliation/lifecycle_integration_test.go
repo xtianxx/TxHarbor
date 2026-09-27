@@ -454,6 +454,20 @@ func TestIntegrationDisposeIdempotencyZeroSideEffects(t *testing.T) {
 		t.Fatalf("disposition rows for the key = %d, want the single recorded row", n)
 	}
 
+	// SC-004 / quickstart §9: ten more replays of the same recorded dispose
+	// converge on the recorded row with zero new side effects (the loop runs
+	// before the zero-side-effect assertions below, so they cover all ten).
+	for i := 1; i <= 10; i++ {
+		replay, err := store.DisposeDiscrepancy(ctx, dispose)
+		if err != nil {
+			t.Fatalf("replay %d of the recorded dispose: %v", i, err)
+		}
+		if !replay.IdempotentReplay || replay.DispositionID != first.DispositionID ||
+			replay.Transitioned || replay.Kind != first.Kind || replay.Result != first.Result {
+			t.Fatalf("replay %d = %+v, want the recorded row replayed with no transition", i, replay)
+		}
+	}
+
 	// Zero side effects: no second disposition, no new audit row, no reverify
 	// row, no state/reopen/updated_at movement.
 	if n := lifecycleITCount(t, ctx, pool,

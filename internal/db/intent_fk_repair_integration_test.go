@@ -149,9 +149,10 @@ func TestIntentFKRepairIncrementalGuardedNoOpThenRepair(t *testing.T) {
 	ctx := context.Background()
 
 	// Stage 1: the defected database: {1..11} + guarded 000013, no
-	// 000012/000014 and no 013 000015 (the era fixture must not absorb it).
+	// 000012/000014, no 013 000015 and no 014 000016 (the era fixture must
+	// not absorb later lanes' migrations).
 	pre := testMigrateOptions(dsn)
-	pre.FS = repairSetFS(t, 12, 14, 15)
+	pre.FS = repairSetFS(t, 12, 14, 15, 16)
 	var out bytes.Buffer
 	if err := MigrateUp(ctx, pre, &out); err != nil {
 		t.Fatalf("stage 1 MigrateUp() error = %v (output %q)", err, out.String())
@@ -179,8 +180,8 @@ func TestIntentFKRepairIncrementalGuardedNoOpThenRepair(t *testing.T) {
 		t.Fatalf("stage 2 MigrateUp() error = %v (output %q)", err, out.String())
 	}
 	t.Logf("stage 2 (000012 + repair 000014): %s", strings.TrimSpace(out.String()))
-	if !strings.Contains(out.String(), "applied=3 skipped=12 pending=0") {
-		t.Fatalf("stage 2 output = %q, want applied=3 skipped=12 pending=0 (000012, 000014, 000015)", out.String())
+	if !strings.Contains(out.String(), "applied=4 skipped=12 pending=0") {
+		t.Fatalf("stage 2 output = %q, want applied=4 skipped=12 pending=0 (000012, 000014, 000015, 000016)", out.String())
 	}
 	exists, validated := intentFKState(t, sqlDB)
 	if !exists || !validated {
@@ -235,8 +236,8 @@ func TestIntentFKRepairRerunIsNoOpSuccess(t *testing.T) {
 	if err := MigrateUp(ctx, testMigrateOptions(dsn), &out); err != nil {
 		t.Fatalf("re-run MigrateUp() error = %v (output %q)", err, out.String())
 	}
-	if !strings.Contains(out.String(), "applied=0 skipped=15 pending=0") {
-		t.Fatalf("re-run output = %q, want applied=0 skipped=15 pending=0", out.String())
+	if !strings.Contains(out.String(), "applied=0 skipped=16 pending=0") {
+		t.Fatalf("re-run output = %q, want applied=0 skipped=16 pending=0", out.String())
 	}
 	exists, validated := intentFKState(t, sqlDB)
 	if !exists || !validated {

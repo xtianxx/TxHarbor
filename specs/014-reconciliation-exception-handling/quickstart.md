@@ -1,8 +1,10 @@
 # Quickstart: 014 Reconciliation Validation Guide (Phase 1)
 
-**Branch**: `014-reconciliation-exception-handling` | **Spec**: [spec.md](spec.md) | **Design**: [plan.md](plan.md), [data-model.md](data-model.md), [contracts/](contracts/)
+**Branch**: `014-reconciliation-exception-handling` | **Spec**: [spec.md](spec.md) | **Design**: [plan.md](plan.md), [data-model.md](data-model.md), [contracts/](contracts/) | **Research**: [research.md](research.md)
 
 Backend-only validation. No product code exists yet; run the named suites only after implementation. Upstream-unconnected assertions are explicitly out of evidence.
+
+**Gate**: T000-P stays OPEN — this guide is not a release and claims no production readiness; the numbers here are local test inputs only. Risk-accept/ignore is explicitly absent (not approved, no contract row, no task), so there is no scenario for it below.
 
 ## Prerequisites
 
