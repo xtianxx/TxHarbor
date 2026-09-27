@@ -28,25 +28,25 @@ test-integration:
 # Integration tests, Redis layer (testcontainers; requires a Docker daemon).
 test-integration-redis:
 	$(call require_tagged_tests,integration_redis,test-integration-redis)
-	go test -tags integration_redis -count=1 -timeout 20m ./...
+	go test -tags integration_redis -count=1 -timeout 20m ./internal/cache ./internal/ratelimit ./internal/testutil
 
 # Integration tests, Kafka layer (testcontainers; requires a Docker daemon).
 test-integration-kafka:
 	$(call require_tagged_tests,integration_kafka,test-integration-kafka)
-	go test -tags integration_kafka -count=1 -timeout 30m ./...
+	go test -tags integration_kafka -count=1 -timeout 30m ./internal/app ./internal/events ./internal/health ./internal/testutil
 
 # Contract layer: event envelope, catalog, schema-version and consumer
 # compatibility. No middleware, no Docker — plain Go (FR-28;
 # verification.md §3). Contract cases arrive with T014/T051/T058.
 test-contract:
 	$(call require_tagged_tests,contract,test-contract)
-	go test -tags contract -count=1 -timeout 10m ./...
+	go test -tags contract -count=1 -timeout 10m ./internal/events ./internal/reconciliation
 
 # End-to-end core deposit/withdrawal flows (full stack + Anvil). Independent
 # layer, never part of a plain unit run.
 test-e2e:
 	$(call require_tagged_tests,e2e,test-e2e)
-	go test -tags e2e -count=1 -timeout 30m ./...
+	go test -tags e2e -count=1 -timeout 30m ./internal/app
 
 # Fault injection and performance layers run independently (scheduled/manual/
 # release gate) and never block ordinary PRs (FR-28; verification.md §4).
