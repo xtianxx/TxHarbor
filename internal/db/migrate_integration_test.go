@@ -11,34 +11,30 @@ import (
 	"testing"
 	"testing/fstest"
 	"time"
-
-	"github.com/testcontainers/testcontainers-go"
-	"github.com/testcontainers/testcontainers-go/modules/postgres"
-	"github.com/testcontainers/testcontainers-go/wait"
 )
 
-// startPostgres boots a real PostgreSQL container and returns its DSN.
-// Skips (never passes) when no Docker provider is available (C1).
+// startPostgres returns the DSN of a test-private, EMPTY PostgreSQL database
+// and is the single entry point every integration test in this package uses.
+//
+// Non-whitelisted tests get a freshly created database inside the package-wide
+// container booted by TestMain (db_shared_pg_test.go): creation and
+// DROP DATABASE ... WITH (FORCE) cleanup are per test, so database-level
+// isolation is preserved. The audited down/destructive lanes keep a dedicated
+// container (dbDedicatedContainerTests -> startPostgresDedicated). Either way
+// the database starts empty and the caller runs its own migrations, so every
+// existing empty-DB, overlay-FS and partial-FS assertion stays exact and
+// migration coverage is unchanged.
+//
+// Docker gating moved to TestMain: when no provider is healthy TestMain exits
+// 0 before m.Run locally (package skipped, never silently passed) and exits 1
+// under CI=true or TXHARBOR_REQUIRE_DOCKER=1. The dedicated whitelist path
+// keeps testcontainers.SkipIfProviderIsNotHealthy as a second line of defense.
 func startPostgres(t *testing.T) string {
 	t.Helper()
-	testcontainers.SkipIfProviderIsNotHealthy(t)
-	ctx := context.Background()
-	ctr, err := postgres.Run(ctx, "postgres:18.6-trixie",
-		postgres.WithDatabase("txharbor"),
-		postgres.WithUsername("txharbor"),
-		postgres.WithPassword("txharbor"),
-		testcontainers.WithWaitStrategy(
-			wait.ForLog("database system is ready to accept connections").WithOccurrence(2)),
-	)
-	if err != nil {
-		t.Fatalf("start postgres container: %v", err)
+	if dbDedicatedContainerTests[t.Name()] {
+		return startPostgresDedicated(t)
 	}
-	t.Cleanup(func() { _ = ctr.Terminate(context.Background()) })
-	dsn, err := ctr.ConnectionString(ctx, "sslmode=disable")
-	if err != nil {
-		t.Fatalf("postgres connection string: %v", err)
-	}
-	return dsn
+	return startPostgresDerived(t)
 }
 
 func openTestSQL(t *testing.T, dsn string) *sql.DB {
