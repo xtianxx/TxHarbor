@@ -74,7 +74,10 @@ func appendAuditEvent(t *testing.T, pool *pgxpool.Pool, sourceID string, sourceV
 		EventType:     EventTypeDepositObservationStatusChanged,
 		SchemaVersion: SchemaVersionV1,
 		IdentityKind:  IdentityKindBusinessObject,
-		AggregateType: "audit_probe_object",
+		// The 000017 mapping CHECK closes (aggregate_type, event_type), so
+		// this audit fixture uses the catalog's deposit_observation aggregate
+		// with probe-scoped ids; the audit itself keys on source_kind/id only.
+		AggregateType: "deposit_observation",
 		AggregateID:   aggregateID,
 		Payload: map[string]any{
 			"from_state": "pending",

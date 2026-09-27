@@ -347,6 +347,16 @@ const (
 	// ReasonUnknownShape: the observation shape is not recognized; the
 	// conservative default applies (alert-only, never dropped).
 	ReasonUnknownShape ClassificationReason = "unknown_shape"
+	// ReasonEventNotApplicable: the candidate's event dimension provably has
+	// no catalog event obligation (R2); the chain/PG comparison stands on its
+	// own and the event dimension is excluded instead of being guessed.
+	ReasonEventNotApplicable ClassificationReason = "event_not_applicable"
+	// ReasonEventObligationUnproven: the event delivery is absent but the
+	// expectation cannot be proven (no durable marker, unreadable evidence,
+	// or an audited legal trim could explain the absence; R3). It stays
+	// pending/gap, alert-only, and is never rendered as missing or
+	// consistent.
+	ReasonEventObligationUnproven ClassificationReason = "event_obligation_unproven"
 )
 
 // DuplicateOutcome reports the Q4 duplicate judgment independently of the
@@ -399,6 +409,13 @@ type Observation struct {
 	// Version is the evidence version domain used for the identity key; any
 	// later change to it re-enters verification (Q5).
 	Version VersionDomain
+
+	// EventObligation is the T040 discriminator outcome for this observation.
+	// It is only set by the scan compare loop's decisive event-only absence
+	// path (chain and PG present, event delivery absent); the zero value
+	// means the discriminator did not apply and the historical classification
+	// rules are unchanged.
+	EventObligation EventObligationState
 
 	// EvidenceRef references the evidence bundle for occurrence/audit rows.
 	EvidenceRef string
@@ -513,6 +530,16 @@ func Classify(obs Observation) Classification {
 		base.Detail = "transaction result is unknown; keep observing"
 		return base
 	}
+	// T040 R3 comes first: an absent event delivery whose expectation cannot
+	// be proven is its own bounded reason (observable, alert-only) instead of
+	// the generic unreadable-party reason. The discriminator only sets this
+	// state on the decisive event-only absence path; the check is
+	// unconditional so a caller can never route an unproven expectation into
+	// a ticket.
+	if obs.EventObligation == EventObligationUnproven {
+		return pending(base, ReasonEventObligationUnproven,
+			"event delivery is absent and no sufficient expectation evidence proves it was due")
+	}
 	if obs.PG.Status == PartyUnknown || obs.Event.Status == PartyUnknown {
 		return pending(base, ReasonEvidenceMissing, "a compared party could not be read")
 	}
@@ -554,10 +581,17 @@ func Classify(obs Observation) Classification {
 	}
 
 	base.Conclusion = ConclusionConsistent
-	if base.Duplicate == DuplicateAbsorbed {
+	switch {
+	case base.Duplicate == DuplicateAbsorbed:
 		base.Reason = ReasonDuplicateAbsorbed
 		base.Detail = "duplicate is idempotently absorbed with zero business divergence; metrics/audit only"
-	} else {
+	case obs.EventObligation == EventObligationNotApplicable:
+		// R2: the event dimension is excluded because the candidate
+		// provably carries no catalog event obligation. This is a chain/PG
+		// agreement, never a claim that all three parties agreed.
+		base.Reason = ReasonEventNotApplicable
+		base.Detail = "the event dimension is not applicable to this candidate; chain/PG evidence agrees"
+	default:
 		base.Reason = ReasonThreeWayMatch
 		base.Detail = "three-way comparison agrees"
 	}
@@ -637,6 +671,9 @@ func (o Observation) validateShape() error {
 	}
 	if o.Duplicates.Deliveries < 0 || o.Duplicates.EffectCount < 0 {
 		return errors.New("negative duplicate/effect count")
+	}
+	if o.EventObligation != "" && !o.EventObligation.Valid() {
+		return errors.New("unknown event obligation state")
 	}
 	if o.Duplicates.Deliveries > 1 && o.Event.Status != PartyPresent {
 		return errors.New("duplicate evidence without a present event party")

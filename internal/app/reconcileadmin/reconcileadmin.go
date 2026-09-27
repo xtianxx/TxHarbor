@@ -613,6 +613,20 @@ func reconcileAdminScan(ctx context.Context, args []string, d Deps) int {
 		fmt.Fprintf(stderr, "txharbor reconcile-admin: event-state adapter refused: %s\n", logx.Redact(err.Error()))
 		return 1
 	}
+	// T040: the read-only expectation carrier (event_obligation, migration
+	// 000017). Bounds: one interval reads at most the candidate aggregates'
+	// markers (the enumeration is already capped by maxCandidates, so the
+	// marker bound scales with it) and a bounded recent window of audited
+	// retention prunes. Reads that hit a bound stay conservative in the
+	// compare loop (R3 pending), never missing-by-truncation.
+	obligations, err := reconciliation.NewEventObligationAdapter(env.pool, reconciliation.EventObligationConfig{
+		MaxExpectations:    maxCandidates * 8,
+		MaxRetentionAudits: 64,
+	})
+	if err != nil {
+		fmt.Fprintf(stderr, "txharbor reconcile-admin: event-obligation adapter refused: %s\n", logx.Redact(err.Error()))
+		return 1
+	}
 
 	// Both scope kinds need the T036 window resolver:
 	//   - time scopes map time->height for the chain read;
@@ -670,9 +684,10 @@ func reconcileAdminScan(ctx context.Context, args []string, d Deps) int {
 		Limits:             limits,
 		FreshnessTolerance: freshness,
 		Sources: reconciliation.ScanSources{
-			Chain:  chainFacts,
-			PG:     pgState,
-			Events: eventState,
+			Chain:       chainFacts,
+			PG:          pgState,
+			Events:      eventState,
+			Obligations: obligations,
 		},
 		WindowResolver:       windowResolver,
 		HeightWindowResolver: windowResolver,

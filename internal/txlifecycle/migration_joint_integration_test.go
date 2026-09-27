@@ -18,8 +18,8 @@ import (
 // provisional numbers in 010→011 merge order on the joint scratch DB (PLAN-1;
 // T043): 000011 (010) precedes 000012 (011) precedes 000013 (010 guarded
 // follow-up) precedes 000014 (010 intent-FK repair), and no applied version is
-// missing or duplicated. The embedded tip is 000016 (014 reconciliation
-// handling), so the highest/current expectations are pinned at 16.
+// missing or duplicated. The embedded tip is 000017 (014 T040 expectation
+// carrier), so the highest/current expectations are pinned at 17.
 func TestT043MigrationSetMergeOrder(t *testing.T) {
 	e := newEnv(t)
 	ctx := context.Background()
@@ -46,8 +46,8 @@ func TestT043MigrationSetMergeOrder(t *testing.T) {
 			t.Errorf("version %d = %q, want %q", v, byVersion[v], name)
 		}
 	}
-	if last := versions[len(versions)-1]; last != 16 {
-		t.Errorf("highest migration = %d, want 16 (014 tip)", last)
+	if last := versions[len(versions)-1]; last != 17 {
+		t.Errorf("highest migration = %d, want 17 (014 tip)", last)
 	}
 
 	opts := db.MigrateOptions{DSN: dsn, LockTimeout: 10 * time.Second, ConnectTimeout: 10 * time.Second}
@@ -58,8 +58,8 @@ func TestT043MigrationSetMergeOrder(t *testing.T) {
 	if len(state.Pending) != 0 {
 		t.Fatalf("pending migrations: %v", state.Pending)
 	}
-	if state.Current != 16 {
-		t.Fatalf("current migration = %d, want 16 (014 tip)", state.Current)
+	if state.Current != 17 {
+		t.Fatalf("current migration = %d, want 17 (014 tip)", state.Current)
 	}
 	for _, v := range []int64{11, 12, 13, 14} {
 		found := false

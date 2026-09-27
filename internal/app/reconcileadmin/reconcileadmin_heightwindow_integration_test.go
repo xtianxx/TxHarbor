@@ -18,8 +18,11 @@
 //     withdrawal candidate carries its own frozen-013 event aggregate identity
 //     (request_id -> aggregate/withdrawal_request/<id>) as EventKey, so a
 //     delivered+closed event of the same business object is a three-way match
-//     with zero tickets, while a genuinely absent aggregate event row is the
-//     one missing-event delivery case that mints exactly one request_id ticket;
+//     with zero tickets. A genuinely absent aggregate event row follows the
+//     T040 discriminator over the real event_obligation carrier: with a
+//     durable expectation marker it mints exactly one request_id `missing`
+//     ticket, and without one it stays pending with a visible gap (never a
+//     ticket, never N/A);
 //   - event evidence that is genuinely insufficient (an unclosed delivery in
 //     the resolved window) stays pending with a visible gap, while an
 //     unconnected upstream receipt declaration no longer masks an otherwise
@@ -302,6 +305,23 @@ func recHdrSeedOutbox(t *testing.T, ctx context.Context, pool *pgxpool.Pool, cha
 		t.Fatalf("seed outbox event %s: %v", row.EventType, err)
 	}
 	return eventID
+}
+
+// recHdrSeedObligation seeds one T040 producer expectation marker
+// (event_obligation, migration 000017): the durable row internal/events.Append
+// writes inside the producer transaction. It is fixture input for the 014
+// read path, never a scan side effect.
+func recHdrSeedObligation(t *testing.T, ctx context.Context, pool *pgxpool.Pool,
+	aggregateType, aggregateID string, version int64, eventType string, obligatedAt time.Time) {
+	t.Helper()
+	if _, err := pool.Exec(ctx, `
+		INSERT INTO event_obligation (aggregate_type, aggregate_id, aggregate_version,
+		    expected_event_type, obligated_at, source_kind, source_id)
+		VALUES ($1, $2, $3, $4, $5, 'height-window-fixture', $6)
+		ON CONFLICT (aggregate_type, aggregate_id, aggregate_version, expected_event_type) DO NOTHING`,
+		aggregateType, aggregateID, version, eventType, obligatedAt.UTC(), aggregateID); err != nil {
+		t.Fatalf("seed obligation marker %s/%s: %v", aggregateType, aggregateID, err)
+	}
 }
 
 // recHdrApplyEvent records the reference consumer's durable application of one
@@ -713,12 +733,14 @@ func TestIntegrationReconcileAdminHeightWindowAcceptance(t *testing.T) {
 		}
 	})
 
-	// ---- 3d. receipted withdrawal, aggregate event row actually missing ----
+	// ---- 3d. receipted withdrawal, aggregate event row missing (R1) --------
 	//
 	// The same chain/PG state with no withdrawal.request.received row is the
 	// genuine missing-event-delivery case: the PG-anchored candidate stays
-	// request_id keyed and mints exactly one missing ticket (never a tx_hash
-	// candidate).
+	// request_id keyed, a durable expectation marker proves the event was due
+	// (the T040 carrier row internal/events.Append writes in the producer
+	// transaction), and the scan mints exactly one missing ticket (never a
+	// tx_hash candidate).
 	t.Run("receipted_withdrawal_without_event_row_mints_missing", func(t *testing.T) {
 		chainID := int64(32310)
 		recHdrSeedChain(t, ctx, pool, chainID, headers, recHdrScopeFrom, recHdrScopeTo)
@@ -726,6 +748,8 @@ func TestIntegrationReconcileAdminHeightWindowAcceptance(t *testing.T) {
 		txHash := "0x" + strings.Repeat("f7", 32)
 		recHdrInsertLog(t, ctx, pool, chainID, 4, headers[4].Hash, txHash, 0, recAdminAsset, recAdminSender, recAdminOutsider)
 		requestID, _ := recHdrSeedWithdrawalChain(t, ctx, pool, chainID, txHash, 4, headers[4].Hash, true)
+		recHdrSeedObligation(t, ctx, pool, "withdrawal_request", requestID, 1,
+			events.EventTypeWithdrawalRequestReceived, headers[3].Time)
 
 		taskID := recHdrTaskAndGrant(t, ctx, pool, fmt.Sprint(chainID), recHdrScopeFrom, recHdrScopeTo, []string{"withdrawal"})
 		out := recHdrScanAndAssertFunds(t, ctx, pool, env, taskID, fmt.Sprint(chainID),
@@ -749,6 +773,38 @@ func TestIntegrationReconcileAdminHeightWindowAcceptance(t *testing.T) {
 		}
 		if category != string(reconciliation.CategoryMissing) {
 			t.Fatalf("receipted withdrawal ticket category = %s, want missing (the absent aggregate event)", category)
+		}
+	})
+
+	// ---- 3e. receipted withdrawal, no event row AND no marker (R3) ---------
+	//
+	// The same shape without any durable expectation marker is exactly the
+	// unmarked-history case: the discriminator can neither prove the event was
+	// due nor prove it was N/A, so the scan stays pending with a visible gap
+	// and mints no ticket (标记缺席 ≠ N/A; 旧生产者未写标记 → 保守 pending).
+	t.Run("receipted_withdrawal_without_event_row_and_without_marker_stays_pending", func(t *testing.T) {
+		chainID := int64(32311)
+		recHdrSeedChain(t, ctx, pool, chainID, headers, recHdrScopeFrom, recHdrScopeTo)
+		recAdminSeedDepositConfig(t, ctx, pool, chainID, 1, 0, recAdminAsset+":0", recAdminWatch+":0")
+		txHash := "0x" + strings.Repeat("f8", 32)
+		recHdrInsertLog(t, ctx, pool, chainID, 4, headers[4].Hash, txHash, 0, recAdminAsset, recAdminSender, recAdminOutsider)
+		requestID, _ := recHdrSeedWithdrawalChain(t, ctx, pool, chainID, txHash, 4, headers[4].Hash, true)
+
+		before := recAdminCount(t, ctx, pool, "discrepancy")
+		taskID := recHdrTaskAndGrant(t, ctx, pool, fmt.Sprint(chainID), recHdrScopeFrom, recHdrScopeTo, []string{"withdrawal"})
+		out := recHdrScanAndAssertFunds(t, ctx, pool, env, taskID, fmt.Sprint(chainID),
+			recHdrScopeFrom, recHdrScopeTo, "withdrawal", "withdrawal=ledger:connected")
+		t.Logf("scan output: %s", out)
+		recHdrAssertFields(t, out, map[string]string{
+			"stop": "scope_exhausted", "candidates": "1", "tickets": "0", "merged": "0",
+			"pending": "1", "gaps": "1",
+		})
+		if after := recAdminCount(t, ctx, pool, "discrepancy"); after != before {
+			t.Fatalf("discrepancy rows = %d, want unchanged %d (unproven expectation mints nothing)",
+				after, before)
+		}
+		if n := recHdrBusinessKeyCount(t, ctx, pool, "request_id="+requestID); n != 0 {
+			t.Fatalf("tickets for the unmarked request = %d, want 0", n)
 		}
 	})
 

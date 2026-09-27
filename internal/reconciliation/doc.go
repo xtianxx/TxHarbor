@@ -14,6 +14,7 @@
 //	authz.go       - action×permission×scope enforcement, default-deny (T009)
 //	store.go       - atomic result+checkpoint commit, crash recovery (T010)
 //	chainfacts.go / pgstate.go / eventstate.go - read-only evidence adapters (T013-T015)
+//	obligation.go  - T040 expected-event discriminator (event_obligation read + R1/R2/R3)
 //	reverify.go    - bounded reverify executor (T027)
 //
 // Hard boundaries (see spec.md FR-014/015/020/021/023 and Q1–Q5):

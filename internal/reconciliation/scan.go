@@ -1041,6 +1041,12 @@ type ScanSources struct {
 	Chain  ChainFactsReader
 	PG     PGStateReader
 	Events EventStateReader
+	// Obligations is the T040 read-only expectation-carrier surface
+	// (event_obligation, migration 000017). A nil reader leaves every
+	// decisive event-only absence R3 pending: the discriminator never
+	// guesses an obligation from missing evidence and never upgrades 标记缺席
+	// into N/A.
+	Obligations EventObligationReader
 }
 
 // ScanOnceRequest is one budgeted scan invocation.
@@ -1755,6 +1761,44 @@ func compareScanInterval(ctx context.Context, req *ScanOnceRequest, task *Task, 
 	candidates := enumeration.Candidates
 	outcome.candidates = len(candidates)
 
+	// T040 expectation evidence: one bounded interval-level read over the
+	// catalog event aggregates the candidates name. The read is charged two
+	// PG statements (markers + audited retention history). A nil reader or a
+	// failed read leaves the evidence unusable, and every decisive event-only
+	// absence stays R3 pending with a visible uncovered range — missing
+	// evidence is never "no obligation".
+	var obligationEvidence EventObligationEvidence
+	if req.Sources.Obligations != nil {
+		aggregates := make([]EventObligationAggregate, 0, len(candidates))
+		for i := range candidates {
+			eventKey := candidates[i].EventKey
+			if strings.TrimSpace(eventKey.Value) == "" {
+				eventKey = candidates[i].BusinessKey
+			}
+			if aggregate, ok := EventObligationAggregateOf(eventKey); ok {
+				aggregates = append(aggregates, aggregate)
+			}
+		}
+		if len(aggregates) > 0 {
+			if err := budget.ConsumePG(ctx, 2); err != nil {
+				return nil, err
+			}
+			evidence, readErr := req.Sources.Obligations.ReadObligations(ctx,
+				EventObligationQuery{Aggregates: aggregates})
+			if ctxErr := scanContextError(readErr); ctxErr != nil {
+				return nil, ctxErr
+			}
+			if readErr != nil {
+				// The expectation carrier could not be read: the interval
+				// records the failed read as an uncovered range instead of
+				// concluding anything from it.
+				outcome.addGapReason(GapQueryFailed)
+			} else {
+				obligationEvidence = evidence
+			}
+		}
+	}
+
 	for i := range candidates {
 		candidate := candidates[i]
 		if err := scanValidateCandidate(&candidate, scope); err != nil {
@@ -1845,6 +1889,39 @@ func compareScanInterval(ctx context.Context, req *ScanOnceRequest, task *Task, 
 			}
 		}
 
+		// T040 expected-event discriminator: only the decisive event-only
+		// absence (chain fact and PG business record both present, event
+		// delivery absent) consults the expectation carrier. Where another
+		// party's divergence already owns the ticket, the event party status
+		// and its canonical content are left untouched, so no identity
+		// content hash and no existing ticket is perturbed:
+		//   - proven obligation   → keep absent (R1, existing missing ticket);
+		//   - provably no catalog event aggregate → N/A (R2), chain/PG
+		//     differences still classify independently;
+		//   - unproven obligation → unknown/pending (R3), alert-only.
+		var eventObligation EventObligationState
+		if eventParty.Status == PartyAbsent && chainParty.Status == PartyPresent && pgParty.Status == PartyPresent {
+			var aggregate *EventObligationAggregate
+			if bound, ok := EventObligationAggregateOf(eventKey); ok {
+				aggregate = &bound
+			}
+			verdict := DiscriminateEventObligation(aggregate, obligationEvidence)
+			switch verdict.State {
+			case EventObligationProven:
+				eventObligation = EventObligationProven
+			case EventObligationNotApplicable:
+				eventObligation = EventObligationNotApplicable
+				eventParty = PartyObservation{Status: PartyNotApplicable,
+					Content: EventNotApplicableSnapshot(eventKey)}
+			case EventObligationUnproven:
+				eventObligation = EventObligationUnproven
+				eventParty = PartyObservation{Status: PartyUnknown,
+					Content: eventUnavailableSnapshot(eventKey)}
+			default:
+				return nil, contractErrorf("event obligation discriminator returned unknown state %q", verdict.State)
+			}
+		}
+
 		// Q4 duplicate evidence: the event adapter owns the delivery-side
 		// facts, the candidate owns the PG-side repeated-effect facts.
 		duplicates := candidate.PGDuplicate
@@ -1875,9 +1952,10 @@ func compareScanInterval(ctx context.Context, req *ScanOnceRequest, task *Task, 
 				Now:                now,
 				FreshnessTolerance: req.FreshnessTolerance,
 			},
-			Upstream:    scanUpstreamReceiptSource(task, candidate.BusinessType),
-			Version:     mergeScanVersionDomain(chainBundle, chainBlock, chainLogs, eventObs, pgRecord, candidate.ChainFact, now),
-			EvidenceRef: candidate.EvidenceRef,
+			Upstream:        scanUpstreamReceiptSource(task, candidate.BusinessType),
+			Version:         mergeScanVersionDomain(chainBundle, chainBlock, chainLogs, eventObs, pgRecord, candidate.ChainFact, now),
+			EvidenceRef:     candidate.EvidenceRef,
+			EventObligation: eventObligation,
 		})
 		if members := scanCandidateMembers(candidate, chainLogs); len(members) > 0 {
 			classification.Members = members

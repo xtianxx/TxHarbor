@@ -142,3 +142,16 @@
 - 边界：不伪造历史标记、不回填未经证明的 cutover；旧实体新转换独立判定；已有票据不静默删除/关闭，新证据走已批准失效/复核/审计流程。
 - 任务口径：T030/T039/T040 保持未勾选，维持 37/40（不宣称 40/40）；T030 关闭仍依赖 T040；T000-P 保持 OPEN。本轮不改产品代码/CI、不跑产品测试。
 - 遗留业务问题（需业务裁决）：祖父证据清单边界、旧生产者标记缺席的 permanent pending 治理、期望义务目录变更权，见设计文档 §6。
+
+## 11. T040 实现落地补充（2026-09-27；非测试证据，不改动 §1–§10 历史）
+
+- 树状态: HEAD `80b2b64` + 本轮 T040 工作树；未提交、未推送。
+- 000017 `event_obligations.sql` 落地持久期望载体（生产者在 `internal/events.Append` 同事务写入标记）；读路径三路判别、合法裁剪区分与旧任务兼容的实现＋验证证据见 `docs/evidence/014/t040_discriminator_evidence.md`。
+- §3 表引用的 `TestIntegrationEventOnlyAbsenceStillMintsFailClosedTicket` 已由 T040 三路矩阵取代：`TestIntegrationEventObligationDiscriminatorMatrix`（有标记→missing、无标记→pending/gap、R2 N/A 不造票）；§6 行的 T030 第三项 BLOCKED 记录相应过时，当前状态以本节与 T040 证据为准。
+- 任务口径：T030/T039/T040 仍保持未勾选（本 lane 只落 T040 实现证据，不代勾 tasks.md）；T000-P 保持 OPEN；远程 CI 仍待核验。
+
+## 12. T039＋T040 联合收口（2026-09-27；关闭 T030，不改动 §1–§11 历史）
+
+- T039：`internal/reconciliation/*` 已纳入 pg 分类集＋反向覆盖守卫，正反例回放全过；fault/perf 未进 PR；必需检查名不动。
+- T040：000017 期望载体、8 类型接线、三路判别、旧任务兼容已实现并验证（见 `t040_discriminator_evidence.md`）；真实 CLI 3d/3e 与重验证入口区分 R1/R2/R3，未知/gap 不可闭合。
+- T030 据此关闭；任务口径 40/40；T000-P 保持 OPEN；远程 CI 仍待核验，本地通过不等于生产就绪。

@@ -39,13 +39,16 @@ type txCall struct {
 }
 
 // scriptedTx is a pgx.Tx stand-in: the embedded nil interface satisfies the
-// full pgx.Tx surface while QueryRow answers from the script. Only QueryRow is
-// ever called by Append, so no other method needs an implementation.
+// full pgx.Tx surface while QueryRow answers from the script and Exec records
+// the T040 obligation INSERT. Only QueryRow/Exec are ever called by Append, so
+// no other method needs an implementation.
 type scriptedTx struct {
 	pgx.Tx
-	mu    sync.Mutex
-	calls []txCall
-	steps []txStep
+	mu        sync.Mutex
+	calls     []txCall
+	execCalls []txCall
+	steps     []txStep
+	execErr   error
 }
 
 func (tx *scriptedTx) QueryRow(_ context.Context, sql string, args ...any) pgx.Row {
@@ -61,10 +64,36 @@ func (tx *scriptedTx) QueryRow(_ context.Context, sql string, args ...any) pgx.R
 	return scriptedRow{err: fmt.Errorf("unexpected query: %s", sql)}
 }
 
+func (tx *scriptedTx) Exec(_ context.Context, sql string, args ...any) (pgconn.CommandTag, error) {
+	tx.mu.Lock()
+	defer tx.mu.Unlock()
+	tx.execCalls = append(tx.execCalls, txCall{sql: sql, args: args})
+	if tx.execErr != nil {
+		return pgconn.CommandTag{}, tx.execErr
+	}
+	return pgconn.NewCommandTag("INSERT 0 1"), nil
+}
+
 func (tx *scriptedTx) callCount() int {
 	tx.mu.Lock()
 	defer tx.mu.Unlock()
 	return len(tx.calls)
+}
+
+func (tx *scriptedTx) execCount() int {
+	tx.mu.Lock()
+	defer tx.mu.Unlock()
+	return len(tx.execCalls)
+}
+
+func (tx *scriptedTx) execCall(t *testing.T, index int) txCall {
+	t.Helper()
+	tx.mu.Lock()
+	defer tx.mu.Unlock()
+	if index >= len(tx.execCalls) {
+		t.Fatalf("exec %d not issued; %d execs total", index, len(tx.execCalls))
+	}
+	return tx.execCalls[index]
 }
 
 func (tx *scriptedTx) call(t *testing.T, index int) txCall {
@@ -159,6 +188,24 @@ func TestAppendInsertsNewEvent(t *testing.T) {
 	if tx.callCount() != 2 {
 		t.Fatalf("Append issued %d queries, want 2", tx.callCount())
 	}
+	if tx.execCount() != 1 {
+		t.Fatalf("Append issued %d execs, want 1 (the T040 obligation marker)", tx.execCount())
+	}
+	obligationCall := tx.execCall(t, 0)
+	if !strings.Contains(obligationCall.sql, "INSERT INTO event_obligation") {
+		t.Fatalf("exec is not the obligation marker insert: %s", obligationCall.sql)
+	}
+	if len(obligationCall.args) != 8 {
+		t.Fatalf("obligation insert has %d args, want 8", len(obligationCall.args))
+	}
+	if obligationCall.args[0] != "deposit_observation" || obligationCall.args[1] != "obs-1" ||
+		obligationCall.args[2] != int64(1) || obligationCall.args[3] != EventTypeDepositObservationCreated {
+		t.Fatalf("obligation aggregate/type args = %v, want (deposit_observation, obs-1, 1, %s)",
+			obligationCall.args[:4], EventTypeDepositObservationCreated)
+	}
+	if obligationCall.args[4] != ev.OccurredAt {
+		t.Fatalf("obligation obligated_at = %v, want the transition instant %v", obligationCall.args[4], ev.OccurredAt)
+	}
 	versionCall := tx.call(t, 0)
 	if !strings.Contains(versionCall.sql, "coalesce(max(aggregate_version)") {
 		t.Fatalf("first query is not the version query: %s", versionCall.sql)
@@ -242,8 +289,30 @@ func TestAppendSameIdentitySameContentIsNoop(t *testing.T) {
 	if res.AggregateVersion != 1 {
 		t.Fatalf("no-op AggregateVersion = %d, want the existing row version 1", res.AggregateVersion)
 	}
+	if tx.execCount() != 0 {
+		t.Fatalf("no-op issued %d obligation marker writes, want 0 (no backfill, zero appends)", tx.execCount())
+	}
 	if observer.count() != 0 {
 		t.Fatalf("no-op raised %d conflict alerts, want 0", observer.count())
+	}
+}
+
+// TestAppendObligationFailureRollsBackTheEmission pins the T040 atomicity
+// contract at the Append boundary: a failed obligation marker write fails the
+// whole Append, so the caller's transaction rolls back the business
+// transition, the event row and the marker together (no half-committed
+// emission, no event without its expectation).
+func TestAppendObligationFailureRollsBackTheEmission(t *testing.T) {
+	ctx := context.Background()
+	ev := mustNewEvent(t, validEvent(t, EventTypeDepositObservationCreated))
+	tx := newVersionTx(0, scriptedRow{fill: fillValues(int64(42), int64(1), true)})
+	tx.execErr = &pgconn.PgError{Code: "23514", ConstraintName: "event_obligation_mapping_check"}
+
+	if _, err := Append(ctx, tx, ev); !errors.Is(err, ErrContract) {
+		t.Fatalf("Append() with a failing obligation insert error = %v, want ErrContract", err)
+	}
+	if tx.execCount() != 1 {
+		t.Fatalf("failing obligation insert issued %d execs, want 1", tx.execCount())
 	}
 }
 

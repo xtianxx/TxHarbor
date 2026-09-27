@@ -19,6 +19,13 @@
 # flows wire those layers (the T067 HTTP failure path exercises the rate-limit
 # policy end to end).
 #
+# Reverse coverage guard (T039): the `changes` job enumerates every package
+# directory that carries `//go:build integration` tests — the exact set
+# `make test-integration` executes — and hard-fails when any of them is
+# missing from the integration-PG path set. A missed internal path is an
+# explicit red, never silently "unclassified" (which the filter would
+# misread as "not affected").
+#
 # Fault Injection and Performance never run here: they live in
 # `.github/workflows/fault-perf.yml` (scheduled/manual/release gate) and MUST
 # NOT be started by an ordinary PR (FR-28; verification.md §4).
@@ -108,6 +115,15 @@ jobs:
               run_all=true
             fi
           fi
+          # Single source of truth for the integration-PG path set, shared by
+          # the changed-file classification and the reverse coverage guard
+          # below (T039) so the two can never drift apart.
+          is_integration_pg_path() {
+            case "$1" in
+              internal/events/*|migrations/*|internal/indexer/*|internal/withdrawal/*|internal/execution/*|internal/reconciliation/*|internal/app/*|internal/db/*|internal/health/*|internal/testutil/*|internal/eth/*|internal/nonce/*|internal/signer/*|internal/txlifecycle/*|internal/jointwire/*|internal/logx/*|internal/config/*|internal/metrics/*|cmd/*|go.mod|go.sum|Makefile|compose.yaml|.github/workflows/*) return 0 ;;
+              *) return 1 ;;
+            esac
+          }
           pg=false; redis=false; kafka=false; e2e=false
           if [ "$run_all" = true ]; then
             pg=true; redis=true; kafka=true; e2e=true
@@ -115,12 +131,11 @@ jobs:
             changed="$(git diff --name-only "$base" "$HEAD_SHA")"
             while IFS= read -r f; do
               [ -n "$f" ] || continue
-              # Integration-PG: events runtime, migration 000015 (all
-              # migrations), upstream integration points, app wiring, shared
-              # test/config/metrics infrastructure.
-              case "$f" in
-                internal/events/*|migrations/*|internal/indexer/*|internal/withdrawal/*|internal/execution/*|internal/app/*|internal/db/*|internal/health/*|internal/testutil/*|internal/eth/*|internal/nonce/*|internal/signer/*|internal/txlifecycle/*|internal/jointwire/*|internal/logx/*|internal/config/*|internal/metrics/*|cmd/*|go.mod|go.sum|Makefile|compose.yaml|.github/workflows/*) pg=true ;;
-              esac
+              # Integration-PG: events runtime, every migration, upstream
+              # integration points (indexer / withdrawal / execution /
+              # reconciliation), app wiring, shared test/config/metrics
+              # infrastructure.
+              if is_integration_pg_path "$f"; then pg=true; fi
               # Integration-Redis: cache/rate-limit carriers and their wiring.
               case "$f" in
                 internal/cache/*|internal/ratelimit/*|internal/app/*|internal/config/*|internal/metrics/*|internal/testutil/*|go.mod|go.sum|Makefile|compose.yaml|.github/workflows/*) redis=true ;;
@@ -136,6 +151,30 @@ jobs:
               esac
             done <<< "$changed"
           fi
+          # Reverse coverage guard (T039): enumerate every package directory
+          # that carries `//go:build integration` tests and assert the pg path
+          # set above matches it. A directory missing from the set fails this
+          # job loudly; a check that cannot enumerate MUST NOT read as green.
+          integration_dirs="$(grep -rl --include='*_test.go' --exclude-dir=.git --exclude-dir=.omo --exclude-dir=.evidence -E '^//go:build integration$' . 2>/dev/null | sed 's|/[^/]*$||' | sort -u || true)"
+          if [ -z "$integration_dirs" ]; then
+            echo "::error::reverse coverage guard: no '//go:build integration' test files found — cannot verify the pg path set is complete (an empty enumeration must not read as covered)."
+            exit 1
+          fi
+          integration_dir_count=0
+          uncovered=""
+          while IFS= read -r dir; do
+            [ -n "$dir" ] || continue
+            dir="${dir#./}"
+            integration_dir_count=$((integration_dir_count + 1))
+            if ! is_integration_pg_path "${dir}/guard_probe.go"; then
+              uncovered="${uncovered}${uncovered:+, }${dir}"
+            fi
+          done <<< "$integration_dirs"
+          if [ -n "$uncovered" ]; then
+            echo "::error::reverse coverage guard: integration-pg path set misses package(s) with '//go:build integration' tests: ${uncovered}. Add them to is_integration_pg_path in this workflow — a missed internal path must not default to unclassified."
+            exit 1
+          fi
+          echo "reverse coverage guard: all ${integration_dir_count} package dirs with '//go:build integration' tests match the pg path set"
           {
             echo "pg=$pg"
             echo "redis=$redis"
@@ -151,6 +190,8 @@ jobs:
             echo "| integration-redis | $redis |"
             echo "| integration-kafka | $kafka |"
             echo "| e2e core | $e2e |"
+            echo ""
+            echo "Reverse coverage guard (T039): ${integration_dir_count} package dirs with '//go:build integration' tests, all matched by the pg path set."
           } >> "$GITHUB_STEP_SUMMARY"
 
   lint:

@@ -32,9 +32,10 @@ var eventInfrastructureTables = []string{
 }
 
 // TestEventInfrastructureMigrationUpDownUp covers T009 (data-model §7):
-// 000015 applies on a scratch database, the joint tip 000016 reverts first,
-// 000015 then reverts cleanly with `down`, and both apply again; the seven
-// tables and the single-row cutover seed exist on the 16 tip.
+// 000015 applies on a scratch database, the joint tips revert first (000017,
+// then 000016), 000015 then reverts cleanly with `down`, and all apply again;
+// the seven tables and the single-row cutover seed exist on the 17 tip
+// (000017 adds only the T040 event_obligation carrier).
 func TestEventInfrastructureMigrationUpDownUp(t *testing.T) {
 	dsn := startPostgres(t)
 	ctx := context.Background()
@@ -46,18 +47,27 @@ func TestEventInfrastructureMigrationUpDownUp(t *testing.T) {
 	}
 	sqlDB := openTestSQL(t, dsn)
 	assertEventInfrastructureTables(t, sqlDB)
+	assertEventObligationTable(t, sqlDB)
 
 	provider, err := newProvider(sqlDB, opts)
 	if err != nil {
 		t.Fatalf("newProvider() error = %v", err)
 	}
-	// 000016 is the joint tip, so the first down reverts it before 000015.
+	// 000017 and 000016 are the joint tips, so the first downs revert them
+	// before 000015.
 	result, err := provider.Down(ctx)
 	if err != nil {
 		t.Fatalf("Down() error = %v", err)
 	}
+	if result.Source.Version != 17 {
+		t.Fatalf("Down() reverted version %d, want 17 (the last migration)", result.Source.Version)
+	}
+	result, err = provider.Down(ctx)
+	if err != nil {
+		t.Fatalf("Down() of 000016 error = %v", err)
+	}
 	if result.Source.Version != 16 {
-		t.Fatalf("Down() reverted version %d, want 16 (the last migration)", result.Source.Version)
+		t.Fatalf("Down() reverted version %d, want 16 (000016)", result.Source.Version)
 	}
 	result, err = provider.Down(ctx)
 	if err != nil {
@@ -66,7 +76,7 @@ func TestEventInfrastructureMigrationUpDownUp(t *testing.T) {
 	if result.Source.Version != 15 {
 		t.Fatalf("Down() reverted version %d, want 15 (000015)", result.Source.Version)
 	}
-	for _, table := range eventInfrastructureTables {
+	for _, table := range append(append([]string(nil), eventInfrastructureTables...), "event_obligation") {
 		var reg *string
 		if err := sqlDB.QueryRowContext(ctx, "SELECT to_regclass($1)::text", "public."+table).Scan(&reg); err != nil {
 			t.Fatalf("to_regclass(%s): %v", table, err)
@@ -81,12 +91,34 @@ func TestEventInfrastructureMigrationUpDownUp(t *testing.T) {
 		t.Fatalf("MigrateUp() after down error = %v", err)
 	}
 	assertEventInfrastructureTables(t, sqlDB)
+	assertEventObligationTable(t, sqlDB)
 	state, err := Inspect(ctx, opts)
 	if err != nil {
 		t.Fatalf("Inspect() after up error = %v", err)
 	}
-	if state.Current != 16 {
-		t.Fatalf("current migration after up = %d, want 16 (the last migration)", state.Current)
+	if state.Current != 17 {
+		t.Fatalf("current migration after up = %d, want 17 (the last migration)", state.Current)
+	}
+}
+
+// assertEventObligationTable checks the T040 carrier exists with the documented
+// identity UNIQUE, and that the Up left it empty (no seed, no backfill).
+func assertEventObligationTable(t *testing.T, sqlDB *sql.DB) {
+	t.Helper()
+	ctx := context.Background()
+	var reg *string
+	if err := sqlDB.QueryRowContext(ctx, "SELECT to_regclass('public.event_obligation')::text").Scan(&reg); err != nil {
+		t.Fatalf("to_regclass(event_obligation): %v", err)
+	}
+	if reg == nil {
+		t.Fatal("event_obligation missing after up")
+	}
+	var count int64
+	if err := sqlDB.QueryRowContext(ctx, "SELECT count(*)::bigint FROM event_obligation").Scan(&count); err != nil {
+		t.Fatalf("count event_obligation: %v", err)
+	}
+	if count != 0 {
+		t.Fatalf("event_obligation rows after migration = %d, want 0 (no seed, no historical backfill)", count)
 	}
 }
 

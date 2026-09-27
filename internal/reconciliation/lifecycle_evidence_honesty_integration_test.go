@@ -16,12 +16,12 @@
 //
 // The pending/incomplete scan classifications never reach these gates at all
 // (they carry no ticket); these cases pin the lifecycle half of the T030
-// requirement that evidence gates cannot be bypassed. T030's scan-side
-// companion (event-only absence as alert-only pending) is BLOCKED on a missing
-// cutover/expected-event discriminator and stays on the fail-closed missing
-// path for now — see the blocker note in scan_evidence_honesty_test.go. No
-// pre-cutover or post-cutover shape reaches these gates without the same
-// fresh, DB-recorded consistent reverify evidence.
+// requirement that evidence gates cannot be bypassed. The scan-side companion
+// landed with T040 (the expected-event discriminator over the 000017 carrier,
+// see scan_evidence_honesty_integration_test.go): an unmarked event-only
+// absence now stays pending/gap, while a marker-proven absence keeps the
+// fail-closed missing ticket — either way no shape reaches these gates without
+// the same fresh, DB-recorded consistent reverify evidence.
 //
 // PostgreSQL comes from testcontainers via the T012 helpers; without a Docker
 // provider the package reports NOT RUN (t.Skip), never a pass.

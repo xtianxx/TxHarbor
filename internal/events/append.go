@@ -115,6 +115,32 @@ DO UPDATE SET attempt_count = outbox_events.attempt_count
 WHERE outbox_events.payload_hash = EXCLUDED.payload_hash
 RETURNING id, aggregate_version, (xmax = 0) AS inserted`
 
+// obligationInsertSQL records the T040 expectation marker for one actually
+// inserted catalog event, inside the same caller transaction as the outbox
+// insert. It is an append-only INSERT: ON CONFLICT DO NOTHING makes a
+// repeated/concurrent emission of the same aggregate version converge to zero
+// new rows (the identity UNIQUE is the backstop), and no UPDATE/DELETE path
+// exists. The obligation tuple is the aggregate triple plus the event type;
+// obligated_at is the transition instant carried by the event.
+//
+// Capability boundary (recorded, not resolvable here): the marker is written
+// only because Append ran, so it can never detect a producer code path that
+// never calls Append at all (neither event nor marker exists then). It proves
+// "an event was due when this emission happened", which is what lets the 014
+// read path distinguish a genuine post-hoc loss (marker exists, event row
+// gone) from unmarked history (no marker, stays pending). It is NOT an
+// independent completeness proof of all producer paths; that remains carried
+// by the same-transaction atomicity and its tests
+// (docs/evidence/014/t040_discriminator_evidence.md §2).
+const obligationInsertSQL = `
+INSERT INTO event_obligation (
+	aggregate_type, aggregate_id, aggregate_version,
+	expected_event_type, obligated_at,
+	source_kind, source_id, source_version
+) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+ON CONFLICT (aggregate_type, aggregate_id, aggregate_version, expected_event_type)
+DO NOTHING`
+
 // Append writes ev inside the caller's already-open PostgreSQL transaction
 // (T1: business transition + outbox row commit or roll back together; FR-07;
 // data-model §5). It never opens its own transaction and never performs a
@@ -123,6 +149,13 @@ RETURNING id, aggregate_version, (xmax = 0) AS inserted`
 // The aggregate_version is derived in-transaction as coalesce(max,0)+1; the
 // partial UNIQUE index is the concurrency backstop and conflicts are
 // classified, never retried blindly (data-model §3.3/§10).
+//
+// T040: when the event row is actually inserted (inserted=true), Append also
+// writes the event_obligation expectation marker in the same transaction. A
+// marker failure fails Append, so the business transition, the event row and
+// the marker still commit or roll back as one unit; a no-op replay writes
+// neither a second event row nor a second marker and never backfills a marker
+// for pre-carrier history (旧行无标记＝unknown).
 //
 // Producer contract: one Append per business transition. Callers must not
 // re-Append for an idempotent replay of an already-committed transition.
@@ -160,6 +193,15 @@ func Append(ctx context.Context, tx pgx.Tx, ev Event) (AppendResult, error) {
 			return AppendResult{}, fmt.Errorf("%w: %s: %v", ErrIdentityConflict, prepared.EventType, err)
 		}
 		return AppendResult{}, classified
+	}
+	if inserted {
+		// T040 expectation marker: same transaction, same commit/rollback unit.
+		if _, err := tx.Exec(ctx, obligationInsertSQL,
+			prepared.AggregateType, prepared.AggregateID, storedVersion,
+			prepared.EventType, prepared.OccurredAt,
+			prepared.SourceKind, prepared.SourceID, nullableInt64(prepared.SourceVersion)); err != nil {
+			return AppendResult{}, ClassifyPGError(err)
+		}
 	}
 	return AppendResult{
 		EventID:          eventID,
