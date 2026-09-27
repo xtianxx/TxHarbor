@@ -23,7 +23,7 @@ test-race:
 
 # Integration tests, PostgreSQL layer (testcontainers; requires a Docker daemon).
 test-integration:
-	go test -tags integration -count=1 -timeout 20m ./...
+	go test -tags integration -count=1 -timeout 20m -p 6 ./...
 
 # Integration tests, Redis layer (testcontainers; requires a Docker daemon).
 test-integration-redis:
