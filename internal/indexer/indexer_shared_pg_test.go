@@ -1,29 +1,42 @@
 //go:build integration
 
 // indexer_shared_pg_test.go owns the package-wide PostgreSQL lifecycle for the
-// indexer integration suite (Phase A container-lifecycle optimization).
+// indexer integration suite (Phase A container-lifecycle optimization, Phase B
+// template-DB clone fast path).
 //
 // Before: every startIndexerPostgres call booted its own postgres:18.6-trixie
 // container and migrated it, so a single `go test -tags integration` run
-// created dozens of containers.
+// created dozens of containers; the first optimization left one container but
+// still re-ran the embedded migrations per test database.
 //
-// After: TestMain boots exactly one container for the whole package and
-// startIndexerPostgres derives a uniquely named, migrated database inside it.
-// Isolation is preserved at the database level: every call gets a fresh
-// database (CREATE DATABASE; DROP DATABASE ... WITH (FORCE) in t.Cleanup), so
-// no test can observe another test's rows. Anvil containers, sleeps/TTLs/polls
-// and every test entry name/assertion are untouched.
+// After (both phases): TestMain boots exactly one container for the whole
+// package and builds one migrated template database (indexerTemplateDBName) by
+// running the full db.MigrateUp exactly once, single-threaded. Every
+// startIndexerPostgres call then clones that template with
+// CREATE DATABASE ... WITH TEMPLATE and drops its clone in t.Cleanup
+// (DROP DATABASE ... WITH (FORCE)). Isolation is preserved at the database
+// level: every call gets a fresh database, so no test can observe another
+// test's rows. Anvil containers, sleeps/TTLs/polls and every test entry
+// name/assertion are untouched.
+//
+// Migration coverage: the template build is the package-wide canary — it runs
+// the full migration path once and aborts the package loudly on any error
+// before m.Run. In addition, exactly one test,
+// TestLeaseExactlyOneHolderAndExpiryTakeover (lease_integration_test.go),
+// calls startIndexerPostgresMigrated, which keeps the legacy empty-database +
+// full db.MigrateUp path alive on every run, so a broken migration cannot hide
+// behind a template that was only built earlier in the same binary (see the
+// helper comment for why that test).
 //
 // Deliberate non-goals and follow-ups (documented, not implemented here):
-//   - No TEMPLATE cloning: each database runs the embedded migrations, which
-//     keeps migration coverage per test and avoids template1 lock contention.
 //   - The pg_stat_activity barriers in deposit_ctxguard, confirmation_race and
 //     deposit_auth read cluster-wide state. That is safe while the indexer
 //     package runs serially against its own per-test databases, but it must be
 //     revisited before another package shares this container or any test gains
 //     t.Parallel (TODO markers at each site).
 //   - TXHARBOR_KEEP_DB=1 (or a failed test) keeps that test's database for
-//     triage; the container still terminates with the test binary.
+//     triage; the template and the container still terminate with the test
+//     binary.
 package indexer
 
 import (
@@ -42,6 +55,8 @@ import (
 	"github.com/testcontainers/testcontainers-go"
 	"github.com/testcontainers/testcontainers-go/modules/postgres"
 	"github.com/testcontainers/testcontainers-go/wait"
+
+	"github.com/xtianxx/txharbor/internal/db"
 )
 
 const (
@@ -64,10 +79,21 @@ const (
 	indexerTestDBPrefix   = "idx_t_"
 	indexerTestDBMaxBytes = 62
 
+	// indexerTemplateDBName is the one migrated template database built by
+	// TestMain; every per-test database is cloned from it. It deliberately
+	// does not use indexerTestDBPrefix so it can never collide with a derived
+	// per-test name.
+	indexerTemplateDBName = "idx_template_migrated"
+
 	indexerKeepDBEnv = "TXHARBOR_KEEP_DB"
 
 	indexerAdminPingTimeout = 10 * time.Second
 	indexerDropTimeout      = 30 * time.Second
+
+	// indexerTemplateConnDrainTimeout bounds the wait for the MigrateUp
+	// session's backends to disappear from the template database before the
+	// package starts cloning it.
+	indexerTemplateConnDrainTimeout = 10 * time.Second
 )
 
 var (
@@ -77,6 +103,11 @@ var (
 	sharedBaseDSN string
 	sharedCtr     *postgres.PostgresContainer
 	adminPool     *pgxpool.Pool
+
+	// sharedTemplateDB is indexerTemplateDBName once the migrated template
+	// database exists, and "" before that (and after teardown). It is written
+	// once before m.Run and only read afterwards.
+	sharedTemplateDB string
 
 	// indexerDBMu serializes CREATE DATABASE: PostgreSQL serializes on the
 	// template database, so concurrent creation is best kept ordered here.
@@ -140,7 +171,9 @@ func indexerDockerProviderHealthy(ctx context.Context) (healthy bool) {
 }
 
 // startSharedIndexerPostgres boots the single postgres container for the
-// package and opens the admin pool used to create/drop per-test databases.
+// package, opens the admin pool used to create/drop per-test databases, and
+// builds the migrated template database every startIndexerPostgres call
+// clones.
 func startSharedIndexerPostgres(ctx context.Context) error {
 	ctr, err := postgres.Run(ctx, indexerPGImage,
 		postgres.WithDatabase(indexerBaseDatabase),
@@ -178,12 +211,90 @@ func startSharedIndexerPostgres(ctx context.Context) error {
 	if err := pool.Ping(pingCtx); err != nil {
 		return fmt.Errorf("ping admin pool: %w", err)
 	}
+
+	// Build the migrated template database once, here in TestMain, before any
+	// test can run; every startIndexerPostgres call clones it afterwards.
+	return buildSharedIndexerTemplate(ctx)
+}
+
+// buildSharedIndexerTemplate creates the migrated template database once,
+// single-threaded, before m.Run: one full db.MigrateUp over an empty database.
+//
+// db.MigrateUp closes its own connections before returning, and
+// waitForZeroIndexerTemplateConnections proves the server also sees zero open
+// connections to the template. That is what CREATE DATABASE ... WITH TEMPLATE
+// requires; without the drain wait the first clone could race the asynchronous
+// server-side teardown of the migration session and fail with "source database
+// is being accessed by other users". Nothing ever connects to the template
+// after this point, so once the drain wait returns, zero stays zero for the
+// rest of the run.
+//
+// This build is also the package-wide migration canary: any migration failure
+// aborts the package from TestMain (exit 1) before a single test runs, which is
+// loud and can never look like a skip.
+func buildSharedIndexerTemplate(ctx context.Context) error {
+	start := time.Now()
+	if _, err := adminPool.Exec(ctx, "CREATE DATABASE "+pgx.Identifier{indexerTemplateDBName}.Sanitize()); err != nil {
+		return fmt.Errorf("create template database %s: %w", indexerTemplateDBName, err)
+	}
+	// From here on the template exists: teardownSharedIndexerPostgres drops it
+	// on every path, including a partially migrated build.
+	sharedTemplateDB = indexerTemplateDBName
+
+	dsn, err := deriveIndexerDSN(sharedBaseDSN, indexerTemplateDBName)
+	if err != nil {
+		return fmt.Errorf("derive template database dsn: %w", err)
+	}
+
+	var summary strings.Builder
+	if err := db.MigrateUp(ctx, db.MigrateOptions{
+		DSN:            dsn,
+		LockTimeout:    5 * time.Second,
+		ConnectTimeout: 5 * time.Second,
+	}, &summary); err != nil {
+		return fmt.Errorf("migrate template database %s: %w", indexerTemplateDBName, err)
+	}
+	if err := waitForZeroIndexerTemplateConnections(ctx, indexerTemplateDBName); err != nil {
+		return err
+	}
+
+	fmt.Fprintf(os.Stderr, "indexer integration: template database %s migrated in %s (%s)\n",
+		indexerTemplateDBName, time.Since(start).Round(time.Millisecond), strings.TrimSpace(summary.String()))
 	return nil
 }
 
-// teardownSharedIndexerPostgres closes the admin pool and terminates the
-// shared container. It runs on the normal and the setup-failure path.
+// waitForZeroIndexerTemplateConnections polls pg_stat_activity until no server
+// backend is attached to dbName. The admin pool itself is connected to the base
+// database, so it never counts against the template.
+func waitForZeroIndexerTemplateConnections(ctx context.Context, dbName string) error {
+	deadline := time.Now().Add(indexerTemplateConnDrainTimeout)
+	for {
+		var n int
+		if err := adminPool.QueryRow(ctx,
+			"SELECT count(*) FROM pg_stat_activity WHERE datname = $1", dbName).Scan(&n); err != nil {
+			return fmt.Errorf("count connections to template database %s: %w", dbName, err)
+		}
+		if n == 0 {
+			return nil
+		}
+		if time.Now().After(deadline) {
+			return fmt.Errorf("template database %s still has %d open connection(s) after %s; CREATE DATABASE ... WITH TEMPLATE would fail",
+				dbName, n, indexerTemplateConnDrainTimeout)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+// teardownSharedIndexerPostgres drops the migrated template database, closes
+// the admin pool and terminates the shared container. It runs on the normal and
+// the setup-failure path.
 func teardownSharedIndexerPostgres() {
+	if adminPool != nil && sharedTemplateDB != "" {
+		if err := dropIndexerTestDB(context.Background(), sharedTemplateDB); err != nil {
+			fmt.Fprintf(os.Stderr, "indexer integration: drop template database %s: %v\n", sharedTemplateDB, err)
+		}
+		sharedTemplateDB = ""
+	}
 	if adminPool != nil {
 		adminPool.Close()
 		adminPool = nil
