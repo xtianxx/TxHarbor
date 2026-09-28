@@ -1,0 +1,73 @@
+# Recovery Drill: independent layer (FR-030/033; quickstart.md §3;
+# verification.md §4).
+#
+# The full disaster-recovery drill (S1-S12 + the F1-F7 failure matrix; real
+# PG/Anvil and, for the event scenarios, Redis/Kafka) is long and Docker-backed.
+# It never runs on ordinary pull requests and never blocks them; it runs on a
+# schedule or manual dispatch. A failure here does not block PRs, but it DOES
+# block the corresponding recovery claim: without a green run of this workflow
+# there is no evidence to claim the drill (no evidence -> no claim).
+#
+# An unrun drill must never read as a pass: while no `drill`-tagged test exists,
+# `make test-drill` reports NOT RUN and exits non-zero (the require_tagged_tests
+# guard), which surfaces here as a failed job — the layer is "not run", not
+# "green".
+#
+# Docker is required: testcontainers provisions its own pinned images
+# (postgres:18.6-trixie, foundry v1.8.1, redis:8.2.10-alpine,
+# confluentinc/confluent-local:7.9.10 from the test sources/compose.yaml);
+# nothing floats and no external service is contacted. Drill evidence is
+# exported as a run artifact so a claim can cite a durable run record.
+name: Recovery Drill
+
+on:
+  schedule:
+    # Weekly, off-peak; the cadence is operational, not a budget claim.
+    - cron: "41 3 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: drill-${{ github.ref }}
+  cancel-in-progress: false
+
+# Fictional credentials only (same rationale as ci.yml / fault-perf.yml).
+env:
+  TXHARBOR_PG_DSN: postgres://txharbor:txharbor@127.0.0.1:5432/txharbor?sslmode=disable
+  TXHARBOR_RPC_URL: http://127.0.0.1:8545
+  TXHARBOR_CHAIN_ID: "31337"
+
+jobs:
+  drill:
+    name: full recovery drill (S1-S12 + F1-F7, Docker)
+    runs-on: ubuntu-latest
+    timeout-minutes: 240
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version: "1.26.5"
+          cache: true
+      - name: verify Docker daemon for testcontainers
+        run: docker info
+        timeout-minutes: 5
+      - name: mask test credentials in logs
+        run: |
+          set -euo pipefail
+          echo "::add-mask::${TXHARBOR_PG_DSN}"
+      - name: full recovery drill layer
+        env:
+          TXHARBOR_DRILL_EVIDENCE_DIR: ${{ runner.temp }}/drill-evidence
+          TXHARBOR_COMMIT: ${{ github.sha }}
+        run: make test-drill
+        timeout-minutes: 200
+      - name: upload drill evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: drill-evidence-${{ github.run_id }}
+          path: ${{ runner.temp }}/drill-evidence
+          if-no-files-found: warn
+          retention-days: 30

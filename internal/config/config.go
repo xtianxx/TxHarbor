@@ -163,6 +163,31 @@ const (
 	EnvReconSettleLimit        = "TXHARBOR_RECON_SETTLE_LIMIT"
 	EnvReconWindowMaxProbes    = "TXHARBOR_RECON_WINDOW_MAX_PROBES"
 	EnvReconManagementTrust    = "TXHARBOR_RECON_MANAGEMENT_TRUST"
+	// 015 backup/recovery and safe service resumption (T003). Every knob is
+	// optional at Load and format-validated when present, so the serve/migrate
+	// flows keep their exact semantics; required-ness is enforced fail-closed
+	// by the recovery-admin command paths — a missing required value is refused
+	// by its exact key name ("not configured") and MUST NOT be replaced by an
+	// invented default (production RPO/RTO/frequency/retention thresholds are
+	// deployment rulings that remain pending; local values are test inputs
+	// only). The control store is an independent database with its own schema
+	// version sequence; the data DB gets zero schema changes this phase.
+	//
+	// The evidence-freshness family carries one tolerance per evidence category
+	// under the shared prefix. None of these names collides with the withdrawal
+	// kill-test keys (TXHARBOR_RECOVERY_KILL_CHILD/_DSN/_READY/_DISPATCH), and
+	// no existing key is renamed.
+	EnvRecoveryControlDSN  = "TXHARBOR_RECOVERY_CONTROL_DSN"
+	EnvRecoveryPrincipal   = "TXHARBOR_RECOVERY_PRINCIPAL"
+	EnvRecoveryArtifactDir = "TXHARBOR_RECOVERY_ARTIFACT_DIR"
+	EnvRecoveryGateTTL     = "TXHARBOR_RECOVERY_GATE_TTL"
+	// EnvRecoveryEvidenceFreshnessPrefix prefixes the per-evidence-category
+	// freshness tolerance keys: TXHARBOR_RECOVERY_EVIDENCE_FRESHNESS_<CATEGORY>.
+	EnvRecoveryEvidenceFreshnessPrefix = "TXHARBOR_RECOVERY_EVIDENCE_FRESHNESS_"
+	EnvRecoveryRPOTarget               = "TXHARBOR_RECOVERY_RPO_TARGET"
+	EnvRecoveryRTOTarget               = "TXHARBOR_RECOVERY_RTO_TARGET"
+	EnvRecoveryBackupFrequency         = "TXHARBOR_RECOVERY_BACKUP_FREQUENCY"
+	EnvRecoveryRetention               = "TXHARBOR_RECOVERY_RETENTION"
 )
 const (
 	DefaultHTTPAddr           = "127.0.0.1:8080"
@@ -338,6 +363,11 @@ type Config struct {
 	// TXHARBOR_RECON_* knobs are set; the reconcile-admin command refuses
 	// missing/invalid values fail-closed (no defaults are invented here).
 	Recon ReconConfig
+	// 015 recovery operator surface (T003). Zero-valued until the
+	// TXHARBOR_RECOVERY_* knobs are set; the recovery-admin command paths
+	// refuse missing/invalid values fail-closed (no defaults are invented
+	// here).
+	Recovery RecoveryConfig
 }
 
 // ReconConfig is the 014 reconcile-admin configuration: the authenticated
@@ -382,6 +412,39 @@ type ReconConfig struct {
 	// through only in this batch: grant/revoke/query management commands are
 	// T023 and are deliberately not delivered here.
 	ManagementTrustRaw string
+}
+
+// RecoveryConfig is the 015 recovery configuration: the independent control
+// store, the authenticated principal binding, the artifact directory and the
+// configurable recovery objectives (FR-036). None of these values has a
+// default: a missing required value is refused by its exact key name ("not
+// configured") at the command path that needs it, and the production
+// RPO/RTO/frequency/retention thresholds remain deployment rulings (local test
+// values are never production thresholds). The per-category evidence freshness
+// tolerances live under EnvRecoveryEvidenceFreshnessPrefix and are resolved by
+// the verification layer (T038); a missing tolerance keeps the conclusion
+// conservative (unknown), never a pass.
+type RecoveryConfig struct {
+	// ControlDSN is the independent control-store DSN. It is never part of the
+	// data-DB backup/restore set, and it must never equal the data DSN (that
+	// equality is refused by the recovery-admin migrate/trust-boundary check).
+	ControlDSN string
+	// Principal is the authenticated caller identity binding ("<kind>:<id>",
+	// controlled deployment config; free text never authorizes).
+	Principal string
+	// ArtifactDir is the backup artifact and manifest directory.
+	ArtifactDir string
+	// GateTTL bounds the gate-evaluation cache (required by the gate; no
+	// default).
+	GateTTL time.Duration
+	// RPOTarget is the configured recovery-point objective.
+	RPOTarget time.Duration
+	// RTOTarget is the configured recovery-time objective.
+	RTOTarget time.Duration
+	// BackupFrequency is the configured backup cadence.
+	BackupFrequency time.Duration
+	// Retention is the configured backup retention period.
+	Retention time.Duration
 }
 
 // EventsConfig is the 013 events runtime configuration. Technical cadence
@@ -661,6 +724,7 @@ func Load(getenv Getenv) (*Config, error) {
 	c.loadWorker(getenv, &errs)
 	c.loadEvents013(getenv, &errs)
 	c.loadRecon014(getenv, &errs)
+	c.loadRecovery015(getenv, &errs)
 	// Nonce read API (008 FR-19): the bearer token passes through verbatim
 	// and is never formatted into an error. Unset or empty leaves the read
 	// endpoints fail-closed (the read provider authenticates against it).
@@ -1408,6 +1472,54 @@ func (c *Config) loadRecon014(getenv Getenv, errs *[]error) {
 	positiveInt(EnvReconMaxEventRows, &c.Recon.MaxEventRows)
 	positiveInt(EnvReconSettleLimit, &c.Recon.SettleLimit)
 	positiveInt(EnvReconWindowMaxProbes, &c.Recon.WindowMaxProbes)
+}
+
+// loadRecovery015 parses the 015 recovery knobs (T003). Every knob is optional
+// at Load and format-validated when present, so the serve/migrate flows keep
+// their exact semantics. Required-ness is enforced fail-closed by the
+// recovery-admin command paths: a missing required value is refused by name
+// ("not configured") and MUST NOT be replaced by an invented default —
+// production RPO/RTO/frequency/retention thresholds are deployment rulings that
+// are still pending, and a local test value is never a production threshold.
+// The per-category TXHARBOR_RECOVERY_EVIDENCE_FRESHNESS_<CATEGORY> family is
+// resolved by the verification layer (T038) through
+// EnvRecoveryEvidenceFreshnessPrefix; a missing tolerance keeps a conclusion
+// conservative (unknown), never a pass.
+func (c *Config) loadRecovery015(getenv Getenv, errs *[]error) {
+	if raw, ok := getenv(EnvRecoveryControlDSN); ok && raw != "" {
+		if err := validateDSN(raw); err != nil {
+			*errs = append(*errs, invalid(EnvRecoveryControlDSN, "%v", err))
+		} else {
+			c.Recovery.ControlDSN = raw
+		}
+	}
+	if raw, ok := getenv(EnvRecoveryPrincipal); ok && raw != "" {
+		if strings.TrimSpace(raw) != raw {
+			*errs = append(*errs, invalid(EnvRecoveryPrincipal, "must not carry surrounding whitespace"))
+		} else {
+			c.Recovery.Principal = raw
+		}
+	}
+	if raw, ok := getenv(EnvRecoveryArtifactDir); ok && raw != "" {
+		c.Recovery.ArtifactDir = raw
+	}
+	positiveDuration := func(name string, dest *time.Duration) {
+		raw, ok := getenv(name)
+		if !ok || raw == "" {
+			return
+		}
+		d, err := time.ParseDuration(raw)
+		if err != nil || d <= 0 {
+			*errs = append(*errs, invalid(name, "%q is not a positive duration", raw))
+			return
+		}
+		*dest = d
+	}
+	positiveDuration(EnvRecoveryGateTTL, &c.Recovery.GateTTL)
+	positiveDuration(EnvRecoveryRPOTarget, &c.Recovery.RPOTarget)
+	positiveDuration(EnvRecoveryRTOTarget, &c.Recovery.RTOTarget)
+	positiveDuration(EnvRecoveryBackupFrequency, &c.Recovery.BackupFrequency)
+	positiveDuration(EnvRecoveryRetention, &c.Recovery.Retention)
 }
 
 // parseBrokerList splits a comma-separated Kafka bootstrap list and validates

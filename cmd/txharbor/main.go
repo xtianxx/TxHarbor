@@ -16,6 +16,9 @@
 //	txharbor events-admin     operate 013 events (replay/unblock/prune; skeleton)
 //	txharbor reconcile-admin  operate 014 reconciliation (tasks: start/scan/pause/resume/cancel/show;
 //	                          discrepancy: claim/dispose/reverify-ticket/show; permissions: grant/revoke/show)
+//	txharbor recovery-admin   operate 015 backup/recovery (migrate/control/backup/verify-backup/
+//	                          restore/instance-open/instance-close/checklist-set/checklist-verify/
+//	                          verify/approve/release/status/drill; setup skeleton)
 package main
 
 import (
@@ -28,6 +31,7 @@ import (
 
 	"github.com/xtianxx/txharbor/internal/app"
 	"github.com/xtianxx/txharbor/internal/app/reconcileadmin"
+	"github.com/xtianxx/txharbor/internal/app/recoveryadmin"
 	"github.com/xtianxx/txharbor/internal/jointwire"
 )
 
@@ -76,6 +80,10 @@ func run(args []string) int {
 		return reconcileadmin.Run(ctx, args[1:], reconcileadmin.Deps{
 			Getenv: os.LookupEnv, Stdout: os.Stdout, Stderr: os.Stderr,
 		})
+	case "recovery-admin":
+		return recoveryadmin.Run(ctx, args[1:], recoveryadmin.Deps{
+			Getenv: os.LookupEnv, Stdout: os.Stdout, Stderr: os.Stderr,
+		})
 	case "help", "-h", "--help":
 		usage(os.Stdout)
 		return 0
@@ -105,6 +113,9 @@ commands:
   event-consumer    run the 013 reference consumer loop (skeleton)
   events-admin      operate 013 events (replay/unblock/prune; skeleton)
   reconcile-admin   operate 014 reconciliation (scan/reverify/reverify-ticket/close/permissions)
+  recovery-admin    operate 015 backup/recovery (migrate/control/backup/verify-backup/restore/
+                    instance-open/instance-close/checklist-set/checklist-verify/verify/approve/
+                    release/status/drill; setup skeleton)
   help              show this help
 `)
 }

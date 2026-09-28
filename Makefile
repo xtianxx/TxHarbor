@@ -1,4 +1,4 @@
-.PHONY: test test-race test-integration test-integration-redis test-integration-kafka test-contract test-e2e test-fault test-perf db-reset lint build
+.PHONY: test test-race test-integration test-integration-redis test-integration-kafka test-contract test-e2e test-fault test-perf test-drill db-reset lint build
 
 # require_tagged_tests guards a layered target: when no test file carries the
 # build tag yet, the layer reports NOT RUN and exits non-zero instead of
@@ -48,8 +48,9 @@ test-e2e:
 	$(call require_tagged_tests,e2e,test-e2e)
 	go test -tags e2e -count=1 -timeout 30m ./internal/app
 
-# Fault injection and performance layers run independently (scheduled/manual/
-# release gate) and never block ordinary PRs (FR-28; verification.md §4).
+# Fault injection, performance and full-drill layers run independently
+# (scheduled/manual/release gate) and never block ordinary PRs (FR-28/FR-33;
+# verification.md §4).
 test-fault:
 	$(call require_tagged_tests,fault,test-fault)
 	go test -tags fault -count=1 -timeout 60m ./...
@@ -57,6 +58,16 @@ test-fault:
 test-perf:
 	$(call require_tagged_tests,perf,test-perf)
 	go test -tags perf -count=1 -timeout 60m ./...
+
+# Full disaster-recovery drill layer (quickstart S1-S12 + failure matrix F1-F7;
+# real PG/Anvil and, for the event scenarios, Redis/Kafka). Independent channel
+# only (scheduled/manual/release gate, see .github/workflows/drill.yml): it
+# never runs on ordinary pull requests and never blocks them (quickstart.md §3;
+# verification.md §4). Without a drill-tagged test the guard reports NOT RUN and
+# exits non-zero — an unrun drill is never a pass.
+test-drill:
+	$(call require_tagged_tests,drill,test-drill)
+	go test -tags drill -count=1 -timeout 120m ./...
 
 # Explicit database wipe: removes the named volume (data is kept otherwise).
 db-reset:
