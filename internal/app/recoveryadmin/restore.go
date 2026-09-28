@@ -8,7 +8,8 @@
 //     discipline).
 //  2. The authenticated subject is TXHARBOR_RECOVERY_PRINCIPAL; it must have
 //     an active identity mapping and hold the `executor` participant role on
-//     the target instance. Free text never authorizes.
+//     the target instance. Free text never authorizes; --reason is a recorded
+//     audit annotation only.
 //  3. A failed precondition produces an explicit blocked state with the
 //     missing items listed on stderr and exit 1; the command never claims a
 //     recovery. The library additionally refuses the control-store database
@@ -18,7 +19,21 @@
 //     target fingerprint only, and every message passes through logx.Redact
 //     (FR-008).
 //  5. Interruption is safe to re-enter: rebuild the target database, then
-//     rerun with the same manifest (idempotent; no double/mixed state).
+//     rerun (idempotent; no double/mixed state). The rerun is a real rerun:
+//     --operation-id replays a recorded outcome with zero side effects, and
+//     omitting it never turns the invocation into a replay.
+//  6. Evidence timing: before the first target write the library commits a
+//     pre-write invalidation marker through the data-model §5 generation
+//     protocol, so releases/approvals bound to the previous generation stop
+//     being usable for admission; an interrupted restore leaves them stale
+//     (the old permission does not come back).
+//  7. production_main preconditions (verified manifest + control-store
+//     evidence chain + target != control store + passing probes) prove the
+//     restored data set, not that old writers stopped: the
+//     reconcile-admin/events-admin/withdraw-exec paths and external
+//     schedulers have no 015 runtime gate in this tree (T028/T064 not
+//     delivered; checklist/program-boundary discipline, no runtime
+//     enforcement claim).
 package recoveryadmin
 
 import (
@@ -36,6 +51,12 @@ import (
 // recoveryAdminRestore implements `recovery-admin restore`.
 func recoveryAdminRestore(ctx context.Context, args []string, d Deps) int {
 	stdout, stderr := d.stdout(), d.stderr()
+	for _, arg := range args {
+		if arg == "-h" || arg == "--help" {
+			recoveryAdminActionUsage(stdout, recoveryAdminActionByNameOrZero("restore"))
+			return 0
+		}
+	}
 	fs := flag.NewFlagSet("txharbor recovery-admin restore", flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	manifestPath := fs.String("manifest", "", "manifest path (required)")

@@ -18,12 +18,17 @@
 //     declaration is isolated-only, production_main requires an explicit
 //     recorded reason.
 //
-// Execution: a real pg_restore --clean --if-exists into the target, then the
-// four probes (readable / structure_constraints / business_state_probes /
-// verification_executable). Only when all four pass is a restore_probe
-// evidence row accepted (through the data-model §5 generation protocol) and
+// Execution: an accepted pre-write invalidation marker (restore_started,
+// through the same data-model §5 generation protocol) advances the evidence
+// generation before the first target write, so every release/approval bound to
+// the pre-restore generation stops being usable for admission even if the
+// restore then fails or is interrupted. Then a real pg_restore --clean
+// --if-exists into the target, then the four probes (readable /
+// structure_constraints / business_state_probes / verification_executable).
+// Only when all four pass is a restore_probe evidence row accepted and
 // Restored reported. An interruption is never marked restored and writes no
-// evidence; the documented retry is: rebuild the target database, rerun.
+// restored evidence (the marker stays: the old authorization basis does not
+// come back); the documented retry is: rebuild the target database, rerun.
 //
 // Signer boundary: the tool checks reachability only and never receives,
 // reads or exports key material (FR-007).
@@ -238,18 +243,60 @@ func ExecuteRestore(ctx context.Context, opts RestoreOptions) (RestoreResult, er
 		return run.fail()
 	}
 
-	// Real restore.
+	// Open the artifact before the marker: a missing artifact is refused
+	// without invalidating anything.
 	archivePath := resolveArtifactPath(opts.ManifestPath, m.Artifacts[0].Path)
 	archive, err := os.Open(archivePath)
 	if err != nil {
 		run.blocked = append(run.blocked, "artifact cannot be opened: "+err.Error())
 		return run.fail()
 	}
+
+	// Pre-write invalidation marker (duplicate-restore timing; F5/INV-3,
+	// data-model §5). A new real restore changes the authoritative data set,
+	// so every release/approval bound to the pre-restore evidence generation
+	// must stop being usable for admission BEFORE the first target write. The
+	// marker commits through the same generation protocol every decision write
+	// uses: the generation advances and the hash refreshes, so the old
+	// authorization basis is stale from that commit on. If the restore then
+	// fails or is interrupted, the generation stays advanced — the old
+	// permission is never restored by the failure. The accepted restore_probe
+	// evidence is still written only after all four probes pass.
+	marker, err := CommitEvidenceWrite(ctx, opts.ControlStore, EvidenceWriteRequest{
+		InstanceID:   token.InstanceID,
+		Token:        token,
+		Kind:         MutationRestoreStarted,
+		Actor:        opts.Actor,
+		Reason:       "restore started: pre-write invalidation of the previous evidence generation",
+		OperationID:  restoreOperationID(opts, m),
+		ResultDigest: []byte(digest),
+		Apply: func(ctx context.Context, tx pgx.Tx, accepted EvidenceToken) error {
+			return insertRestoreStartedMarker(ctx, tx, accepted, m, digest,
+				run.result.TargetFingerprint, string(run.result.Declaration), opts)
+		},
+	})
+	if err != nil {
+		_ = archive.Close()
+		run.blocked = append(run.blocked,
+			"restore start marker could not be recorded (the target was not touched): "+logx.Redact(err.Error()))
+		return run.fail()
+	}
+	if marker.Discarded {
+		_ = archive.Close()
+		run.blocked = append(run.blocked,
+			"restore start marker was discarded (evidence changed during the restore start: "+
+				marker.DiscardReason+"); re-run against the current evidence generation")
+		return run.fail()
+	}
+
+	// Real restore.
 	restoreErr := pgRestoreInto(ctx, opts.PG, archive, opts.TargetDSN)
 	_ = archive.Close()
 	if restoreErr != nil {
-		// Interruption/partial restore: never restored, no evidence. Retry =
-		// rebuild the target database, then rerun (idempotent).
+		// Interruption/partial restore: never restored, no restored evidence.
+		// The pre-write marker stays committed, so the old releases/approvals
+		// remain stale; retry = rebuild the target database, then rerun
+		// (idempotent).
 		run.blocked = append(run.blocked, "pg_restore did not complete: "+restoreErr.Error())
 		return run.fail()
 	}
@@ -281,8 +328,11 @@ func ExecuteRestore(ctx context.Context, opts RestoreOptions) (RestoreResult, er
 		return run.fail()
 	}
 	written, err := CommitEvidenceWrite(ctx, opts.ControlStore, EvidenceWriteRequest{
-		InstanceID:   token.InstanceID,
-		Token:        token,
+		InstanceID: token.InstanceID,
+		// The acceptance is captured on the marker's accepted token: it was
+		// observed before pg_restore/probes derived this result, and it still
+		// fails closed if any writer commits in between (discard).
+		Token:        marker.Token,
 		Kind:         MutationRestoreProbeAccepted,
 		Actor:        opts.Actor,
 		Reason:       "restore probes passed; restored evidence",
@@ -455,6 +505,46 @@ ORDER BY created_at DESC, evidence_id`, instanceID, m.BackupID)
 			" does not match the current manifest digest (manifest copied/edited?); re-run verify-backup")
 	}
 	return false
+}
+
+// ActionRestoreStarted is the recovery_audit action of the pre-write restore
+// invalidation marker (MutationRestoreStarted). It records the credential-free
+// start facts; the generation advance itself is written by the protocol.
+const ActionRestoreStarted = "restore_started"
+
+// insertRestoreStartedMarker writes the operator-facing marker row of the
+// pre-write invalidation transition inside the marker's protocol transaction.
+// It carries only credential-free facts (target fingerprint, never a DSN).
+func insertRestoreStartedMarker(ctx context.Context, tx pgx.Tx, accepted EvidenceToken,
+	m *Manifest, manifestDigest, targetFingerprint, declaration string, opts RestoreOptions) error {
+	target, err := json.Marshal(map[string]any{
+		"backup_id":          m.BackupID,
+		"manifest_digest":    manifestDigest,
+		"target_fingerprint": targetFingerprint,
+		"declaration":        declaration,
+	})
+	if err != nil {
+		return fmt.Errorf("encode restore_started target: %w", err)
+	}
+	detail, err := json.Marshal(map[string]any{
+		"reason": boundedEvidenceDetail(opts.TargetReason),
+		"note": "pre-write invalidation marker: releases/approvals bound to the previous generation " +
+			"are stale before the first target write and stay stale if the restore fails",
+	})
+	if err != nil {
+		return fmt.Errorf("encode restore_started detail: %w", err)
+	}
+	generation := accepted.Generation
+	return controlstore.WriteAudit(ctx, tx, controlstore.AuditRecord{
+		InstanceID:         accepted.InstanceID,
+		Actor:              opts.Actor,
+		Action:             ActionRestoreStarted,
+		Target:             target,
+		Detail:             detail,
+		Result:             controlstore.AuditOK,
+		EvidenceGeneration: &generation,
+		OperationID:        restoreOperationID(opts, m),
+	})
 }
 
 // insertEvidence writes one recovery_evidence row inside the caller's

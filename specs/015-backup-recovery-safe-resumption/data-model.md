@@ -174,7 +174,7 @@ open --supersede(仅显式、双人批准、审计)--> closed + 新 open 实例�
 - 取证（事务外）：读取 `(I.state, I.evidence_generation, I.evidence_hash)` 作为令牌。
 - 提交（事务内）：`SELECT ... FOR UPDATE` 锁实例行，重读令牌并逐项校验；不符 → 丢弃结果，仅写 `recovery_audit(result=discarded)`，不写结果行、不改缺口、不推进代次。
 - 接受写入：同一事务内插入结果行 + `evidence_generation = evidence_generation + 1` + 刷新 `evidence_hash`；因此所有绑定旧代次的批准/放行立即失效（fail-closed）。
-- 触发代次推进的写入：核验批次结果、缺口闭合/建立、隔离项 verified/rejected、restore_probe 接受、证据快照接受。
+- 触发代次推进的写入：核验批次结果、缺口闭合/建立、隔离项 verified/rejected、restore_probe 接受、证据快照接受，以及 `restore_started` 预写失效标记（restore 在首次目标写入前提交，旧证据/批准立即不可再用于准入；失败/中断不回退该代次）。
 - **不靠 `created_at`/进程时钟裁决**；同秒并发以提交序（自增序/锁内重读）为准。
 
 ## 6. 幂等与审计

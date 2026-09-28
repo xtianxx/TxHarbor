@@ -26,6 +26,7 @@ func TestEvidenceMutationKindClosedSet(t *testing.T) {
 		MutationGapClosed,
 		MutationIsolationVerified,
 		MutationIsolationRejected,
+		MutationRestoreStarted,
 		MutationRestoreProbeAccepted,
 		MutationEvidenceSnapshotAccepted,
 	}
@@ -35,11 +36,14 @@ func TestEvidenceMutationKindClosedSet(t *testing.T) {
 	}
 
 	// Frozen string values: they appear in audit targets and in the evidence
-	// hash chain, so they must match the data-model §5 trigger list verbatim.
+	// hash chain. The first seven mirror the data-model §5 trigger list
+	// verbatim; `restore_started` is the restore pre-write invalidation marker
+	// added by restore.go (duplicate-restore timing) and must keep its frozen
+	// spelling too.
 	wantStrings := []string{
 		"verification_batch", "gap_opened", "gap_closed",
 		"isolation_verified", "isolation_rejected",
-		"restore_probe_accepted", "evidence_snapshot_accepted",
+		"restore_started", "restore_probe_accepted", "evidence_snapshot_accepted",
 	}
 	for i, k := range got {
 		if string(k) != wantStrings[i] {

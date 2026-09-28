@@ -97,6 +97,10 @@ type recoveryAdminAction struct {
 	// positional, when non-empty, is the closed set of required positional
 	// tokens (e.g. migrate's up|status).
 	positional []string
+	// notes, when non-empty, are operator-facing boundaries rendered under the
+	// flag list (for example the restore preconditions and evidence-timing
+	// facts). They are help text only and never a runtime enforcement claim.
+	notes []string
 }
 
 // recoveryAdminActions is the fixed action surface, in help order.
@@ -132,26 +136,34 @@ var recoveryAdminActions = []recoveryAdminAction{
 			{name: "manifest", usage: "manifest path (required)"},
 			{name: "target-dsn", usage: "isolated target DSN (required)"},
 			{name: "instance", usage: "recovery instance id that binds the conclusion (optional)"},
-			{name: "operation-id", usage: "idempotent operation identity (optional)"},
+			{name: "operation-id", usage: "idempotency key (optional); same id+input replays with zero side effects, a changed input conflicts with zero writes; omitted = a real rerun (non-replay)"},
 		},
 		required: []string{"manifest", "target-dsn"},
 	},
 	{
 		name:    "restore",
-		summary: "restore a verified manifest into the bound recovery instance",
+		summary: "restore a verified manifest into the bound recovery instance (pre-write evidence invalidation)",
 		usage:   "restore --manifest M --target-dsn TARGET --instance ID [--declaration isolated|production_main] [--reason R] [--operation-id ID]",
 		flags: []recoveryAdminFlag{
-			{name: "manifest", usage: "manifest path (required)"},
-			{name: "target-dsn", usage: "target DSN (required; isolated unless explicitly declared)"},
+			{name: "manifest", usage: "manifest path (required); the control store must hold verified evidence bound to this instance and backup_id"},
+			{name: "target-dsn", usage: "target DSN (required; isolated unless explicitly declared production_main)"},
 			{name: "instance", usage: "recovery instance id (required)"},
 			{name: "declaration", usage: "isolated|production_main (default isolated)"},
-			{name: "reason", usage: "explicit recorded reason (required for production_main)"},
-			{name: "operation-id", usage: "idempotent operation identity (optional)"},
+			{name: "reason", usage: "explicit recorded reason (required for production_main); audit annotation only, never an authorization"},
+			{name: "operation-id", usage: "idempotency key (optional); same id+input replays with zero side effects, a changed input conflicts with zero writes; omitted = a real rerun (non-replay) that appends new evidence"},
 			{name: "signer-endpoint", usage: "signer boundary endpoint for reachability probing (optional)"},
 			{name: "rpc-url", usage: "RPC fact-source URL for reachability probing (optional)"},
 			{name: "broker-dsn", usage: "broker DSN for reachability probing (optional)"},
 		},
 		required: []string{"manifest", "target-dsn", "instance"},
+		// Operator-facing boundaries of T022. These are help text: they state
+		// preconditions and limits, never a runtime enforcement claim.
+		notes: []string{
+			"production_main preconditions: verified manifest + a control-store evidence chain matching the current manifest + a target that is not the control store + all four restore probes passing. This proves the restored data set is usable; it does NOT prove the old writers stopped or that the old instance is isolated.",
+			"Authority comes from TXHARBOR_RECOVERY_PRINCIPAL with an active mapping and the executor participant binding on the instance; --reason is recorded audit annotation only and free text never authorizes.",
+			"Evidence timing: an accepted pre-write marker advances the evidence generation before the first target write, so releases/approvals bound to the previous generation stop being usable for admission; an interrupted restore keeps them stale and never brings the old permission back.",
+			"T028/T064 are not delivered: reconcile-admin/events-admin/withdraw-exec operator paths and external schedulers have no 015 runtime gate in this tree. Isolation relies on the documented stop/permission-removal discipline plus audit and no_pre_release_effects evidence; no runtime enforcement is claimed.",
+		},
 	},
 	{
 		name:    "instance-open",
@@ -400,5 +412,11 @@ func recoveryAdminActionUsage(w io.Writer, action recoveryAdminAction) {
 	fmt.Fprintf(w, "usage: txharbor recovery-admin %s\n", action.usage)
 	for _, f := range action.flags {
 		fmt.Fprintf(w, "  --%s\t%s\n", f.name, f.usage)
+	}
+	if len(action.notes) > 0 {
+		fmt.Fprintln(w, "notes:")
+		for _, note := range action.notes {
+			fmt.Fprintf(w, "  - %s\n", note)
+		}
 	}
 }

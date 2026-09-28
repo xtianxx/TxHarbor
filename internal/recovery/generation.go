@@ -33,11 +33,14 @@
 //     approval/release bound to the previous generation/hash is therefore
 //     invalidated at once (fail-closed, INV-3).
 //
-// Generation-advancing writes (the closed set of data-model §5): verification
+// Generation-advancing writes (the closed set of data-model §5: verification
 // batch results, gap establishment/closure, isolation item verified/rejected,
-// restore-probe acceptance and evidence-snapshot acceptance. Every one of
-// those writes must go through CommitEvidenceWrite — this file is the only
-// generation protocol in 015 (tasks.md Shared-Artifact Confluence).
+// restore-probe acceptance and evidence-snapshot acceptance, plus the restore
+// pre-write invalidation marker of restore.go, `restore_started`, which the
+// duplicate-restore timing needs so the old authorization basis is stale
+// before the first target write — INV-3). Every one of those writes must go
+// through CommitEvidenceWrite — this file is the only generation protocol in
+// 015 (tasks.md Shared-Artifact Confluence).
 //
 // Reusable interface for T012 (gate.go) and the later write paths:
 //
@@ -104,6 +107,14 @@ const (
 	// MutationIsolationRejected: an isolation checklist item was rejected
 	// (evidence insufficient, re-collection required).
 	MutationIsolationRejected EvidenceMutationKind = "isolation_rejected"
+	// MutationRestoreStarted: a restore executor started a real restore
+	// against its declared target. This is the pre-write invalidation marker
+	// of restore.go, committed before the first target write so that every
+	// release/approval bound to the pre-restore generation stops being usable
+	// for admission even if the restore fails or is interrupted (INV-3,
+	// data-model §5; duplicate-restore invalidation timing). The accepted
+	// restore_probe evidence is still written only after all four probes pass.
+	MutationRestoreStarted EvidenceMutationKind = "restore_started"
 	// MutationRestoreProbeAccepted: a restore probe was accepted (the
 	// `restored` evidence of data-model §4.2/§7).
 	MutationRestoreProbeAccepted EvidenceMutationKind = "restore_probe_accepted"
@@ -120,6 +131,7 @@ var knownEvidenceMutationKinds = []EvidenceMutationKind{
 	MutationGapClosed,
 	MutationIsolationVerified,
 	MutationIsolationRejected,
+	MutationRestoreStarted,
 	MutationRestoreProbeAccepted,
 	MutationEvidenceSnapshotAccepted,
 }
