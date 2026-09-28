@@ -173,20 +173,41 @@ func TestControlBadOperationIDIsUsageError(t *testing.T) {
 }
 
 // TestRecoveryAdminUnwiredActionsRemainStub pins the wiring boundary after
-// B6/T021-T022: migrate/control/backup/verify-backup/restore act (or refuse
-// fail-closed), the remaining actions are still the B0 stub, and a wired
-// command that lacks required configuration refuses by exact key name instead
-// of claiming success.
+// B8/T027-T029: migrate/control/backup/verify-backup/restore/instance-open/
+// instance-close/checklist-set/checklist-verify act (or refuse fail-closed),
+// `drill` is still the B0 stub, and a wired command that lacks required
+// configuration refuses by exact key name instead of claiming success.
 func TestRecoveryAdminUnwiredActionsRemainStub(t *testing.T) {
 	env := controlTestEnv("postgres://u:c@127.0.0.1:1/control?sslmode=disable",
 		"postgres://u:d@127.0.0.1:1/data?sslmode=disable", "deploy:manager")
-	code, _, stderr := runRecoveryAdmin(t, []string{"instance-open", "--kind", "recovery"}, env)
-	if code != 1 || !strings.Contains(stderr, "NOT IMPLEMENTED") {
-		t.Fatalf("instance-open must remain the B0 stub: exit=%d stderr=%q", code, stderr)
-	}
-	code, _, stderr = runRecoveryAdmin(t, []string{"drill"}, env)
+	code, _, stderr := runRecoveryAdmin(t, []string{"drill"}, env)
 	if code != 1 || !strings.Contains(stderr, "NOT IMPLEMENTED") {
 		t.Fatalf("drill must remain the B0 stub: exit=%d stderr=%q", code, stderr)
+	}
+
+	// The B8 lifecycle/checklist actions are wired: with an unreachable control
+	// store they refuse fail-closed and never answer NOT IMPLEMENTED or claim
+	// success.
+	const instanceID = "11111111-1111-4111-8111-111111111111"
+	for _, tc := range []struct {
+		name string
+		args []string
+	}{
+		{"instance-open", []string{"instance-open", "--kind", "recovery"}},
+		{"instance-close", []string{"instance-close", "--instance", instanceID}},
+		{"checklist-set", []string{"checklist-set", "--instance", instanceID, "--item", "old_writers_stopped", "--evidence-ref", "evidence://015/x"}},
+		{"checklist-verify", []string{"checklist-verify", "--instance", instanceID, "--item", "old_writers_stopped"}},
+	} {
+		code, stdout, stderr := runRecoveryAdmin(t, tc.args, env)
+		if code == 0 {
+			t.Fatalf("%s must refuse without a reachable control store: exit=%d stdout=%q", tc.name, code, stdout)
+		}
+		if strings.Contains(stderr, "NOT IMPLEMENTED") {
+			t.Fatalf("%s is wired (B8/T027-T029); it must not answer NOT IMPLEMENTED: %q", tc.name, stderr)
+		}
+		if !strings.Contains(stderr, "control store unavailable") && !strings.Contains(stderr, config.EnvRecoveryControlDSN) {
+			t.Fatalf("%s refusal must name the unavailable control store or refuse by key name: %q", tc.name, stderr)
+		}
 	}
 
 	// backup is wired (T021): without the required artifact directory it

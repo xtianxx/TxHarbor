@@ -386,7 +386,17 @@ func (g *Gate) admitBound(ctx context.Context, req GateRequest) (GateDecision, e
 				Capability:   req.Capability,
 				ScopeHash:    req.ScopeHash,
 			}
-			g.audit(ctx, req, d, nil)
+			// The audit row of a stale/unknown binding is attributed to the
+			// currently open recovery instance when one exists, so the active
+			// incident's trail records every refused caller (the caller's own
+			// instance id has no row and cannot carry an FK-bound audit). The
+			// returned decision keeps no instance: the caller's binding was
+			// not the open instance.
+			audited := d
+			if openID, kind, openErr := g.openInstance(ctx); openErr == nil && openID != "" && kind == "recovery" {
+				audited.InstanceID = openID
+			}
+			g.audit(ctx, req, audited, nil)
 			return d, nil
 		}
 		d := g.unavailableDecision(req, err)

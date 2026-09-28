@@ -22,8 +22,12 @@
 // mapping changes invalidating affected approvals). B6/T021-T022 implement
 // `backup`/`verify-backup` in backup.go and `restore` in restore.go (real
 // pg_dump/pg_restore only, principal bound to a registered participant,
-// persistent operation_id idempotency, explicit blocked states). Every other
-// action is still the stub.
+// persistent operation_id idempotency, explicit blocked states). B8/T027-T029
+// implement the instance lifecycle in instance.go (`instance-open` with the
+// explicit supersede path, release-guarded `instance-close`) and the
+// isolation checklist in checklist.go (`checklist-set`/`checklist-verify`
+// with audited refusals and operation_id idempotency). Every other action is
+// still the stub.
 //
 // It lives in its own package (rather than internal/app) for the same reason as
 // internal/app/reconcileadmin: the delivered command imports internal/recovery
@@ -167,42 +171,73 @@ var recoveryAdminActions = []recoveryAdminAction{
 	},
 	{
 		name:    "instance-open",
-		summary: "open a recovery instance (executor recorded; at most one open)",
-		usage:   "instance-open --kind recovery|baseline [--reason R]",
+		summary: "open a recovery instance (executor recorded; at most one open; explicit supersede replaces one)",
+		usage:   "instance-open --kind recovery|baseline [--supersede ID --approval-refs A,B] [--reason R] [--operation-id ID]",
 		flags: []recoveryAdminFlag{
-			{name: "kind", usage: "recovery|baseline (required)"},
+			{name: "kind", usage: "recovery|baseline (required); only recovery arms the production gate, baseline is documentation-only state"},
+			{name: "supersede", usage: "explicit supersede: the open instance id this new instance replaces (requires --approval-refs)"},
+			{name: "approval-refs", usage: "two approval ids (comma-separated) by two distinct non-executor people, required with --supersede"},
 			{name: "reason", usage: "audit annotation (optional)"},
+			{name: "operation-id", usage: "idempotency key (optional); same id+input replays with zero side effects, a changed input conflicts with zero writes"},
 		},
 		required: []string{"kind"},
+		notes: []string{
+			"The recorded opened_by is the executor: the gate excludes its person from approvals and checklist verification. It must resolve to an active identity mapping.",
+			"supersede is explicit only (the old instance id must be named), requires two current approvals by two distinct non-executor people, closes the old instance and opens a new one in one audited transaction; a row written directly into the control store is not this path and grants nothing.",
+			"A process bound through " + "TXHARBOR_RECOVERY_INSTANCE" + " cannot open another instance; use --supersede for the audited replacement path (the binding must then match the instance being replaced).",
+		},
 	},
 	{
 		name:    "instance-close",
 		summary: "close the open recovery instance (only when every capability is validly released)",
-		usage:   "instance-close --instance ID",
+		usage:   "instance-close --instance ID [--reason R] [--operation-id ID]",
 		flags: []recoveryAdminFlag{
-			{name: "instance", usage: "recovery instance id (required)"},
+			{name: "instance", usage: "open recovery instance id (required)"},
+			{name: "reason", usage: "audit annotation (optional)"},
+			{name: "operation-id", usage: "idempotency key (optional); same id+input replays with zero side effects, a changed input conflicts with zero writes"},
 		},
 		required: []string{"instance"},
+		notes: []string{
+			"Close requires all seven capabilities to be currently release-valid (derived evaluation re-run under the instance lock, including the dual two-person approval condition when a funds/delivery capability was ever released).",
+			"An open evidence gap refuses the close: the instance stays open, is escalated for manual handling, and no risk acceptance is delivered.",
+			"TXHARBOR_RECOVERY_GATE_TTL is required (the close guard has no default TTL); the bound principal needs a participant binding on the instance.",
+		},
 	},
 	{
 		name:    "checklist-set",
 		summary: "record isolation-checklist evidence (executor)",
-		usage:   "checklist-set --instance ID --item ITEM",
+		usage:   "checklist-set --instance ID --item ITEM [--evidence-ref REF] [--checkpoint-summary JSON] [--reason R] [--operation-id ID]",
 		flags: []recoveryAdminFlag{
 			{name: "instance", usage: "recovery instance id (required)"},
-			{name: "item", usage: "checklist item key (required)"},
+			{name: "item", usage: "checklist item key (required): " + "old_writers_stopped|writer_fencing_observed|network_isolation|version_compatible|no_pre_release_effects|authorization_recheck"},
+			{name: "evidence-ref", usage: "external evidence reference (required; a checkpoint summary or state record alone is never proof)"},
+			{name: "checkpoint-summary", usage: "optional JSON status/context summary (stored, never a verification basis)"},
+			{name: "reason", usage: "audit annotation (optional)"},
+			{name: "operation-id", usage: "idempotency key (optional); same id+input replays with zero side effects, a changed input conflicts with zero writes"},
 		},
 		required: []string{"instance", "item"},
+		notes: []string{
+			"Evidence is collected by this instance's executor and confirmed by a non-executor verifier; a checkpoint summary alone is never proof and collection does not advance the evidence generation.",
+			"Program boundary (T028/T064): reconcile-admin/events-admin/withdraw-exec operator paths and external schedulers have no 015 runtime gate in this tree. old_writers_stopped evidence must name the executable stop/permission-removal measures with time and subject plus the gate audit; checklist signing alone does not constitute a runtime isolation proof (runbook T064).",
+			"no_pre_release_effects is verified against the gate audit (zero admitted externally visible actions), never by a status field; an action admitted before the instance opened and still in flight is outside that audit check and must be drained or awaited by the isolation procedure.",
+		},
 	},
 	{
 		name:    "checklist-verify",
 		summary: "confirm a checklist item (non-executor verifier)",
-		usage:   "checklist-verify --instance ID --item ITEM",
+		usage:   "checklist-verify --instance ID --item ITEM [--reject --reason R] [--operation-id ID]",
 		flags: []recoveryAdminFlag{
 			{name: "instance", usage: "recovery instance id (required)"},
 			{name: "item", usage: "checklist item key (required)"},
+			{name: "reject", usage: "reject the item (insufficient/superseded evidence; re-collection required); a verified item may be rejected by a later verdict"},
+			{name: "reason", usage: "reason (required with --reject; audit annotation)"},
+			{name: "operation-id", usage: "idempotency key (optional); same id+input replays with zero side effects, a changed input conflicts with zero writes"},
 		},
 		required: []string{"instance", "item"},
+		notes: []string{
+			"The verifier must be registered on the instance with the verifier role and must not resolve to the executor's person (the same person under another principal is refused and audited).",
+			"An accepted verification/rejection advances the evidence generation by exactly one, invalidating releases/approvals bound to the previous generation.",
+		},
 	},
 	{
 		name:    "verify",
@@ -261,9 +296,10 @@ func recoveryAdminActionByName(name string) (recoveryAdminAction, bool) {
 
 // Run runs the 015 operator command surface. `migrate up|status` (T008) is
 // implemented in migrate.go, the `control ...` subcommands (T010) in
-// control.go, `backup`/`verify-backup` (T021/T020) in backup.go and
-// `restore` (T022) in restore.go; every other action is still the B0 stub
-// (help and argument parsing only, no behavior).
+// control.go, `backup`/`verify-backup` (T021/T020) in backup.go, `restore`
+// (T022) in restore.go, the instance lifecycle (T027) in instance.go and the
+// isolation checklist (T028/T029) in checklist.go; every other action is
+// still the B0 stub (help and argument parsing only, no behavior).
 func Run(ctx context.Context, args []string, d Deps) int {
 	if len(args) == 0 {
 		recoveryAdminUsage(d.stderr())
@@ -292,6 +328,18 @@ func Run(ctx context.Context, args []string, d Deps) int {
 	case "restore":
 		// T022: precondition-gated restore bound to the open instance.
 		return recoveryAdminRestore(ctx, args[1:], d)
+	case "instance-open":
+		// T027: open/supersede a recovery instance (executor recorded).
+		return recoveryAdminInstanceOpen(ctx, args[1:], d)
+	case "instance-close":
+		// T027: release-guarded close of the open instance.
+		return recoveryAdminInstanceClose(ctx, args[1:], d)
+	case "checklist-set":
+		// T029: isolation-checklist evidence collection (executor).
+		return recoveryAdminChecklistSet(ctx, args[1:], d)
+	case "checklist-verify":
+		// T029: isolation-checklist confirmation (non-executor verifier).
+		return recoveryAdminChecklistVerify(ctx, args[1:], d)
 	}
 	action, ok := recoveryAdminActionByName(args[0])
 	if !ok {
@@ -404,7 +452,7 @@ func recoveryAdminUsage(w io.Writer) {
 		fmt.Fprintf(w, "  %-16s %s\n", action.name, action.summary)
 	}
 	fmt.Fprintln(w)
-	fmt.Fprintln(w, "Wired today: `migrate up|status` (T008), `control participant-register|identity-map-set|identity-map-show` (T010), `backup`/`verify-backup` (T020/T021) and `restore` (T022). Every other action is the B0 stub and reports NOT IMPLEMENTED (non-zero); missing arguments and unknown actions exit 2. Required configuration values are refused by name and never defaulted; the authenticated subject comes from TXHARBOR_RECOVERY_PRINCIPAL and free text never authorizes.")
+	fmt.Fprintln(w, "Wired today: `migrate up|status` (T008), `control participant-register|identity-map-set|identity-map-show` (T010), `backup`/`verify-backup` (T020/T021), `restore` (T022), `instance-open`/`instance-close` (T027) and `checklist-set`/`checklist-verify` (T028/T029). Every other action is the B0 stub and reports NOT IMPLEMENTED (non-zero); missing arguments and unknown actions exit 2. Required configuration values are refused by name and never defaulted; the authenticated subject comes from TXHARBOR_RECOVERY_PRINCIPAL and free text never authorizes.")
 }
 
 // recoveryAdminActionUsage prints one action's accepted argument form.
