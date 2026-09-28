@@ -33,6 +33,7 @@ import (
 	"github.com/xtianxx/txharbor/internal/db"
 	"github.com/xtianxx/txharbor/internal/logx"
 	"github.com/xtianxx/txharbor/internal/metrics"
+	"github.com/xtianxx/txharbor/internal/recovery"
 	"github.com/xtianxx/txharbor/internal/signer"
 )
 
@@ -196,6 +197,19 @@ func SignerServe(ctx context.Context, args []string, d Deps) int {
 		return 1
 	}
 	defer pool.Close()
+
+	// 015 resumption gate (T032/T070): the delivery checkpoint's admission is
+	// assembled before the listener starts. Without TXHARBOR_RECOVERY_CONTROL_DSN
+	// the process is in normal mode (FR-023); with the control store
+	// configured, a missing gate TTL, an unreachable store or an
+	// unknown/incompatible schema version refuses startup — there is no
+	// degraded pass-through.
+	recoveryWiring, err := assembleExistingWithdrawalRecovery(ctx, cfg, d.getenv())
+	if err != nil {
+		fmt.Fprintf(stderr, "txharbor signer-serve: startup failed (recovery gate): %s\n", logx.Redact(err.Error()))
+		return 1
+	}
+	defer recoveryWiring.close()
 	m := metrics.New(func() bool { return true })
 	provider, err := signer.NewDevKeyProvider(signer.Mode(cfg.SignerMode), cfg.SignerKeyFile, cfg.SignerKeyTimeout)
 	if err != nil {
@@ -214,7 +228,7 @@ func SignerServe(ctx context.Context, args []string, d Deps) int {
 	transport := &signerTransport{
 		pool:    pool,
 		submit:  signer.SubmitDeps{DB: pool, Policy: policy, Provider: provider, Binding: live.Binding, ScopeLock: live.Scope},
-		deliver: signer.DeliveryDeps{DB: pool, Binding: live.Binding, ScopeLock: live.Scope},
+		deliver: signer.DeliveryDeps{DB: pool, Binding: live.Binding, ScopeLock: live.Scope, RecoveryGate: signerDeliveryRecoveryGate(recoveryWiring)},
 	}
 
 	mux := http.NewServeMux()
@@ -245,6 +259,38 @@ func SignerServe(ctx context.Context, args []string, d Deps) int {
 		return 1
 	}
 	return 0
+}
+
+// signerDeliveryRecoveryGate adapts the 015 existing_withdrawal_recovery
+// admission to the signer delivery checkpoint (T032/T070). The returned
+// function is never nil: delivery.go's checkpoint is always wired by the
+// supported signer-serve assembly, and its absence is refused by the core
+// (fail-closed).
+//
+// A nil wiring is normal mode (no control store configured, FR-023): this
+// process cannot observe an open recovery instance, and the process's
+// isolation is the deployment checklist's `old_writers_stopped` item
+// (contracts/resumption-gate.md §1.2) — it is deliberately not an admission to
+// act inside recovery mode. Every other assembly outcome is fail-closed before
+// the listener starts (missing TTL, bound instance without the store,
+// unreachable store, unknown schema version).
+//
+// The submit path is deliberately not gated a second time (T070: "submit.go
+// 签名路径酌情同构"): signing persists a result with no external byte egress,
+// and the persisted signature cannot leave the process without passing this
+// checkpoint — delivery re-gates every attempt, so an isolated signer cannot
+// hand out signature bytes.
+func signerDeliveryRecoveryGate(wiring *existingWithdrawalRecoveryWiring) signer.DeliveryGate {
+	if wiring == nil {
+		return func(context.Context, signer.DeliveryGateRequest) error { return nil }
+	}
+	return func(ctx context.Context, req signer.DeliveryGateRequest) error {
+		dec, err := wiring.admit(ctx, recovery.CapabilityExistingWithdrawalRecovery, "signer_delivery", req.SigningRequestID)
+		if err == nil && dec.Allowed {
+			return nil
+		}
+		return fmt.Errorf("recovery gate refused delivery: refusal_class=%s", existingWithdrawalRecoveryRefusalClass(dec))
+	}
 }
 
 // submitHTTP handles POST /signer/v1/signing-requests in the fixed api.md §4

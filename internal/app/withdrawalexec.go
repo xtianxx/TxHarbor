@@ -5,6 +5,14 @@
 // operation_conflict with zero writes (008 R7 protocol). Operator identity and
 // reason are audit fields, required for mutations. Read-only inspections write
 // no audit row.
+//
+// T032 adds the 015 existing_withdrawal_recovery admission in front of every
+// operator mutation (permission-set/revoke, claim-revoke, projection-refresh):
+// this CLI funnel is independent of the execution HTTP write path, and a
+// refused admission exits non-zero with the closed refusal_class before
+// execOperatorOp — no mutation and no execution_ops_audit row. The read-only
+// inspections (claim-show/step-list/event-list) write nothing and keep their
+// pre-015 behavior.
 package app
 
 import (
@@ -24,6 +32,7 @@ import (
 	"github.com/xtianxx/txharbor/internal/db"
 	"github.com/xtianxx/txharbor/internal/execution"
 	"github.com/xtianxx/txharbor/internal/logx"
+	"github.com/xtianxx/txharbor/internal/recovery"
 )
 
 // errOperationConflict means an operation_id was reused with different input;
@@ -232,11 +241,15 @@ func withdrawalExecPermissionSet(ctx context.Context, args []string, d Deps) int
 		return 2
 	}
 
-	pool, code := withdrawalExecOpenPool(ctx, d)
+	pool, recoveryWiring, code := withdrawalExecOpenMutation(ctx, d)
 	if pool == nil {
 		return code
 	}
 	defer pool.Close()
+	defer recoveryWiring.close()
+	if code := withdrawalExecRecoveryRefuse(ctx, stderr, recoveryWiring, "permission_set", *operationID); code != 0 {
+		return code
+	}
 
 	op := operatorOp{
 		OperationID: *operationID,
@@ -299,11 +312,15 @@ func withdrawalExecPermissionRevoke(ctx context.Context, args []string, d Deps) 
 		return 2
 	}
 
-	pool, code := withdrawalExecOpenPool(ctx, d)
+	pool, recoveryWiring, code := withdrawalExecOpenMutation(ctx, d)
 	if pool == nil {
 		return code
 	}
 	defer pool.Close()
+	defer recoveryWiring.close()
+	if code := withdrawalExecRecoveryRefuse(ctx, stderr, recoveryWiring, "permission_revoke", *operationID); code != 0 {
+		return code
+	}
 
 	op := operatorOp{
 		OperationID: *operationID,
@@ -359,11 +376,15 @@ func withdrawalExecClaimRevoke(ctx context.Context, args []string, d Deps) int {
 		return 2
 	}
 
-	pool, code := withdrawalExecOpenPool(ctx, d)
+	pool, recoveryWiring, code := withdrawalExecOpenMutation(ctx, d)
 	if pool == nil {
 		return code
 	}
 	defer pool.Close()
+	defer recoveryWiring.close()
+	if code := withdrawalExecRecoveryRefuse(ctx, stderr, recoveryWiring, "claim_revoke", *operationID); code != 0 {
+		return code
+	}
 
 	op := operatorOp{
 		OperationID:    *operationID,
@@ -419,11 +440,15 @@ func withdrawalExecProjectionRefresh(ctx context.Context, args []string, d Deps)
 		return 2
 	}
 
-	pool, code := withdrawalExecOpenPool(ctx, d)
+	pool, recoveryWiring, code := withdrawalExecOpenMutation(ctx, d)
 	if pool == nil {
 		return code
 	}
 	defer pool.Close()
+	defer recoveryWiring.close()
+	if code := withdrawalExecRecoveryRefuse(ctx, stderr, recoveryWiring, "projection_refresh", *operationID); code != 0 {
+		return code
+	}
 
 	op := operatorOp{
 		OperationID: *operationID,
@@ -623,6 +648,54 @@ func withdrawalExecOpenPool(ctx context.Context, d Deps) (*pgxpool.Pool, int) {
 		return nil, 1
 	}
 	return pool, 0
+}
+
+// withdrawalExecOpenMutation opens the data pool and assembles the 015
+// existing_withdrawal_recovery admission of one operator mutation. Without
+// TXHARBOR_RECOVERY_CONTROL_DSN the admission is nil (normal mode, FR-023);
+// with the control store configured, a missing gate TTL, an unreachable store
+// or an unknown schema version refuses the command — there is no degraded
+// pass-through. The caller owns the pool and the wiring (close both).
+func withdrawalExecOpenMutation(ctx context.Context, d Deps) (*pgxpool.Pool, *existingWithdrawalRecoveryWiring, int) {
+	stderr := d.stderr()
+	cfg, err := config.Load(d.getenv())
+	if err != nil {
+		fmt.Fprintf(stderr, "txharbor withdrawal-exec: configuration error: %s\n", logx.Redact(err.Error()))
+		return nil, nil, 1
+	}
+	pool, err := db.OpenPool(ctx, cfg.PGDSN, cfg.ProbeTimeout)
+	if err != nil {
+		fmt.Fprintf(stderr, "txharbor withdrawal-exec: %s\n", logx.Redact(err.Error()))
+		return nil, nil, 1
+	}
+	wiring, err := assembleExistingWithdrawalRecovery(ctx, cfg, d.getenv())
+	if err != nil {
+		pool.Close()
+		fmt.Fprintf(stderr, "txharbor withdrawal-exec: recovery gate: %s\n", logx.Redact(err.Error()))
+		return nil, nil, 1
+	}
+	return pool, wiring, 0
+}
+
+// withdrawalExecRecoveryRefuse evaluates the 015
+// existing_withdrawal_recovery admission before one operator mutation (T032).
+// It returns 0 when the action may proceed (normal mode included) and a
+// non-zero exit code after surfacing the closed refusal_class when the gate
+// denies. The refusal is audited by the gate itself; no mutation and no
+// execution_ops_audit write happens on a refusal.
+func withdrawalExecRecoveryRefuse(ctx context.Context, stderr io.Writer, wiring *existingWithdrawalRecoveryWiring, action, operationID string) int {
+	dec, err := wiring.admit(ctx, recovery.CapabilityExistingWithdrawalRecovery, action, operationID)
+	if err == nil && dec.Allowed {
+		return 0
+	}
+	reason := dec.Reason
+	if err != nil && reason == "" {
+		reason = err.Error()
+	}
+	fmt.Fprintf(stderr, "txharbor withdrawal-exec: %s refused: refusal_class=%s capability=%s operation_id=%s reason=%s\n",
+		action, existingWithdrawalRecoveryRefusalClass(dec), recovery.CapabilityExistingWithdrawalRecovery,
+		operationID, logx.Redact(reason))
+	return 1
 }
 
 // withdrawalExecUsage prints the accepted action forms.

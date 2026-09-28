@@ -25,6 +25,7 @@ import (
 	"github.com/xtianxx/txharbor/internal/indexer"
 	"github.com/xtianxx/txharbor/internal/logx"
 	"github.com/xtianxx/txharbor/internal/metrics"
+	"github.com/xtianxx/txharbor/internal/recovery"
 )
 
 // claimScanLimit bounds one scan batch; the loop repeats on its cadence.
@@ -170,6 +171,7 @@ func (w *WithdrawalWorker) runTrackingPass(ctx context.Context) {
 		w.log().Warn("tracking scan failed", "error", logx.Redact(err.Error()))
 		return
 	}
+	trackingRefused := false
 	for _, cand := range candidates {
 		if ctx.Err() != nil {
 			return
@@ -184,6 +186,17 @@ func (w *WithdrawalWorker) runTrackingPass(ctx context.Context) {
 		_, busy := w.active[cand.intentID]
 		w.mu.Unlock()
 		if busy {
+			continue
+		}
+		// 015 T032: the receipt/confirmation scan is one tracking action of
+		// existing_withdrawal_recovery; it re-evaluates the gate before it
+		// runs. A refusal skips the candidate without advancing anything and
+		// without taking it out of the tracking rotation (the retry is kept).
+		if dec, err := w.admitRecovery(ctx, "worker_tracking", cand.intentID); err != nil || !dec.Allowed {
+			if !trackingRefused {
+				w.logRecoveryRefusal("worker_tracking", cand.intentID, dec, err)
+				trackingRefused = true
+			}
 			continue
 		}
 		if err := w.ConfirmAttempt(ctx, cand.intentID); err != nil {
@@ -303,6 +316,12 @@ type WithdrawalWorker struct {
 	// reconciler consumes the authority facts (see JointDeps.ConfirmAttempt).
 	// Always set by joint construction.
 	ConfirmAttempt func(ctx context.Context, intentID string) error
+	// Recovery is the 015 resumption-gate admission of the
+	// existing_withdrawal_recovery capability (T032). It is nil when the
+	// deployment does not configure the recovery control store (normal mode,
+	// FR-023) and non-nil otherwise; a non-nil wiring evaluates every gated
+	// action before it starts and never replaces the 011 gate sequence.
+	Recovery *existingWithdrawalRecoveryWiring
 
 	mu     sync.Mutex
 	active map[string]context.CancelFunc
@@ -407,6 +426,14 @@ func (w *WithdrawalWorker) cycle(ctx context.Context) {
 // serveIntent acquires the claim, marks it claimed, and renews it while active.
 // A lost or expired qualification stops the holder immediately.
 func (w *WithdrawalWorker) serveIntent(ctx context.Context, intentID string) {
+	// 015 T032: no claim may be acquired (and no admitted->claimed progress
+	// may be written) before the existing_withdrawal_recovery admission
+	// passes. A refusal is a no-op: the intent stays claimable and is retried
+	// on a later cycle; no progress is swallowed.
+	if dec, err := w.admitRecovery(ctx, "worker_claim", intentID); err != nil || !dec.Allowed {
+		w.logRecoveryRefusal("worker_claim", intentID, dec, err)
+		return
+	}
 	res, err := w.Claims.Claim(ctx, intentID, w.OwnerID)
 	if err != nil {
 		w.observeAcquisition("error")
@@ -480,6 +507,15 @@ func (w *WithdrawalWorker) workLoop(ctx context.Context, intentID string, versio
 // nothing), and the retry/re-scan cadence is the pre-existing one. `failed`
 // stays terminal-without-tracking.
 func (w *WithdrawalWorker) execIntentCycle(ctx context.Context, intentID string, version int64) error {
+	// 015 T032: every advance (receipt/confirmation consumption, reconcile,
+	// projection refresh, step issue) is one action of
+	// existing_withdrawal_recovery and re-evaluates the gate first. A refusal
+	// performs no work and returns without an error: the claim stays, the next
+	// cycle retries, and the refusal never advances progress or drops a retry.
+	if dec, err := w.admitRecovery(ctx, "worker_exec_cycle", intentID); err != nil || !dec.Allowed {
+		w.logRecoveryRefusal("worker_exec_cycle", intentID, dec, err)
+		return nil
+	}
 	intent, found, err := execution.ReadIntent(ctx, w.Pool, intentID)
 	if err != nil || !found {
 		return err
@@ -564,6 +600,13 @@ func (w *WithdrawalWorker) execIntentCycle(ctx context.Context, intentID string,
 // startupCatchUp reconciles every open (issued) step first, then runs a
 // version-ordered projection catch-up. Both are no-ops without the 010 wiring.
 func (w *WithdrawalWorker) startupCatchUp(ctx context.Context) {
+	// 015 T032: the startup reconcile/projection catch-up is one action; it
+	// does not start before the admission passes. The tracking pass has its
+	// own per-candidate admission below.
+	if dec, err := w.admitRecovery(ctx, "worker_startup_catch_up", ""); err != nil || !dec.Allowed {
+		w.logRecoveryRefusal("worker_startup_catch_up", "", dec, err)
+		return
+	}
 	// Lane-F2: startup recovery includes the to-be-tracked completed intents
 	// (a restart must not drop receipt/confirmation/reorg-revision tracking).
 	w.runTrackingPass(ctx)
@@ -621,6 +664,31 @@ func (w *WithdrawalWorker) observeAcquisition(result string) {
 	}
 }
 
+// admitRecovery evaluates one single action of the
+// existing_withdrawal_recovery capability before it starts (T032). A nil
+// admission (normal-mode deployment) passes through; otherwise the T012 gate
+// is the only evaluator. operationID is the audit correlation of this action
+// (intent id where one exists; empty is allowed).
+func (w *WithdrawalWorker) admitRecovery(ctx context.Context, action, operationID string) (recovery.GateDecision, error) {
+	return w.Recovery.admit(ctx, recovery.CapabilityExistingWithdrawalRecovery, action, operationID)
+}
+
+// logRecoveryRefusal records one refused worker action with the closed refusal
+// class. The refusal is audited by the gate itself (control store); this line
+// is the process-side notification and never carries secrets.
+func (w *WithdrawalWorker) logRecoveryRefusal(action, intentID string, dec recovery.GateDecision, err error) {
+	reason := dec.Reason
+	if err != nil && reason == "" {
+		reason = err.Error()
+	}
+	w.log().Warn("recovery gate refused worker action",
+		"action", action,
+		"intent_id", intentID,
+		"capability", string(recovery.CapabilityExistingWithdrawalRecovery),
+		"refusal_class", string(existingWithdrawalRecoveryRefusalClass(dec)),
+		"reason", logx.Redact(reason))
+}
+
 func (w *WithdrawalWorker) log() *slog.Logger {
 	if w.Log != nil {
 		return w.Log
@@ -664,6 +732,31 @@ func WithdrawalWorkerCommand(ctx context.Context, args []string, d Deps) int {
 	}
 	defer pool.Close()
 
+	// 015 T032: the existing_withdrawal_recovery admission is assembled before
+	// any claim can be made. Without the control store the process is in
+	// normal mode (FR-023); with it, a missing TTL, an unreachable store or an
+	// unknown schema version refuses startup — there is no degraded
+	// pass-through.
+	recoveryWiring, err := assembleExistingWithdrawalRecovery(ctx, cfg, d.getenv())
+	if err != nil {
+		fmt.Fprintf(stderr, "txharbor withdrawal-worker: recovery gate: %s\n", logx.Redact(err.Error()))
+		return 1
+	}
+	defer recoveryWiring.close()
+	// Startup gate: the loop must not start (and no claim may be made) while
+	// the capability is not released. The refusal class is surfaced by name
+	// and audited by the gate; the process exits instead of running an
+	// isolated worker.
+	if dec, gerr := recoveryWiring.admit(ctx, recovery.CapabilityExistingWithdrawalRecovery, "worker_startup", ""); gerr != nil || !dec.Allowed {
+		reason := dec.Reason
+		if gerr != nil && reason == "" {
+			reason = gerr.Error()
+		}
+		fmt.Fprintf(stderr, "txharbor withdrawal-worker: recovery gate refused startup: refusal_class=%s capability=%s reason=%s\n",
+			existingWithdrawalRecoveryRefusalClass(dec), recovery.CapabilityExistingWithdrawalRecovery, logx.Redact(reason))
+		return 1
+	}
+
 	deps, err := d.JointWiring(ctx, cfg, pool)
 	if err != nil {
 		fmt.Fprintf(stderr, "txharbor withdrawal-worker: joint wiring failed: %s\n", logx.Redact(err.Error()))
@@ -674,6 +767,7 @@ func WithdrawalWorkerCommand(ctx context.Context, args []string, d Deps) int {
 		fmt.Fprintf(stderr, "txharbor withdrawal-worker: %s\n", logx.Redact(err.Error()))
 		return 1
 	}
+	worker.Recovery = recoveryWiring
 	fmt.Fprintf(d.stdout(), "txharbor withdrawal-worker: joint wiring ready (driver=%T reconciler=%T)\n", worker.Driver, worker.Reconciler)
 	worker.Run(ctx)
 	return 0

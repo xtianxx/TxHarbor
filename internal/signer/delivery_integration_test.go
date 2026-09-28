@@ -227,7 +227,7 @@ func dlvSeedScope(t *testing.T, pool *pgxpool.Pool, f *dlvFixture, version int64
 }
 
 func dlvDeps(pool *pgxpool.Pool, binding BindingReader, scope ScopeLocker) DeliveryDeps {
-	return DeliveryDeps{DB: pool, Binding: binding, ScopeLock: scope}
+	return DeliveryDeps{DB: pool, Binding: binding, ScopeLock: scope, RecoveryGate: testDeliveryGateAllow}
 }
 
 // dlvAdmissionCount counts the persisted admission rows for a request.
@@ -319,6 +319,53 @@ func TestSignerDeliveryV7(t *testing.T) {
 	ctx := context.Background()
 	n := 0
 	next := func() *dlvFixture { n++; return dlvSeed(t, pool, n) }
+
+	t.Run("T070 recovery checkpoint refuses before any bytes and passes after release", func(t *testing.T) {
+		gateReset006(t, pool)
+		f := next()
+		sink := &dlvSink{}
+		deps := dlvDeps(pool, &dlvBinding{results: []BindingResult{BindingMatches}}, nil)
+
+		// Phase one refuses: zero bytes, no admission row, no marker, no
+		// re-sign — and the 009 gate sequence never runs.
+		gateCalls := 0
+		deps.RecoveryGate = func(_ context.Context, req DeliveryGateRequest) error {
+			gateCalls++
+			if req.SigningRequestID != f.requestID || req.CallerID != f.callerID || req.ChainID != gateChainID {
+				t.Fatalf("checkpoint request = %+v, want the durable delivery facts of %s", req, f.requestID)
+			}
+			return errors.New("recovery gate refused delivery: refusal_class=isolation_unproven")
+		}
+		res, err := Deliver(ctx, deps, Caller{ID: f.callerID, CanSign: true}, f.requestID, sink)
+		if res != nil {
+			t.Fatalf("refused delivery result = %+v, want nil", res)
+		}
+		signerAuthRefusal(t, err, ClassSignatureWithheld)
+		if gateCalls != 1 {
+			t.Fatalf("checkpoint calls = %d, want exactly 1", gateCalls)
+		}
+		if sink.count() != 0 {
+			t.Fatalf("sink received %d payloads on a refused checkpoint, want 0", sink.count())
+		}
+		if got := dlvAdmissionCount(t, pool, f.rowID); got != 0 {
+			t.Fatalf("refused checkpoint left %d admission row(s), want 0", got)
+		}
+		if dlvDeliveredMarker(t, pool, f.rowID) {
+			t.Fatal("refused checkpoint wrote a delivered marker")
+		}
+		dlvAssertNoResign(t, pool, f)
+
+		// Same identity, checkpoint released: the delivery proceeds through
+		// the untouched 009 gates and hands out the persisted bytes.
+		deps.RecoveryGate = testDeliveryGateAllow
+		res, err = Deliver(ctx, deps, Caller{ID: f.callerID, CanSign: true}, f.requestID, sink)
+		if err != nil || res == nil || res.Verdict != VerdictDelivered {
+			t.Fatalf("released checkpoint delivery = %+v / %v, want delivered", res, err)
+		}
+		if sink.count() != 1 {
+			t.Fatalf("sink received %d payloads after release, want 1", sink.count())
+		}
+	})
 
 	t.Run("admission insert bytes write and marker commit in one region", func(t *testing.T) {
 		gateReset006(t, pool)

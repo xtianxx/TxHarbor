@@ -2,15 +2,20 @@ package app
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
+	"sync"
 	"time"
+
+	"github.com/jackc/pgx/v5"
 
 	"github.com/xtianxx/txharbor/internal/config"
 	"github.com/xtianxx/txharbor/internal/db"
 	"github.com/xtianxx/txharbor/internal/events"
 	"github.com/xtianxx/txharbor/internal/logx"
+	"github.com/xtianxx/txharbor/internal/recovery"
 )
 
 // EventConsumer is the 013 `event-consumer` entry point (T044): fail-closed
@@ -19,6 +24,13 @@ import (
 // group runtime — per-partition sequential processing, the durable PostgreSQL
 // progress as the authoritative resume point, Kafka offset commits strictly
 // after the effect transaction and bounded lag observation.
+//
+// 015 wiring (T034): when TXHARBOR_RECOVERY_CONTROL_DSN is configured, the
+// entry admits event_consuming before any broker contact and before every
+// Effect application; a refusal rolls the T4 transaction back (no effect, no
+// inbox row, no progress advance), stops the entry and surfaces the closed
+// refusal_class (the gate audits it). The reference consumer stays
+// evidence-only and non-authoritative.
 //
 // Guarantee statement (global, MUST NOT be weakened): delivery is
 // at-least-once and processing is idempotent; the same event is effectively
@@ -52,6 +64,28 @@ func EventConsumer(ctx context.Context, args []string, d Deps) int {
 	}
 	fmt.Fprintf(stdout, "txharbor event-consumer: config %s\n", cfg.Summary())
 
+	// 015 resumption-gate assembly (T034). Recovery mode is armed by
+	// configuring TXHARBOR_RECOVERY_CONTROL_DSN: the entry then admits
+	// event_consuming before its first effect (here, and again before every
+	// Effect application) and refuses before any broker contact or data-DB
+	// write. Not configured means normal mode (FR-023); once configured, a
+	// missing gate TTL, an unreachable control store or an unknown/
+	// incompatible schema refuses startup — no degraded pass-through.
+	wiring, err := assembleEventsRecovery(ctx, cfg, d.getenv(), eventConsumingScope(cfg.ChainID))
+	if err != nil {
+		fmt.Fprintf(stderr, "txharbor event-consumer: %s\n", logx.Redact(err.Error()))
+		return 1
+	}
+	defer wiring.close()
+	// Startup admission before any broker contact or data-DB write: while a
+	// recovery instance is open and event_consuming is not released, the entry
+	// must not create the reference ledger, join a consumer group or apply any
+	// effect.
+	if err := wiring.require(ctx, recovery.CapabilityEventConsuming, "startup"); err != nil {
+		fmt.Fprintf(stderr, "txharbor event-consumer: refused: %s\n", err.Error())
+		return 1
+	}
+
 	pool, err := db.OpenPool(ctx, cfg.PGDSN, cfg.ProbeTimeout)
 	if err != nil {
 		fmt.Fprintf(stderr, "txharbor event-consumer: open database: %s\n", logx.Redact(err.Error()))
@@ -71,6 +105,24 @@ func EventConsumer(ctx context.Context, args []string, d Deps) int {
 	if err != nil {
 		fmt.Fprintf(stderr, "txharbor event-consumer: %s\n", logx.Redact(err.Error()))
 		return 1
+	}
+	// 015 Effect checkpoint (T034). The gate is admitted before every Effect
+	// the T4 transaction would apply; a refusal rolls that transaction back
+	// (no inbox row, no effect, no progress advance) and cancels the run so
+	// the entry stops without applying anything further. The reference
+	// consumer stays the evidence-only, non-authoritative consumer it is.
+	refusals := &consumerGateRefusals{}
+	runCtx, cancelRun := context.WithCancel(ctx)
+	defer cancelRun()
+	if wiring != nil {
+		reference.Consumer.Effect = &gatedConsumerEffect{
+			inner: reference.Consumer.Effect,
+			gate:  wiring,
+			onRefusal: func(err error) {
+				refusals.record(err)
+				cancelRun()
+			},
+		}
 	}
 	if err := reference.EnsureLedgerSchema(ctx); err != nil {
 		fmt.Fprintf(stderr, "txharbor event-consumer: reference ledger schema: %s\n", logx.Redact(err.Error()))
@@ -104,12 +156,77 @@ func EventConsumer(ctx context.Context, args []string, d Deps) int {
 	fmt.Fprintln(stdout, "txharbor event-consumer: delivery is at-least-once and processing is idempotent;")
 	fmt.Fprintf(stdout, "txharbor event-consumer: boundary: %s\n", reference.BoundaryStatement())
 
-	if err := runtime.Run(ctx); err != nil && ctx.Err() == nil {
-		fmt.Fprintf(stderr, "txharbor event-consumer: %s\n", logx.Redact(err.Error()))
+	runErr := runtime.Run(runCtx)
+	if refused := refusals.first(); refused != nil {
+		// The gate denied an Effect: nothing was applied, no inbox row and no
+		// progress advanced; the entry stops and surfaces the closed class.
+		fmt.Fprintf(stderr, "txharbor event-consumer: refused: %s\n", refused.Error())
+		return 1
+	}
+	if runErr != nil && ctx.Err() == nil {
+		fmt.Fprintf(stderr, "txharbor event-consumer: %s\n", logx.Redact(runErr.Error()))
 		return 1
 	}
 	fmt.Fprintln(stdout, "txharbor event-consumer: stopped")
 	return 0
+}
+
+// consumerGateRefusals records the first 015 gate refusal seen by the gated
+// Effect so the entry can stop the Kafka run and surface the closed
+// refusal_class after Run returns.
+type consumerGateRefusals struct {
+	mu    sync.Mutex
+	cause *eventsGateRefusedError
+}
+
+// record keeps the first refusal (later ones are consequences of the same
+// closed capability; the first is the cause the entry reports).
+func (r *consumerGateRefusals) record(err error) {
+	var refused *eventsGateRefusedError
+	if err == nil || !errors.As(err, &refused) {
+		return
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.cause == nil {
+		r.cause = refused
+	}
+}
+
+// first returns the recorded refusal, or nil when the run ended cleanly.
+func (r *consumerGateRefusals) first() *eventsGateRefusedError {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.cause
+}
+
+// gatedConsumerEffect is the T034 Effect checkpoint: before the Effect of a
+// delivered event is applied inside the T4 transaction, the entry admits
+// event_consuming (contracts/resumption-gate.md §1 "Effect 应用前与进度推进前").
+// The T4 transaction couples the effect, the inbox row, the version update and
+// the durable progress advance, so a refusal here rolls the whole transaction
+// back — no effect, no inbox row and no progress advance — and the run is
+// cancelled before the consumer could quarantine or mark the offset. The
+// admission covers exactly this one event's application action.
+//
+// The effect-class dimension of the scope is T050's; until that ruling lands
+// every consumed effect is conservatively high impact and the gate's
+// dual-approval requirement stands (RequiredApprovalClass).
+type gatedConsumerEffect struct {
+	inner     events.Effect
+	gate      *eventsRecoveryWiring
+	onRefusal func(error)
+}
+
+// Apply gates one effect application.
+func (e *gatedConsumerEffect) Apply(ctx context.Context, tx pgx.Tx, env events.Envelope) error {
+	if err := e.gate.require(ctx, recovery.CapabilityEventConsuming, "apply_effect"); err != nil {
+		if e.onRefusal != nil {
+			e.onRefusal(err)
+		}
+		return err
+	}
+	return e.inner.Apply(ctx, tx, env)
 }
 
 // eventConsumerLogObserver turns consumer outcomes into structured log lines.
