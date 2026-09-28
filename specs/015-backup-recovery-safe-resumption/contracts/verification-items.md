@@ -11,7 +11,7 @@
 | V1 | 链事实 vs PG | RPC canonical（区块/回执/日志）+ `chain_blocks/erc20_transfer_logs/indexer_checkpoint/log_checkpoint/deposit_*` + 006 `reorg_recovery` | 恢复点后链上已发生但本地缺失/矛盾 | RPC 不可达、确认未达阈值、孤块未决 | `chain_scan`、充值相关 |
 | V2 | 提款请求/付款意图/授权 | `withdrawal_requests/payment_intents/withdrawal_authorizations` + 007 审计 | 请求/意图的存在与状态；**不能**证明"从未发生" | 恢复点无记录且无外部证据 | `new_withdrawal_creation`、`existing_withdrawal_recovery` |
 | V3 | nonce 分配/占用 | 008 `nonce_bindings/nonce_observations/nonce_scope_state…` + `eth_getTransactionCount` | 分配与链上消耗的一致性 | RPC 不可达、pending/unknown | `existing_withdrawal_recovery` |
-| V4 | 签名/广播结果（含 unknown） | `signing_requests/signature_results/tx_attempt_signings/tx_send_attempts/tx_receipts/tx_reconciliations` + 链回执（只读复用 `txlifecycle.Reconcile/UnknownRecovery` 观察语义） | 已持久化事实与链上结果的对照；unknown 保持 unknown | 无记录且无法从链/签名边界取证 | `existing_withdrawal_recovery` |
+| V4 | 签名/广播结果（含 unknown） | `signing_requests/signature_results/tx_attempt_signings/tx_send_attempts/tx_receipts/tx_reconciliations` + 链回执（**只读 accessor 白名单（F4）**：`AttemptByID`/`UnknownRecovery`〔内部只读事实 `sendFacts`/`reconcileFacts`〕/`Status`/回执只读查询；**禁用 `Reconcile`〔写 `tx_reconciliations` 观察行+状态转换〕、`Release`、`Send`、`applyReceipt` 等写路径**；方法名含查询/恢复不构成只读证明） | 已持久化事实与链上结果的对照；unknown 保持 unknown | 无记录且无法从链/签名边界取证 | `existing_withdrawal_recovery` |
 | V5 | Outbox 与义务标记 | `outbox_events` + `event_obligation`（000017，只增不减）+ publisher 进度 | 义务存在但事件未推进/已发布未知 | broker 不可读、保留裁剪区段 | `event_publishing` |
 | V6 | 消费者幂等/进度/隔离 | `consumer_inbox/versions/progress/quarantine` + broker committed offset（可读时） | 回退检测（PG 进度 vs offset）、重复吸收现状 | broker 不可读（offset 未知） | `event_consuming` |
 | V7 | 014 差异/复核/处置/权限/审计 | 000016 表（只读引用） | 既有差异与处置历史可追溯 | 表缺失/未迁移 | 与 V2/V5/V6 重叠部分 |
@@ -25,6 +25,9 @@
 - 时间推断、默认值、旧状态、"大概未发生"不得填补证据（FR-018）。
 - DB 回退 ≠ 外部付款/消费效果回退；已签名/已广播/已发布/已消费保持外部事实，差异必须显式列入结论（FR-015）。
 - 复用 014/006/013 能力不得绕过其授权与门禁；核验发现的修复动作只能引用其既有入口（FR-020）。
+- **只读纪律（F4）**：V1–V9 适配器只能经只读 accessor/只读查询取证；**MUST NOT 调用 `Reconcile` 等任何写路径冒充只读**；集成测试必须断言核验批次执行前后权威表整表指纹零写（复用 `internal/txlifecycle/readonly_integration_test.go` 指纹模式）。
+- **历史重发负例（F10）**：历史 signed bytes 重放、历史广播重发、历史付款意图重执行、重复投递重发一律拒绝（0 次重放/重广播/重投递/重建意图）；回退绝不构成重放许可。
+- **探针枚举（F9）**：`restore_probe.business_state_probes` 必须逐项对照 FR-002 九类权威对象（链身份/游标、事件、充值确认、提款请求与付款意图、出站交易与签名/广播、nonce、Outbox/义务标记、消费者幂等/进度、审计/权限/014 差异）抽样并声明覆盖边界；不能证明的类别标 `unknown` 且不得计入 `restored` 通过。
 
 ## 2. 证据缺口与人工处置证据包（FR-019）
 
@@ -34,6 +37,7 @@
 - 可证明独立且证据充分的能力可按 [approval-matrix.md](approval-matrix.md) 放行；放行必须记录范围、依赖核验、证据与批准结果，且不得间接启动被暂停的付款/签名/广播/真实下游副作用。
 - 缺口无法补齐：保留 `unknown/pending` + 证据包 + 责任归属 + 升级；允许有界只读复核；**超时、重试耗尽、人工知悉 ≠ 闭合或获准复服**。
 - 本阶段不交付风险接受后强制复服、损失核销、人工补偿付款、自动补造意图；**双人批准不能替代缺失证据**。
+- **有界只读复核（F13）**：可读范围=本实例及授权 scope 内的证据/核验/缺口/审计；次数/时间/资源预算（部署配置）；预算耗尽→拒绝后续复核＋审计、不改变缺口/实例/批准/放行状态；超时、预算耗尽、人工知悉 ≠ 缺口闭合或获准复服。
 
 ## 3. 事件与下游边界（FR-027–FR-029）
 

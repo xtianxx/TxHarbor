@@ -10,7 +10,7 @@ All spec clarifications are resolved (Session 2026-09-28: FR-036 scope, FR-023 s
 
 - **链观察与索引（002/003/004/005/006）**：serve 启动版本门禁 `internal/app/serve.go:141`（`db.CheckCompatibility`）；单主租约与 fencing token `internal/indexer/lease.go:56-63`（`ensureLeaseSQL` 含 `fencing_token = indexer_lease.fencing_token + 1`）、`:67 lockLeaseSQL`；scanner `serve.go:319`（header）/`:331`（log）/`:350-353`（deposit scanner，配置身份冻结拒绝漂移）/`:380-398`（confirmation scanner+committer）/`:411 NewRecoveryLoopWithMetrics`（006 恢复循环）；`serve.go:615 runServiceStreams` 五流并发；暂停门 `internal/indexer/scanner.go:1108/1148`（`indexer_pause`）。015 只做"停止证明/继续证明"的观察与门禁，不改写这些状态机。
 - **提款创建（007）**：`internal/app/withdrawalhttp.go:136 ServeHTTP` / `:148 ServePOST`（调用链含 `guardRoute` + 013 `CapacityGate`，serve 装配 `serve.go:466-467`）/ `:227 ServeGET`；路由挂载 `serve.go:473-474`（`ratelimit.ClassNewWithdrawal`）、执行路由 `:479-480`、nonce 读 `:488`；限流 fail-closed 语义与"中间件只拒绝不改写"纪律 `internal/app/ratelimit_middleware.go:1-10/136`。
-- **提款执行与在途恢复（008/009/010/011/012）**：worker `internal/app/withdrawalworker.go:318 NewWithdrawalWorker` / `:349 Run` / `:367 cycle` / `:566 startupCatchUp` / `:649 WithdrawalWorkerCommand`；唯一可写操作员 CLI `internal/app/withdrawalexec.go:35` 与 `execOperatorOp`（`operation_id` 审计去重、23505 读回、冲突零写）；门禁 `internal/execution/gates.go:31 GateLockSQL……:85/:161/:202/:240/:307/:345` 被 `admit.go:101-118`/`advance.go:136-164` 真实调用；fact-only 对账 `internal/execution/reconcile.go:41 ReconcileIntent`；未知结果 `internal/txlifecycle/reconcile.go:62 Reconcile` / `:183 UnknownRecovery`（只读事实+恢复条件）；锁序 `internal/txlifecycle/gates.go:84`；nonce 门 `internal/nonce/coord.go:69/118/172`。015 核验复用这些只读事实，**从不自动触发恢复/重放/付款**。
+- **提款执行与在途恢复（008/009/010/011/012）**：worker `internal/app/withdrawalworker.go:318 NewWithdrawalWorker` / `:349 Run` / `:367 cycle` / `:566 startupCatchUp` / `:649 WithdrawalWorkerCommand`；唯一可写操作员 CLI `internal/app/withdrawalexec.go:35` 与 `execOperatorOp`（`operation_id` 审计去重、23505 读回、冲突零写）；门禁 `internal/execution/gates.go:31 GateLockSQL……:85/:161/:202/:240/:307/:345` 被 `admit.go:101-118`/`advance.go:136-164` 真实调用；fact-only 对账 `internal/execution/reconcile.go:41 ReconcileIntent`；未知结果 `internal/txlifecycle/reconcile.go:183 UnknownRecovery`（只读事实+恢复条件；`:62 Reconcile` 会写 `tx_reconciliations` 观察行——V4 只允许只读 accessor 白名单（`AttemptByID`/`UnknownRecovery`/`Status`/回执读），禁用该写路径，F4）；锁序 `internal/txlifecycle/gates.go:84`；nonce 门 `internal/nonce/coord.go:69/118/172`。015 核验复用这些只读事实，**从不自动触发恢复/重放/付款**。
 - **事件（013）**：发布 `internal/app/eventpublisher.go:41` → `internal/events/publisher.go:177 NewPublisher`（`:161-162` 说明 `FOR UPDATE SKIP LOCKED` + owner/lease 分片，无 Redis 锁）；消费 `internal/app/eventconsumer.go:31` → `internal/events/consumer.go:351 NewConsumer`、`:639 Effect.Apply`；参考消费者 `internal/events/refconsumer.go` 明确"非账本、仅本项目证据"；真实非权威 Effect = 缓存失效 `internal/cache/invalidator.go:120 Apply`；隔离/重放 `internal/events/quarantine.go`；watermark 审计 `internal/events/audit.go:148-180`。015 只做回退检测、幂等吸收边界与投递门禁接线。
 - **014（差异/权限/审计/代次）**：`migrations/000016_reconciliation_handling.sql`（`recon_task/recon_checkpoint/recon_gap/discrepancy/disposition/reverify/recon_audit/recon_scan_attempt/recon_permission`，默认拒绝、无预置授予，`:377-402`）；`migrations/000017_event_obligations.sql`（事件义务标记，只增不减、无保留裁剪）；`migrations/000018_reverify_generation.sql`（纯增列 `discrepancy.reverify_generation`；写写反序令牌协议见 014 `data-model.md §3.1`；升级/回滚禁混跑检查清单见 014 `quickstart.md`「000018 升级与回滚」——**本规格沿用的 000018 检查清单模式即此模板**）。015 核验引用 014 差异/审计；014 生命周期动作仍走 014 自己已授权的入口。
 - **审计与证据模式**：append-only 审计族（`execution_ops_audit`、`event_ops_audit`、`recon_audit`、`signing_request_audit`、`withdrawal_request_audit`、`nonce_ops_audit`）；`docs/evidence/*` 与 `.evidence/*` 证据目录模式；`internal/faultdrill`（五态矩阵/真实 Anvil）与 `internal/perf` harness。015 复用同一模式，不新建第二套审计体系。
@@ -25,6 +25,7 @@ All spec clarifications are resolved (Session 2026-09-28: FR-036 scope, FR-023 s
 - **Recovery point 定义（唯一允许口径）**: `(snapshot xmin/xip/xmax, wal_lsn(export 时，作为上界), wall clock, server/database identity)`；`backup_lag = 恢复点 → 最近可观察外部事实/最新本地写入`，`uncovered interval = 恢复点 → 失败点之间未被备份覆盖的时间区间`。**MUST NOT** 用业务表 `MAX(created_at)`、备份频率、备份文件 mtime 充当 RPO 证明（spec FR-036、验收 SC-005）。
 - **Integrity**: 产物 SHA-256 + manifest 自描述校验；缺失/截断/校验失败/完整性未知一律"不可用"（fail-closed，FR-003）。
 - **Compatibility**: manifest 记录生成时 `goose_db_version` 精确版本集与程序版本标识；恢复/复服前与当前二进制目标版本比对（复用 `CheckCompatibility` 只读语义）；不兼容 → 明确拒绝，禁止静默降级/自动改写（FR-004）。
+- **验证生命周期（F7/DG-2 决议）**: 备份级验证（manifest `verified`，绑定 backup_id/carrier/schema）与目标实例级验证（`restore_probe`，绑定实例 + `data_target` 指纹）分离；复制 manifest、重建实例或更换目标必须重跑实际恢复验证/探针，不得沿用旧 `verified`；`restore` 前置校验控制库存在绑定 `backup_id` 的可验证证据行（无可验证证据 → 拒绝或重跑 `verify-backup`）；探针按 FR-002 九类权威对象抽样并声明边界、不能证明标 unknown（F9）。
 - **Retention**: 保留策略 = 部署配置（数量/时长），**生产数值不在本阶段裁决**；未配置必需约束时不得宣称符合生产恢复目标（FR-036）。
 - **Alternatives considered**: (a) `pg_basebackup` + WAL 归档/PITR——deferred：需要归档存储/编排与同主版本约束，当前单机 posture 无此依赖；manifest 身份模型对物理载体同样适用，未来可替换（ADR-002）；(b) 卷/文件系统快照——rejected：依赖宿主存储实现、跨环境可移植差、无法在仓库内确定性演练；(c) 外部托管备份产品——rejected：spec 明示不指定厂商、不引入仓库外信任依赖。
 
@@ -37,6 +38,7 @@ All spec clarifications are resolved (Session 2026-09-28: FR-036 scope, FR-023 s
   - **旧批准重现**：批准只在控制库、且**绑定恢复实例 ID**；数据 DB 或旧控制库行中的旧实例批准对当前实例惰性（instance_id 不匹配即无效）；015 从不读取数据 DB 中的批准行。
   - **实例身份复用**：实例 ID 由控制库生成、全局唯一、只追加、禁止复用；同一时刻**至多一个 open 实例**（部分唯一索引）；进程/命令绑定实例不匹配即拒绝。
   - **可信输入缺失**：控制库不可达/无实例/无批准/身份映射缺失 → 拒绝（不提供自由填写替代认证；`--operator` 类自由文本仅审计注记）。
+- **控制库自身的回退纪律（F6/DG-4）**: 禁盲恢复控制库；受支持恢复 = 停机隔离（执行者执行＋非执行者核验隔离项）→ 显式重建/`supersede`＋审计（新实例 ID 只增；执行者失去旧权限的确认=旧 DSN/凭据吊销或新库新凭据，记录时间与主体；建新实例的可信依据=部署受控配置＋恢复点证据＋重新隔离清单；旧库标 retired）；**不得在已回退库内写 `supersede` 即称可检**；015 不提供对盲恢复/旧副本的自动检测；「旧批准不自动重生效」仅就数据 DB 回滚域成立（控制域独立＋实例绑定），控制库回退域的普适声明保持限定（若要求普适保证另立裁决）。同实例储层同失（F14/DG-3）超出逻辑回滚域：fail-closed 重建，不虚构实例级独立性；备份落盘/异地策略待裁决。
 - **Alternatives considered**: (a) 数据 DB 内建控制表——rejected：回滚自证不可信（旧批准/旧撤销随备份回流）；(b) 本地 append-only JSONL 证据账本——rejected 作为唯一权威：违反 III 精神且跨主机协调/持久性弱；可继续作为**证据附件**（哈希入控制库）；(c) 纯运维流程无存储——rejected：无法满足 FR-009/SC-003 的运行期拒绝与可查询状态；(d) 新控制平台/服务/UI——rejected：XIII 明确禁止无理由新服务边界。
 
 ## 4. R3 复服闸门与运行期强制（隔离默认、逐项放行）
@@ -44,7 +46,7 @@ All spec clarifications are resolved (Session 2026-09-28: FR-036 scope, FR-023 s
 - **Decision**: 新增核心库 `internal/recovery.Gate`（纯逻辑 + 控制库读取），由全部可能产生外部效果/双写的真实入口在"动作前"调用；**无 open 恢复实例时按正常态放行（不改变日常运行，FR-023）**；一旦存在 open 实例，所有已接线入口的对应能力**默认拒绝**，仅当该能力在控制库中对"当前实例 + 当前证据代次 + 范围"满足全部条件（§data-model §3 派生评估）才放行。单实例全局至多一个 open；进程可显式绑定实例（`TXHARBOR_RECOVERY_INSTANCE`），绑定不匹配即拒绝。控制库读取带**有界 TTL 缓存**（部署配置；本地值仅测试输入），缓存过期且控制库不可达 → fail-closed 拒绝（正确性优先于可用性，宪法 I）。
 - **接线检查点（能力放行不是进程开关，而是动作前校验）**：查询类 HTTP 处理器准入前；链扫描/充值确认的 loop 启动与循环步进前；既有提款恢复（worker 认领/推进与 `withdrawal-exec` 操作员写路径）动作前；新提款创建 POST 准入前；事件发布 claim 批次前；事件消费 Effect 前；签名交付（signer-serve 交付路径）作为"既有提款恢复"的下游依赖同步受门禁。**任何入口 MUST NOT 存在一个开关恢复全部**（FR-021）。
 - **重启语义**: 放行/批准状态只存在于控制库，进程重启读同一控制库 → 重启自动回到与库一致的判权，**不会自动解除隔离**（FR-009）；实例关闭前一直受门禁。
-- **残留 procedural 边界（明示）**: 若操作者绕过 `recovery-admin` 手工恢复并让进程在"无 open 实例"的正常态下运行，门禁按设计不启用。015 的保证以"恢复走受支持入口 + 000018 检查清单"为前提：`restore` 必须在 open 实例下执行、恢复后首个动作必须是实例绑定与隔离核验；该前提是部署纪律（与 000018 的禁混跑同级），不虚构成自动检测能力。检测手段：控制库审计 + checklist 证据 + 门禁在实例开启后强制。
+- **残留 procedural 边界（明示）**: 若操作者绕过 `recovery-admin` 手工恢复并让进程在"无 open 实例"的正常态下运行，门禁按设计不启用。015 的保证以"恢复走受支持入口 + 000018 检查清单"为前提：`restore` 必须在 open 实例下执行、恢复后首个动作必须是实例绑定与隔离核验；该前提是部署纪律（与 000018 的禁混跑同级），不虚构成自动检测能力。检测手段：控制库审计 + checklist 证据 + 门禁在实例开启后强制。**同族边界（F1/F3/F6，不得称运行时全覆盖）**：`reconcile-admin`（claim/dispose/reverify/scan 等写路径）/`events-admin`（replay/unblock/retention-prune）/外部定时调度不在运行期门禁接线内（程序边界=停服/权限移除+审计+`no_pre_release_effects`，仅 checklist 签署不构成运行时隔离证明）；signer 核心在受支持装配之外的直调/蓄意伪造门禁不自动检测（T070 承接受支持装配内的进程内检查点）；控制库盲恢复/旧副本不自动检测（T025/T064）。
 - **Alternatives considered**: (a) 纯运维流程（不起进程即隔离）——rejected：无法满足 FR-009 运行期拒绝与 SC-003 请求级 100% 拒绝；(b) 数据 DB 内开关——rejected：回滚复活/擦除控制状态；(c) 每进程 env 开关（默认关）——rejected：重启/遗忘即自动放开，违反"重启不自动解除"；(d) 常驻控制服务——rejected：XIII。
 
 ## 5. R4 人员、身份绑定与审批模型
@@ -54,6 +56,7 @@ All spec clarifications are resolved (Session 2026-09-28: FR-036 scope, FR-023 s
 - **同人多账号识别**: 控制库维护 `person_id ↔ principal` **身份映射**（部署期导入/维护，非自由文本）。规则：双人批准 = 两个不同 principal **且**两个不同 `person_id`（同一人多账号只算一人）；单人批准的非执行者校验同样按 `person_id ≠ executor.person_id`；**映射缺失/未知 → 不能证明是不同人，一律拒绝**（fail-closed）。执行者排除按实例记录，不按"用户名不同"推断。
 - **审批类别**: 高影响能力（新提款创建、既有提款恢复、向真实下游投递及可产生真实下游业务效果的消费恢复）必须两名不同人员（均具 `recovery_approve`、均为本恢复实例非执行者）；其余能力（查询、链扫描、充值确认、事件发布/消费的非真实下游范围）由一名非执行者批准 + 审计。两档都绑定（实例、能力、范围、证据代次+哈希），证据变化/门禁失效即失效（重核重批）；**硬门禁不可被任何批准覆盖**（缺证/未隔离/未知付款结果），且只适用于 015 灾后复服，不改变日常运行与 014 已批权限，不新增紧急绕过/管理员强制入口。
 - **撤销与重入**: 批准/释放为 append-only 决策记录，撤销是显式新记录（后序覆盖前序，但**代次不匹配的历史批准永远无效**）；重复批准/重复释放按 `operation_id` 幂等读回，不产生第二次副作用；中断重入等价于继续推进（§7）。
+- **映射维护与变更（F19）**: 身份映射为部署受控特权路径+审计（`source`/`recorded_by`/`recorded_at`）；单特权维护无法由 015 证明双人真实性（程序/人的边界）；**映射变更立即使以该映射为依据的既有批准失效、须重核重批**（审批有效性按当前映射重算，批准行 `person_id` 与当前映射不一致 → `approval_identity_unverified`）；保守 dual 不抵消错映射；本地真实身份配置与验收路径可操作（T010/T046），生产名单待部署。
 - **Alternatives considered**: (a) 复用/扩大 `recon_permission`、`execution_caller_permission`、signer 凭据——rejected：语义域不同，复用即自动扩权（014 同类结论），且位于被回退 DB；(b) 仅 principal 字符串区分两人——rejected：违反 FR-023 同人双账号条款；(c) 增加第三人在场审批——spec 裁决明确不要求三人互斥，不引入。
 
 ## 6. R5 核验项与可证明边界
@@ -68,6 +71,7 @@ All spec clarifications are resolved (Session 2026-09-28: FR-036 scope, FR-023 s
 
 - **Decision**: 每个恢复实例有 `evidence_generation`（接受写入即推进）；批准/释放**绑定代次 + 证据哈希**；取证在事务外、提交在实例行锁内逐项校验令牌，不符即丢弃并审计（`discarded`），不写结果、不删缺口、不倒序覆盖——与 014 `data-model.md §3.1` 的写写反序协议同形。所有决策表 append-only，前向状态 = 按提交序取最新 + 显式撤销记录；**不以 `created_at` 排序裁决有效性**。命令幂等键 `operation_id` UNIQUE（同形 011/013/014 读回语义）；中断重入 = 有界步进重复调用，无内存态。
 - **Rationale**: 014 已证明"仅时间戳/进程时钟/裁决类型不能防倒序覆盖"；同一场景在恢复期（长时间人工操作、跨主机取证）更突出。
+- **缓存代次感知（F5）**: 门禁求值在实例行锁内读取权威 `(state, evidence_generation, evidence_hash)`；缓存键含实例+能力+scope+代次+哈希；任何代次/哈希变化立即失效（发现者=求值器，下一次真实动作前求值即拒绝，不等 TTL）；缓存过期且控制库不可达 = fail-closed 拒绝；区分「未准入」（拒绝、不产生动作）与「已在途」（按原门禁处理、未知结果按 unknown 纪律，不追溯中止已提交工作）。
 - **Alternatives considered**: 时间戳/最新行获胜——rejected（014 T026/T027 教训）；长事务持锁取证——rejected（跨慢调用不可行，违背有界原则）。
 
 ## 8. R7 CI 分层与演练通道
@@ -78,13 +82,13 @@ All spec clarifications are resolved (Session 2026-09-28: FR-036 scope, FR-023 s
 
 ## 9. R8 配置、度量与非声明
 
-- **Decision**: 可配置约束（FR-036）: RPO/RTO 目标、备份频率、保留策略、新鲜度容忍、门禁缓存 TTL、演练重复数——全部部署配置；**生产数值留部署前业务裁决，不编造**。度量分开记录且可查询：`recovery point`、`db_restore_time`、`verification_time`、`per_capability_release_time`、`backup_lag`、`uncovered_interval`、缺口数量与处置状态；**不得以数据库可连接宣称 RTO 达标**；若配置了目标，超时 100% 记不达标 + 告警 + 升级，且**不单独永久禁止后续安全复服**。未配置必需约束时状态显式报告"未配置"，不得宣称符合生产恢复目标；本地演练数值标注"测试输入"。
+- **Decision**: 可配置约束（FR-036）: RPO/RTO 目标、备份频率、保留策略、新鲜度容忍、门禁缓存 TTL、演练重复数——全部部署配置；**生产数值留部署前业务裁决，不编造**。度量分开记录且可查询：`recovery point`、`db_restore_time`、`verification_time`、`per_capability_release_time`、`backup_lag`、`uncovered_interval`、缺口数量与处置状态；**不得以数据库可连接宣称 RTO 达标**；若配置了目标，超时 100% 记不达标 + 告警 + 升级，且**不单独永久禁止后续安全复服**。未配置必需约束时状态显式报告"未配置"，不得宣称符合生产恢复目标；本地演练数值标注"测试输入"。**有界只读复核（F13）**: 可读范围 + 次数/时间/资源预算同为部署配置；耗尽→拒绝后续复核＋审计、不改变任何状态；超时/耗尽/人工知悉≠缺口闭合或获准复服。
 - **Alternatives considered**: 内置默认生产阈值——rejected（spec 明确禁止编造）；只记录总时长——rejected（SC-005 要求分列口径）。
 
 ## 10. 迁移编号、待测参数与待裁决
 
 - **数据 DB 迁移**: 本设计新增 `000019+` **无**——015 不修改数据 DB schema（控制事实不入回滚集；见 §3/ADR-001）。若实现期发现必需的数据 DB 表，按纪律另报并保持 fail-closed 默认。控制库 schema 独立版本化（`recovery-admin migrate`），编号自成体系。
 - **待测参数（实现后测量填入，不编造，不阻塞设计）**: 门禁缓存 TTL、各证据类别新鲜度容忍、核验批次上界、控制库语句超时、演练时长与备份大小/耗时。生产阈值单独立项裁决。
-- **部署前裁决（不阻塞本轮设计）**: 生产 RPO/RTO/备份频率/保留期（FR-036 已声明留裁决）；控制库拓扑（同实例独立 database vs 独立实例）与保留；身份映射（人员↔principal）内容与维护者；真实下游 effect class 清单（哪些 topic/scope 属"真实下游投递"）；单机/单人部署时非执行者批准人来源（FR-023 下单人无法自批）；备份产物落盘/异地策略。以上按 spec 纪律单列，本计划不批准、不阻塞无关设计。
+- **部署前裁决（不阻塞本轮设计）**: 生产 RPO/RTO/备份频率/保留期（FR-036 已声明留裁决）；控制库拓扑（同实例独立 database vs 独立实例）与保留；身份映射（人员↔principal）内容与维护者；真实下游 effect class 清单（哪些 topic/scope 属"真实下游投递"）；单机/单人部署时非执行者批准人来源（FR-023 下单人无法自批）；备份产物落盘/异地策略；控制库自身回退/旧副本检测边界与普适「旧批准不重生效」范围（DG-4：不提供自动检测，若需普适保证另立设计/裁决）。以上按 spec 纪律单列，本计划不批准、不阻塞无关设计。
 - **阻塞项**: 无设计阻塞。风险接受后强制复服、损失核销、人工补偿付款、自动补造意图：**明确缺席**——无设计、无契约行、无迁移表、无任务；若未来需要属业务阻塞，另行业务裁决（双人批准亦不得替代缺失证据）。
 - **发布门禁**: T000-P 保持 OPEN；本目录全部结论仅本地范围，不宣称生产就绪。

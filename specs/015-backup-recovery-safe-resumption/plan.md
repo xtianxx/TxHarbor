@@ -103,10 +103,11 @@ internal/
 │                                 # checklist/verify/approve/release/status/drill (plan only)
 ├── app/serve.go                  # WIRE: query / chain_scan / deposit_confirmation / new_withdrawal_creation checkpoints
 ├── app/withdrawalworker.go       # WIRE: existing_withdrawal_recovery checkpoint
-├── app/withdrawalexec.go         # WIRE: operator write path checkpoint
+├── app/withdrawalexec.go         # WIRE: operator CLI write path checkpoint
+├── app/withdrawalexecution.go    # WIRE: execution HTTP admission checkpoint (POST /withdrawals/{request_id}/execution, serve.go:479)
 ├── app/eventpublisher.go         # WIRE: event_publishing checkpoint
 ├── app/eventconsumer.go          # WIRE: event_consuming checkpoint
-├── app/signer*.go, internal/signer/  # WIRE: signing delivery under existing_withdrawal_recovery dependency
+├── app/signerserve.go, internal/signer/  # WIRE: signing delivery (delivery.go core) + in-process checkpoint (T070)
 ├── indexer/ events/ execution/ txlifecycle/ nonce/ reconciliation/  # REUSE read-only or via their own authorized entries
 ├── metrics/                      # REUSE registry + bounded low-cardinality recovery series
 └── faultdrill/ perf/             # REUSE patterns; drill additions behind new `drill` tag
@@ -119,9 +120,9 @@ internal/
 | # | 能力 | 真实入口（file:line） | 依赖 | 恢复环境默认 | 门禁检查点 |
 |---|---|---|---|---|---|
 | 1 | query | `internal/app/withdrawalhttp.go:227`（+`serve.go:473-474`）、执行读 `serve.go:479-480`、nonce 读 `serve.go:488` | — | 拒绝 | HTTP 准入前 |
-| 2 | chain_scan | `serve.go:319/331`（`:615 runServiceStreams`；lease/fencing `internal/indexer/lease.go:56-67`） | — | 关闭 | 启动/每轮步进前 |
+| 2 | chain_scan | `serve.go:319/331`（`:615 runServiceStreams`；lease/fencing `internal/indexer/lease.go:56-67`） | — | 关闭 | 启动检查＋包装步进回调（注入，T030/F12） |
 | 3 | deposit_confirmation | `serve.go:350-353`、`:380-398`、`:411`（006 recovery loop） | chain_scan | 关闭 | 同上 |
-| 4 | existing_withdrawal_recovery | `internal/app/withdrawalworker.go:318/349/566`；`withdrawalexec.go:35`；下游 `signer-serve`（`internal/signer/gates.go:123/162`） | chain_scan | 关闭 | 认领/操作/交付前 |
+| 4 | existing_withdrawal_recovery | `internal/app/withdrawalworker.go:318/349/566`；`withdrawalexec.go:35`（CLI `execOperatorOp`）；`withdrawalexecution.go` `POST /withdrawals/{request_id}/execution`（`serve.go:479`，HTTP 直调 `execution.Admit`，与 CLI 非同漏斗）；下游 `signer-serve` 交付：`signerserve.go:295 signer.Deliver` → `internal/signer/delivery.go:170 Deliver`/`:194 deliverGated`（`signer/gates.go:123/162` 为 009 内部 gate 行，非 015 交付接线点） | chain_scan | 关闭 | 认领/操作/准入/交付前（交付受支持装配＋T070 进程内检查点） |
 | 5 | new_withdrawal_creation | `withdrawalhttp.go:148`（`serve.go:473` guardRoute+CapacityGate） | 4 | 拒绝 | 处理器准入前 |
 | 6 | event_publishing | `eventpublisher.go:41` → `internal/events/publisher.go:177` | chain_scan | 关闭 | claim/settle 前 |
 | 7 | event_consuming | `eventconsumer.go:31` → `internal/events/consumer.go:351`（Effect：`internal/cache/invalidator.go:120`；参考账本仅证据） | — | 关闭 | Effect/进度前 |
@@ -155,7 +156,7 @@ internal/
 | FR-019 缺口证据包/独立性/暂停 | verification-items §2、data-model §1.6/§3 | S7 |
 | FR-020 与既有能力衔接不绕门禁 | verification-items §1、[research.md](research.md) §1 | S6 |
 | FR-021 分级且无总开关 | resumption-gate §1–2 | S8/S9 |
-| FR-022 restored/verified/approved | data-model §4.2、resumption-gate §2 | S10 |
+| FR-022 restored/verified/released（spec 称 approved） | data-model §4.2、resumption-gate §2 | S10 |
 | FR-023 审批规则（2026-09-28） | approval-matrix §1–3 | S8/S9/F7 |
 | FR-024 幂等/可重入/撤销显式 | approval-matrix §4、data-model §6 | S12 幂等段 |
 | FR-025 既有资金门禁继续有效 | resumption-gate §4、data-model §3 | S9 |
@@ -192,10 +193,24 @@ internal/
 | C2 FR-023：执行/核验/批准独立；高影响双人非执行者；批准绑定证据版本；硬门禁不可覆盖 | approval-matrix §1–3、data-model §3.1 | S8/S9/F7 |
 | C3 FR-019：缺口无法补齐保留 unknown/pending+证据包+升级；仅可证明独立能力放行 | verification-items §2 | S7/F6 |
 
+### Analyze 定向修正（2026-09-28，本轮；完整 F1–F20 归属表见 tasks.md）
+
+| 修正 | 落点 | 说明 |
+|---|---|---|
+| F1/F8 signer 交付接线 | 入口表 #2/#4、[contracts/resumption-gate.md](contracts/resumption-gate.md) §1/§1.1；tasks T032/T070 | 交付点=`signerserve.go:295 signer.Deliver`→`internal/signer/delivery.go:170 Deliver`/`:194 deliverGated`（`signer/gates.go:123/162` 为 009 内部 gate 行，非交付点）；补进程内检查点 T070；残余边界不得称全覆盖 |
+| F2 execution HTTP 写路径 | 入口表 #4、T032 | `withdrawalexecution.go`（`serve.go:479`，直调 `execution.Admit`）归属 `existing_withdrawal_recovery`；与 CLI `execOperatorOp` 非同漏斗，独立接线 |
+| F3 管理命令/调度边界 | resumption-gate §1.2、T028/T064 | reconcile-admin/events-admin/定时调度=程序边界（停服/权限移除+审计+`no_pre_release_effects`）；不得声称运行时强制 |
+| F5 缓存代次失效 | [data-model.md](data-model.md) §3.3、T012/T047、approval-matrix §3 | 代次/哈希变化立即失效（发现者=求值器）；控制库不可达 fail-closed；未准入 vs 已在途 |
+| F6 控制库回退纪律 | T025/T064、[adr/ADR-001](adr/ADR-001-recovery-control-store.md)、[research.md](research.md) §3/§10 | 禁盲恢复；仅停机隔离+显式重建/supersede+审计；不提供自动检测；普适「旧批准不重生效」声明保持限定（DG-4） |
+| F7 验证生命周期 | T019/T020、[contracts/backup-manifest.md](contracts/backup-manifest.md) §3、data-model §1.4、quickstart S2 | 备份级 vs 目标实例级验证；复制 manifest/重建/换目标指纹须重 probe；restore 前置校验控制库证据行 |
+| F9 探针枚举 | backup-manifest §3、data-model §7、T019/T020 | `business_state_probes` 对照 FR-002 九类权威对象；抽样声明边界；不能证明标 unknown |
+| F16 术语 | data-model §4.2、resumption-gate §2、quickstart | `released`=派生放行；`approved`=批准记录（spec FR-022 的 approved 即 released） |
+| F20 两阶段判权 | data-model §3、T012 | recovery allow AND 动作处原门禁；禁替代 |
+
 ## 待测参数 · 部署前裁决 · 阻塞项
 
-- **待测参数（实现后测量填入，不编造，不阻塞设计）**：门禁缓存 TTL、证据新鲜度容忍、核验批次上界、控制库语句超时、演练时长/备份耗时体积。
-- **部署前裁决（单列，不批准、不阻塞无关设计）**：生产 RPO/RTO/备份频率/保留期（FR-036 明示留裁决）；控制库拓扑与保留；身份映射内容与维护者；真实下游 effect class 清单；单人/单机部署的非执行者批准人来源（FR-023 下无法自批）；备份产物异地/落盘策略。
+- **待测参数（实现后测量填入，不编造，不阻塞设计）**：门禁缓存 TTL、证据新鲜度容忍、核验批次上界、控制库语句超时、演练时长/备份耗时体积、有界只读复核范围/次数/时间/资源预算（T051/T063）。
+- **部署前裁决（单列，不批准、不阻塞无关设计）**：生产 RPO/RTO/备份频率/保留期（FR-036 明示留裁决）；控制库拓扑与保留；身份映射内容与维护者；真实下游 effect class 清单；单人/单机部署的非执行者批准人来源（FR-023 下无法自批）；备份产物异地/落盘策略；控制库自身回退/旧副本检测边界与普适「旧批准不重生效」范围（DG-4：不提供自动检测，若需普适保证另立设计/裁决）；控制库 schema 升级路径（当前仅 0001，T069 只交付未知/不兼容版本拒绝）。
 - **阻塞项**：无设计阻塞。风险接受后强制复服、损失核销、人工补偿付款、自动补造意图明确缺席；若未来需要属业务阻塞，另行业务裁决；双人批准不得替代缺失证据。
 
 ## Complexity Tracking

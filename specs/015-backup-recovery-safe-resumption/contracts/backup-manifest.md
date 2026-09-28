@@ -35,10 +35,12 @@
 |---|---|
 | `readable` | dump 可列出、可恢复，无截断/校验错误 |
 | `structure_constraints` | 目标库 schema 版本精确等于 manifest；关键表/约束/FK 完整 |
-| `business_state_probes` | 代表性只读查询可执行且结构可用（不得以"计数非零"作为业务正确性证明） |
-| `verification_executable` | 015 核验工具可对目标执行 V1–V9 只读核验 |
+| `business_state_probes` | 代表性只读查询可执行且结构可用（不得以"计数非零"作为业务正确性证明）；**逐项对照 FR-002 九类权威对象**（链身份/游标、事件、充值确认、提款请求与付款意图、出站交易与签名/广播、nonce、Outbox/义务标记、消费者幂等/进度、审计/权限/014 差异）抽样并声明覆盖边界（F9） |
+| `verification_executable` | 015 核验工具可对目标执行 V1–V9 只读核验；不能证明的类别标 `unknown`，不计入通过（F9） |
 
 - 验证记录含 `verified_at`/`verifier`/`target=isolated`/`evidence_ref`；写回 manifest 与恢复控制库。
+- **验证生命周期（F7/DG-2）**：备份级验证（manifest `verified`，绑定 backup_id/carrier/schema）≠ 目标实例级验证（`restore_probe`，绑定实例 + `data_target` 指纹）；复制 manifest、重建实例或更换目标后必须重跑实际恢复验证/探针，不得沿用旧 `verified`；`restore` 前置必须校验控制库存在绑定该 `backup_id` 的可验证证据行（无可验证证据 → 拒绝或重跑 `verify-backup`），不得只信 manifest 文件内的旗标。
+- `verify-backup` 先于实例开启时的证据绑定按 [data-model.md](../data-model.md) §1.4：先落 manifest 级结论，实例开启后经受控命令显式同步绑定并审计。
 - 未验证备份仅可标记 `unverified`，不得作为恢复或复服依据。
 - **禁止**：以备份频率、业务表 `MAX(created_at)`、备份文件 mtime 证明 RPO；以"备份命令退出 0"证明恢复成功。
 

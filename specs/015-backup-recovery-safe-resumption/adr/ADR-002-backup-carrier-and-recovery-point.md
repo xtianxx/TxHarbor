@@ -11,7 +11,7 @@
 1. **载体 = 逻辑备份** `pg_dump --format=custom`（pinned `postgres:18.6-trixie` 镜像自带客户端，不新增依赖），产物 + 外部 manifest（[contracts/backup-manifest.md](../contracts/backup-manifest.md)）构成备份身份；选择只按 manifest。
 2. **一致性快照**：`REPEATABLE READ` 事务中 `SELECT pg_current_wal_lsn(), pg_current_snapshot(), pg_export_snapshot(), now()`，以 `--snapshot` 导出；恢复点 = 快照元组（xmin/xip/wall clock/LSN 上界），非业务表时间戳。
 3. **完整性/兼容性**：SHA-256 + `pg_restore -l` 可读；manifest 记录 `goose_db_version` 精确集与程序版本；复用 `internal/db` `Inspect/CheckCompatibility` 只读语义，拒绝不兼容。
-4. **恢复验证**：`verify-backup` 在隔离目标真实 `pg_restore` + 结构/约束/兼容/可用性/核验可执行检查；未验证备份不得用于恢复/复服。
+4. **恢复验证**：`verify-backup` 在隔离目标真实 `pg_restore` + 结构/约束/兼容/可用性/核验可执行检查；未验证备份不得用于恢复/复服；备份级验证（manifest `verified`，绑定 backup_id/carrier/schema）≠ 目标实例级验证（`restore_probe`，绑定实例 + `data_target` 指纹）——复制 manifest/重建实例/换目标须重 probe，不得沿用旧 `verified`（F7/DG-2）。
 5. **调度/保留**：薄命令 + 外部调度（operator/cron），无守护进程；保留策略部署配置，**不编造生产数值**；未配置必需约束不得宣称生产恢复目标。
 
 ## Rationale
@@ -24,6 +24,7 @@
 
 - RPO 粒度 = 备份频率（部署决策），不是 PITR 级；本设计不宣称秒级/连续恢复能力。
 - 大库 dump 时间/体积属部署关注点，保留策略与存储位置走配置；本地演练数值标注测试输入。
+- 备份级与目标实例级验证生命周期分离（F7/DG-2）：`verified` 不可继承；`business_state_probes` 按 FR-002 九类权威对象抽样、声明覆盖边界，不能证明标 `unknown`（F9）。
 - 若未来需要 PITR/物理载体：manifest 身份模型与恢复点字段可扩展 `carrier`，控制面/门禁/核验模型不变（替换 ADR 即可）。
 
 ## Alternatives
