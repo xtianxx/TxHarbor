@@ -2,9 +2,9 @@
 // management surface (`recovery-admin control ...`) without Docker: required
 // configuration (control DSN, data DSN for the independence proof, the
 // authenticated principal), the same-target refusal before any connection,
-// malformed/unreachable control DSNs with redaction, usage errors and the
-// untouched stub surface. The real identity paths run in
-// control_integration_test.go.
+// malformed/unreachable control DSNs with redaction, usage errors, the
+// remaining stub actions and the B6 refusal-by-name boundary. The real
+// identity paths run in control_integration_test.go.
 package recoveryadmin
 
 import (
@@ -172,17 +172,37 @@ func TestControlBadOperationIDIsUsageError(t *testing.T) {
 	}
 }
 
-// TestRecoveryAdminOtherActionsRemainStub pins the T010 wiring boundary: only
-// migrate and control act; every other action still reports NOT IMPLEMENTED.
-func TestRecoveryAdminOtherActionsRemainStub(t *testing.T) {
+// TestRecoveryAdminUnwiredActionsRemainStub pins the wiring boundary after
+// B6/T021-T022: migrate/control/backup/verify-backup/restore act (or refuse
+// fail-closed), the remaining actions are still the B0 stub, and a wired
+// command that lacks required configuration refuses by exact key name instead
+// of claiming success.
+func TestRecoveryAdminUnwiredActionsRemainStub(t *testing.T) {
 	env := controlTestEnv("postgres://u:c@127.0.0.1:1/control?sslmode=disable",
 		"postgres://u:d@127.0.0.1:1/data?sslmode=disable", "deploy:manager")
-	code, _, stderr := runRecoveryAdmin(t, []string{"backup", "--chain-id", "1"}, env)
-	if code != 1 || !strings.Contains(stderr, "NOT IMPLEMENTED") {
-		t.Fatalf("backup must remain the B0 stub: exit=%d stderr=%q", code, stderr)
-	}
-	code, _, stderr = runRecoveryAdmin(t, []string{"instance-open", "--kind", "recovery"}, env)
+	code, _, stderr := runRecoveryAdmin(t, []string{"instance-open", "--kind", "recovery"}, env)
 	if code != 1 || !strings.Contains(stderr, "NOT IMPLEMENTED") {
 		t.Fatalf("instance-open must remain the B0 stub: exit=%d stderr=%q", code, stderr)
+	}
+	code, _, stderr = runRecoveryAdmin(t, []string{"drill"}, env)
+	if code != 1 || !strings.Contains(stderr, "NOT IMPLEMENTED") {
+		t.Fatalf("drill must remain the B0 stub: exit=%d stderr=%q", code, stderr)
+	}
+
+	// backup is wired (T021): without the required artifact directory it
+	// refuses by key name - it never reports NOT IMPLEMENTED and never claims
+	// a backup.
+	code, stdout, stderr := runRecoveryAdmin(t, []string{"backup", "--chain-id", "1"}, env)
+	if code != 1 {
+		t.Fatalf("backup without the required artifact dir must refuse: exit=%d stderr=%q", code, stderr)
+	}
+	if strings.Contains(stderr, "NOT IMPLEMENTED") {
+		t.Fatalf("backup is a wired action; it must not answer NOT IMPLEMENTED: %q", stderr)
+	}
+	if !strings.Contains(stderr, config.EnvRecoveryArtifactDir) {
+		t.Fatalf("the missing artifact dir must be refused by key name: %q", stderr)
+	}
+	if strings.Contains(stdout, "verification=") || strings.Contains(stdout, "backup_id=") {
+		t.Fatalf("refused backup must not claim success: stdout=%q", stdout)
 	}
 }

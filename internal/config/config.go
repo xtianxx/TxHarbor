@@ -180,7 +180,11 @@ const (
 	EnvRecoveryControlDSN  = "TXHARBOR_RECOVERY_CONTROL_DSN"
 	EnvRecoveryPrincipal   = "TXHARBOR_RECOVERY_PRINCIPAL"
 	EnvRecoveryArtifactDir = "TXHARBOR_RECOVERY_ARTIFACT_DIR"
-	EnvRecoveryGateTTL     = "TXHARBOR_RECOVERY_GATE_TTL"
+	// EnvRecoveryInstance binds an operator command to one recovery instance:
+	// a command invocation whose --instance disagrees with this deployment
+	// binding is refused (T022/T027 instance-bound execution).
+	EnvRecoveryInstance = "TXHARBOR_RECOVERY_INSTANCE"
+	EnvRecoveryGateTTL  = "TXHARBOR_RECOVERY_GATE_TTL"
 	// EnvRecoveryEvidenceFreshnessPrefix prefixes the per-evidence-category
 	// freshness tolerance keys: TXHARBOR_RECOVERY_EVIDENCE_FRESHNESS_<CATEGORY>.
 	EnvRecoveryEvidenceFreshnessPrefix = "TXHARBOR_RECOVERY_EVIDENCE_FRESHNESS_"

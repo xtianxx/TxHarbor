@@ -40,7 +40,7 @@ test-integration-kafka:
 # verification.md §3). Contract cases arrive with T014/T051/T058.
 test-contract:
 	$(call require_tagged_tests,contract,test-contract)
-	go test -tags contract -count=1 -timeout 10m ./internal/events ./internal/reconciliation
+	go test -tags contract -count=1 -timeout 10m ./internal/events ./internal/reconciliation ./internal/recovery
 
 # End-to-end core deposit/withdrawal flows (full stack + Anvil). Independent
 # layer, never part of a plain unit run.

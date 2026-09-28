@@ -4,12 +4,14 @@
 // release/status/drill all converge here.
 //
 // B0 setup skeleton (T004): this batch registers the fixed action surface and
-// every action only performs help and argument parsing. No behavior is
-// implemented yet — a well-formed invocation reports NOT IMPLEMENTED and exits
-// non-zero; it never returns a false success, never substitutes a default for a
-// required argument and never starts a backup, restore, verification, approval
-// or release flow. Missing arguments and unknown actions are usage errors
-// (exit 2); help goes to stdout, refusals and usage errors go to stderr.
+// leaves every action at help/argument parsing. The behavior lands batch by
+// batch (T008/T069 migrate, T010 control, T020/T021 verify-backup/backup,
+// T022 restore); an action without an implementation still reports NOT
+// IMPLEMENTED and exits non-zero. A stub never returns a false success, never
+// substitutes a default for a required argument and never starts a backup,
+// restore, verification, approval or release flow. Missing arguments and
+// unknown actions are usage errors (exit 2); help goes to stdout, refusals and
+// usage errors go to stderr.
 //
 // T008/T069 implement `migrate up|status` in migrate.go, scoped to the
 // independent control store (TXHARBOR_RECOVERY_CONTROL_DSN) with the same
@@ -17,8 +19,11 @@
 // `control participant-register|identity-map-set|identity-map-show` management
 // surface in control.go (deployment-privilege path: subject from
 // TXHARBOR_RECOVERY_PRINCIPAL, single subject + audit, no preset principal,
-// mapping changes invalidating affected approvals). Every other action is
-// still the stub.
+// mapping changes invalidating affected approvals). B6/T021-T022 implement
+// `backup`/`verify-backup` in backup.go and `restore` in restore.go (real
+// pg_dump/pg_restore only, principal bound to a registered participant,
+// persistent operation_id idempotency, explicit blocked states). Every other
+// action is still the stub.
 //
 // It lives in its own package (rather than internal/app) for the same reason as
 // internal/app/reconcileadmin: the delivered command imports internal/recovery
@@ -111,31 +116,40 @@ var recoveryAdminActions = []recoveryAdminAction{
 	{
 		name:    "backup",
 		summary: "produce a backup artifact and its manifest (unverified until verify-backup)",
-		usage:   "backup --chain-id CHAIN [--out DIR]",
+		usage:   "backup --chain-id CHAIN [--out DIR] [--operation-id ID]",
 		flags: []recoveryAdminFlag{
 			{name: "chain-id", usage: "scope chain identity (required)"},
 			{name: "out", usage: "artifact output directory override (defaults to the configured artifact dir)"},
+			{name: "operation-id", usage: "idempotent operation identity (optional)"},
 		},
 		required: []string{"chain-id"},
 	},
 	{
 		name:    "verify-backup",
 		summary: "restore a backup into an isolated target and verify it",
-		usage:   "verify-backup --manifest M --target-dsn TARGET",
+		usage:   "verify-backup --manifest M --target-dsn TARGET [--instance ID] [--operation-id ID]",
 		flags: []recoveryAdminFlag{
 			{name: "manifest", usage: "manifest path (required)"},
 			{name: "target-dsn", usage: "isolated target DSN (required)"},
+			{name: "instance", usage: "recovery instance id that binds the conclusion (optional)"},
+			{name: "operation-id", usage: "idempotent operation identity (optional)"},
 		},
 		required: []string{"manifest", "target-dsn"},
 	},
 	{
 		name:    "restore",
 		summary: "restore a verified manifest into the bound recovery instance",
-		usage:   "restore --manifest M --target-dsn TARGET --instance ID",
+		usage:   "restore --manifest M --target-dsn TARGET --instance ID [--declaration isolated|production_main] [--reason R] [--operation-id ID]",
 		flags: []recoveryAdminFlag{
 			{name: "manifest", usage: "manifest path (required)"},
 			{name: "target-dsn", usage: "target DSN (required; isolated unless explicitly declared)"},
 			{name: "instance", usage: "recovery instance id (required)"},
+			{name: "declaration", usage: "isolated|production_main (default isolated)"},
+			{name: "reason", usage: "explicit recorded reason (required for production_main)"},
+			{name: "operation-id", usage: "idempotent operation identity (optional)"},
+			{name: "signer-endpoint", usage: "signer boundary endpoint for reachability probing (optional)"},
+			{name: "rpc-url", usage: "RPC fact-source URL for reachability probing (optional)"},
+			{name: "broker-dsn", usage: "broker DSN for reachability probing (optional)"},
 		},
 		required: []string{"manifest", "target-dsn", "instance"},
 	},
@@ -234,8 +248,10 @@ func recoveryAdminActionByName(name string) (recoveryAdminAction, bool) {
 }
 
 // Run runs the 015 operator command surface. `migrate up|status` (T008) is
-// implemented in migrate.go; every other action is still the B0 stub (help
-// and argument parsing only, no behavior).
+// implemented in migrate.go, the `control ...` subcommands (T010) in
+// control.go, `backup`/`verify-backup` (T021/T020) in backup.go and
+// `restore` (T022) in restore.go; every other action is still the B0 stub
+// (help and argument parsing only, no behavior).
 func Run(ctx context.Context, args []string, d Deps) int {
 	if len(args) == 0 {
 		recoveryAdminUsage(d.stderr())
@@ -253,6 +269,17 @@ func Run(ctx context.Context, args []string, d Deps) int {
 		// implemented in control.go; every other action remains the B0
 		// help/parse stub.
 		return recoveryAdminControl(ctx, args[1:], d)
+	case "backup":
+		// T021: produce a real backup artifact + manifest (artifact-bound,
+		// unverified until verify-backup).
+		return recoveryAdminBackup(ctx, args[1:], d)
+	case "verify-backup":
+		// T021/T020: real isolated restore verification + control-store
+		// conclusion.
+		return recoveryAdminVerifyBackup(ctx, args[1:], d)
+	case "restore":
+		// T022: precondition-gated restore bound to the open instance.
+		return recoveryAdminRestore(ctx, args[1:], d)
 	}
 	action, ok := recoveryAdminActionByName(args[0])
 	if !ok {
@@ -365,7 +392,7 @@ func recoveryAdminUsage(w io.Writer) {
 		fmt.Fprintf(w, "  %-16s %s\n", action.name, action.summary)
 	}
 	fmt.Fprintln(w)
-	fmt.Fprintln(w, "B0 setup skeleton: every action performs help/argument parsing only except `migrate up|status` (T008) and `control participant-register|identity-map-set|identity-map-show` (T010), which act on the independent control store only; no backup/recovery flow is implemented and no invocation claims success. A stub invocation exits non-zero with NOT IMPLEMENTED; missing arguments and unknown actions exit 2. Required configuration values are refused by name and never defaulted.")
+	fmt.Fprintln(w, "Wired today: `migrate up|status` (T008), `control participant-register|identity-map-set|identity-map-show` (T010), `backup`/`verify-backup` (T020/T021) and `restore` (T022). Every other action is the B0 stub and reports NOT IMPLEMENTED (non-zero); missing arguments and unknown actions exit 2. Required configuration values are refused by name and never defaulted; the authenticated subject comes from TXHARBOR_RECOVERY_PRINCIPAL and free text never authorizes.")
 }
 
 // recoveryAdminActionUsage prints one action's accepted argument form.
