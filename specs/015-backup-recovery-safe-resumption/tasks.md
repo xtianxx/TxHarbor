@@ -17,20 +17,20 @@
 | # | 交付链 | 归属批次 | 锚点任务/证据 |
 |---|---|---|---|
 | 1 | 备份到恢复（快照生命周期、dump 实际用快照、manifest 产物绑定、失败不发成功备份、隔离库真实 restore+兼容检查；快照身份/可恢复范围/RPO 证明区分；restore_probe 九类权威对象枚举＋备份级/实例级验证生命周期 T019/T020） | B5、B6（+B17 联合演练） | T014–T022、T058；证据 `docs/evidence/015/` |
-| 2 | 控制库与信任边界（独立初始化、schema 版本与版本校验 T069、最小权限、配置校验、CLI 构造；不误指数据恢复目标、不进数据备份集、独立 DSN≠隔离证明；不可达/丢失行为；旧副本回退纪律=禁盲恢复+停机隔离+显式重建/supersede+审计 T025/T064；旧批准不自动重生效仅限数据 DB 回滚域，普适声明保持限定） | B1、B2、B7（T025）、B8、B13 前置（T069） | T006–T008、T025、T027、T069、T008/T022 DSN 校验 |
+| 2 | 控制库与信任边界（独立初始化、schema 版本与版本校验 T069、最小权限、配置校验、CLI 构造；不误指数据恢复目标、不进数据备份集、独立 DSN≠隔离证明；不可达/丢失行为；旧副本回退纪律=禁盲恢复+停机隔离+显式重建/supersede+审计 T025/T064；旧批准不自动重生效仅限数据 DB 回滚域，普适声明保持限定） | B1、B2（含 T069）、B7（T025）、B8 | T006–T008、T025、T027、T069、T008/T022 DSN 校验 |
 | 3 | 身份与审批（人员映射、授予/撤销、执行者记录、同人多账号拒绝、执行者不批己案、单/双人批准、幂等审计；本地可操作身份配置路径；映射变更→相关批准失效重批） | B3、B12、B13 | T009–T010、T043–T051 |
-| 4 | 七类能力接线（逐项生产入口/Gate 调用点/范围依赖/原门禁保留/正反例；签名·广播·发布·消费效果与重试入口；signer 进程内检查点 T070；execution HTTP 写路径 T032；正常 vs 恢复模式；缺配置行为；reconcile-admin/events-admin/调度=程序边界声明 T028/T064） | B4（底座）、B7（负例）、B9（接线）、B12·B13（放行正例） | T011–T012、T023、T030–T034、T045、T070 |
+| 4 | 七类能力接线（逐项生产入口/Gate 调用点/范围依赖/原门禁保留/正反例；签名·广播·发布·消费效果与重试入口；signer 进程内检查点 T070；execution HTTP 写路径 T032；正常 vs 恢复模式；缺配置行为；reconcile-admin/events-admin/调度=程序边界声明 T028/T064） | B4（底座）、B7（负例）、B9（接线，含 T070）、B12·B13（放行正例） | T011–T012、T023、T030–T034、T045、T070 |
 | 5 | 并发与失效（取证后变化、批准后撤销、检查后执行、旧实例续跑、迟到核验、重复复服、中断重入；TTL 代次感知失效——证据代次/哈希变化立即失效（发现者=求值器），未准入拒绝 vs 已在途原门禁；代次/隔离设计+受控交错；外部副作用不可回滚保持 unknown） | B4（代次底座）、B7（TTL/拒绝）、B12（T047）、B13（失效重批） | T013、T023、T047、T048–T049 |
 | 6 | 核验与正向复服（V1–V9 真实适配器、完整性/新鲜度/预算/缺证行为；备份→外部推进→恢复旧数据→缺口拒绝→按审批恢复指定能力；禁补造意图/直写批准；不可重建=保持暂停） | B10、B11、B15、B12（放行正例）、B17 | T035–T042、T045、T052–T054、T058 |
 | 7 | 指标运维 CI（三段计时+RTO 超时处理分开；配置示例/真实命令/隔离证明/失败处置/证据索引；普通 PR 分层、真实小规模 dump/restore 路径触发与失败传播、完整演练独立；NOT RUN 纪律） | B5（真实 dump/restore 路径）、B16、B17、B18、B19 | T015、T055–T061、T062–T068 |
 
 ## 本轮 analyze 定向修正 → 批次归属（不重排原批次；新增仅 T069 起）
 
-> 依据本轮 analyze 发现（F1–F20）集中修正规划文档。不降低任何安全承诺：原阻塞与 fail-closed 口径保留；F5/F7/F4/F9 仍为对应首批完成条件前置（不得推迟收尾），F1/F2/F3/F12 归 B9 接线批，F11/F13/F19 归后批/Polish 合并但先于其依赖路径生效。
+> 依据本轮 analyze 发现（F1–F20）集中修正规划文档。不降低任何安全承诺：原阻塞与 fail-closed 口径保留；F5/F7/F4/F9 仍为对应首批完成条件前置（不得推迟收尾），F1/F2/F3/F12 归 B9 接线批（T070 并入 B9），F11/T069 并入 B2（与 T007/T008 同批，版本守卫），F13/F19 归后批/Polish 合并但先于其依赖路径生效。
 
 | 发现 | 修正位置 | 批次归属/阻塞口径 | 残余边界（不夸大） |
 |---|---|---|---|
-| F1 signer 交付门禁只到 app 包装层（HIGH） | T032 标注交付核心路径＋**新增 T070**；resumption-gate §1 | B9 完成条件（先于 US2 checkpoint）；不得称全覆盖 | 非受支持装配/蓄意伪造门禁不自动检测（DG-1 同类）；worker/exec 门禁＋V8 为纵深 |
+| F1 signer 交付门禁只到 app 包装层（HIGH） | T032 标注交付核心路径＋**新增 T070**；resumption-gate §1 | B9（T070 并入 B9，于 T032 后串行）；不得称全覆盖 | 非受支持装配/蓄意伪造门禁不自动检测（DG-1 同类）；worker/exec 门禁＋V8 为纵深 |
 | F2 withdrawalexecution.go 写路径无 owner（HIGH） | T032 增 owner＋正反例（归属 `existing_withdrawal_recovery`） | B9 | HTTP 直调 `execution.Admit` 与 CLI `execOperatorOp` 非同漏斗，须独立接线 |
 | F3 reconcile-admin/events-admin/定时调度无运行时门禁（HIGH） | T028 证据覆盖＋T064 runbook；resumption-gate §1.2 | B9 书面边界＋B18 文档 | 程序边界（停服+审计+`no_pre_release_effects`）；仅 checklist 签署不构成运行时隔离证明 |
 | F12 每轮步进门禁与包禁令冲突（MEDIUM） | T030 明确回调/注入形态；resumption-gate §1 | B9 | recovery 根包不得 import indexer（T001），装配在 `internal/app` |
@@ -42,7 +42,7 @@
 | F8 plan 指代 signer/gates.go:123/162 不精确（HIGH 附带） | plan/contracts/tasks 改指交付路径＋行号核对注记 | 文档同步 | 行号按 HEAD 10e78f9 核对，实现期以实际文件为准 |
 | F9 restore_probe 未枚举 FR-002 九类（MEDIUM） | T019/T020＋backup-manifest §3＋data-model §7 | B6 | 抽样声明边界；不能证明标 unknown，不计入 restored |
 | F10 无历史重发显式负例（MEDIUM） | T036＋verification-items §1 | B10 | 0 重放/重广播/重投递/重建意图 |
-| F11 控制库仅 0001 无升级校验（MEDIUM） | **新增 T069**＋T008 引用；data-model §3.3 | 后批合并；先于 T048–T051 使用控制库前生效 | 未知/不兼容版本拒绝；当前仅 0001 初版 |
+| F11 控制库仅 0001 无升级校验（MEDIUM） | **新增 T069**＋T008 引用；data-model §3.3 | B2（T069 并入 B2，与 T007/T008 同批、T007/T008 后串行）；B4/B13 前置经 B2 获得版本守卫 | 未知/不兼容版本拒绝；当前仅 0001 初版 |
 | F13 有界只读复核无 bounds（MEDIUM） | T051/T063＋verification-items §2＋data-model §6 | B14/B18（Polish） | 范围+预算+耗尽拒绝审计；超时/耗尽≠闭合 |
 | F15 B11/B13 并行表述（LOW） | B11/B13 批次注记：串行现状保留、owner 确认前不并行、不加 [P] | 批次注记 | 不重排 |
 | F16 approved/released 术语（LOW） | data-model §4.2 命名统一＋plan/contracts/quickstart 校正 | 文档同步 | `released`=派生放行；`approved`=批准记录（spec FR-022 的 approved 即 released） |
@@ -94,13 +94,14 @@
 ### 批次 B2 · 控制库构造与信任边界（链 2）
 
 - **前置**: B1 完成。
-- **实际入口**: `internal/recovery/controlstore/store.go`；`internal/app/recoveryadmin/migrate.go`（命令汇合于 `cmd/txharbor/main.go:56`）。
-- **完成条件**: store 提供 append-only 决策读、行锁、`operation_id` 幂等读回、审计写入；`migrate up/status` 只作用控制 DSN；控制 DSN = 数据 DSN 被拒绝；DSN 明文不入日志/证据；最小权限说明落地。
+- **实际入口**: `internal/recovery/controlstore/store.go`；`internal/app/recoveryadmin/migrate.go`（命令汇合于 `cmd/txharbor/main.go:56`）；控制库 schema 版本清单（`internal/recovery/controlstore/schema/`）。
+- **完成条件**: store 提供 append-only 决策读、行锁、`operation_id` 幂等读回、审计写入；`migrate up/status` 只作用控制 DSN；控制 DSN = 数据 DSN 被拒绝；DSN 明文不入日志/证据；最小权限说明落地；**版本守卫（T069）**：控制库 schema 版本兼容校验落地，未知/不兼容版本在 migrate 与 store 读路径均被明确拒绝（fail-closed），正反例可测；后续门禁/审批任务不得缺此检查即称完成。
 - **验证层次**: unit + PG integration（`make test-integration`）。
 - **提交节点**: 本批退出时本地 commit（不 push）。
 
 - [ ] T007 [P] 实现控制库 store 于 `internal/recovery/controlstore/store.go`：实例行锁（`SELECT … FOR UPDATE`）与部分唯一冲突拒绝；append-only 决策读取（前向状态=按提交序取最新+显式 revoke，**不以 `created_at` 排序裁决有效性**）；`operation_id` UNIQUE 同输入读回、异输入冲突零写；审计写入含 `result`/`refusal_class`/`evidence_generation`；不得新增可直写放行布尔（依赖 T006）
-- [ ] T008 [P] 实现控制库初始化与信任边界校验于 `internal/app/recoveryadmin/migrate.go`（`recovery-admin migrate up/status`）：只对 `TXHARBOR_RECOVERY_CONTROL_DSN` 执行；DSN 未配置/不可达/认证失败→拒绝；控制 DSN 与数据 DSN 相同→拒绝；`data_target` 只存 database/role 指纹、明文 DSN 不入库/不入日志/不入证据；最小权限与独立保留域说明；无有效配置默认拒绝；控制库 schema 版本未知/不兼容→拒绝（版本校验由 T069 落地合并）（依赖 T006）
+- [ ] T008 [P] 实现控制库初始化与信任边界校验于 `internal/app/recoveryadmin/migrate.go`（`recovery-admin migrate up/status`）：只对 `TXHARBOR_RECOVERY_CONTROL_DSN` 执行；DSN 未配置/不可达/认证失败→拒绝；控制 DSN 与数据 DSN 相同→拒绝；`data_target` 只存 database/role 指纹、明文 DSN 不入库/不入日志/不入证据；最小权限与独立保留域说明；无有效配置默认拒绝；控制库 schema 版本未知/不兼容→拒绝（版本校验与正反例见同批 T069；本任务不得在未知版本上继续）（依赖 T006）
+- [ ] T069 控制库 schema 版本校验（F11；本批 T007/T008 后串行）：`recovery-admin migrate` 与 store 连接识别未知/不兼容控制库 schema 版本→明确拒绝（fail-closed；拒绝以 `control_store_unavailable` 表达并审计注记版本，不新增放行路径）；migrate 不得对未知版本静默降级/尽力读取；即使本阶段仅 0001 初版，校验路径与拒绝路径必须存在并可测（正例=已知 0001 通过；反例=未知/缺版本表/版本不兼容→拒绝）；B4/B13 的求值/放行/审批前置经本批获得版本守卫，T012 与 T048–T051 不得缺此检查即称完成（依赖 T007、T008）
 
 ### 批次 B3 · 身份与授权底座（链 3）
 
@@ -115,17 +116,17 @@
 
 ### 批次 B4 · 门禁/能力/代次底座（链 4/5）
 
-- **前置**: B2、B3 完成。
+- **前置**: B2、B3 完成（B2 含 T069：控制库版本守卫已落地——未知/不兼容版本拒绝；B4 求值不得缺此守卫）。
 - **实际入口**: `internal/recovery/capabilities.go`、`internal/recovery/gate.go`、`internal/recovery/generation.go`（接口将被 B9 的全部真实入口调用）。
-- **完成条件**: 能力闭集与依赖矩阵写死；`release_valid` 派生评估公式完整；无 open 实例→正常态直通；有 open 实例→默认拒绝；TTL 有界且失效语义可测；控制库不可达→拒绝；代次令牌协议可丢弃过期提交。
+- **完成条件**: 能力闭集与依赖矩阵写死；`release_valid` 派生评估公式完整；无 open 实例→正常态直通；有 open 实例→默认拒绝；TTL 有界且失效语义可测；控制库不可达→拒绝；**控制库版本未知/不兼容→拒绝（经 B2/T069，不得缺此检查）**；代次令牌协议可丢弃过期提交。
 - **验证层次**: unit（`make test`，纯逻辑）+ contract 在 B7 补证；PG integration 由 B7 承接入库。
 - **提交节点**: 本批退出时本地 commit（不 push）。
 
 - [ ] T011 [P] 实现能力闭集与依赖矩阵于 `internal/recovery/capabilities.go`：7 能力闭集 `query`/`chain_scan`/`deposit_confirmation`/`existing_withdrawal_recovery`/`new_withdrawal_creation`/`event_publishing`/`event_consuming`；`requires_capabilities` 与 `isolation_dependency_set` 按 data-model §3.2 写死（`deposit_confirmation→chain_scan`、`existing_withdrawal_recovery→chain_scan`、`new_withdrawal_creation→existing_withdrawal_recovery`（保守固有依赖，禁止「只开入口不备处置」）、`event_publishing→chain_scan`）；依赖图变化属规格变更、不在配置面放开
-- [ ] T012 实现派生评估门禁于 `internal/recovery/gate.go`（唯一放行判定）：`release_valid(I,C,S) := I.state='open' && C∈闭集 && requires_capabilities(C) 全部放行 && isolation_dependency_set(C) 全部 state='verified' && 无 open gap 命中 affected_capabilities && 最新 release 行 decision='release' 且 evidence_generation=当前且 evidence_hash=当前且未被同 (I,C,S) 更晚 revoke 覆盖 && approvals_valid() && existing_fund_gates(P) 在真实动作处仍全部通过（本门禁不替代）`；无 open 实例→正常态直通（不改变日常运行；直通判定同样以控制库权威读取为准，缺必需配置按名拒绝）；有界 TTL 缓存（部署配置；非法/缺失按名拒绝、无默认）；**代次感知失效（F5）**：求值在控制库实例行锁内读取权威 `(state, evidence_generation, evidence_hash)`，缓存键含实例+能力+scope+代次+哈希，任何代次/哈希变化立即使相关缓存失效（发现者=本求值器，下一次真实动作前求值即拒绝，不得等 TTL）；缓存过期且控制库不可达→拒绝；区分「未准入」（拒绝、不产生动作）与「已在途」（按原门禁处理、未知结果按 unknown 纪律，不追溯中止已提交工作）；拒绝分类闭集 `no_instance/instance_mismatch/no_release/release_invalidated_generation/release_revoked/capability_dependency_closed/isolation_unproven/gap_open/approval_missing/approval_identity_unverified/approval_executor_excluded/approval_stale/hard_gate_active/control_store_unavailable/scope_mismatch` 全部审计；无「关门禁」开关（依赖 T010、T011）；判权两阶段注记（F20）：本门禁=第①阶段（recovery allow），第②阶段=动作处既有原门禁独立评估；公式中 `existing_fund_gates(P)` 是对第②阶段的引用，禁止用本门禁替代/合并/短路原门禁（两阶段均须通过）
+- [ ] T012 实现派生评估门禁于 `internal/recovery/gate.go`（唯一放行判定）：`release_valid(I,C,S) := I.state='open' && C∈闭集 && requires_capabilities(C) 全部放行 && isolation_dependency_set(C) 全部 state='verified' && 无 open gap 命中 affected_capabilities && 最新 release 行 decision='release' 且 evidence_generation=当前且 evidence_hash=当前且未被同 (I,C,S) 更晚 revoke 覆盖 && approvals_valid() && existing_fund_gates(P) 在真实动作处仍全部通过（本门禁不替代）`；无 open 实例→正常态直通（不改变日常运行；直通判定同样以控制库权威读取为准，缺必需配置按名拒绝）；有界 TTL 缓存（部署配置；非法/缺失按名拒绝、无默认）；**单动作准入协议（R3）**：①缓存命中与未命中均须在**本次动作准入前**读取控制库权威状态，并在共同锁（实例行锁，与决策写入同一锁）内按代次协议校验 `(state, evidence_generation, evidence_hash)`——缓存键含代次/哈希仅是可复用条件，**不构成最新性证明**；②缓存只复用仍有效的计算结果（当前代次/哈希、未撤销、门禁未失效），**不得复用旧 allow 跳过本次授权检查**；控制库不可达（含缓存过期）→拒绝；③顺序=判定点（锁内）→释锁点→实际动作：判定成立并释锁后再执行本次调用的唯一明确动作，**一次准入不得跨请求/循环步进/批次/异步重试复用**；④撤销先于准入→拒绝；准入后撤销→按在途＋unknown 规则处理（不追溯中止已提交工作、不回滚）并阻止后续准入；**缓存命中不得被追认为在途**；不宣称跨系统原子；⑤任何代次/哈希变化立即使相关缓存失效（发现者=本求值器，下一次真实动作前求值即拒绝，不得等 TTL）；区分「未准入」（拒绝、不产生动作）与「已在途」（按原门禁处理、未知结果按 unknown 纪律，不追溯中止已提交工作）；**控制库 schema 版本未知/不兼容→拒绝（经 B2/T069，不得缺此检查即称完成）**；拒绝分类闭集 `no_instance/instance_mismatch/no_release/release_invalidated_generation/release_revoked/capability_dependency_closed/isolation_unproven/gap_open/approval_missing/approval_identity_unverified/approval_executor_excluded/approval_stale/hard_gate_active/control_store_unavailable/scope_mismatch` 全部审计；无「关门禁」开关（依赖 T010、T011）；判权两阶段注记（F20）：本门禁=第①阶段（recovery allow），第②阶段=动作处既有原门禁独立评估；公式中 `existing_fund_gates(P)` 是对第②阶段的引用，禁止用本门禁替代/合并/短路原门禁（两阶段均须通过）
 - [ ] T013 [P] 实现证据代次与写写反序协议于 `internal/recovery/generation.go`：事务外取证捕获 `(state, evidence_generation, evidence_hash)` 令牌；提交在实例行锁内重读并逐项校验，不符→丢弃结果、仅写 `recovery_audit(result=discarded)`、不写结果行/不改缺口/不推进代次/不倒序覆盖；接受写入同事务 `evidence_generation = evidence_generation + 1` 并刷新 `evidence_hash`；触发代次推进的写入=核验批次结果/缺口闭合或建立/隔离项 verified 或 rejected/restore_probe 接受/证据快照接受；同秒并发以提交序为准、不以 `created_at` 裁决（复用 014 data-model §3.1 教训）（依赖 T007）
 
-**Checkpoint（Phase 2）**: 控制库可独立初始化；身份注册与映射可操作；门禁在无实例时直通、有实例时默认拒绝且控制库不可达拒绝；代次令牌可丢弃过期提交。**Foundation ready — 所有 story 可开始**（合流 owner：T006 schema、T007 store、T009/T010 身份、T011–T013 门禁与代次分别合并后 story 才 rebase）。
+**Checkpoint（Phase 2）**: 控制库可独立初始化且版本守卫生效（未知/不兼容版本拒绝，T069）；身份注册与映射可操作；门禁在无实例时直通、有实例时默认拒绝且控制库不可达拒绝；代次令牌可丢弃过期提交。**Foundation ready — 所有 story 可开始**（合流 owner：T006 schema、T007 store＋T069 版本守卫、T009/T010 身份、T011–T013 门禁与代次分别合并后 story 才 rebase）。
 
 ---
 
@@ -203,6 +204,7 @@
 - **前置**: B4、B8 完成（门禁与实例/清单可用）。
 - **实际入口（逐项）**: ① query `internal/app/withdrawalhttp.go:227 ServeGET` + `internal/app/serve.go:473-474/479-480/488`；② chain_scan `internal/app/serve.go:319/331`、`:615 runServiceStreams`（lease/fencing `internal/indexer/lease.go:56-67`）；③ deposit_confirmation `internal/app/serve.go:350-353/380-398/411`；④ existing_withdrawal_recovery `internal/app/withdrawalworker.go:318/349/566`、`internal/app/withdrawalexec.go:35`（CLI `execOperatorOp`）、`internal/app/withdrawalexecution.go`（HTTP `POST /withdrawals/{request_id}/execution`，`serve.go:479`，直调 `execution.Admit`）、签名交付 `internal/app/signerserve.go:295 signer.Deliver` → `internal/signer/delivery.go:170 Deliver`/`:194 deliverGated`（`internal/signer/gates.go:123/162` 为 009 内部 gate 行，非交付接线点；行号按 HEAD 10e78f9 核对，实现期以实际为准）；⑤ new_withdrawal_creation `internal/app/withdrawalhttp.go:148`（`serve.go:466-467 guardRoute+CapacityGate`）；⑥ event_publishing `internal/app/eventpublisher.go:41` → `internal/events/publisher.go:177`；⑦ event_consuming `internal/app/eventconsumer.go:31` → `internal/events/consumer.go:351`（Effect `:639`；`internal/cache/invalidator.go:120`）。
 - **完成条件**: 7 项逐项接线，调用点在「动作前」；正常模式直通、恢复模式默认拒绝；原门禁与状态机一律保留、不被门禁替代；缺配置行为显式；不得产生 Action 后置检查（先动后判）；受 T026 正反例覆盖；signer 交付以受支持装配为边界＋T070 进程内检查点（不得称全覆盖）；`reconcile-admin`/`events-admin`/定时调度为程序边界（T028/T064 书面边界，不声称运行时强制，F3）。
+- **并行注记**: T070 在 T032 后串行（同改 `internal/app/signerserve.go` 装配与 `internal/signer` 核心，不带 [P]）——不重排批次与编号。
 - **验证层次**: app 级 integration（`make test-integration`）+ unit 编译；drill 联合验收在 B17。
 - **提交节点**: 本批退出时本地 commit（不 push）；US2 checkpoint 可验收。
 
@@ -211,8 +213,9 @@
 - [ ] T032 [P] [US2] 接线既有提款恢复与签名交付于 `internal/app/withdrawalworker.go` + `internal/app/withdrawalexec.go` + `internal/app/withdrawalexecution.go` + `internal/app/signerserve.go`：worker 认领/推进前（`:318/349/566`）、exec 每个操作前（`:35` + `execOperatorOp`）按 `existing_withdrawal_recovery` 及其 `chain_scan` 依赖判定；`internal/app/withdrawalexecution.go`（HTTP `POST /withdrawals/{request_id}/execution`，`serve.go:479`，`servePOST`→`execution.Admit`）在准入前独立接线（F2：该 HTTP 写路径与 CLI `withdrawal-exec` 的 `execOperatorOp` **非同漏斗**，不得以 CLI/worker 接线代表覆盖；正例=放行后仍走 011 原门禁 `can_execute`/execution gates；反例=拒绝时不产生 claim/不推进、审计 `refusal_class`）；签名交付前（受支持路径：`internal/app/signerserve.go:295 signer.Deliver` → 交付核心 `internal/signer/delivery.go:170 Deliver`/`:194 deliverGated`；`internal/signer/gates.go:123/162` 为 009 内部 gate 读取/评估行、非 015 交付接线点；行号按 HEAD 10e78f9 核对，实现期以实际为准）按 `existing_withdrawal_recovery` 及其 `chain_scan` 依赖判定；禁止重放历史签名/广播；nonce hold、发送/执行门禁、authorization/T-deliver 原门禁保留；既有重试/恢复入口在放行后按原门禁工作、在拒绝时不得推进进度或吞掉重试（FR-012/013/025）。**残余边界（F1，不得称全覆盖）**：app 包装层门禁只覆盖受支持的 `signer-serve` 装配；`internal/signer` 核心可被受支持装配之外的 in-process 调用直调——由 T070（进程内检查点）承接，仍以「受支持装配提供门禁依赖」为边界，非受支持装配/蓄意伪造门禁不自动检测（DG-1 同类）；worker/exec 门禁与 V8 授权面再核验为纵深。
 - [ ] T033 [P] [US2] 接线事件发布入口于 `internal/app/eventpublisher.go`（→ `internal/events/publisher.go:177`）：claim 批次前与 settle 前调用门禁（`event_publishing` 依赖 `chain_scan`）；拒绝时不 claim/不 settle/不推进 outbox 进度；at-least-once 语义不变；不得发布真实下游事件（FR-009/012；依赖 T012）
 - [ ] T034 [P] [US2] 接线事件消费入口于 `internal/app/eventconsumer.go`（→ `internal/events/consumer.go:351`，Effect `:639`；缓存失效 `internal/cache/invalidator.go:120`）：Effect 应用前与进度推进前调用门禁（`event_consuming`）；拒绝时不应用 Effect、不推进 offset/inbox；参考消费者 `refconsumer.go` 仅证据、非账本；effect class 范围在放行时校验（高影响档判定见 T050）（FR-009/012；依赖 T012）
+- [ ] T070 接线 signer 进程内检查点（F1；本批 T032 后串行）：在 `internal/signer` 交付核心（`delivery.go` `Deliver`/`deliverGated`，交付字节离开前）以注入的门禁函数（`DeliveryDeps` 新增依赖字段；`submit.go` 签名路径酌情同构）执行 `existing_withdrawal_recovery`（含 `chain_scan` 依赖）动作前校验；门禁函数缺失/配置缺失按 fail-closed 拒绝，不得解释为直通；`signer-serve` 装配（`internal/app/signerserve.go`）提供同一 Gate 与控制库配置；不改变 009 门禁次序、unknown 语义与历史重放拒绝；残余边界：受支持装配之外直调 signer 核心/蓄意伪造门禁不自动检测（DG-1 同类），不得称全覆盖（依赖 T012、T032）
 
-**Checkpoint（Phase 4 · US2）**: S3/S4/S5 正向走通（需 US1 restore）、F5 负例、T026 真实入口默认拒绝全绿；写入/发送/投递 0 次在隔离期发生；链 4 负例证据齐备；本地 commit（不 push）。
+**Checkpoint（Phase 4 · US2）**: S3/S4/S5 正向走通（需 US1 restore）、F5 负例、T026 真实入口默认拒绝全绿；写入/发送/投递 0 次在隔离期发生；链 4 负例证据齐备；signer 进程内检查点（T070）与受支持装配边界落证；本地 commit（不 push）。
 
 ---
 
@@ -231,7 +234,7 @@
 - **提交节点**: 测试先行批可单独本地 commit（不 push）。
 
 - [ ] T035 [P] [US3] 编写核验结论契约测试 `internal/recovery/verification_contract_test.go`（tags: contract）：`consistent` 仅当证据完整、新鲜（配置容忍内）、覆盖闭合且全部来源一致；任一来源 unknown →整项至多 unknown；unknown/stale 不得当通过；缺失不构成「从未发生/从未付款/可重执行」；不得以默认值/旧状态/时间推断/「大概未发生」填补（FR-015/016/018）
-- [ ] T036 [P] [US3] 编写 V1–V9 真实适配器集成测试 `internal/recovery/verification_integration_test.go`（tags: integration；真实 PG+Anvil）：外部领先→`divergent`/`unknown`+缺口；恢复点缺记录→`unknown`+gap；核验 0 次触发付款/签名/广播/重放/真实下游投递；批次/预算有界；V1–V9 全部经真实适配器（V5/V6 的 broker 不可读→unknown 由 T053 补事件层）；F4/F6；负例（F10）：历史 signed bytes 重放、历史广播重发、历史付款意图重执行、重复投递重发全部被拒绝（0 次重放/重广播/重投递/新建意图）；零写断言（F4）：核验批次执行前后对权威表整表指纹 diff 为空（只读 accessor 白名单见 T039；复用 `internal/txlifecycle/readonly_integration_test.go` 指纹模式）（FR-014–FR-017/020；SC-002）
+- [ ] T036 [P] [US3] 编写 V1–V9 真实适配器集成测试 `internal/recovery/verification_integration_test.go`（tags: integration；真实 PG+Anvil）：外部领先→`divergent`/`unknown`+缺口；恢复点缺记录→`unknown`+gap；核验 0 次触发付款/签名/广播/重放/真实下游投递；批次/预算有界；V1–V9 全部经真实适配器（V5/V6 的 broker 不可读→unknown 由 T053 补事件层）；F4/F6；负例（F10）：历史 signed bytes 重放、历史广播重发、历史付款意图重执行、重复投递重发全部被拒绝（0 次重放/重广播/重投递/新建意图）；零写断言（F4，R1 细化）：①**隔离夹具（无并发业务写者）**下，核验批次执行前后对 V1–V9 读取链的数据 DB 表做**整表内容指纹 diff**（全行 `to_jsonb` 串接聚合的确定性摘要，不止行数；复用 `internal/txlifecycle/readonly_integration_test.go` 指纹模式），diff 必须为空；**静态清单**（表名以 `migrations/` 实际 schema 为准；实现期以 T039/T040 落地读取表同步增补，测试不得动态收集）：V1 `chain_blocks`/`erc20_transfer_logs`/`indexer_checkpoint`/`log_checkpoint`/`deposit_observations`/`deposit_observation_transitions`/`deposit_checkpoint`/`deposit_config_history`/`confirmation_policy_history`/`reorg_recovery`/`reorg_recovery_events`；V2 `withdrawal_requests`/`payment_intents`/`withdrawal_authorizations`/`withdrawal_authorization_scopes`/`request_status_projection`/`withdrawal_request_audit`/`withdrawal_grant_audit`；V3 `nonce_bindings`/`nonce_observations`/`nonce_scope_state`/`nonce_scope_holds`/`nonce_wallet_registry`/`nonce_binding_events`/`nonce_ops_audit`；V4 `signing_requests`/`signature_results`/`signing_request_audit`/`delivery_admissions`/`signer_caller`/`tx_attempts`/`tx_attempt_signings`/`tx_send_attempts`/`tx_receipts`/`tx_reconciliations`/`tx_attempt_events`/`tx_intent_freezes`/`execution_claims`/`execution_steps`/`execution_events`/`execution_ops_audit`/`execution_caller_permission`；V5 `outbox_events`/`event_obligation`/`event_system_state`/`event_ops_audit`；V6 `consumer_inbox`/`consumer_versions`/`consumer_progress`/`consumer_quarantine`；V7/V8 `recon_task`/`recon_checkpoint`/`recon_gap`/`discrepancy`/`discrepancy_occurrence`/`disposition`/`reverify`/`recon_audit`/`recon_scan_attempt`/`recon_permission`/`caller`/`api_key`；门禁/租约表（`indexer_pause`/`log_pause`/`deposit_pause`/`deposit_pause_audit`/`indexer_lease`）不属 V1–V9 读取链，另由既有门禁覆盖；②**控制库写入另列**：`recovery_verification_item`/`recovery_evidence`/`recovery_gap`/`recovery_audit` 与 `evidence_generation`/`evidence_hash` 推进是本核验的预期输出，按 append-only＋代次协议单独断言，**不混入数据 DB 零写**；③**生产/演练并发观察边界**：并发业务写者（serve/worker/publisher/consumer/execution 等）对数据 DB 的写入 ≠ 核验副作用——并发场景不得断言整表指纹为空，只断言「核验归因写入=0」（核验经只读角色/只读事务执行，并以数据库侧证据做归因），边界写入证据（FR-014–FR-017/020；SC-002）
 - [ ] T037 [P] [US3] 编写缺口/独立性/升级集成测试 `internal/recovery/gaps_integration_test.go`（tags: integration）：证据包含对象/范围/时间线/现有证据/所需外部证据/受影响能力/风险/责任归属/升级记录；依赖无法证明独立→保守纳入暂停（不得仅凭「不同模块」判独立）；超时/重试耗尽/人工知悉不改变 `state`、不得视为闭合或获准复服；缺口闭合仅由新证据触发；不可重建场景=保持暂停并升级（FR-019；C3）
 
 ### 批次 B11 · V1–V9 核验与缺口实现（链 6）
@@ -263,7 +266,7 @@
 
 - **前置**: B4 完成（T047 依赖 T013/T012；release 路径由 B13 落地，测试先失败）。
 - **实际入口**: 新建测试文件；真实控制库；身份映射须显式注册（禁以任意 `person_id` 证双人独立）。
-- **完成条件**: 五个测试先落并失败；F7 拒绝矩阵与链 5 交错场景钉死。
+- **完成条件**: 五个测试先落并失败；F7 拒绝矩阵与链 5 交错场景钉死（含 R3 单动作准入受控交错：命中后撤销/证据与身份映射变化/控制库不可达/撤销先于准入/准入后撤销＋后续重求值）。
 - **验证层次**: contract + PG integration + app 级 integration。
 - **提交节点**: 测试先行批可单独本地 commit（不 push）。
 
@@ -271,20 +274,20 @@
 - [ ] T044 [P] [US4] 编写放行/撤销/三态/幂等 PG 集成测试 `internal/recovery/release_integration_test.go`（tags: integration）：S8/S9 未获授权拒绝并审计；新提款创建/既有提款恢复/真实下游投递及可产生真实下游业务效果的消费恢复缺第二人 0 次放行；执行者自批 0 次；证据变化后旧批准 100% 失效、须重核重批；重复 approve/release/close ≥10 次零状态翻转；撤销必须显式、有授权、审计；`restored` 不得显示为 `verified`、`verified` 不得显示为 `released`（F16 术语）；F7（FR-022/023/024；SC-004/007）
 - [ ] T045 [P] [US4] 编写真实入口放行正例集成测试 `internal/app/recovery_release_integration_test.go`（tags: integration）：S8 前 `POST /withdrawals` 必须 503（`no_release` 类拒绝）；single 放行 `query` 后读路径可用而写路径仍拒绝；按依赖顺序 `chain_scan→deposit_confirmation→existing_withdrawal_recovery` 逐项放行；放行不得解锁/替代既有资金门禁（signer 交付、nonce hold、发送/执行门禁仍独立校验）；0 次直写放行（INV-2）
 - [ ] T046 [P] [US4] 编写身份与授权路径验收测试 `internal/recovery/identity_path_integration_test.go`（tags: integration）：本地可操作身份配置——显式注册两个 person 的两个 principal 并完成双人批准；主体验证走部署受控配置（`TXHARBOR_RECOVERY_PRINCIPAL`）；缺映射/未注册 principal 拒绝；执行/核验/批准权限独立（一人可多 role，但 executor 不得批准自己执行的实例）；**禁止以任意 `person_id` 证明双人独立**（必须以显式映射+不同 person 证明）；部署名单内容待裁决、不阻塞本测试；**映射变更（F19）**：变更后旧批准立即失效（重核重批），变更审计可查（谁/何时/改了哪条映射），`person_id` 与当前映射不一致的批准按身份不可信拒绝（`approval_identity_unverified`）；保守 dual 不得抵消错映射（映射冲突时 0 放行）
-- [ ] T047 [P] [US4] 编写代次与失效受控交错集成测试 `internal/recovery/generation_integration_test.go`（tags: integration；链 5）：写写反序——A 取证→B 取证并先提交→A 提交被丢弃且不写结果/不改缺口/不推进代次、仅 `result=discarded` 审计；批准后撤销→下一求值拒绝；检查后执行（隔离项被 rejected 后放行停止）；旧实例续跑/迟到核验→丢弃+审计；TTL 语义——有界、撤销后至迟于 TTL 到期/下一次求值拒绝，不得未经裁决把 TTL 变为「撤销后仍可执行」；TTL 到期+控制库不可达→拒绝；代次感知缓存交错（F5）：证据变化后下一次求值（未等 TTL）立即拒绝、缓存内旧代次放行不得用于新动作、缓存过期+控制库不可达→拒绝；「未准入」（拒绝、无动作）与「已在途」（原门禁+unknown 纪律、不追溯中止）分别验收；外部副作用不可回滚：未知结果保持 unknown、不自动重付/重广播/重投递（FR-024；SC-007；INV-3/5/7）
+- [ ] T047 [P] [US4] 编写代次与失效受控交错集成测试 `internal/recovery/generation_integration_test.go`（tags: integration；链 5）：写写反序——A 取证→B 取证并先提交→A 提交被丢弃且不写结果/不改缺口/不推进代次、仅 `result=discarded` 审计；批准后撤销→下一求值拒绝；检查后执行（隔离项被 rejected 后放行停止）；旧实例续跑/迟到核验→丢弃+审计；TTL 语义——有界、撤销后至迟于 TTL 到期/下一次求值拒绝，不得未经裁决把 TTL 变为「撤销后仍可执行」；TTL 到期+控制库不可达→拒绝；**单动作准入协议受控交错（F5/R3，逐项）**：①缓存命中后撤销——命中不得跳过本次准入的权威读取与授权校验，撤销后下一次准入拒绝；②证据/身份映射变化——代次/哈希/映射变化后下一次求值（未等 TTL）立即拒绝，缓存内旧代次放行不得用于新动作；③控制库不可达（含缓存过期）→拒绝；④撤销先于准入→拒绝；⑤准入后撤销→按在途＋unknown 纪律（不追溯中止已提交工作、不回滚），并阻止后续准入；后续重求值仍拒绝；缓存命中不得被追认为在途；⑥一次准入不得跨请求/循环步进/批次/异步重试复用；「未准入」（拒绝、无动作）与「已在途」（原门禁+unknown 纪律、不追溯中止）分别验收；外部副作用不可回滚：未知结果保持 unknown、不自动重付/重广播/重投递（FR-024；SC-007；INV-3/5/7）
 
 ### 批次 B13 · 审批与放行实现（链 3/4/5）
 
-- **前置**: B12 测试已落并失败；B4 完成。
+- **前置**: B12 测试已落并失败；B4 完成（控制库版本守卫经 B2/T069，不得在未知/不兼容版本上做审批或放行）。
 - **实际入口**: `internal/recovery/approvals.go`、`release.go`、`scope.go`；决策行写 `recovery_approval`/`recovery_release`（append-only）。
-- **完成条件**: approvals_valid 与 release 生效条件完整；高影响 effect class 保守分类；close/supersede 守卫；全部经派生评估、无行上布尔。
+- **完成条件**: approvals_valid 与 release 生效条件完整；高影响 effect class 保守分类；close/supersede 守卫；全部经派生评估、无行上布尔；控制库版本守卫经 B2/T069（T048–T051 不得缺此检查即称完成）。
 - **并行注记（F15）**: T049/T050 串行现状保留（同属审批/放行单一 owner，接口冻结/owner 确认前不并行、不加 [P]）——不重排批次与编号。
 - **验证层次**: unit + PG integration。
 - **提交节点**: 本批退出时本地 commit（不 push）。
 
-- [ ] T048 [US4] 实现审批有效性于 `internal/recovery/approvals.go`（§3.1 逐字）：高影响档（dual）存在两条决策序最新 approve（不同 principal）且两人都有 `approver` role、两人 `person_id` 互不相同、两人 `person_id` 均 ≠ executor.person_id、两行 `scope_hash`/`evidence_generation`/`evidence_hash` 与当前一致、两行 `person_id` 与当前身份映射一致（映射变更→旧批准失效重批，F19）、均未被各自 revoke 覆盖；其余能力 single 档同条件一条；映射缺失/未注册/role 不符/执行者自批/代次不符/映射不一致/含 revoke→不满足；有效性派生、不在行上存布尔；append-only + `operation_id` 幂等（FR-023；依赖 T013）
-- [ ] T049 [US4] 实现放行/撤销决策于 `internal/recovery/release.go`：`recovery_release` 逐字（`decision` CHECK(`release`,`revoke`)、`approval_refs` UUID[] 确定性排序、`evidence_generation`/`evidence_hash` 绑定、`operation_id` UNIQUE、append-only）；当前有效放行=最新 release 未被同 (I,C,S) 更晚 revoke 覆盖且 §3 条件全部成立、**每次门禁求值重算**；撤销显式且有授权审计；close 前置（全 7 能力有效 release；缺口未闭合不得 close）；supersede 仅显式双人批准；重复 release/revoke/close 按 `operation_id` 读回零翻转（FR-021/022/024；依赖 T048）
-- [ ] T050 [US4] 实现能力范围/effect class 保守分类于 `internal/recovery/scope.go`：规范化 `scope_hash`（链/资产/业务类型/能力）；高影响档判定（新提款创建、既有提款恢复、向真实下游投递、可产生真实下游业务效果的消费恢复→dual）；真实下游 effect class 清单属部署前裁决——未配置/未知一律保守按 dual、不得默认 single；范围匹配失败→`scope_mismatch` 拒绝（FR-021/023；依赖 T048）
+- [ ] T048 [US4] 实现审批有效性于 `internal/recovery/approvals.go`（§3.1 逐字）：高影响档（dual）存在两条决策序最新 approve（不同 principal）且两人都有 `approver` role、两人 `person_id` 互不相同、两人 `person_id` 均 ≠ executor.person_id、两行 `scope_hash`/`evidence_generation`/`evidence_hash` 与当前一致、两行 `person_id` 与当前身份映射一致（映射变更→旧批准失效重批，F19）、均未被各自 revoke 覆盖；其余能力 single 档同条件一条；映射缺失/未注册/role 不符/执行者自批/代次不符/映射不一致/含 revoke→不满足；有效性派生、不在行上存布尔；append-only + `operation_id` 幂等（FR-023；依赖 T013；控制库版本守卫经 B2/T069）
+- [ ] T049 [US4] 实现放行/撤销决策于 `internal/recovery/release.go`：`recovery_release` 逐字（`decision` CHECK(`release`,`revoke`)、`approval_refs` UUID[] 确定性排序、`evidence_generation`/`evidence_hash` 绑定、`operation_id` UNIQUE、append-only）；当前有效放行=最新 release 未被同 (I,C,S) 更晚 revoke 覆盖且 §3 条件全部成立、**每次门禁求值重算**；撤销显式且有授权审计；close 前置（全 7 能力有效 release；缺口未闭合不得 close）；supersede 仅显式双人批准；重复 release/revoke/close 按 `operation_id` 读回零翻转（FR-021/022/024；依赖 T048；版本守卫经 B2/T069）
+- [ ] T050 [US4] 实现能力范围/effect class 保守分类于 `internal/recovery/scope.go`：规范化 `scope_hash`（链/资产/业务类型/能力）；高影响档判定（新提款创建、既有提款恢复、向真实下游投递、可产生真实下游业务效果的消费恢复→dual）；真实下游 effect class 清单属部署前裁决——未配置/未知一律保守按 dual、不得默认 single；范围匹配失败→`scope_mismatch` 拒绝（FR-021/023；依赖 T048；版本守卫经 B2/T069）
 
 ### 批次 B14 · 放行/状态 CLI（链 4）
 
@@ -294,7 +297,7 @@
 - **验证层次**: PG integration + app 级 integration。
 - **提交节点**: 本批退出时本地 commit（不 push）；US4 checkpoint 可验收。
 
-- [ ] T051 [US4] 实现 `recovery-admin approve/release/status` 接线于 `internal/app/recoveryadmin/approve.go` + `internal/app/recoveryadmin/status.go`：approve/revoke/release/revoke-release 校验对应审批记录（无有效批准不得 release）；主体绑定+自由文本仅审计+`operation_id` 幂等；`status` 只读、逐能力显示 `restored/verified/released` 三态与阻塞原因、拒绝分类；不得把未核验或回退后数据显示为正常一致；健康探针不得替代资金门禁判权；**有界只读复核 bounds（F13）**：定义可读范围（本实例及授权 scope 内的证据/核验/缺口/审计行；禁止无界全表扫描）、次数/时间/资源预算（部署配置，本地值仅测试输入）、耗尽行为（拒绝后续复核＋审计，不改变缺口/实例/批准/放行状态）；超时/预算耗尽/人工知悉≠缺口闭合/获准复服（FR-019）；术语（F16）：对外状态统一 `released`＝派生放行，`approved` 仅指有效批准记录、不构成放行（FR-022/026；依赖 T048–T050）
+- [ ] T051 [US4] 实现 `recovery-admin approve/release/status` 接线于 `internal/app/recoveryadmin/approve.go` + `internal/app/recoveryadmin/status.go`：approve/revoke/release/revoke-release 校验对应审批记录（无有效批准不得 release）；主体绑定+自由文本仅审计+`operation_id` 幂等；`status` 只读、逐能力显示 `restored/verified/released` 三态与阻塞原因、拒绝分类；不得把未核验或回退后数据显示为正常一致；健康探针不得替代资金门禁判权；**有界只读复核 bounds（F13）**：定义可读范围（本实例及授权 scope 内的证据/核验/缺口/审计行；禁止无界全表扫描）、次数/时间/资源预算（部署配置，本地值仅测试输入）、耗尽行为（拒绝后续复核＋审计，不改变缺口/实例/批准/放行状态）；超时/预算耗尽/人工知悉≠缺口闭合/获准复服（FR-019）；术语（F16）：对外状态统一 `released`＝派生放行，`approved` 仅指有效批准记录、不构成放行（FR-022/026；依赖 T048–T050；版本守卫经 B2/T069，缺此检查不得称完成）
 
 **Checkpoint（Phase 6 · US4）**: S8/S9/S10/S11 通过、F7 拒绝矩阵全绿；7 能力独立条件与审计记录齐备；证据失效重批可观察；本地 commit（不 push）。
 
@@ -387,17 +390,6 @@
 - [ ] T068 [P] 私钥/凭据边界全量复核 `internal/recovery/**` + `internal/app/recoveryadmin/**`：备份/证据/日志/审计禁含私钥、签名密钥、真实凭据、DSN 明文；签名密钥继续留在 Signer 边界、恢复环境不为恢复获取可直接持有的私钥；复用 `internal/logx.Redact`；复核结论写入 `docs/evidence/015/README.md` 证据索引（FR-007；INV-9）
 
 **Checkpoint（Phase 9）**: 分层验证记录齐全（NOT RUN 如实）、文档与证据索引收口、无生产就绪声明；可交付本地范围。
-
-### 批次 B20 · analyze 定向修正追加（链 2/4；原 T001–T068 编号保留）
-
-- **前置**: T069 依赖 B2（T002/T007/T008）；T070 依赖 T012、T032。
-- **实际入口**: `internal/recovery/controlstore/`（版本校验）；`internal/signer/delivery.go`、`internal/signer/submit.go`、`internal/app/signerserve.go`（装配）。
-- **完成条件**: 未知/不兼容控制库 schema 版本被拒绝（含 migrate 与门禁读取路径）；signer 交付在受支持装配下动作前校验（门禁依赖缺失/未配置按 fail-closed 拒绝），残余边界写入 T032 与契约。
-- **验证层次**: unit + PG integration（T069）；unit + app 级 integration（T070）。
-- **提交节点**: 归属批次退出时本地 commit（不 push）。
-
-- [ ] T069 [P] 控制库 schema 版本校验（F11）：`recovery-admin migrate` 与 store 连接识别未知/不兼容控制库 schema 版本→明确拒绝（fail-closed；拒绝以 `control_store_unavailable` 表达并审计注记版本，不新增放行路径）；migrate 不得对未知版本静默降级/尽力读取；即使本阶段仅 0001 初版，校验路径与拒绝路径必须存在并可测；先于 T048–T051 的任何放行/求值使用控制库前生效（前置 T002/T007/T008；归属 B2 后补 → B13 前置）
-- [ ] T070 [P] signer 进程内检查点（F1）：在 `internal/signer` 交付核心（`delivery.go` `Deliver`/`deliverGated`，交付字节离开前）以注入的门禁函数（`DeliveryDeps` 新增依赖字段；`submit.go` 签名路径酌情同构）执行 `existing_withdrawal_recovery`（含 `chain_scan` 依赖）动作前校验；门禁函数缺失/配置缺失按 fail-closed 拒绝，不得解释为直通；`signer-serve` 装配（`internal/app/signerserve.go`）提供同一 Gate 与控制库配置；不改变 009 门禁次序、unknown 语义与历史重放拒绝；残余边界：受支持装配之外直调 signer 核心/蓄意伪造门禁不自动检测（DG-1 同类），不得称全覆盖（前置 T012、T032）
 
 ---
 
@@ -557,7 +549,7 @@
 ### Phase Dependencies
 
 - **Setup（Phase 1）**: 无依赖，可立即开始。
-- **Foundational（Phase 2）**: 依赖 Setup；**阻塞所有 user story**；合流责任：T006（schema 单一所有者，只合并一次）、T007（store 唯一决策读写入口）、T009/T010（身份与授权）、T011–T013（门禁与代次）各自所有者合并后，story 才 rebase。
+- **Foundational（Phase 2）**: 依赖 Setup；**阻塞所有 user story**；合流责任：T006（schema 单一所有者，只合并一次）、T007＋T069（store 唯一决策读写入口与版本守卫，B2 内 T069 在 T007/T008 后串行）、T009/T010（身份与授权）、T011–T013（门禁与代次）各自所有者合并后，story 才 rebase。
 - **User Stories（Phase 3+）**: 均依赖 Foundational 完成。
   - **US1（P1）**: 自身验收（S1/S2＋F1–F3）无跨 story 依赖；MVP。S4「恢复→核验」端到端序列归 US2（B9 checkpoint），不属 US1 验收（F18 注记）。
   - **US2（P1）**: 实现依赖 Foundational；S4/S5 的完整正向序列使用 US1 的 restore（本批负例/默认拒绝可先独立验收）。
@@ -598,7 +590,7 @@
 
 ### Batch Order（依赖链）
 
-B0 → B1 → B2 → B3 → B4（Foundational 完成）→ B5 → B6（US1）→ B7 → B8 → B9（US2）→ B10 → B11（US3）→ B12 → B13 → B14（US4）→ B15（US5）→ B16 → B17（US6）→ B18 → B19（Polish）；**B20（T069/T070）按归属合并**：T069 先于 B13/B14 使用控制库前生效、T070 与 B9 同批交付。
+B0 → B1 → B2（含 T069 版本守卫）→ B3 → B4（Foundational 完成）→ B5 → B6（US1）→ B7 → B8 → B9（US2，含 T070）→ B10 → B11（US3）→ B12 → B13 → B14（US4）→ B15（US5）→ B16 → B17（US6）→ B18 → B19（Polish）。**T069/T070 已并入 B2/B9，无独立收尾批**；B4/B13 前置经 B2 获得版本守卫。
 可并行：B7 与 B8/B9 的测试编写；B5 测试与 B6 实现存在 TDD 先后但不阻塞其他文件；US3 与 US4 的测试文件可与相邻实现并行编写（依赖见各批前置）。**不并行**：T039/T040、T049/T050 串行现状保留（F15，owner 确认前不加 [P]）。
 
 ---
@@ -615,6 +607,7 @@ Task: "保密性单测 internal/recovery/secrecy_test.go"                       
 Task: "serve.go 链观察接线"                                                     # T030
 Task: "withdrawalhttp.go 提款写入口接线"                                        # T031
 Task: "worker/exec/signer 既有提款恢复接线"                                     # T032
+Task: "signer 进程内检查点（T032 后串行，不带 [P]）"                              # T070
 Task: "eventpublisher.go 接线"                                                  # T033
 Task: "eventconsumer.go 接线"                                                   # T034
 
@@ -628,7 +621,7 @@ Task: "approvals_contract_test.go" / "release_integration_test.go" /
 
 ```bash
 # B0：T002–T005 并行（不同文件/目录）
-# B2：T007 与 T008 并行（不同文件，均只依赖 T006）
+# B2：T007 与 T008 并行（不同文件，均只依赖 T006）；T069 在 T007/T008 后串行（同改 store.go/migrate.go，不带 [P]）
 # B4：T011 与 T013 并行；T012 在 T011 后串行
 ```
 
@@ -674,7 +667,7 @@ Task: "approvals_contract_test.go" / "release_integration_test.go" /
 - **Exit（通用）**：本批完成条件在指定层次全绿；未执行/未覆盖检查如实记录（NOT RUN 不得记为 pass）；测试先行批必须先失败后转绿；每批本地 commit（不 push）；Checkpoint 可独立复现。
 - **层次适用**：`gofmt`/`go vet`/unit（`make test`）/race（`make test-race`）始终适用；contract（`make test-contract`）普通 PR；PG integration（`make test-integration`）按 `internal/recovery/*` 路径分类触发，Docker 缺位 → NOT RUN；Kafka/Redis 层按 `ci.yml` 分类；drill（`make test-drill`）仅独立通道，永不进普通 PR。
 - **逐批 Exit 摘要**：
-  - B0：构建/CLI help/drill NOT RUN 守卫；B1：schema 与零数据 DB 变更；B2：store/migrate/DSN 校验；B3：身份注册路径可操作；B4：门禁直通/默认拒绝与代次丢弃可测；B5：测试先落且失败；B6：S1/S2+F1/F2/F3；B7：测试先落且失败；B8：S3/S5+close 守卫；B9：7 入口默认拒绝与原门禁保留；B10：测试先落且失败；B11：S6/S7+F4/F6；B12：测试先落且失败；B13：审批/放行派生判定与保守 effect class；B14：S10/S11+F7；B15：回退/重复/缺失三场景；B16：分列计时与 drill 记录；B17：S1–S12+F1–F7（含保持暂停）+幂等；B18：CI 分类守卫/runbook/证据索引；B19：矩阵记录/文档收口/保密复核。
+  - B0：构建/CLI help/drill NOT RUN 守卫；B1：schema 与零数据 DB 变更；B2：store/migrate/DSN 校验＋版本守卫（T069：未知/不兼容拒绝）；B3：身份注册路径可操作；B4：门禁直通/默认拒绝与代次丢弃可测；B5：测试先落且失败；B6：S1/S2+F1/F2/F3；B7：测试先落且失败；B8：S3/S5+close 守卫；B9：7 入口默认拒绝与原门禁保留＋signer 进程内检查点（T070）；B10：测试先落且失败；B11：S6/S7+F4/F6；B12：测试先落且失败；B13：审批/放行派生判定与保守 effect class；B14：S10/S11+F7；B15：回退/重复/缺失三场景；B16：分列计时与 drill 记录；B17：S1–S12+F1–F7（含保持暂停）+幂等；B18：CI 分类守卫/runbook/证据索引；B19：矩阵记录/文档收口/保密复核。
 
 ---
 

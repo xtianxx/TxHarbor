@@ -129,7 +129,8 @@ release_valid(I, C, S) :=
 ### 3.3 求值来源与失败分类
 
 - 求值只读控制库（实例行 + 最新决策 + 检查项 + 缺口 + 参与人/映射）；**绝不读数据 DB 授权行作为放行依据**。
-- 有界 TTL 缓存（部署配置）；**代次感知失效（F5）**：求值在实例行锁内读取权威 `(state, evidence_generation, evidence_hash)`；缓存键含实例+能力+scope+代次+哈希；任何代次/哈希变化立即失效（发现者=求值器，下一次真实动作前求值即拒绝，不得等 TTL）；缓存过期且控制库不可达 → 拒绝；区分「未准入」（拒绝）与「已在途」（按原门禁处理、未知结果按 unknown 纪律）。
+- 有界 TTL 缓存（部署配置）；**代次感知失效（F5）**：缓存键含实例+能力+scope+代次+哈希；任何代次/哈希变化立即失效（发现者=求值器，下一次真实动作前求值即拒绝，不得等 TTL）；缓存过期且控制库不可达 → 拒绝。
+- **单动作准入协议（R3）**：缓存命中与未命中均在**动作准入前**于共同锁（实例行锁，与决策写入同一锁）内读取权威 `(state, evidence_generation, evidence_hash)` 并按代次协议校验——**键含代次≠最新性证明**；缓存只复用仍有效的计算结果，不得用旧 allow 跳过本次授权检查；控制库不可达即拒绝；顺序=判定点（锁内）→释锁→实际动作，**一次准入=当次调用单个明确动作**，不得跨请求/循环步进/批次/异步重试复用；撤销先于准入→拒绝，准入后撤销→在途＋unknown（不追溯中止已提交工作、不回滚）并阻止后续准入；**缓存命中不得被追认为在途**；不宣称跨系统原子；区分「未准入」（拒绝）与「已在途」（按原门禁处理、未知结果按 unknown 纪律）。
 - 控制库 schema 版本未知/不兼容 → 拒绝（fail-closed；以 `control_store_unavailable` 表达并审计注记版本，T069）。
 - 拒绝分类（`refusal_class` 闭集）：`no_instance`（正常态不拒绝，仅标记 normal）、`instance_mismatch`、`no_release`、`release_invalidated_generation`、`release_revoked`、`capability_dependency_closed`、`isolation_unproven`、`gap_open`、`approval_missing`、`approval_identity_unverified`、`approval_executor_excluded`、`approval_stale`、`hard_gate_active`、`control_store_unavailable`、`scope_mismatch`。全部 fail-closed，全部审计。
 
