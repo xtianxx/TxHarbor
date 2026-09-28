@@ -27,7 +27,9 @@
 //   - A rejected item cannot be verified directly: it must be re-collected
 //     with a new external reference first. A verified item is not silently
 //     re-collected either; only a non-executor rejection verdict moves it back
-//     to re-collection.
+//     to re-collection. Re-running the confirmation on a verified item is an
+//     idempotent re-affirmation (it stays verified, is re-audited and still
+//     advances the generation), so bounded retries converge (FR-024).
 //   - `no_pre_release_effects` is verified against the gate audit, never by a
 //     state field: if the control store already recorded an admitted
 //     externally visible action (a gate admission of an effectful capability)
@@ -334,12 +336,15 @@ RETURNING `+checklistSelectColumns, locked.InstanceID, string(item), ref, checkl
 	return record, nil
 }
 
-// Verify records one non-executor verdict. An approve verdict is allowed only
-// from evidenced and moves the item to verified; a rejection verdict is
-// allowed from evidenced or verified and moves the item to rejected. Both go
-// through CommitEvidenceWrite, so an accepted verdict advances the evidence
-// generation by exactly 1 (invalidating older releases/approvals) and a stale
-// captured token is discarded with the protocol's audit row.
+// Verify records one non-executor verdict. An approve verdict is allowed from
+// evidenced and moves the item to verified; it also re-affirms an already
+// verified item (idempotent reentrancy, FR-024: repeating an accepted verdict
+// converges instead of refusing; the item stays verified and the verdict is
+// re-audited). A rejection verdict is allowed from evidenced or verified and
+// moves the item to rejected. Every accepted verdict goes through
+// CommitEvidenceWrite, so it advances the evidence generation by exactly 1
+// (invalidating older releases/approvals) and a stale captured token is
+// discarded with the protocol's audit row.
 func (c *Checklist) Verify(ctx context.Context, req ChecklistVerifyRequest) (ChecklistItem, error) {
 	if c == nil || c.store == nil {
 		return ChecklistItem{}, errors.New("isolation checklist requires a control store")
@@ -421,9 +426,16 @@ func (c *Checklist) Verify(ctx context.Context, req ChecklistVerifyRequest) (Che
 				valid = true
 			case !req.Reject && state == string(ChecklistStateEvidenced):
 				valid = true
+			case !req.Reject && state == string(ChecklistStateVerified):
+				// Idempotent re-affirmation of a verified item: a repeated
+				// accepted verdict converges (FR-024) instead of refusing, and
+				// the item never regresses. The actor/verifier/mapping checks
+				// above still apply, and the accepted verdict advances the
+				// generation, so no older release/approval silently survives.
+				valid = true
 			}
 			if !valid {
-				return fmt.Errorf("%w: %s is state=%s; want evidenced (a rejection verdict may also supersede verified)", ErrChecklistTransition, item, state)
+				return fmt.Errorf("%w: %s is state=%s; want evidenced or verified (a rejection verdict may also supersede verified)", ErrChecklistTransition, item, state)
 			}
 			if item == IsolationItemNoPreReleaseEffects {
 				blocked, err := checklistEffectAdmissionsExist(ctx, tx, accepted.InstanceID)

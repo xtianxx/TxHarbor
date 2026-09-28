@@ -26,8 +26,14 @@
 // implement the instance lifecycle in instance.go (`instance-open` with the
 // explicit supersede path, release-guarded `instance-close`) and the
 // isolation checklist in checklist.go (`checklist-set`/`checklist-verify`
-// with audited refusals and operation_id idempotency). Every other action is
-// still the stub.
+// with audited refusals and operation_id idempotency). T042 implements
+// `verify` in verify.go: one bounded read-only V1-V9 step through the T038
+// orchestrator and the T039/T040 source adapters, bound to the open recovery
+// instance. T051 implements `approve`/`release` in approve.go (the append-only
+// approve/revoke/release/revoke-release wiring over the T048/T049 decision
+// writers, no direct row writes) and `status` in status.go (the bounded
+// read-only per-capability restored/verified/released review). Every other
+// action is still the stub.
 //
 // It lives in its own package (rather than internal/app) for the same reason as
 // internal/app/reconcileadmin: the delivered command imports internal/recovery
@@ -241,40 +247,71 @@ var recoveryAdminActions = []recoveryAdminAction{
 	},
 	{
 		name:    "verify",
-		summary: "run bounded V1-V9 fact verification for the instance",
-		usage:   "verify --instance ID --scope SCOPE",
+		summary: "run one bounded read-only V1-V9 fact verification step for the instance",
+		usage:   "verify --instance ID --scope SCOPE [--operation-id ID]",
 		flags: []recoveryAdminFlag{
-			{name: "instance", usage: "recovery instance id (required)"},
-			{name: "scope", usage: "verification scope (required)"},
+			{name: "instance", usage: "recovery instance id (required); must be the open recovery instance and agree with " + "TXHARBOR_RECOVERY_INSTANCE"},
+			{name: "scope", usage: "verification scope (required): \"all\" or a JSON object; canonicalized and recorded as scope_hash (empty/invalid refuses as scope_mismatch)"},
+			{name: "operation-id", usage: "idempotency key (optional); same id+input reads the recorded outcome back with zero side effects, a changed input conflicts with zero writes; omitted = a real rerun (non-replay) that appends a new bounded step"},
 		},
 		required: []string{"instance", "scope"},
+		notes: []string{
+			"One bounded step over the full V1-V9 catalogue: the (state, generation, hash) token is captured and re-validated under the instance row lock on every call (no in-memory state), repeated calls append new verdict rows instead of flipping history, and the batch bound is TXHARBOR_RECOVERY_VERIFICATION_BATCH_LIMIT (no default; a bound overrun refuses with zero writes).",
+			"Conclusions are consistent/divergent/unknown/stale; unknown and stale are never a pass and an open/escalated gap keeps its affected capabilities blocked. Verification never auto-fixes a gap and never triggers payment, signature, broadcast, replay or downstream delivery.",
+			"Authority: TXHARBOR_RECOVERY_PRINCIPAL must resolve to an active identity mapping and a participant binding on the instance; TXHARBOR_RPC_URL, TXHARBOR_CHAIN_ID and the control-store schema guard (T069) are refused by exact key name when missing or incompatible.",
+			"Output lists each V1-V9 conclusion and the open/escalated gap list (affected capabilities, required evidence, owner, escalation); the bound capabilities remain closed until the gap is closed by new evidence (T041) and released through the approval path.",
+		},
 	},
 	{
 		name:    "approve",
-		summary: "record an approval (single/dual; executor excluded)",
-		usage:   "approve --instance ID --capability CAP",
+		summary: "record an approval decision (approve/revoke; executor excluded)",
+		usage:   "approve --instance ID --capability CAP --scope SCOPE [--revoke] [--reason R] [--operation-id ID]",
 		flags: []recoveryAdminFlag{
-			{name: "instance", usage: "recovery instance id (required)"},
+			{name: "instance", usage: "open recovery instance id (required)"},
 			{name: "capability", usage: "capability name (required)"},
+			{name: "scope", usage: "canonical capability scope (required); canonicalized with T050, a non-canonical --scope refuses as scope_mismatch"},
+			{name: "revoke", usage: "record the revoke of this principal's earlier approve decision of the same (instance, capability, scope) stream"},
+			{name: "reason", usage: "audit annotation (optional; never an authorization)"},
+			{name: "operation-id", usage: "idempotency key (optional); same id+input reads the recorded decision back with zero writes, a changed input conflicts with zero writes; omitted = a real derived id (non-replayable)"},
 		},
-		required: []string{"instance", "capability"},
+		required: []string{"instance", "capability", "scope"},
+		notes: []string{
+			"Validity is derived (T048): the recorded person comes from the current active mapping, the conservative approval class from the capability matrix, and the evidence (generation, hash) token from the instance row lock; approving is not releasing (F16: approved is not a state).",
+			"The executor (opened_by or an executor-role participant, directly or through the current mapping) can never approve its own instance; a mapping change invalidates the earlier approval (re-approval is required).",
+		},
 	},
 	{
 		name:    "release",
-		summary: "release one capability (derived evaluation; nothing is writable)",
-		usage:   "release --instance ID --capability CAP",
+		summary: "record a release/revoke decision (derived evaluation; nothing is writable)",
+		usage:   "release --instance ID --capability CAP --scope SCOPE [--revoke] [--reason R] [--operation-id ID]",
 		flags: []recoveryAdminFlag{
-			{name: "instance", usage: "recovery instance id (required)"},
+			{name: "instance", usage: "open recovery instance id (required)"},
 			{name: "capability", usage: "capability name (required)"},
+			{name: "scope", usage: "canonical capability scope (required); canonicalized with T050, a non-canonical --scope refuses as scope_mismatch"},
+			{name: "revoke", usage: "record the explicit revoke of this stream (fail-safe; needs no approval basis)"},
+			{name: "reason", usage: "audit annotation (optional; never an authorization)"},
+			{name: "operation-id", usage: "idempotency key (optional); same id+input reads the recorded decision back with zero writes, a changed input conflicts with zero writes; omitted = a real derived id (non-replayable)"},
 		},
-		required: []string{"instance", "capability"},
+		required: []string{"instance", "capability", "scope"},
+		notes: []string{
+			"No valid approval basis means no release: the writer derives the current approve decisions of the instance's approvers and judges them with the single derived judgment; an unsatisfied basis refuses, is audited and writes zero release rows. There is no flag that names approvals and no force/override entry.",
+			"The recorded basis binds the authoritative (evidence_generation, evidence_hash) token; any later accepted evidence write invalidates the release (release_invalidated_generation). The gate re-derives every condition on each admission (INV-2: no writable release boolean) and the existing fund gates remain phase two at the action site.",
+			"A release/revoke requires the instance's recovery_execute binding (opened_by or an executor-role participant) and TXHARBOR_RECOVERY_GATE_TTL (no default).",
+		},
 	},
 	{
 		name:    "status",
-		summary: "show the read-only per-capability restored/verified/released view",
-		usage:   "status [--instance ID]",
+		summary: "show the read-only per-capability restored/verified/released review",
+		usage:   "status [--instance ID] [--scope SCOPE]",
 		flags: []recoveryAdminFlag{
-			{name: "instance", usage: "recovery instance id (optional)"},
+			{name: "instance", usage: "recovery instance id (optional; defaults to the bound or single open instance)"},
+			{name: "scope", usage: "canonical capability scope filter (optional); canonicalized with T050"},
+		},
+		notes: []string{
+			"Per capability the three derived states of data-model §4.2 are shown with the blocking reason and the closed refusal class: restored = accepted restore-probe evidence (never implies verified/released), verified = current-generation V1-V9 conclusions for the applicable categories (unknown allowed and displayed; never a pass), released = the derived gate evaluation re-run per (capability, scope) stream (approved alone is not a release).",
+			"Bounded read-only review (F13): the range is this instance (plus --scope) with instance-predicated LIMITed reads and no unbounded scan; the bounds TXHARBOR_RECOVERY_STATUS_TIMEOUT / TXHARBOR_RECOVERY_STATUS_MAX_READS / TXHARBOR_RECOVERY_STATUS_MAX_ROWS are required by exact key name (no default; local values are test inputs only). Exhausting any bound refuses the rest of the review, appends one refused audit row and changes no gap/instance/approval/release state.",
+			"The review grants nothing: the gate evaluates phase one only (phase_two_evaluated=false), health signals never substitute the existing fund gates, and a timeout/exhausted budget/human knowledge is never gap closure or a resumption permission.",
+			"Requires an active identity mapping and a participant binding on the reviewed instance, and TXHARBOR_RECOVERY_GATE_TTL for the derived evaluation.",
 		},
 	},
 	{
@@ -297,9 +334,10 @@ func recoveryAdminActionByName(name string) (recoveryAdminAction, bool) {
 // Run runs the 015 operator command surface. `migrate up|status` (T008) is
 // implemented in migrate.go, the `control ...` subcommands (T010) in
 // control.go, `backup`/`verify-backup` (T021/T020) in backup.go, `restore`
-// (T022) in restore.go, the instance lifecycle (T027) in instance.go and the
-// isolation checklist (T028/T029) in checklist.go; every other action is
-// still the B0 stub (help and argument parsing only, no behavior).
+// (T022) in restore.go, the instance lifecycle (T027) in instance.go, the
+// isolation checklist (T028/T029) in checklist.go and `verify` (T042) in
+// verify.go; every other action is still the B0 stub (help and argument
+// parsing only, no behavior).
 func Run(ctx context.Context, args []string, d Deps) int {
 	if len(args) == 0 {
 		recoveryAdminUsage(d.stderr())
@@ -340,6 +378,23 @@ func Run(ctx context.Context, args []string, d Deps) int {
 	case "checklist-verify":
 		// T029: isolation-checklist confirmation (non-executor verifier).
 		return recoveryAdminChecklistVerify(ctx, args[1:], d)
+	case "verify":
+		// T042: one bounded read-only V1-V9 verification step over the T038
+		// orchestrator and the T039/T040 real source adapters, bound to the
+		// open recovery instance.
+		return recoveryAdminVerify(ctx, args[1:], d)
+	case "approve":
+		// T051: append-only approval decisions (approve/revoke) through the
+		// T048 writer; the executor is excluded and no release is derived here.
+		return recoveryAdminApprove(ctx, args[1:], d)
+	case "release":
+		// T051: append-only release/revoke decisions whose release basis is
+		// derived and judged by the T049 writer / T012 gate.
+		return recoveryAdminRelease(ctx, args[1:], d)
+	case "status":
+		// T051: bounded read-only per-capability reconstructed state
+		// (restored/verified/released + blocking reason + refusal class).
+		return recoveryAdminStatus(ctx, args[1:], d)
 	}
 	action, ok := recoveryAdminActionByName(args[0])
 	if !ok {
@@ -452,7 +507,7 @@ func recoveryAdminUsage(w io.Writer) {
 		fmt.Fprintf(w, "  %-16s %s\n", action.name, action.summary)
 	}
 	fmt.Fprintln(w)
-	fmt.Fprintln(w, "Wired today: `migrate up|status` (T008), `control participant-register|identity-map-set|identity-map-show` (T010), `backup`/`verify-backup` (T020/T021), `restore` (T022), `instance-open`/`instance-close` (T027) and `checklist-set`/`checklist-verify` (T028/T029). Every other action is the B0 stub and reports NOT IMPLEMENTED (non-zero); missing arguments and unknown actions exit 2. Required configuration values are refused by name and never defaulted; the authenticated subject comes from TXHARBOR_RECOVERY_PRINCIPAL and free text never authorizes.")
+	fmt.Fprintln(w, "Wired today: `migrate up|status` (T008), `control participant-register|identity-map-set|identity-map-show` (T010), `backup`/`verify-backup` (T020/T021), `restore` (T022), `instance-open`/`instance-close` (T027), `checklist-set`/`checklist-verify` (T028/T029), `verify` (T042) and `approve`/`release`/`status` (T051). Every other action is the B0 stub and reports NOT IMPLEMENTED (non-zero); missing arguments and unknown actions exit 2. Required configuration values are refused by name and never defaulted; the authenticated subject comes from TXHARBOR_RECOVERY_PRINCIPAL and free text never authorizes.")
 }
 
 // recoveryAdminActionUsage prints one action's accepted argument form.

@@ -12,7 +12,7 @@
 //     by default. A capability is released only by the derived evaluation:
 //     instance open + capability in the closed set + every requires_capabilities
 //     dependency release-valid + every isolation_dependency_set item verified +
-//     no open gap naming the capability + the latest release decision is
+//     no open/escalated gap naming the capability + the latest release decision is
 //     `release` at the current (evidence_generation, evidence_hash) and is not
 //     covered by a later revoke + approvals_valid + the injected phase-two
 //     fundamental gate check (when wired).
@@ -614,7 +614,7 @@ func (g *Gate) validateCapabilityFacts(facts gateCapabilityFacts, c Capability, 
 	}
 	if facts.gapOpen {
 		return &gateRefusal{class: RefusalGapOpen, reason: fmt.Sprintf(
-			"an open gap lists capability %s in affected_capabilities", c)}
+			"an open or escalated gap lists capability %s in affected_capabilities", c)}
 	}
 	return nil
 }
@@ -946,10 +946,12 @@ type gateIsolationRow struct {
 }
 
 // gateCapabilityFacts are the generation-bound derivations of one capability:
-// the isolation item states and whether an open gap names the capability.
-// Isolation transitions and gap open/close advance the evidence generation
-// (data-model §5), so these facts are only reusable while the in-lock token
-// matches the generation and hash they were read at.
+// the isolation item states and whether an open or escalated gap names the
+// capability (escalation is not closure: FR-019 keeps an escalated gap
+// blocking until new evidence closes it). Isolation transitions and gap
+// open/close advance the evidence generation (data-model §5), so these facts
+// are only reusable while the in-lock token matches the generation and hash
+// they were read at.
 type gateCapabilityFacts struct {
 	generation int64
 	hash       string
@@ -992,10 +994,14 @@ func (g *Gate) capabilityFacts(ctx context.Context, token controlstore.InstanceT
 		}
 		facts.isolation = append(facts.isolation, row)
 	}
+	// An escalated gap blocks exactly like an open one: escalation requires
+	// manual handling but is not closure and delivers no risk acceptance
+	// (FR-019, C3). Only new evidence closes a gap and lifts the block.
 	if err := tx.QueryRow(ctx,
 		`SELECT EXISTS (
 		    SELECT 1 FROM recovery_gap
-		    WHERE instance_id = $1 AND state = 'open' AND $2 = ANY(affected_capabilities))`,
+		    WHERE instance_id = $1 AND state IN ('open', 'escalated')
+		      AND $2 = ANY(affected_capabilities))`,
 		token.InstanceID, string(c)).Scan(&facts.gapOpen); err != nil {
 		return gateCapabilityFacts{}, fmt.Errorf("read open gaps for capability %s: %w", c, err)
 	}

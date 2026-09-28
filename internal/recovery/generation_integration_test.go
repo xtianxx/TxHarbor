@@ -19,9 +19,12 @@ package recovery
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
+	"reflect"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -652,4 +655,680 @@ WHERE application_name = $1 AND wait_event_type = 'Lock'`, appName).Scan(&waitin
 		}
 		time.Sleep(2 * time.Millisecond)
 	}
+}
+
+// ===========================================================================
+// T047 [US4]: generation and invalidation controlled interleavings (链 5)
+//
+// TDD-first. B12 lands these tests before B13, so the approval/release calls
+// below reference the planned T048/T049 API (internal/recovery/approvals.go /
+// release.go) that does not exist until B13 lands:
+//
+//	func Approve(ctx context.Context, store *controlstore.Store, req ApprovalRequest) (ApprovalOutcome, error)
+//	func RevokeApproval(ctx context.Context, store *controlstore.Store, req ApprovalRequest) (ApprovalOutcome, error)
+//	func Release(ctx context.Context, store *controlstore.Store, gate *Gate, req ReleaseRequest) (ReleaseOutcome, error)
+//	func RevokeRelease(ctx context.Context, store *controlstore.Store, gate *Gate, req ReleaseRequest) (ReleaseOutcome, error)
+//
+// The generation protocol itself (T013) already exists; T047 covers the
+// controlled interleavings of data-model §3.3/§5/§6 and approval-matrix §4:
+//
+//   - write-write reverse order: a late writer's commit is discarded with
+//     exactly one result='discarded' audit row — no result row, no gap change,
+//     no generation advance (the otherwise-committed newer evidence wins);
+//   - revoke after approval / after release refuses the next evaluation
+//     immediately (no waiting for the TTL, warm cache included);
+//   - a rejected isolation item stops the evaluation after the check;
+//   - an old instance's late verification is discarded against a real lock
+//     barrier observed in pg_stat_activity, with only a discarded audit;
+//   - the gate TTL is bounded: a warm cache never skips the current
+//     authorization check, TTL expiry re-reads the control store, and an
+//     unreachable control store refuses even with a warm/expired cache;
+//   - the single-action admission protocol (R3): a cache hit never skips the
+//     in-lock authority read (cache hit then revoke refuses); an evidence or
+//     mapping change refuses the next evaluation without waiting for the TTL;
+//     revoke-before-admission refuses (未准入); admission-before-revoke is
+//     in-flight + unknown discipline (already-admitted work is not rewound,
+//     no retry/compensation entry exists, the next admission refuses);
+//     one admission never covers more than its one action.
+//
+// External side effects are never rewound (INV-3/5/7): the tests assert that
+// committed work is not retracted and that no automatic re-pay/re-broadcast/
+// re-deliver path exists on the gate.
+// ===========================================================================
+
+// t047RetryEntryName matches a method that would look like an automatic
+// retry/replay/compensation entry. The unknown discipline keeps an external
+// result unknown; nothing may automatically re-pay, re-broadcast or
+// re-deliver it.
+var t047RetryEntryName = regexp.MustCompile(`(?i)(retry|replay|repay|rebroadcast|redeliver|redrive|compensat)`)
+
+// t047Scene bundles the ge-generation fixture scene (open instance,
+// executor/verifier/approver participants), the checklist service and the
+// single derived gate.
+type t047Scene struct {
+	f         *gateFixture
+	checklist *Checklist
+	gate      *Gate
+}
+
+func t047NewScene(t *testing.T, opts GateOptions) *t047Scene {
+	t.Helper()
+	f := gateBaseFixture(t)
+	checklist, err := NewChecklist(f.store)
+	if err != nil {
+		t.Fatalf("NewChecklist: %v", err)
+	}
+	return &t047Scene{f: f, checklist: checklist, gate: gateNewGate(t, f.store, opts)}
+}
+
+func (s *t047Scene) seed(t *testing.T, capability Capability) {
+	t.Helper()
+	isoVerifyAll(t, s.f, s.checklist, capability)
+}
+
+func (s *t047Scene) approve(t *testing.T, principal string, capability Capability) ApprovalOutcome {
+	t.Helper()
+	out, err := Approve(s.f.ctx, s.f.store, ApprovalRequest{
+		InstanceID: s.f.instanceID, Capability: capability, ScopeHash: s.f.scope,
+		Principal: principal, Reason: "t047 approval", OperationID: gateOperation("t047-approve"),
+	})
+	if err != nil {
+		t.Fatalf("Approve(%s, %s): %v", principal, capability, err)
+	}
+	return out
+}
+
+func (s *t047Scene) revokeApproval(t *testing.T, principal string, capability Capability) ApprovalOutcome {
+	t.Helper()
+	out, err := RevokeApproval(s.f.ctx, s.f.store, ApprovalRequest{
+		InstanceID: s.f.instanceID, Capability: capability, ScopeHash: s.f.scope,
+		Principal: principal, Reason: "t047 explicit revoke", OperationID: gateOperation("t047-approve-revoke"),
+	})
+	if err != nil {
+		t.Fatalf("RevokeApproval(%s, %s): %v", principal, capability, err)
+	}
+	return out
+}
+
+func (s *t047Scene) release(t *testing.T, capability Capability) ReleaseOutcome {
+	t.Helper()
+	out, err := Release(s.f.ctx, s.f.store, s.gate, ReleaseRequest{
+		InstanceID: s.f.instanceID, Capability: capability, ScopeHash: s.f.scope,
+		Principal: "deploy:executor", Reason: "t047 release", OperationID: gateOperation("t047-release"),
+	})
+	if err != nil {
+		t.Fatalf("Release(%s): %v", capability, err)
+	}
+	return out
+}
+
+func (s *t047Scene) revokeRelease(t *testing.T, capability Capability) ReleaseOutcome {
+	t.Helper()
+	out, err := RevokeRelease(s.f.ctx, s.f.store, s.gate, ReleaseRequest{
+		InstanceID: s.f.instanceID, Capability: capability, ScopeHash: s.f.scope,
+		Principal: "deploy:executor", Reason: "t047 explicit release revoke", OperationID: gateOperation("t047-release-revoke"),
+	})
+	if err != nil {
+		t.Fatalf("RevokeRelease(%s): %v", capability, err)
+	}
+	return out
+}
+
+func (s *t047Scene) admit(t *testing.T, capability Capability) GateDecision {
+	t.Helper()
+	decision, err := s.gate.Admit(s.f.ctx, GateRequest{
+		InstanceID: s.f.instanceID, Capability: capability, ScopeHash: s.f.scope,
+		Actor: "deploy:executor", OperationID: gateOperation("t047-admit"), Action: "test:t047",
+	})
+	if err != nil {
+		t.Fatalf("Admit(%s): %v", capability, err)
+	}
+	return decision
+}
+
+func (s *t047Scene) admitErr(t *testing.T, capability Capability) (GateDecision, error) {
+	t.Helper()
+	return s.gate.Admit(s.f.ctx, GateRequest{
+		InstanceID: s.f.instanceID, Capability: capability, ScopeHash: s.f.scope,
+		Actor: "deploy:executor", OperationID: gateOperation("t047-admit-err"),
+	})
+}
+
+func (s *t047Scene) count(t *testing.T, sql string, args ...any) int {
+	t.Helper()
+	return countGenerationRows(t, s.f.ctx, s.f.pool, sql, args...)
+}
+
+func (s *t047Scene) gateAudits(t *testing.T, result string) int {
+	t.Helper()
+	return s.count(t, `SELECT count(*) FROM recovery_audit
+	    WHERE instance_id = $1 AND action = $2 AND result = $3`,
+		s.f.instanceID, GateAuditAction, result)
+}
+
+// t047AssertNoAutomaticRetryEntry pins the unknown discipline: the derived
+// gate exposes no retry/replay/compensation entry that could automatically
+// re-pay, re-broadcast or re-deliver an unknown external result.
+func t047AssertNoAutomaticRetryEntry(t *testing.T) {
+	t.Helper()
+	typ := reflect.TypeOf(&Gate{})
+	for i := 0; i < typ.NumMethod(); i++ {
+		name := typ.Method(i).Name
+		if t047RetryEntryName.MatchString(name) {
+			t.Fatalf("Gate.%s looks like an automatic retry/replay entry; an unknown result must stay unknown (never re-pay/re-broadcast/re-deliver)", name)
+		}
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Write-write reverse order
+// ---------------------------------------------------------------------------
+
+func TestT047WriteWriteReverseOrderDiscardsLateWriterAudited(t *testing.T) {
+	ctx, _, pool, store := generationControlStore(t)
+	instanceID := openGenerationInstance(t, ctx, store)
+
+	// A captures first, B (the late writer) captures the same token afterwards
+	// but commits first.
+	tokenA, err := CaptureEvidenceToken(ctx, pool, instanceID)
+	if err != nil {
+		t.Fatalf("capture token A: %v", err)
+	}
+	tokenLate, err := CaptureEvidenceToken(ctx, pool, instanceID)
+	if err != nil {
+		t.Fatalf("capture late token: %v", err)
+	}
+	if !tokenA.Matches(tokenLate) {
+		t.Fatalf("both writers must start from the same token: %+v vs %+v", tokenA, tokenLate)
+	}
+
+	accepted, err := CommitEvidenceWrite(ctx, store, EvidenceWriteRequest{
+		InstanceID: instanceID, Token: tokenLate, Kind: MutationVerificationBatch,
+		Actor: "deploy:verifier-b-first", Reason: "b commits first", OperationID: "t047-b-first",
+		Apply: func(ctx context.Context, tx pgx.Tx, accepted EvidenceToken) error {
+			return insertVerificationEvidenceTx(ctx, tx, accepted, "t047-b-first")
+		},
+	})
+	if err != nil || accepted.Discarded {
+		t.Fatalf("writer B must commit first: outcome=%+v err=%v", accepted, err)
+	}
+
+	// A fresh accepted write opens a gap at the new token, so the late
+	// writer's discard must leave the gap untouched too.
+	tokenGap, err := CaptureEvidenceToken(ctx, pool, instanceID)
+	if err != nil {
+		t.Fatalf("capture gap token: %v", err)
+	}
+	gapOutcome, err := CommitEvidenceWrite(ctx, store, EvidenceWriteRequest{
+		InstanceID: instanceID, Token: tokenGap, Kind: MutationGapOpened,
+		Actor: "deploy:verifier-b-first", Reason: "gap at the new token", OperationID: "t047-gap-open",
+		Apply: func(ctx context.Context, tx pgx.Tx, accepted EvidenceToken) error {
+			return insertOpenGapTx(ctx, tx, accepted, "t047-gap-object")
+		},
+	})
+	if err != nil || gapOutcome.Discarded {
+		t.Fatalf("gap open must commit: outcome=%+v err=%v", gapOutcome, err)
+	}
+
+	// A commits last, against its stale captured token: discarded.
+	late, err := CommitEvidenceWrite(ctx, store, EvidenceWriteRequest{
+		InstanceID: instanceID, Token: tokenA, Kind: MutationVerificationBatch,
+		Actor: "deploy:verifier-late", Reason: "late commit", OperationID: "t047-a-late",
+		Apply: func(ctx context.Context, tx pgx.Tx, accepted EvidenceToken) error {
+			return insertVerificationEvidenceTx(ctx, tx, accepted, "t047-a-late")
+		},
+	})
+	if err != nil {
+		t.Fatalf("late commit must be discarded, not fail: %v", err)
+	}
+	if !late.Discarded || late.Mismatch == nil {
+		t.Fatalf("late commit = %+v, want a discard with a token mismatch", late)
+	}
+
+	// No result row, no gap change, no generation advance: exactly one
+	// discarded audit row for the late writer.
+	if got := countGenerationRows(t, ctx, pool,
+		"SELECT count(*) FROM recovery_evidence WHERE instance_id = $1", instanceID); got != 1 {
+		t.Fatalf("evidence rows = %d, want only writer B's accepted row", got)
+	}
+	var gapState string
+	var closedBy *string
+	if err := pool.QueryRow(ctx,
+		"SELECT state, closed_by FROM recovery_gap WHERE instance_id = $1 AND object_key = 't047-gap-object'",
+		instanceID).Scan(&gapState, &closedBy); err != nil {
+		t.Fatalf("read gap: %v", err)
+	}
+	if gapState != "open" || closedBy != nil {
+		t.Fatalf("late discard changed the gap: state=%s closed_by=%v", gapState, closedBy)
+	}
+	if generation, _ := instanceEvidenceState(t, ctx, pool, instanceID); generation != 2 {
+		t.Fatalf("generation = %d, want 2 (two accepted writes, no advance from the discard)", generation)
+	}
+	if got := countGenerationRows(t, ctx, pool,
+		"SELECT count(*) FROM recovery_audit WHERE instance_id = $1 AND action = 'evidence_write' AND result = 'ok'", instanceID); got != 2 {
+		t.Fatalf("accepted evidence_write audits = %d, want 2", got)
+	}
+	if got := countGenerationRows(t, ctx, pool,
+		"SELECT count(*) FROM recovery_audit WHERE instance_id = $1 AND action = 'evidence_write' AND result = 'discarded'", instanceID); got != 1 {
+		t.Fatalf("discarded evidence_write audits = %d, want exactly 1 (the late writer)", got)
+	}
+	var actor, captured string
+	if err := pool.QueryRow(ctx, `
+SELECT actor, COALESCE(target->>'captured_generation', '')
+FROM recovery_audit
+WHERE instance_id = $1 AND action = 'evidence_write' AND result = 'discarded'`, instanceID).
+		Scan(&actor, &captured); err != nil {
+		t.Fatalf("read late discard audit: %v", err)
+	}
+	if actor != "deploy:verifier-late" || captured != "0" {
+		t.Fatalf("discard audit = actor=%q captured_generation=%q, want the late writer against generation 0", actor, captured)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Approval/release revocation and isolation rejection
+// ---------------------------------------------------------------------------
+
+func TestT047ApprovalAndReleaseRevokeRefuseNextEvaluation(t *testing.T) {
+	s := t047NewScene(t, GateOptions{})
+	s.seed(t, CapabilityQuery)
+	generationBefore, hashBefore := gateInstanceToken(t, s.f.ctx, s.f.pool, s.f.instanceID)
+
+	s.approve(t, "auth:approver", CapabilityQuery)
+	s.release(t, CapabilityQuery)
+	if got := s.admit(t, CapabilityQuery); !got.Allowed {
+		t.Fatalf("legal base state must be admitted, got %+v", got)
+	}
+
+	// Revoking the approval covers that principal's earlier approve: the next
+	// evaluation refuses (no TTL, no cache involved).
+	s.revokeApproval(t, "auth:approver", CapabilityQuery)
+	if got := s.admit(t, CapabilityQuery); got.Allowed || got.RefusalClass != RefusalApprovalMissing {
+		t.Fatalf("after approval revoke = %+v, want %s", got, RefusalApprovalMissing)
+	}
+	// The revoke is not an evidence change: the generation/hash stay put.
+	if generation, hash := gateInstanceToken(t, s.f.ctx, s.f.pool, s.f.instanceID); generation != generationBefore || hash != hashBefore {
+		t.Fatalf("approval revoke changed the evidence token (%d,%s) -> (%d,%s)", generationBefore, hashBefore, generation, hash)
+	}
+
+	// A re-approval does not revive the old release (the release references
+	// the old approval); a re-release is required.
+	s.approve(t, "auth:approver", CapabilityQuery)
+	if got := s.admit(t, CapabilityQuery); got.Allowed {
+		t.Fatal("a re-approval must not silently revive a release bound to the old approval")
+	}
+	s.release(t, CapabilityQuery)
+	if got := s.admit(t, CapabilityQuery); !got.Allowed {
+		t.Fatalf("re-approved and re-released capability must be admitted, got %+v", got)
+	}
+
+	// An explicit release revoke refuses the next evaluation.
+	s.revokeRelease(t, CapabilityQuery)
+	if got := s.admit(t, CapabilityQuery); got.Allowed || got.RefusalClass != RefusalReleaseRevoked {
+		t.Fatalf("after release revoke = %+v, want %s", got, RefusalReleaseRevoked)
+	}
+}
+
+func TestT047IsolationRejectedStopsReleaseEvaluation(t *testing.T) {
+	s := t047NewScene(t, GateOptions{})
+	s.seed(t, CapabilityQuery)
+	s.approve(t, "auth:approver", CapabilityQuery)
+	s.release(t, CapabilityQuery)
+	if got := s.admit(t, CapabilityQuery); !got.Allowed {
+		t.Fatalf("legal base state must be admitted, got %+v", got)
+	}
+	generationBefore, _ := gateInstanceToken(t, s.f.ctx, s.f.pool, s.f.instanceID)
+
+	items, err := IsolationDependencySet(CapabilityQuery)
+	if err != nil || len(items) == 0 {
+		t.Fatalf("IsolationDependencySet(query) = %v, %v", items, err)
+	}
+	// The non-executor verifier rejects one verified item: the release must
+	// stop being evaluable (the isolation check is the first gate condition
+	// after the capability facts).
+	if _, err := s.checklist.Verify(s.f.ctx, ChecklistVerifyRequest{
+		InstanceID: s.f.instanceID, ItemKey: items[0], Actor: "auth:verifier",
+		Reject: true, Reason: "t047 rejected evidence", OperationID: gateOperation("t047-iso-reject"),
+	}); err != nil {
+		t.Fatalf("checklist reject verdict: %v", err)
+	}
+	if generation, _ := gateInstanceToken(t, s.f.ctx, s.f.pool, s.f.instanceID); generation != generationBefore+1 {
+		t.Fatalf("rejection generation = %d, want %d (verified<->rejected advances the generation)", generation, generationBefore+1)
+	}
+	item, found, err := s.checklist.Item(s.f.ctx, s.f.instanceID, items[0])
+	if err != nil || !found || item.State != ChecklistStateRejected {
+		t.Fatalf("rejected item = (%+v, found=%v, err=%v), want state rejected", item, found, err)
+	}
+	got := s.admit(t, CapabilityQuery)
+	if got.Allowed || got.RefusalClass != RefusalIsolationUnproven {
+		t.Fatalf("after the isolation rejection = %+v, want %s (the release stops being evaluable)", got, RefusalIsolationUnproven)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Late verification against a real lock barrier
+// ---------------------------------------------------------------------------
+
+func TestT047LateVerificationDiscardedAgainstRealLockBarrier(t *testing.T) {
+	ctx, dsn, pool, store := generationControlStore(t)
+	instanceID := openGenerationInstance(t, ctx, store)
+
+	token0, err := CaptureEvidenceToken(ctx, pool, instanceID)
+	if err != nil {
+		t.Fatalf("capture token: %v", err)
+	}
+
+	type writeResult struct {
+		outcome EvidenceWriteOutcome
+		err     error
+	}
+
+	// The active writer holds the instance row lock inside Apply; the old
+	// instance's late verification blocks on that lock.
+	releaseActive := make(chan struct{})
+	activeApplying := make(chan struct{})
+	activeDone := make(chan writeResult, 1)
+	go func() {
+		outcome, err := CommitEvidenceWrite(ctx, store, EvidenceWriteRequest{
+			InstanceID: instanceID, Token: token0, Kind: MutationVerificationBatch,
+			Actor: "deploy:verifier-active", Reason: "active write", OperationID: "t047-late-barrier-active",
+			Apply: func(ctx context.Context, tx pgx.Tx, accepted EvidenceToken) error {
+				if err := insertVerificationEvidenceTx(ctx, tx, accepted, "t047-active"); err != nil {
+					return err
+				}
+				close(activeApplying)
+				<-releaseActive
+				return nil
+			},
+		})
+		activeDone <- writeResult{outcome: outcome, err: err}
+	}()
+	select {
+	case <-activeApplying:
+	case <-time.After(30 * time.Second):
+		t.Fatal("the active writer never held the instance row lock")
+	}
+
+	latePool := namedGenerationPool(t, dsn, "t047-late-verifier")
+	lateStore, err := controlstore.NewStore(ctx, latePool)
+	if err != nil {
+		t.Fatalf("NewStore for the late verifier: %v", err)
+	}
+	lateDone := make(chan writeResult, 1)
+	go func() {
+		outcome, err := CommitEvidenceWrite(ctx, lateStore, EvidenceWriteRequest{
+			InstanceID: instanceID, Token: token0, Kind: MutationIsolationVerified,
+			Actor: "deploy:verifier-late", Reason: "old instance late verification", OperationID: "t047-late-barrier-late",
+			Apply: func(ctx context.Context, tx pgx.Tx, accepted EvidenceToken) error {
+				_, err := tx.Exec(ctx, `
+INSERT INTO recovery_isolation_check
+    (check_id, instance_id, item_key, state, evidence_ref, checked_by, checked_at)
+VALUES (gen_random_uuid(), $1, 'old_writers_stopped', 'evidenced', 'evidence://t047/late', $2, now())`,
+					accepted.InstanceID, "deploy:verifier-late")
+				return err
+			},
+		})
+		lateDone <- writeResult{outcome: outcome, err: err}
+	}()
+
+	// Deterministic barrier: wait until the late writer is observed waiting on
+	// the lock the active writer holds, then release.
+	waitGenerationLockWait(t, ctx, pool, "t047-late-verifier")
+	close(releaseActive)
+
+	var active, late writeResult
+	select {
+	case active = <-activeDone:
+	case <-time.After(30 * time.Second):
+		t.Fatal("the active writer did not finish")
+	}
+	select {
+	case late = <-lateDone:
+	case <-time.After(30 * time.Second):
+		t.Fatal("the late writer did not finish")
+	}
+	if active.err != nil || active.outcome.Discarded {
+		t.Fatalf("the active write must commit: %+v err=%v", active.outcome, active.err)
+	}
+	if late.err != nil {
+		t.Fatalf("the late verification must be discarded, not fail: %v", late.err)
+	}
+	if !late.outcome.Discarded || late.outcome.Token.Generation != 1 {
+		t.Fatalf("late verification = %+v, want a discard against generation 1", late.outcome)
+	}
+
+	// The late result left no row: no isolation item, only the active
+	// writer's evidence, and exactly one discarded audit for the late actor.
+	if got := countGenerationRows(t, ctx, pool,
+		"SELECT count(*) FROM recovery_isolation_check WHERE instance_id = $1", instanceID); got != 0 {
+		t.Fatalf("isolation rows = %d, want 0 (the late verification must not write)", got)
+	}
+	if got := countGenerationRows(t, ctx, pool,
+		"SELECT count(*) FROM recovery_evidence WHERE instance_id = $1", instanceID); got != 1 {
+		t.Fatalf("evidence rows = %d, want only the active writer's row", got)
+	}
+	if got := countGenerationRows(t, ctx, pool, `
+SELECT count(*) FROM recovery_audit
+WHERE instance_id = $1 AND action = 'evidence_write' AND result = 'discarded' AND actor = 'deploy:verifier-late'`,
+		instanceID); got != 1 {
+		t.Fatalf("late-verifier discarded audits = %d, want exactly 1", got)
+	}
+	if generation, _ := instanceEvidenceState(t, ctx, pool, instanceID); generation != 1 {
+		t.Fatalf("generation = %d, want 1 (the discard must not advance it)", generation)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// TTL semantics and control-store reachability
+// ---------------------------------------------------------------------------
+
+func TestT047TTLIsBoundedAndRevocationRefuses(t *testing.T) {
+	now := time.Date(2026, 9, 28, 12, 0, 0, 0, time.UTC)
+	s := t047NewScene(t, GateOptions{TTL: time.Minute, Now: func() time.Time { return now }})
+	s.seed(t, CapabilityQuery)
+	s.approve(t, "auth:approver", CapabilityQuery)
+	s.release(t, CapabilityQuery)
+
+	if got := s.admit(t, CapabilityQuery); !got.Allowed || got.CacheHit {
+		t.Fatalf("first admission must be an allowed cache miss, got %+v", got)
+	}
+	if got := s.admit(t, CapabilityQuery); !got.Allowed || !got.CacheHit {
+		t.Fatalf("second admission must reuse the bounded cache, got %+v", got)
+	}
+
+	// A revoke is discovered by the evaluator immediately: the warm cache must
+	// not be reused as a stale allow, and nothing waits for the TTL.
+	s.revokeApproval(t, "auth:approver", CapabilityQuery)
+	if got := s.admit(t, CapabilityQuery); got.Allowed || got.RefusalClass != RefusalApprovalMissing {
+		t.Fatalf("revoke with a warm cache = %+v, want %s", got, RefusalApprovalMissing)
+	}
+
+	// Re-approve/re-release, warm the cache again, then let the TTL lapse: the
+	// entry is re-derived (allowed while the basis is still valid), never
+	// treated as an eternal permission.
+	s.approve(t, "auth:approver", CapabilityQuery)
+	s.release(t, CapabilityQuery)
+	now = now.Add(2 * time.Minute)
+	if got := s.admit(t, CapabilityQuery); !got.Allowed {
+		t.Fatalf("TTL-expired entry must be re-derived and allowed while the basis is valid, got %+v", got)
+	}
+
+	// Revoke, TTL lapse again, and make the control store unreachable: the
+	// admission refuses (fail-closed), never a cache-only allow.
+	s.revokeRelease(t, CapabilityQuery)
+	now = now.Add(2 * time.Minute)
+	s.f.pool.Close()
+	decision, err := s.admitErr(t, CapabilityQuery)
+	if err == nil || !errors.Is(err, ErrGateControlStoreUnavailable) {
+		t.Fatalf("unreachable control store error = %v, want ErrGateControlStoreUnavailable", err)
+	}
+	if decision.Allowed || decision.RefusalClass != RefusalControlStoreUnavailable {
+		t.Fatalf("unreachable control store = %+v, want %s", decision, RefusalControlStoreUnavailable)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// R3: single-action admission, cache hits and the controlled interleavings
+// ---------------------------------------------------------------------------
+
+func TestT047SingleActionAdmissionCannotSkipAuthorityOrBeReused(t *testing.T) {
+	s := t047NewScene(t, GateOptions{})
+	s.seed(t, CapabilityQuery)
+	s.approve(t, "auth:approver", CapabilityQuery)
+	s.release(t, CapabilityQuery)
+
+	// (1) cache hit then revoke: the hit must not skip the current
+	// authorization check, and the next admission refuses.
+	if got := s.admit(t, CapabilityQuery); !got.Allowed {
+		t.Fatalf("first admission must be allowed, got %+v", got)
+	}
+	if got := s.admit(t, CapabilityQuery); !got.Allowed || !got.CacheHit {
+		t.Fatalf("second admission must be an allowed cache hit, got %+v", got)
+	}
+	s.revokeRelease(t, CapabilityQuery)
+	if got := s.admit(t, CapabilityQuery); got.Allowed || got.RefusalClass != RefusalReleaseRevoked {
+		t.Fatalf("cache hit then revoke = %+v, want %s", got, RefusalReleaseRevoked)
+	}
+
+	// (2) evidence change: the next evaluation refuses immediately (the
+	// evaluator is the discoverer; no waiting for the TTL) and the cached
+	// old-generation allow is never reused.
+	s.release(t, CapabilityQuery) // approvals are still current
+	if got := s.admit(t, CapabilityQuery); !got.Allowed {
+		t.Fatalf("re-release must be allowed, got %+v", got)
+	}
+	s.f.bumpGeneration(t)
+	if got := s.admit(t, CapabilityQuery); got.Allowed || got.RefusalClass != RefusalReleaseInvalidatedGeneration {
+		t.Fatalf("evidence change with a warm cache = %+v, want %s", got, RefusalReleaseInvalidatedGeneration)
+	}
+
+	// (2b) mapping change: same immediacy, different refusal class.
+	s.approve(t, "auth:approver", CapabilityQuery)
+	s.release(t, CapabilityQuery)
+	if got := s.admit(t, CapabilityQuery); !got.Allowed {
+		t.Fatalf("fresh-token release must be allowed, got %+v", got)
+	}
+	gateMapIdentity(t, s.f.ctx, s.f.store, "auth:approver", "person-approver-other")
+	if got := s.admit(t, CapabilityQuery); got.Allowed || got.RefusalClass != RefusalApprovalIdentityUnverified {
+		t.Fatalf("mapping change with a warm cache = %+v, want %s", got, RefusalApprovalIdentityUnverified)
+	}
+
+	// (6) one admission covers one action only: every call re-enters the lock
+	// and writes its own audit row; an old decision value can never be
+	// replayed because Admit takes no decision input.
+	okBefore := s.gateAudits(t, controlstore.AuditOK)
+	if got := s.admit(t, CapabilityQuery); got.Allowed {
+		t.Fatalf("the mapping-changed basis must still refuse, got %+v", got)
+	}
+	if got := s.gateAudits(t, controlstore.AuditOK); got != okBefore {
+		t.Fatalf("a refused admission wrote %d ok audit row(s)", got-okBefore)
+	}
+	t047AssertNoAutomaticRetryEntry(t)
+}
+
+func TestT047AdmissionBeforeRevokeIsInFlightAndNotRetracted(t *testing.T) {
+	s := t047NewScene(t, GateOptions{})
+	s.seed(t, CapabilityQuery)
+	s.approve(t, "auth:approver", CapabilityQuery)
+	s.release(t, CapabilityQuery)
+
+	// Warm the cache so the interleaved admission below is a cache hit; a hit
+	// still takes the in-lock judgment (the cache must never be the authority).
+	if got := s.admit(t, CapabilityQuery); !got.Allowed {
+		t.Fatalf("warm-up admission must be allowed, got %+v", got)
+	}
+	if got := s.admit(t, CapabilityQuery); !got.Allowed || !got.CacheHit {
+		t.Fatalf("warm-up admission must be a cache hit, got %+v", got)
+	}
+
+	entered := make(chan struct{})
+	releaseAdmission := make(chan struct{})
+	s.gate.fundGates = func(context.Context, GateRequest) error {
+		select {
+		case <-entered:
+		default:
+			close(entered)
+		}
+		<-releaseAdmission
+		return nil
+	}
+
+	type admitResult struct {
+		decision GateDecision
+		err      error
+	}
+	inflightOp := gateOperation("t047-inflight")
+	admitted := make(chan admitResult, 1)
+	go func() {
+		decision, err := s.gate.Admit(s.f.ctx, GateRequest{
+			InstanceID: s.f.instanceID, Capability: CapabilityQuery, ScopeHash: s.f.scope,
+			Actor: "deploy:executor", OperationID: inflightOp, Action: "test:t047-inflight",
+		})
+		admitted <- admitResult{decision: decision, err: err}
+	}()
+	select {
+	case <-entered:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the admission never reached the judgment point")
+	}
+
+	// The revoke arrives while the admission holds the instance row lock and
+	// blocks on it (real lock wait observed in pg_stat_activity).
+	revokePool := gateNamedPool(t, s.f.dsn, "t047-revoke-writer")
+	revokeStore, err := controlstore.NewStore(s.f.ctx, revokePool)
+	if err != nil {
+		t.Fatalf("NewStore for the revoke writer: %v", err)
+	}
+	revoked := make(chan error, 1)
+	go func() {
+		_, err := RevokeRelease(s.f.ctx, revokeStore, s.gate, ReleaseRequest{
+			InstanceID: s.f.instanceID, Capability: CapabilityQuery, ScopeHash: s.f.scope,
+			Principal: "deploy:executor", Reason: "interleaved revoke", OperationID: gateOperation("t047-revoke-interleaved"),
+		})
+		revoked <- err
+	}()
+	waitGateLockWait(t, s.f.ctx, s.f.pool, "t047-revoke-writer")
+	select {
+	case err := <-revoked:
+		t.Fatalf("the revoke completed while the admission held the lock: %v", err)
+	default:
+	}
+
+	// The admitted action was admitted before the revoke: it stays committed
+	// (in-flight; the gate never rewinds it). The revoke then applies and the
+	// NEXT admission refuses.
+	close(releaseAdmission)
+	result := <-admitted
+	if result.err != nil {
+		t.Fatalf("interleaved admission: %v", result.err)
+	}
+	if !result.decision.Allowed || !result.decision.CacheHit {
+		t.Fatalf("an admission linearized before the revoke must stay allowed from the cache hit, got %+v", result.decision)
+	}
+	if err := <-revoked; err != nil {
+		t.Fatalf("revoke after the admission released the lock: %v", err)
+	}
+	if got := s.admit(t, CapabilityQuery); got.Allowed || got.RefusalClass != RefusalReleaseRevoked {
+		t.Fatalf("revoke before the next admission = %+v, want %s", got, RefusalReleaseRevoked)
+	}
+
+	// Unknown discipline: the committed admission is not retracted (its ok
+	// audit row stands), the revoke is appended, and no automatic retry or
+	// compensation entry exists. An unknown external result stays unknown —
+	// nothing re-pays, re-broadcasts or re-delivers it.
+	var admittedResult string
+	if err := s.f.pool.QueryRow(s.f.ctx, `
+SELECT result FROM recovery_audit
+WHERE instance_id = $1 AND action = $2 AND operation_id = $3`,
+		s.f.instanceID, GateAuditAction, inflightOp).Scan(&admittedResult); err != nil {
+		t.Fatalf("read the in-flight admission audit: %v", err)
+	}
+	if admittedResult != controlstore.AuditOK {
+		t.Fatalf("the in-flight admission audit = %q, want the committed %q (never retracted)", admittedResult, controlstore.AuditOK)
+	}
+	if got := s.count(t, `SELECT count(*) FROM recovery_release WHERE instance_id = $1 AND capability = 'query'`,
+		s.f.instanceID); got != 2 {
+		t.Fatalf("release decisions = %d, want exactly the release and its revoke (append-only, zero rewrite)", got)
+	}
+	t047AssertNoAutomaticRetryEntry(t)
 }

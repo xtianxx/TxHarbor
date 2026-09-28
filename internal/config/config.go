@@ -192,6 +192,19 @@ const (
 	EnvRecoveryRTOTarget               = "TXHARBOR_RECOVERY_RTO_TARGET"
 	EnvRecoveryBackupFrequency         = "TXHARBOR_RECOVERY_BACKUP_FREQUENCY"
 	EnvRecoveryRetention               = "TXHARBOR_RECOVERY_RETENTION"
+	// EnvRecoveryStatusTimeout/EnvRecoveryStatusMaxReads/EnvRecoveryStatusMaxRows
+	// bound one bounded read-only status review pass (FR-019/F13, T051): the
+	// wall-clock budget, the number of bounded reads one pass may issue and
+	// the number of rows one bounded read may return. They are optional at
+	// Load and must be positive when present; the `recovery-admin status`
+	// command refuses a missing or invalid value by exact key name (no
+	// default, no unbounded review) and a local test value is never a
+	// production threshold. None of these names collides with the withdrawal
+	// kill-test keys (TXHARBOR_RECOVERY_KILL_CHILD/_DSN/_READY/_DISPATCH), and
+	// no existing key is renamed.
+	EnvRecoveryStatusTimeout  = "TXHARBOR_RECOVERY_STATUS_TIMEOUT"
+	EnvRecoveryStatusMaxReads = "TXHARBOR_RECOVERY_STATUS_MAX_READS"
+	EnvRecoveryStatusMaxRows  = "TXHARBOR_RECOVERY_STATUS_MAX_ROWS"
 )
 const (
 	DefaultHTTPAddr           = "127.0.0.1:8080"
@@ -449,6 +462,14 @@ type RecoveryConfig struct {
 	BackupFrequency time.Duration
 	// Retention is the configured backup retention period.
 	Retention time.Duration
+	// StatusTimeout/StatusMaxReads/StatusMaxRows bound one bounded read-only
+	// status review pass (FR-019/F13, T051). The zero value means "not
+	// configured": the status command refuses a missing value by exact key
+	// name and never invents a bound, so an unconfigured review would scan
+	// unbounded.
+	StatusTimeout  time.Duration
+	StatusMaxReads int
+	StatusMaxRows  int
 }
 
 // EventsConfig is the 013 events runtime configuration. Technical cadence
@@ -1519,11 +1540,29 @@ func (c *Config) loadRecovery015(getenv Getenv, errs *[]error) {
 		}
 		*dest = d
 	}
+	positiveInt := func(name string, dest *int) {
+		raw, ok := getenv(name)
+		if !ok || raw == "" {
+			return
+		}
+		n, err := strconv.Atoi(raw)
+		if err != nil || n <= 0 {
+			*errs = append(*errs, invalid(name, "%q is not a positive decimal integer", raw))
+			return
+		}
+		*dest = n
+	}
 	positiveDuration(EnvRecoveryGateTTL, &c.Recovery.GateTTL)
 	positiveDuration(EnvRecoveryRPOTarget, &c.Recovery.RPOTarget)
 	positiveDuration(EnvRecoveryRTOTarget, &c.Recovery.RTOTarget)
 	positiveDuration(EnvRecoveryBackupFrequency, &c.Recovery.BackupFrequency)
 	positiveDuration(EnvRecoveryRetention, &c.Recovery.Retention)
+	// The bounded read-only status review bounds are optional at Load and
+	// positive when present (T051/F13); the status command refuses a missing
+	// value by exact key name and never performs an unbounded review.
+	positiveDuration(EnvRecoveryStatusTimeout, &c.Recovery.StatusTimeout)
+	positiveInt(EnvRecoveryStatusMaxReads, &c.Recovery.StatusMaxReads)
+	positiveInt(EnvRecoveryStatusMaxRows, &c.Recovery.StatusMaxRows)
 }
 
 // parseBrokerList splits a comma-separated Kafka bootstrap list and validates
