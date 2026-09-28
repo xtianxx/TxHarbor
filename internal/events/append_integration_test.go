@@ -432,16 +432,20 @@ func connectNamed(t *testing.T, ctx context.Context, dsn, name string) *pgx.Conn
 }
 
 // waitForBlockedStatement polls pg_stat_activity until the named connection is
-// waiting on a lock: the deterministic signal that its version query already
-// ran against the pre-commit snapshot and the insert is now blocked on the
-// identity index.
+// an active backend blocked on a lock: the deterministic signal that its
+// version query already ran against the pre-commit snapshot and the insert is
+// now blocked on the identity index. The predicate must say "blocked on a
+// lock", not merely "has a wait event": an idle backend reports
+// Client/ClientRead, so wait_event IS NOT NULL could fire before the racing
+// Append even sent its version query, letting the loser serialize after the
+// winner and insert a new version instead of colliding.
 func waitForBlockedStatement(t *testing.T, ctx context.Context, watcher *pgx.Conn, applicationName string) {
 	t.Helper()
 	deadline := time.Now().Add(15 * time.Second)
 	for {
 		var waiting int
 		if err := watcher.QueryRow(ctx,
-			`SELECT count(*) FROM pg_stat_activity WHERE application_name = $1 AND wait_event IS NOT NULL`,
+			`SELECT count(*) FROM pg_stat_activity WHERE application_name = $1 AND state = 'active' AND wait_event_type = 'Lock'`,
 			applicationName).Scan(&waiting); err != nil {
 			t.Fatalf("poll pg_stat_activity: %v", err)
 		}

@@ -260,7 +260,7 @@ jobs:
 
   integration-pg:
     name: integration tests (PostgreSQL, Docker)
-    needs: [changes, lint, build, unit]
+    needs: [changes]
     if: needs.changes.outputs.pg == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 40
@@ -303,7 +303,7 @@ jobs:
 
   integration-redis:
     name: integration tests (Redis, Docker)
-    needs: [changes, lint, build, unit]
+    needs: [changes]
     if: needs.changes.outputs.redis == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 30
@@ -344,7 +344,7 @@ jobs:
 
   integration-kafka:
     name: integration tests (Kafka, Docker)
-    needs: [changes, lint, build, unit]
+    needs: [changes]
     if: needs.changes.outputs.kafka == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 40
@@ -385,7 +385,7 @@ jobs:
 
   e2e:
     name: e2e core flows (Docker + Anvil)
-    needs: [changes, lint, build, unit]
+    needs: [changes]
     if: needs.changes.outputs.e2e == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 40

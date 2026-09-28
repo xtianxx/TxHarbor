@@ -21,7 +21,6 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
-	"github.com/testcontainers/testcontainers-go"
 
 	"github.com/xtianxx/txharbor/internal/db"
 	"github.com/xtianxx/txharbor/internal/withdrawal"
@@ -40,17 +39,13 @@ const (
 	withdrawalHTTPRecipientEIP55 = "0xaAaAaAaaAaAaAaaAaAAAAAAAAaaaAaAaAaaAaaAa"
 )
 
-// withdrawalHTTPSetup boots a migrated scratch PostgreSQL, opens a pool, and
-// returns the DSN plus the context for direct seeding/polling.
+// withdrawalHTTPSetup clones a migrated scratch PostgreSQL from the shared
+// package-wide template (app_shared_pg_test.go), opens a pool, and returns the
+// DSN plus the context for direct seeding/polling.
 func withdrawalHTTPSetup(t *testing.T) (context.Context, *pgxpool.Pool, string) {
 	t.Helper()
-	testcontainers.SkipIfProviderIsNotHealthy(t)
 	ctx := context.Background()
-	ctr := startPostgresContainer(t)
-	dsn := postgresDSN(t, ctr)
-	if err := db.MigrateUp(ctx, db.MigrateOptions{DSN: dsn, LockTimeout: 5 * time.Second, ConnectTimeout: 5 * time.Second}, io.Discard); err != nil {
-		t.Fatalf("migrate up: %v", err)
-	}
+	dsn := newTestDB(t)
 	pool, err := db.OpenPool(ctx, dsn, 5*time.Second)
 	if err != nil {
 		t.Fatalf("open pool: %v", err)
