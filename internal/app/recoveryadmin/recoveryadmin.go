@@ -11,10 +11,14 @@
 // or release flow. Missing arguments and unknown actions are usage errors
 // (exit 2); help goes to stdout, refusals and usage errors go to stderr.
 //
-// T008/T069 implement exactly one action on top of that skeleton: `migrate
-// up|status` in migrate.go, scoped to the independent control store
-// (TXHARBOR_RECOVERY_CONTROL_DSN) with the same trust-boundary and schema
-// version guard the store uses. Every other action is still the stub.
+// T008/T069 implement `migrate up|status` in migrate.go, scoped to the
+// independent control store (TXHARBOR_RECOVERY_CONTROL_DSN) with the same
+// trust-boundary and schema version guard the store uses. T010 implements the
+// `control participant-register|identity-map-set|identity-map-show` management
+// surface in control.go (deployment-privilege path: subject from
+// TXHARBOR_RECOVERY_PRINCIPAL, single subject + audit, no preset principal,
+// mapping changes invalidating affected approvals). Every other action is
+// still the stub.
 //
 // It lives in its own package (rather than internal/app) for the same reason as
 // internal/app/reconcileadmin: the delivered command imports internal/recovery
@@ -100,8 +104,8 @@ var recoveryAdminActions = []recoveryAdminAction{
 	},
 	{
 		name:       "control",
-		summary:    "manage participants and identity mappings",
-		usage:      "control participant-register|identity-map-set|identity-map-show",
+		summary:    "manage participants and identity mappings (deployment-controlled; T010)",
+		usage:      "control participant-register|identity-map-set|identity-map-show [flags]",
 		positional: []string{"participant-register", "identity-map-set", "identity-map-show"},
 	},
 	{
@@ -242,8 +246,13 @@ func Run(ctx context.Context, args []string, d Deps) int {
 		return recoveryAdminHelp(args[1:], d)
 	case "migrate":
 		// T008/T069: the control-store provisioning path is implemented in
-		// migrate.go; every other action remains the B0 help/parse stub.
+		// migrate.go.
 		return recoveryAdminMigrate(ctx, args[1:], d)
+	case "control":
+		// T010: the deployment-privilege identity management path is
+		// implemented in control.go; every other action remains the B0
+		// help/parse stub.
+		return recoveryAdminControl(ctx, args[1:], d)
 	}
 	action, ok := recoveryAdminActionByName(args[0])
 	if !ok {
@@ -356,7 +365,7 @@ func recoveryAdminUsage(w io.Writer) {
 		fmt.Fprintf(w, "  %-16s %s\n", action.name, action.summary)
 	}
 	fmt.Fprintln(w)
-	fmt.Fprintln(w, "B0 setup skeleton: every action performs help/argument parsing only except `migrate up|status` (T008), which acts on the independent control store only; no backup/recovery flow is implemented and no invocation claims success. A stub invocation exits non-zero with NOT IMPLEMENTED; missing arguments and unknown actions exit 2. Required configuration values are refused by name and never defaulted.")
+	fmt.Fprintln(w, "B0 setup skeleton: every action performs help/argument parsing only except `migrate up|status` (T008) and `control participant-register|identity-map-set|identity-map-show` (T010), which act on the independent control store only; no backup/recovery flow is implemented and no invocation claims success. A stub invocation exits non-zero with NOT IMPLEMENTED; missing arguments and unknown actions exit 2. Required configuration values are refused by name and never defaulted.")
 }
 
 // recoveryAdminActionUsage prints one action's accepted argument form.
