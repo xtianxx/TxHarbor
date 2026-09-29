@@ -43,6 +43,16 @@
 //     controlstore.NewStore, so the T069 schema-version guard (unknown or
 //     incompatible versions refuse as control_store_unavailable) is inherited
 //     and there is no unguarded read path.
+//   - Scope carriage (T050): ScopeHash is a canonical capability scope
+//     (capability=<c>;chain=<id> plus optional asset/kind). The gate
+//     canonicalizes it, refuses everything else (legacy opaque strings,
+//     non-canonical expressions, a scope naming another capability) as
+//     scope_mismatch, and evaluates requires_capabilities dependencies at the
+//     explicit DependencyScope mapping of the request scope — never by
+//     reusing the request scope string. The approval class of a stream is the
+//     scope-level conservative classification (RequiredApprovalClassForScope)
+//     resolved against the trusted deployment effect-class ruling carried in
+//     GateOptions; the caller can never declare a lower class.
 package recovery
 
 import (
@@ -190,7 +200,10 @@ type FundGateChecker func(ctx context.Context, req GateRequest) error
 // caller's bound recovery instance (TXHARBOR_RECOVERY_INSTANCE); empty means
 // "not bound" and resolves to normal pass-through unless a recovery instance
 // is open (then it refuses as instance_mismatch). ScopeHash is the canonical
-// capability scope of T050, treated as an opaque non-empty key here.
+// capability scope of T050: the gate canonicalizes it (equivalent
+// representations converge) and refuses a non-canonical, legacy opaque or
+// mismatching scope as scope_mismatch; it is never treated as an
+// interchangeable opaque key.
 type GateRequest struct {
 	InstanceID  string
 	Capability  Capability
@@ -229,11 +242,17 @@ type GateDecision struct {
 
 // GateOptions constructs a Gate. TTL is required (GateTTLConfigKey); Now is a
 // test seam for the TTL bookkeeping (nil means time.Now); FundGates is the
-// optional phase-two call point.
+// optional phase-two call point; EffectClassRuling is the trusted deployment
+// ruling (EffectClassRulingConfigKey) that resolves the effect-class dimension
+// of a scope (T050). A nil ruling means "not configured": the event
+// capabilities stay conservatively dual. A malformed ruling refuses
+// construction (ErrEffectClassRuling) — a deployment configuration error is
+// never guessed around.
 type GateOptions struct {
-	TTL       time.Duration
-	Now       func() time.Time
-	FundGates FundGateChecker
+	TTL               time.Duration
+	Now               func() time.Time
+	FundGates         FundGateChecker
+	EffectClassRuling EffectClassRuling
 }
 
 // Gate is the single derived release evaluator. It is safe for concurrent use.
@@ -242,6 +261,7 @@ type Gate struct {
 	ttl       time.Duration
 	now       func() time.Time
 	fundGates FundGateChecker
+	ruling    EffectClassRuling
 
 	mu    sync.Mutex
 	cache map[gateCacheKey]gateCapabilityFacts
@@ -268,6 +288,9 @@ func NewGate(store *controlstore.Store, opts GateOptions) (*Gate, error) {
 	if opts.TTL <= 0 {
 		return nil, fmt.Errorf("%s is required (not configured) and must be a positive duration; the gate has no default TTL", GateTTLConfigKey)
 	}
+	if err := opts.EffectClassRuling.Validate(); err != nil {
+		return nil, err
+	}
 	now := opts.Now
 	if now == nil {
 		now = time.Now
@@ -277,8 +300,18 @@ func NewGate(store *controlstore.Store, opts GateOptions) (*Gate, error) {
 		ttl:       opts.TTL,
 		now:       now,
 		fundGates: opts.FundGates,
+		ruling:    opts.EffectClassRuling,
 		cache:     make(map[gateCacheKey]gateCapabilityFacts),
 	}, nil
+}
+
+// requiredApprovalClass is the conservative scope classification of one
+// canonical scope: RequiredApprovalClassForScope with the scope's effect-class
+// dimension resolved against the trusted deployment ruling (T050). It never
+// weakens the compiled-in class of a capability except through the explicit
+// positive ruling of the two event capabilities.
+func (g *Gate) requiredApprovalClass(scope Scope) (ApprovalClass, error) {
+	return RequiredApprovalClassForScope(scope, ScopeEffectClass(scope), g.ruling)
 }
 
 // Admit evaluates release_valid for one single action of req.Capability at
@@ -294,7 +327,8 @@ func (g *Gate) Admit(ctx context.Context, req GateRequest) (GateDecision, error)
 		return GateDecision{Allowed: false, Capability: req.Capability},
 			fmt.Errorf("%w: capability %q is outside the closed set; wire capabilities from this package's constants", ErrGateRequest, req.Capability)
 	}
-	if strings.TrimSpace(req.ScopeHash) == "" {
+	rawScope := strings.TrimSpace(req.ScopeHash)
+	if rawScope == "" {
 		d := GateDecision{
 			Allowed:      false,
 			RefusalClass: RefusalScopeMismatch,
@@ -304,6 +338,36 @@ func (g *Gate) Admit(ctx context.Context, req GateRequest) (GateDecision, error)
 		g.audit(ctx, req, d, nil)
 		return d, nil
 	}
+	// The scope must be a canonical capability scope of the requested
+	// capability (T050). A legacy opaque string, a non-canonical expression and
+	// a scope naming another capability all refuse as scope_mismatch and are
+	// never translated or defaulted; the recorded stream keys stay canonical,
+	// so equivalent representations converge on one stream and an old opaque
+	// release requires a fresh approval/release at the canonical scope.
+	scope, err := ParseCapabilityScope(rawScope, req.Capability)
+	if err != nil {
+		d := GateDecision{
+			Allowed:      false,
+			RefusalClass: RefusalScopeMismatch,
+			Reason:       err.Error(),
+			Capability:   req.Capability,
+		}
+		g.audit(ctx, req, d, nil)
+		return d, nil
+	}
+	canonical, err := scope.Canonical()
+	if err != nil {
+		// Unreachable: ParseCapabilityScope canonicalizes the same expression.
+		d := GateDecision{
+			Allowed:      false,
+			RefusalClass: RefusalScopeMismatch,
+			Reason:       err.Error(),
+			Capability:   req.Capability,
+		}
+		g.audit(ctx, req, d, nil)
+		return d, nil
+	}
+	req.ScopeHash = canonical
 	if strings.TrimSpace(req.InstanceID) == "" {
 		return g.admitUnbound(ctx, req)
 	}
@@ -503,6 +567,15 @@ type gateEvaluation struct {
 // DependencyClosure, each evaluated once), then the capability itself, then
 // the phase-two call point. Formula order of data-model §3 is preserved:
 // dependencies, isolation set, gaps, release stream, approvals, fund gates.
+//
+// Dependency coverage is the explicit T050 mapping: each dependency is
+// evaluated at DependencyScope(requested, dep) — the same chain/asset/business
+// type with the capability dimension replaced — never by reusing the
+// dependent capability's scope string. The request scope is re-validated here
+// (canonical capability scope) because lifecycle guards (instance close) feed
+// recorded scopes straight into this evaluator; a non-canonical or
+// mismatching recorded scope refuses as scope_mismatch instead of being read
+// as a release.
 func (g *Gate) evaluateLocked(ctx context.Context, tx pgx.Tx, token controlstore.InstanceToken, req GateRequest) gateEvaluation {
 	ev := gateEvaluation{
 		ids: &gateIdentities{
@@ -514,6 +587,12 @@ func (g *Gate) evaluateLocked(ctx context.Context, tx pgx.Tx, token controlstore
 		},
 	}
 
+	requested, err := ParseCapabilityScope(req.ScopeHash, req.Capability)
+	if err != nil {
+		// A scope violation is a refusal, never an infrastructure cause: the
+		// caller must surface scope_mismatch and not control_store_unavailable.
+		return gateEvaluation{refusal: &gateRefusal{class: RefusalScopeMismatch, reason: err.Error()}}
+	}
 	closure, err := DependencyClosure(req.Capability)
 	if err != nil {
 		// Impossible for the compiled-in matrix (ValidateCapabilityMatrix);
@@ -521,7 +600,13 @@ func (g *Gate) evaluateLocked(ctx context.Context, tx pgx.Tx, token controlstore
 		return gateEvaluation{refusal: &gateRefusal{class: RefusalCapabilityDependencyClosed, reason: err.Error(), cause: err}}
 	}
 	for _, dep := range closure {
-		r, _ := g.evaluateSelfLocked(ctx, tx, token, req.ScopeHash, dep, &ev)
+		depScope, err := DependencyScope(requested, dep).Canonical()
+		if err != nil {
+			// Impossible for a validated request scope; refuse instead of
+			// evaluating the dependency at a guessed scope.
+			return gateEvaluation{refusal: &gateRefusal{class: RefusalCapabilityDependencyClosed, reason: err.Error(), cause: err}}
+		}
+		r, _ := g.evaluateSelfLocked(ctx, tx, token, depScope, dep, &ev)
 		if r == nil {
 			continue
 		}
@@ -530,7 +615,7 @@ func (g *Gate) evaluateLocked(ctx context.Context, tx pgx.Tx, token controlstore
 		}
 		return gateEvaluation{refusal: &gateRefusal{
 			class:  RefusalCapabilityDependencyClosed,
-			reason: fmt.Sprintf("required capability %s is not release-valid: %s (%s)", dep, r.class, r.reason),
+			reason: fmt.Sprintf("required capability %s is not release-valid at its mapped dependency scope %s: %s (%s)", dep, depScope, r.class, r.reason),
 		}, cacheHit: ev.cacheHit}
 	}
 	r, releaseID := g.evaluateSelfLocked(ctx, tx, token, req.ScopeHash, req.Capability, &ev)
@@ -654,7 +739,16 @@ func (g *Gate) approvalsValid(ctx context.Context, tx pgx.Tx, token controlstore
 	if err != nil {
 		return &gateRefusal{class: RefusalControlStoreUnavailable, reason: err.Error(), cause: err}
 	}
-	required, err := RequiredApprovalClass(c)
+	// The required class is the scope-level conservative classification (T050):
+	// capability plus the scope's effect-class dimension resolved against the
+	// trusted deployment ruling. It is never the caller's declaration and never
+	// weaker than the compiled-in class except through an explicit positive
+	// ruling of the two event capabilities.
+	requested, err := ParseCapabilityScope(scope, c)
+	if err != nil {
+		return &gateRefusal{class: RefusalScopeMismatch, reason: err.Error()}
+	}
+	required, err := g.requiredApprovalClass(requested)
 	if err != nil {
 		return &gateRefusal{class: RefusalApprovalMissing, reason: err.Error(), cause: err}
 	}
@@ -668,9 +762,17 @@ func (g *Gate) approvalsValid(ctx context.Context, tx pgx.Tx, token controlstore
 		if !ok {
 			return &gateRefusal{class: RefusalApprovalMissing, reason: fmt.Sprintf("release references approval %s which does not exist", ref)}
 		}
-		if row.instanceID != token.InstanceID || row.capability != string(c) || row.scopeHash != scope {
+		if row.instanceID != token.InstanceID || row.capability != string(c) {
 			return &gateRefusal{class: RefusalScopeMismatch, reason: fmt.Sprintf(
-				"release references approval %s recorded for a different instance/capability/scope", ref)}
+				"release references approval %s recorded for a different instance/capability", ref)}
+		}
+		// Scope equality is canonical equality (T050): the recorded scope and
+		// the release scope must be the same canonical capability scope. A
+		// legacy opaque or non-canonical recorded scope matches nothing and
+		// refuses as scope_mismatch, so old approvals can never be reused.
+		if err := CheckScopeMatch(scope, row.scopeHash); err != nil {
+			return &gateRefusal{class: RefusalScopeMismatch, reason: fmt.Sprintf(
+				"release references approval %s recorded for a different scope: %v", ref, err)}
 		}
 		if row.decision != "approve" {
 			return &gateRefusal{class: RefusalApprovalMissing, reason: fmt.Sprintf("release references approval %s whose decision is %q", ref, row.decision)}

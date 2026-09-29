@@ -638,8 +638,14 @@ func vfyGate(t *testing.T, f *vfyFixture) *recovery.Gate {
 
 func vfyAdmit(t *testing.T, f *vfyFixture, gate *recovery.Gate, capability recovery.Capability) recovery.GateDecision {
 	t.Helper()
+	// The canonical capability scope of the fixture chain (T050); the same
+	// constructor the package-internal fixtures use.
+	scope, err := recovery.Scope{ChainID: 31337, Asset: "usdc", Kind: "deposit", Capability: capability}.Canonical()
+	if err != nil {
+		t.Fatalf("canonical scope of %s: %v", capability, err)
+	}
 	decision, err := gate.Admit(f.ctx, recovery.GateRequest{
-		InstanceID: f.instanceID, Capability: capability, ScopeHash: "chain=31337;asset=usdc",
+		InstanceID: f.instanceID, Capability: capability, ScopeHash: scope,
 		Actor: "deploy:executor", OperationID: f.operation("admit"),
 	})
 	if err != nil {

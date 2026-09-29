@@ -1,7 +1,8 @@
 // eventrecovery.go owns the shared 015 resumption-gate assembly of the two
 // events entry points (T033 event-publisher / T034 event-consumer): the gate
-// wiring, the closed-refusal error both entries surface, and the opaque
-// capability scopes of their surfaces.
+// wiring, the closed-refusal error both entries surface, and the canonical
+// capability scopes of their surfaces (T050: chain + capability, no entry
+// identity).
 //
 // Both entries follow the same fail-closed rule as every other 015 entry
 // wiring:
@@ -51,9 +52,9 @@ type eventsGateAdmitter interface {
 type eventsRecoveryWiring struct {
 	gate eventsGateAdmitter
 	pool *pgxpool.Pool
-	// scope is the opaque non-empty capability scope of the entry's surface
-	// (T050 owns the canonical scope vocabulary; until then the stable string
-	// of eventPublishingScope/eventConsumingScope).
+	// scope is the canonical business scope of the entry's capability (T050:
+	// chain + capability, no entry identity). It is derived from the
+	// capability by the assembly, never passed in as a string.
 	scope string
 	// actor is the audit label of the deployment principal; it authorizes
 	// nothing by itself.
@@ -139,32 +140,16 @@ func (w *eventsRecoveryWiring) require(ctx context.Context, capability recovery.
 	}
 }
 
-// eventPublishingScope is the opaque non-empty capability scope of the
-// event-publisher surface (T050 owns the canonical scope form; until then this
-// stable string is the scope release decisions for event_publishing must be
-// recorded at). event_publishing carries the chain_scan dependency, evaluated
-// by the gate itself.
-func eventPublishingScope(chainID uint64) string {
-	return fmt.Sprintf("chain=%d;surface=event-publisher", chainID)
-}
-
-// eventConsumingScope is the opaque non-empty capability scope of the
-// event-consumer surface. The effect-class dimension of T050 is not yet
-// landed, so every consumed effect is conservatively high impact and the
-// gate's dual-approval requirement (RequiredApprovalClass) stands; T050 will
-// narrow the scope vocabulary, never widen this wiring.
-func eventConsumingScope(chainID uint64) string {
-	return fmt.Sprintf("chain=%d;surface=event-consumer", chainID)
-}
-
-// assembleEventsRecovery builds the events-entry gate wiring. It is
-// fail-closed in both directions: without TXHARBOR_RECOVERY_CONTROL_DSN the
-// entry is in normal mode and returns (nil, nil) — a process bound by
-// TXHARBOR_RECOVERY_INSTANCE without the control store refuses; with the
-// control store configured, a missing gate TTL, an unreachable store or an
-// unknown/incompatible schema version refuses startup instead of degrading to
-// pass-through (INV-5/INV-11).
-func assembleEventsRecovery(ctx context.Context, cfg *config.Config, getenv func(string) (string, bool), scope string) (*eventsRecoveryWiring, error) {
+// assembleEventsRecovery builds the events-entry gate wiring. The capability
+// is the single source of the entry's canonical scope (T050); the caller never
+// passes a scope string. It is fail-closed in both directions: without
+// TXHARBOR_RECOVERY_CONTROL_DSN the entry is in normal mode and returns
+// (nil, nil) — a process bound by TXHARBOR_RECOVERY_INSTANCE without the
+// control store refuses; with the control store configured, a missing gate
+// TTL, a malformed effect-class ruling, an unusable chain, an unreachable
+// store or an unknown/incompatible schema version refuses startup instead of
+// degrading to pass-through (INV-5/INV-11).
+func assembleEventsRecovery(ctx context.Context, cfg *config.Config, getenv func(string) (string, bool), capability recovery.Capability) (*eventsRecoveryWiring, error) {
 	var instance string
 	if getenv != nil {
 		if raw, ok := getenv(config.EnvRecoveryInstance); ok {
@@ -184,8 +169,13 @@ func assembleEventsRecovery(ctx context.Context, cfg *config.Config, getenv func
 			"%s is required when %s is configured and must be a positive duration; the resumption gate has no default TTL",
 			config.EnvRecoveryGateTTL, config.EnvRecoveryControlDSN)
 	}
-	if strings.TrimSpace(scope) == "" {
-		return nil, fmt.Errorf("the event capability scope is empty; the gate never substitutes a default scope (T050)")
+	ruling, err := recoveryEffectClassRuling(cfg)
+	if err != nil {
+		return nil, fmt.Errorf("gate assembly: %s", logx.Redact(err.Error()))
+	}
+	scope, err := recoveryScopeFor(cfg.ChainID, capability)
+	if err != nil {
+		return nil, fmt.Errorf("event capability scope: %s", logx.Redact(err.Error()))
 	}
 	pool, err := db.OpenPool(ctx, cfg.Recovery.ControlDSN, cfg.ProbeTimeout)
 	if err != nil {
@@ -196,7 +186,7 @@ func assembleEventsRecovery(ctx context.Context, cfg *config.Config, getenv func
 		pool.Close()
 		return nil, fmt.Errorf("control store unavailable: %s", logx.Redact(err.Error()))
 	}
-	gate, err := recovery.NewGate(store, recovery.GateOptions{TTL: cfg.Recovery.GateTTL})
+	gate, err := recovery.NewGate(store, recovery.GateOptions{TTL: cfg.Recovery.GateTTL, EffectClassRuling: ruling})
 	if err != nil {
 		pool.Close()
 		return nil, fmt.Errorf("gate assembly: %s", logx.Redact(err.Error()))

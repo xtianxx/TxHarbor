@@ -23,8 +23,9 @@ import (
 // withdrawalRecoveryTestWiring builds the T031 wiring over a scripted
 // admission surface. The scope/actor match the serve assembly vocabulary; the
 // gate itself is replaced, so no control store is needed.
-func withdrawalRecoveryTestWiring(admitter *fakeRecoveryAdmitter) *serveRecoveryWiring {
-	return &serveRecoveryWiring{gate: admitter, scope: "chain=31337;surface=serve", actor: "deploy:tester"}
+func withdrawalRecoveryTestWiring(t *testing.T, admitter *fakeRecoveryAdmitter) *serveRecoveryWiring {
+	t.Helper()
+	return &serveRecoveryWiring{gate: admitter, scopes: recovServeTestScopes(t, 31337), actor: "deploy:tester"}
 }
 
 // withdrawalRecoveryAdmissions drains the recorded admissions.
@@ -51,7 +52,7 @@ func TestWithdrawalRecoveryGateRefusesCreateBeforeNextHandler(t *testing.T) {
 		Reason:       "a recovery instance is open and this admission is not bound to it",
 		InstanceID:   "11111111-1111-1111-1111-111111111111",
 	})
-	wiring := withdrawalRecoveryTestWiring(admitter)
+	wiring := withdrawalRecoveryTestWiring(t, admitter)
 	called := false
 	next := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		called = true
@@ -103,7 +104,7 @@ func TestWithdrawalRecoveryGateCreatePassThroughNormalMode(t *testing.T) {
 		Normal:       true,
 		RefusalClass: recovery.RefusalNoInstance,
 	})
-	wiring := withdrawalRecoveryTestWiring(admitter)
+	wiring := withdrawalRecoveryTestWiring(t, admitter)
 	called := false
 	next := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		called = true
@@ -132,7 +133,7 @@ func TestWithdrawalRecoveryGateReadIsQueryAndRefusedBeforeNext(t *testing.T) {
 		RefusalClass: recovery.RefusalIsolationUnproven,
 		Reason:       "isolation item old_writers_stopped is pending",
 	})
-	wiring := withdrawalRecoveryTestWiring(admitter)
+	wiring := withdrawalRecoveryTestWiring(t, admitter)
 	called := false
 	next := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		called = true
@@ -177,7 +178,7 @@ func TestWithdrawalRecoveryGateLeavesNonActionsUntouched(t *testing.T) {
 				Allowed:      false,
 				RefusalClass: recovery.RefusalInstanceMismatch,
 			})
-			wiring := withdrawalRecoveryTestWiring(admitter)
+			wiring := withdrawalRecoveryTestWiring(t, admitter)
 			called := false
 			next := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 				called = true
@@ -218,7 +219,7 @@ func TestWithdrawalRecoveryGateNilWiringIsNoOp(t *testing.T) {
 func TestWithdrawalRecoveryGateUnavailableStoreSurfacesClosedClass(t *testing.T) {
 	admitter := newFakeRecoveryAdmitter(recovery.GateDecision{Allowed: false})
 	admitter.errs = []error{errors.New("dial tcp: connection refused")}
-	wiring := withdrawalRecoveryTestWiring(admitter)
+	wiring := withdrawalRecoveryTestWiring(t, admitter)
 	next := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusCreated) })
 
 	rec := httptest.NewRecorder()
@@ -234,22 +235,24 @@ func TestWithdrawalRecoveryGateUnavailableStoreSurfacesClosedClass(t *testing.T)
 	}
 }
 
-// TestWithdrawalRecoveryGateScopeIsStable pins the opaque non-empty scope the
-// T031 admission carries through the shared serve wiring (T050 owns the
-// canonical scope form). The wiring built by the serve assembly always carries
-// serveRecoveryScope; the wrapper must not invent its own scope.
-func TestWithdrawalRecoveryGateScopeIsStable(t *testing.T) {
+// TestWithdrawalRecoveryGateScopeIsCanonical pins the canonical business scope
+// the T031 admission carries through the shared serve wiring (T050). The scope
+// is derived per capability from the production constructor; the wrapper must
+// never invent its own scope and the write path's capability is
+// new_withdrawal_creation (not the read path's query).
+func TestWithdrawalRecoveryGateScopeIsCanonical(t *testing.T) {
 	admitter := newFakeRecoveryAdmitter(recovery.GateDecision{Allowed: true})
-	wiring := &serveRecoveryWiring{gate: admitter, scope: serveRecoveryScope(31337)}
+	wiring := &serveRecoveryWiring{gate: admitter, scopes: recovServeTestScopes(t, 31337)}
 	next := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) })
 	rec := httptest.NewRecorder()
 	withdrawalRecoveryGate(wiring, next).ServeHTTP(rec,
 		httptest.NewRequest(http.MethodPost, "/withdrawals", strings.NewReader("{}")))
 	admissions := withdrawalRecoveryAdmissions(admitter)
-	if len(admissions) != 1 || admissions[0].ScopeHash != serveRecoveryScope(31337) {
-		t.Fatalf("scope = %+v, want the shared serve scope %q", admissions, serveRecoveryScope(31337))
+	want := "capability=new_withdrawal_creation;chain=31337"
+	if len(admissions) != 1 || admissions[0].ScopeHash != want {
+		t.Fatalf("scope = %+v, want the canonical write-path scope %q", admissions, want)
 	}
-	if !strings.HasPrefix(admissions[0].ScopeHash, "chain=31337;") {
-		t.Fatalf("scope %q does not carry the chain binding", admissions[0].ScopeHash)
+	if admissions[0].Capability != recovery.CapabilityNewWithdrawalCreation {
+		t.Fatalf("capability = %q, want %q", admissions[0].Capability, recovery.CapabilityNewWithdrawalCreation)
 	}
 }

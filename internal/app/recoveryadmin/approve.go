@@ -31,9 +31,12 @@
 //     the instance row and refuses a missing/closed/non-recovery instance.
 //  6. Missing required configuration is refused by exact key name;
 //     TXHARBOR_RECOVERY_GATE_TTL is required for a release (the derived
-//     evaluation has no default TTL). Exit codes: 0 recorded/replayed, 1
-//     refusal/config, 2 usage. DSNs never reach stdout/stderr (logx.Redact;
-//     only the credential-free fingerprint is carried in audit detail).
+//     evaluation has no default TTL), and a malformed
+//     TXHARBOR_RECOVERY_EFFECT_CLASS_RULING refuses by key name (the ruling
+//     resolves the scope's effect-class dimension and is never a flag). Exit
+//     codes: 0 recorded/replayed, 1 refusal/config, 2 usage. DSNs never reach
+//     stdout/stderr (logx.Redact; only the credential-free fingerprint is
+//     carried in audit detail).
 //
 // The control store is reached only through recoveryOpOpen
 // (controlstore.NewStore), so the T069 schema-version guard (unknown or
@@ -187,11 +190,20 @@ func recoveryAdminDecision(ctx context.Context, args []string, d Deps, approval 
 	// A release evaluates the derived release_valid on every call, so the
 	// gate (with the configured TTL, no default) is required; no fund-gate
 	// checker is injected here (phase two stays the action site's obligation).
+	// The trusted deployment effect-class ruling (T050) resolves the scope's
+	// effect-class dimension at this evaluation: an absent key means "not
+	// configured"; a malformed value refuses by key name, never guessing a
+	// class. The approval snapshot stays conservative and is never a request
+	// input.
 	ttl, code := recoveryGateTTL(d, command)
 	if code != 0 {
 		return code
 	}
-	gate, gateErr := recovery.NewGate(env.store, recovery.GateOptions{TTL: ttl})
+	ruling, code := recoveryGateEffectClassRuling(d, command)
+	if code != 0 {
+		return code
+	}
+	gate, gateErr := recovery.NewGate(env.store, recovery.GateOptions{TTL: ttl, EffectClassRuling: ruling})
 	if gateErr != nil {
 		fmt.Fprintf(stderr, "txharbor recovery-admin %s: %s\n", command, logx.Redact(gateErr.Error()))
 		return 1

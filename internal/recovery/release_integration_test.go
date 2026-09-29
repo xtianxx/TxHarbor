@@ -161,7 +161,7 @@ func (s *t044Service) approveOK(t *testing.T, principal string, capability Capab
 	out, err := Approve(s.f.ctx, s.f.store, ApprovalRequest{
 		InstanceID:  s.f.instanceID,
 		Capability:  capability,
-		ScopeHash:   s.f.scope,
+		ScopeHash:   gateScopeFor(capability),
 		Principal:   principal,
 		Reason:      "t044 approval",
 		OperationID: gateOperation("t044-approve"),
@@ -180,7 +180,7 @@ func (s *t044Service) approveErr(t *testing.T, principal string, capability Capa
 	return Approve(s.f.ctx, s.f.store, ApprovalRequest{
 		InstanceID:  s.f.instanceID,
 		Capability:  capability,
-		ScopeHash:   s.f.scope,
+		ScopeHash:   gateScopeFor(capability),
 		Principal:   principal,
 		Reason:      "t044 refusal probe",
 		OperationID: gateOperation("t044-approve-refuse"),
@@ -192,7 +192,7 @@ func (s *t044Service) releaseOK(t *testing.T, capability Capability) ReleaseOutc
 	out, err := Release(s.f.ctx, s.f.store, s.gate, ReleaseRequest{
 		InstanceID:  s.f.instanceID,
 		Capability:  capability,
-		ScopeHash:   s.f.scope,
+		ScopeHash:   gateScopeFor(capability),
 		Principal:   "deploy:executor",
 		Reason:      "t044 release",
 		OperationID: gateOperation("t044-release"),
@@ -211,7 +211,7 @@ func (s *t044Service) releaseErr(t *testing.T, capability Capability) (ReleaseOu
 	return Release(s.f.ctx, s.f.store, s.gate, ReleaseRequest{
 		InstanceID:  s.f.instanceID,
 		Capability:  capability,
-		ScopeHash:   s.f.scope,
+		ScopeHash:   gateScopeFor(capability),
 		Principal:   "deploy:executor",
 		Reason:      "t044 refusal probe",
 		OperationID: gateOperation("t044-release-refuse"),
@@ -223,7 +223,7 @@ func (s *t044Service) revokeApprovalOK(t *testing.T, principal string, capabilit
 	out, err := RevokeApproval(s.f.ctx, s.f.store, ApprovalRequest{
 		InstanceID:  s.f.instanceID,
 		Capability:  capability,
-		ScopeHash:   s.f.scope,
+		ScopeHash:   gateScopeFor(capability),
 		Principal:   principal,
 		Reason:      "t044 explicit revoke",
 		OperationID: gateOperation("t044-approve-revoke"),
@@ -242,7 +242,7 @@ func (s *t044Service) revokeReleaseOK(t *testing.T, principal string, capability
 	out, err := RevokeRelease(s.f.ctx, s.f.store, s.gate, ReleaseRequest{
 		InstanceID:  s.f.instanceID,
 		Capability:  capability,
-		ScopeHash:   s.f.scope,
+		ScopeHash:   gateScopeFor(capability),
 		Principal:   principal,
 		Reason:      "t044 explicit release revoke",
 		OperationID: gateOperation("t044-release-revoke"),
@@ -262,7 +262,7 @@ func (s *t044Service) admit(t *testing.T, capability Capability) GateDecision {
 	decision, err := s.gate.Admit(s.f.ctx, GateRequest{
 		InstanceID:  s.f.instanceID,
 		Capability:  capability,
-		ScopeHash:   s.f.scope,
+		ScopeHash:   gateScopeFor(capability),
 		Actor:       "deploy:executor",
 		OperationID: gateOperation("t044-admit"),
 		Action:      "test:action",
@@ -369,7 +369,7 @@ func TestT044UnauthorizedApprovalAndReleaseRefusedAndAudited(t *testing.T) {
 	// An unregistered principal cannot release either.
 	audits = s.refusedAudits(t)
 	rel, err = Release(s.f.ctx, s.f.store, s.gate, ReleaseRequest{
-		InstanceID: s.f.instanceID, Capability: CapabilityQuery, ScopeHash: s.f.scope,
+		InstanceID: s.f.instanceID, Capability: CapabilityQuery, ScopeHash: gateScopeFor(CapabilityQuery),
 		Principal: "auth:stranger", Reason: "unauthorized release", OperationID: gateOperation("t044-release-unauthorized"),
 	})
 	t044RequireRefused(t, s, ErrReleaseRefused, rel.RefusalClass, err, audits,
@@ -521,7 +521,7 @@ func TestT044RepeatedApproveReleaseCloseDoNotFlipState(t *testing.T) {
 	var firstID string
 	for i := 0; i < 10; i++ {
 		out, err := Approve(s.f.ctx, s.f.store, ApprovalRequest{
-			InstanceID: s.f.instanceID, Capability: CapabilityChainScan, ScopeHash: s.f.scope,
+			InstanceID: s.f.instanceID, Capability: CapabilityChainScan, ScopeHash: gateScopeFor(CapabilityChainScan),
 			Principal: "auth:approver", Reason: "idempotent replay", OperationID: op,
 		})
 		if err != nil {
@@ -558,7 +558,7 @@ func TestT044RepeatedApproveReleaseCloseDoNotFlipState(t *testing.T) {
 	var releaseID string
 	for i := 0; i < 10; i++ {
 		out, err := Release(s.f.ctx, s.f.store, s.gate, ReleaseRequest{
-			InstanceID: s.f.instanceID, Capability: CapabilityEventPublishing, ScopeHash: s.f.scope,
+			InstanceID: s.f.instanceID, Capability: CapabilityEventPublishing, ScopeHash: gateScopeFor(CapabilityEventPublishing),
 			Principal: "deploy:executor", Reason: "idempotent replay", OperationID: relOp,
 		})
 		if err != nil {
@@ -661,7 +661,7 @@ func TestT044ExplicitAuthorizedRevocationIsAudited(t *testing.T) {
 	rowsBefore := s.count(t, `SELECT count(*) FROM recovery_release WHERE instance_id = $1`, s.f.instanceID)
 	audits := s.refusedAudits(t)
 	if _, err := RevokeRelease(s.f.ctx, s.f.store, s.gate, ReleaseRequest{
-		InstanceID: s.f.instanceID, Capability: CapabilityQuery, ScopeHash: s.f.scope,
+		InstanceID: s.f.instanceID, Capability: CapabilityQuery, ScopeHash: gateScopeFor(CapabilityQuery),
 		Principal: "auth:stranger", Reason: "unauthorized revoke", OperationID: gateOperation("t044-revoke-unauthorized"),
 	}); err == nil {
 		t.Fatal("an unregistered principal must not revoke a release")

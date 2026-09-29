@@ -81,23 +81,19 @@ func t045Op(prefix string) string {
 	return fmt.Sprintf("t045-%s-%d", prefix, t045OpSeq.Add(1))
 }
 
-// t045ServeScope is the serve surface scope the production wiring reads for
-// the /withdrawals and /nonce/bindings entry points (serveRecoveryScope).
-func t045ServeScope() string { return fmt.Sprintf("chain=%d;surface=serve", t045ChainID) }
-
-// t045ExistingScope is the existing_withdrawal_recovery entry family scope
-// (existingWithdrawalRecoveryScope) used by the execution write path.
-func t045ExistingScope() string {
-	return fmt.Sprintf("chain=%d;capability=existing_withdrawal_recovery", t045ChainID)
-}
-
-// t045ScopeFor maps a capability onto the scope its production entry point
-// reads.
+// t045ScopeFor maps a capability onto the canonical business scope its
+// production entry points read (T050). Entry identity is not a scope
+// dimension: the serve read path, the scan loops, the withdrawal creation
+// entry, the execution write path and the worker/signer family all derive
+// their scope through the same production constructor
+// (recoveryScopeFor/recovery.CapabilityScope), so one release covers every
+// entry that acts on that capability at this chain.
 func t045ScopeFor(capability recovery.Capability) string {
-	if capability == recovery.CapabilityExistingWithdrawalRecovery {
-		return t045ExistingScope()
+	scope, err := recoveryScopeFor(t045ChainID, capability)
+	if err != nil {
+		panic(err) // fixed fixture chain id cannot fail
 	}
-	return t045ServeScope()
+	return scope
 }
 
 // t045Scene is the T026 scene plus the checklist service and the single
@@ -362,6 +358,14 @@ func TestT045ProgressiveReleaseByDependencyOrder(t *testing.T) {
 	h := t045StartServe(t, s, addr)
 	defer h.stop()
 
+	// Before the prerequisite is released, deposit_confirmation is blocked by
+	// its dependency (capability_dependency_closed), not by its own missing
+	// release: a legitimately released prerequisite is what lets the dependent
+	// capability continue.
+	if got := s.admit(t, recovery.CapabilityDepositConfirmation); got.Allowed || got.RefusalClass != recovery.RefusalCapabilityDependencyClosed {
+		t.Fatalf("deposit_confirmation before its prerequisite = %+v, want %s", got, recovery.RefusalCapabilityDependencyClosed)
+	}
+
 	// chain_scan (single non-executor approval).
 	s.approve(t, t045Approver1, recovery.CapabilityChainScan)
 	s.release(t, recovery.CapabilityChainScan)
@@ -380,12 +384,14 @@ func TestT045ProgressiveReleaseByDependencyOrder(t *testing.T) {
 	}
 
 	// existing_withdrawal_recovery is dual: one approval yields zero releases.
-	// It is released at the serve scope (the new_withdrawal_creation closure
-	// check reads the request scope) and at its own execution entry scope.
-	s.approveAt(t, t045Approver1, recovery.CapabilityExistingWithdrawalRecovery, t045ServeScope())
+	// Its canonical scope is shared by the serve-side execution entry and the
+	// worker/signer family (entry identity is not a scope dimension), so the
+	// single release covers every entry of the family.
+	evrScope := t045ScopeFor(recovery.CapabilityExistingWithdrawalRecovery)
+	s.approveAt(t, t045Approver1, recovery.CapabilityExistingWithdrawalRecovery, evrScope)
 	rowsBefore := t045ReleaseRows(t, s)
 	if _, err := recovery.Release(s.ctx, s.store, s.gate, recovery.ReleaseRequest{
-		InstanceID: s.instanceID, Capability: recovery.CapabilityExistingWithdrawalRecovery, ScopeHash: t045ServeScope(),
+		InstanceID: s.instanceID, Capability: recovery.CapabilityExistingWithdrawalRecovery, ScopeHash: evrScope,
 		Principal: recovPrincipal, Reason: "one-person attempt", OperationID: t045Op("release-single"),
 	}); err == nil {
 		t.Fatal("existing_withdrawal_recovery with a single approval must not release")
@@ -393,12 +399,17 @@ func TestT045ProgressiveReleaseByDependencyOrder(t *testing.T) {
 	if got := t045ReleaseRows(t, s); got != rowsBefore {
 		t.Fatalf("single-person attempt wrote %d release row(s)", got-rowsBefore)
 	}
-	s.approveAt(t, t045Approver2, recovery.CapabilityExistingWithdrawalRecovery, t045ServeScope())
-	s.releaseAt(t, recovery.CapabilityExistingWithdrawalRecovery, t045ServeScope())
-	// The execution write path's own entry scope.
-	s.releaseValidAt(t, recovery.CapabilityExistingWithdrawalRecovery, t045ExistingScope())
+	s.approveAt(t, t045Approver2, recovery.CapabilityExistingWithdrawalRecovery, evrScope)
+	s.releaseAt(t, recovery.CapabilityExistingWithdrawalRecovery, evrScope)
 	if got := s.admit(t, recovery.CapabilityExistingWithdrawalRecovery); !got.Allowed {
 		t.Fatalf("existing_withdrawal_recovery must be admitted after its dual release, got %+v", got)
+	}
+	// The gate evaluates the new_withdrawal_creation dependency at the mapped
+	// dependency scope (T050): the execution-family release above satisfies
+	// it, so the only remaining blocker of new_withdrawal_creation is its own
+	// missing release.
+	if got := s.admit(t, recovery.CapabilityNewWithdrawalCreation); got.Allowed || got.RefusalClass != recovery.RefusalNoRelease {
+		t.Fatalf("new_withdrawal_creation after its released dependency closure = %+v, want %s", got, recovery.RefusalNoRelease)
 	}
 
 	// new_withdrawal_creation is not released: with its dependency closure
@@ -411,6 +422,42 @@ func TestT045ProgressiveReleaseByDependencyOrder(t *testing.T) {
 	}
 }
 
+// TestT045UnrelatedScopeReleaseDoesNotUnlock pins the scope dimension of the
+// release mapping (T050): a release granted for another chain or another asset
+// is a valid canonical stream but a different business authorization scope, so
+// it never unlocks this deployment's capability; releasing the same capability
+// at its own canonical scope still works independently.
+func TestT045UnrelatedScopeReleaseDoesNotUnlock(t *testing.T) {
+	s := t045NewScene(t)
+	s.seedIsolation(t, recovery.CapabilityQuery)
+
+	// Another chain: a different business authorization scope.
+	otherChain, err := recovery.Scope{ChainID: t045ChainID + 1, Capability: recovery.CapabilityQuery}.Canonical()
+	if err != nil {
+		t.Fatalf("canonical other-chain scope: %v", err)
+	}
+	s.releaseValidAt(t, recovery.CapabilityQuery, otherChain)
+	if got := s.admit(t, recovery.CapabilityQuery); got.Allowed {
+		t.Fatalf("a release at another chain must not unlock this deployment's query, got %+v", got)
+	}
+
+	// Another asset on the same chain is a distinct scope as well.
+	otherAsset, err := recovery.Scope{ChainID: t045ChainID, Asset: "usdc", Capability: recovery.CapabilityQuery}.Canonical()
+	if err != nil {
+		t.Fatalf("canonical other-asset scope: %v", err)
+	}
+	s.releaseValidAt(t, recovery.CapabilityQuery, otherAsset)
+	if got := s.admit(t, recovery.CapabilityQuery); got.Allowed {
+		t.Fatalf("a release at another asset scope must not unlock this deployment's query, got %+v", got)
+	}
+
+	// The capability's own canonical scope releases independently.
+	s.releaseValidAt(t, recovery.CapabilityQuery, t045ScopeFor(recovery.CapabilityQuery))
+	if got := s.admit(t, recovery.CapabilityQuery); !got.Allowed {
+		t.Fatalf("query must be admitted after its canonical release, got %+v", got)
+	}
+}
+
 // ---------------------------------------------------------------------------
 // Release does not unlock the original gates; INV-2 is derived
 // ---------------------------------------------------------------------------
@@ -420,15 +467,16 @@ func TestT045ReleaseDoesNotUnlockOriginalGates(t *testing.T) {
 	for _, capability := range recovery.KnownCapabilities() {
 		s.seedIsolation(t, capability)
 	}
-	// Release every capability at the serve scope, plus the execution write
-	// path's own entry scope for existing_withdrawal_recovery.
+	// Release every capability at its canonical scope. The serve and execution
+	// entries of existing_withdrawal_recovery converge on one canonical scope
+	// (entry identity is not a scope dimension), so seven releases cover all
+	// seven capabilities and every entry that acts on them.
 	for _, capability := range recovery.KnownCapabilities() {
-		s.releaseValidAt(t, capability, t045ServeScope())
+		s.releaseValidAt(t, capability, t045ScopeFor(capability))
 	}
-	s.releaseValidAt(t, recovery.CapabilityExistingWithdrawalRecovery, t045ExistingScope())
-	expectedReleases := len(recovery.KnownCapabilities()) + 1
+	expectedReleases := len(recovery.KnownCapabilities())
 	if got := t045ReleaseRows(t, s); got != expectedReleases {
-		t.Fatalf("release rows = %d, want %d (all seven released, existing at both entry scopes)", got, expectedReleases)
+		t.Fatalf("release rows = %d, want %d (all seven released at their canonical capability scopes)", got, expectedReleases)
 	}
 
 	addr := freeAddr(t)
@@ -448,7 +496,7 @@ func TestT045ReleaseDoesNotUnlockOriginalGates(t *testing.T) {
 		t.Fatalf("NewGate with the phase-two fund gate: %v", err)
 	}
 	phaseTwo, err := failingGate.Admit(s.ctx, recovery.GateRequest{
-		InstanceID: s.instanceID, Capability: recovery.CapabilityQuery, ScopeHash: t045ServeScope(),
+		InstanceID: s.instanceID, Capability: recovery.CapabilityQuery, ScopeHash: t045ScopeFor(recovery.CapabilityQuery),
 		Actor: recovPrincipal, OperationID: t045Op("phase-two"), Action: "test:t045-phase-two",
 	})
 	if err != nil {
@@ -504,7 +552,7 @@ WHERE table_name = 'recovery_release' AND column_name IN ('released', 'valid', '
 		t.Fatalf("recovery_release carries %d writable validity column(s)", n)
 	}
 	if _, err := recovery.RevokeRelease(s.ctx, s.store, s.gate, recovery.ReleaseRequest{
-		InstanceID: s.instanceID, Capability: recovery.CapabilityQuery, ScopeHash: t045ServeScope(),
+		InstanceID: s.instanceID, Capability: recovery.CapabilityQuery, ScopeHash: t045ScopeFor(recovery.CapabilityQuery),
 		Principal: recovPrincipal, Reason: "t045 explicit revoke", OperationID: t045Op("release-revoke"),
 	}); err != nil {
 		t.Fatalf("RevokeRelease(query): %v", err)

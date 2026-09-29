@@ -110,7 +110,7 @@ func t046ConfigPrincipal(t *testing.T, principal string) string {
 func t046Approve(t *testing.T, f *gateFixture, principal string, capability Capability) (ApprovalOutcome, error) {
 	t.Helper()
 	return Approve(f.ctx, f.store, ApprovalRequest{
-		InstanceID: f.instanceID, Capability: capability, ScopeHash: f.scope,
+		InstanceID: f.instanceID, Capability: capability, ScopeHash: gateScopeFor(capability),
 		Principal: principal, Reason: "t046 approval", OperationID: gateOperation("t046-approve"),
 	})
 }
@@ -127,7 +127,7 @@ func t046ApproveOK(t *testing.T, f *gateFixture, principal string, capability Ca
 func t046Release(t *testing.T, f *gateFixture, gate *Gate, capability Capability) (ReleaseOutcome, error) {
 	t.Helper()
 	return Release(f.ctx, f.store, gate, ReleaseRequest{
-		InstanceID: f.instanceID, Capability: capability, ScopeHash: f.scope,
+		InstanceID: f.instanceID, Capability: capability, ScopeHash: gateScopeFor(capability),
 		Principal: "deploy:executor", Reason: "t046 release", OperationID: gateOperation("t046-release"),
 	})
 }
@@ -144,7 +144,7 @@ func t046ReleaseOK(t *testing.T, f *gateFixture, gate *Gate, capability Capabili
 func t046Admit(t *testing.T, f *gateFixture, gate *Gate, capability Capability) GateDecision {
 	t.Helper()
 	decision, err := gate.Admit(f.ctx, GateRequest{
-		InstanceID: f.instanceID, Capability: capability, ScopeHash: f.scope,
+		InstanceID: f.instanceID, Capability: capability, ScopeHash: gateScopeFor(capability),
 		Actor: "deploy:executor", OperationID: gateOperation("t046-admit"), Action: "test:t046",
 	})
 	if err != nil {

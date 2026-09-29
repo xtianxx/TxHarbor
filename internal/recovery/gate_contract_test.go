@@ -58,7 +58,16 @@ import (
 	"github.com/xtianxx/txharbor/internal/recovery/controlstore"
 )
 
-const contractGateScope = "chain=31337;asset=usdc;kind=withdrawal"
+// contractScopeFor returns the canonical capability scope of c for the
+// storeless contract harness (chain 31337, asset usdc, business type
+// withdrawal). T050: each capability is evaluated at its own canonical scope.
+func contractScopeFor(c Capability) string {
+	scope, err := Scope{ChainID: 31337, Asset: "usdc", Kind: "withdrawal", Capability: c}.Canonical()
+	if err != nil {
+		panic(err) // fixed canonical fixture inputs cannot fail
+	}
+	return scope
+}
 
 // contractBypassName matches every field/method/key name that would look like
 // a way to close, skip or force the gate. The 015 gate has no such switch:
@@ -102,7 +111,7 @@ func TestGateContractNormalModeMarker(t *testing.T) {
 
 	// The pre-database request refusals never produce an allow either.
 	gate := &Gate{ttl: time.Minute, now: time.Now, cache: make(map[gateCacheKey]gateCapabilityFacts)}
-	if _, err := gate.Admit(context.Background(), GateRequest{Capability: "order_book", ScopeHash: contractGateScope}); !errors.Is(err, ErrGateRequest) {
+	if _, err := gate.Admit(context.Background(), GateRequest{Capability: "order_book", ScopeHash: contractScopeFor(CapabilityQuery)}); !errors.Is(err, ErrGateRequest) {
 		t.Fatalf("unknown capability error = %v, want ErrGateRequest", err)
 	}
 	if d, err := gate.Admit(context.Background(), GateRequest{Capability: CapabilityQuery, ScopeHash: " "}); err != nil {
@@ -134,7 +143,7 @@ func TestGateContractOpenInstanceDeniesAllCapabilities(t *testing.T) {
 		CapabilityEventConsuming:             RefusalIsolationUnproven,
 	}
 	for _, capability := range KnownCapabilities() {
-		req := GateRequest{InstanceID: token.InstanceID, Capability: capability, ScopeHash: contractGateScope}
+		req := GateRequest{InstanceID: token.InstanceID, Capability: capability, ScopeHash: contractScopeFor(capability)}
 		ev := contractEvaluate(t, gate, token, req)
 		if ev.allowed {
 			t.Fatalf("capability %s must be denied while its isolation dependency set is unverified", capability)
@@ -184,7 +193,7 @@ func TestGateContractIsolationItemMustBeExactlyVerified(t *testing.T) {
 		token := contractInstanceToken()
 		gate := contractGateWithIsolationState(t, token, state)
 		ev := contractEvaluate(t, gate, token, GateRequest{
-			InstanceID: token.InstanceID, Capability: CapabilityQuery, ScopeHash: contractGateScope,
+			InstanceID: token.InstanceID, Capability: CapabilityQuery, ScopeHash: contractScopeFor(CapabilityQuery),
 		})
 		if ev.allowed || ev.refusal == nil || ev.refusal.class != RefusalIsolationUnproven {
 			t.Fatalf("isolation state %q must refuse with isolation_unproven, got allowed=%v refusal=%+v",
@@ -244,7 +253,7 @@ func TestGateContractCapabilityDependencyClosure(t *testing.T) {
 	token := contractInstanceToken()
 	gate := contractGateWithIsolationState(t, token, "pending")
 	ev := contractEvaluate(t, gate, token, GateRequest{
-		InstanceID: token.InstanceID, Capability: CapabilityNewWithdrawalCreation, ScopeHash: contractGateScope,
+		InstanceID: token.InstanceID, Capability: CapabilityNewWithdrawalCreation, ScopeHash: contractScopeFor(CapabilityNewWithdrawalCreation),
 	})
 	if ev.allowed || ev.refusal == nil || ev.refusal.class != RefusalCapabilityDependencyClosed {
 		t.Fatalf("new_withdrawal_creation with an unverified closure must be capability_dependency_closed, got allowed=%v refusal=%+v",
@@ -437,7 +446,7 @@ func TestGateContractFundGatesRemainPhaseTwo(t *testing.T) {
 	calls := 0
 	gate.fundGates = func(context.Context, GateRequest) error { calls++; return nil }
 	ev := contractEvaluate(t, gate, token, GateRequest{
-		InstanceID: token.InstanceID, Capability: CapabilityQuery, ScopeHash: contractGateScope,
+		InstanceID: token.InstanceID, Capability: CapabilityQuery, ScopeHash: contractScopeFor(CapabilityQuery),
 	})
 	if ev.allowed || ev.refusal == nil {
 		t.Fatalf("phase one must refuse with unverified isolation, got allowed=%v refusal=%+v", ev.allowed, ev.refusal)

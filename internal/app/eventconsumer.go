@@ -71,7 +71,7 @@ func EventConsumer(ctx context.Context, args []string, d Deps) int {
 	// write. Not configured means normal mode (FR-023); once configured, a
 	// missing gate TTL, an unreachable control store or an unknown/
 	// incompatible schema refuses startup — no degraded pass-through.
-	wiring, err := assembleEventsRecovery(ctx, cfg, d.getenv(), eventConsumingScope(cfg.ChainID))
+	wiring, err := assembleEventsRecovery(ctx, cfg, d.getenv(), recovery.CapabilityEventConsuming)
 	if err != nil {
 		fmt.Fprintf(stderr, "txharbor event-consumer: %s\n", logx.Redact(err.Error()))
 		return 1
@@ -209,9 +209,12 @@ func (r *consumerGateRefusals) first() *eventsGateRefusedError {
 // cancelled before the consumer could quarantine or mark the offset. The
 // admission covers exactly this one event's application action.
 //
-// The effect-class dimension of the scope is T050's; until that ruling lands
-// every consumed effect is conservatively high impact and the gate's
-// dual-approval requirement stands (RequiredApprovalClass).
+// The effect-class dimension of the scope is T050's: the class is resolved
+// from the scope's business type against the trusted deployment ruling
+// (EffectClassRulingConfigKey). Without a positive ruling every consumed
+// effect stays conservatively high impact and the dual-approval requirement
+// stands (RequiredApprovalClassForScope); the caller can never declare a lower
+// class.
 type gatedConsumerEffect struct {
 	inner     events.Effect
 	gate      *eventsRecoveryWiring

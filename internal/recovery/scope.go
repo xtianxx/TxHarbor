@@ -59,6 +59,31 @@
 //     scope_mismatch and the result is always refused: callers cannot forge an
 //     admission row through this helper.
 //
+// # Entry scopes and dependency coverage (T050 wiring)
+//
+// CapabilityScope is the entry-scope constructor of the business entry points
+// (T030–T034) and ParseCapabilityScope is the matching rule every decision
+// writer, the gate and the CLI apply. Entry identity (serve surface, worker
+// process, command name) is not a scope dimension: two entries that act on
+// the same capability at the same chain converge on one canonical scope and
+// one release covers both, while different chains, assets, business types,
+// instances and contracts stay distinct — an omitted dimension is not a
+// wildcard and never merges into an expressed one.
+//
+// Cross-capability dependency coverage is an explicit mapping, not a string
+// comparison of entry scopes: DependencyScope carries the chain/asset/kind
+// dimensions of a validated request scope over to the required dependency
+// capability, and the gate evaluates every requires_capabilities entry at
+// that mapped scope (data-model §3.2). A release of chain_scan for chain X
+// therefore covers the chain_scan dependency of every dependent capability of
+// chain X — and nothing else.
+//
+// A recorded scope outside the canonical capability form (the pre-T050 opaque
+// strings such as "chain=1;surface=serve" or a canonical string with a
+// different casing/order) is never translated, upgraded or matched by
+// guessing: ParseCapabilityScope refuses it with scope_mismatch and the
+// operator must re-approve and re-release at the canonical scope.
+//
 // # Conservative effect class
 //
 // RequiredApprovalClassForScope decides the approval class of a scope's
@@ -156,6 +181,20 @@ const (
 	// subject for a scope refusal audit. It is an audit label only and never
 	// authorizes anything.
 	scopeFallbackActor = "system:recovery-scope"
+
+	// EffectClassRulingConfigKey is the deployment configuration key of the
+	// trusted effect-class ruling (a JSON object mapping effect-class tokens to
+	// the closed impact set). The constant mirrors
+	// config.EnvRecoveryEffectClassRuling (a unit test pins the two together)
+	// so this file carries no dependency on the config package. An unconfigured
+	// key means "not configured": every effect class is unknown and the event
+	// capabilities stay conservatively dual.
+	EffectClassRulingConfigKey = "TXHARBOR_RECOVERY_EFFECT_CLASS_RULING"
+
+	// maxEffectClassRulingEntries bounds one deployment ruling. The bound is
+	// far above any real downstream-class list; it exists so an abusive
+	// carriage cannot be retained or looked up unbounded.
+	maxEffectClassRulingEntries = 64
 )
 
 var (
@@ -413,6 +452,73 @@ func ScopeDigest(raw string) (string, error) {
 	return scope.Digest()
 }
 
+// CapabilityScope returns the canonical scope_hash of one capability stream
+// with no further dimensions expressed: "capability=<c>;chain=<id>" in
+// canonical key order. It is the entry-scope constructor of the business entry
+// points (serve read/scan loops, withdrawal creation, execution/signer
+// recovery, event publisher/consumer): entry identity is not a scope
+// dimension, so every entry that acts on the same capability at the same chain
+// derives the same scope and one release covers them all. A zero chain or an
+// unknown capability refuses as scope_mismatch (fail-closed; no default
+// scope).
+func CapabilityScope(chainID uint64, capability Capability) (string, error) {
+	return Scope{ChainID: chainID, Capability: capability}.Canonical()
+}
+
+// DependencyScope maps one validated request scope onto a required dependency
+// capability: the chain, asset and business-type (kind) dimensions are carried
+// over unchanged and only the capability dimension is replaced. This is the
+// explicit dependency coverage mapping of data-model §3.2 — the gate never
+// reuses the dependent capability's scope string for its dependency and never
+// compares entry-scope strings for equality. A dependency release covers the
+// dependent capability only when it was granted for the same chain, asset and
+// business type.
+func DependencyScope(requested Scope, dependency Capability) Scope {
+	return Scope{
+		ChainID:    requested.ChainID,
+		Asset:      requested.Asset,
+		Kind:       requested.Kind,
+		Capability: dependency,
+	}
+}
+
+// ParseCapabilityScope parses raw and requires that it is a canonical
+// capability scope of capability c: the expression must be a valid canonical
+// scope (all ParseScope rules) and its capability dimension must equal c. Any
+// failure — a malformed or non-canonical expression, an unknown dimension, a
+// missing capability, a legacy opaque string, or a scope naming a different
+// capability — returns a *ScopeRefusal with the closed class scope_mismatch
+// and no value is ever translated or defaulted.
+//
+// The returned Scope canonicalizes the same expression: callers that record a
+// scope_hash call Canonical (or CanonicalScopeHash) and record that exact
+// canonical form, because the control store keys streams by the recorded
+// string and equivalent representations must converge on one key.
+func ParseCapabilityScope(raw string, c Capability) (Scope, error) {
+	if !c.Known() {
+		return Scope{}, scopeRefusef("capability %q is outside the closed 7-capability set %v", c, KnownCapabilities())
+	}
+	scope, err := ParseScope(raw)
+	if err != nil {
+		return Scope{}, err
+	}
+	if scope.Capability != c {
+		return Scope{}, scopeRefusef("scope names capability %s but the request is for capability %s; a scope never covers a different capability", scope.Capability, c)
+	}
+	if _, err := scope.Canonical(); err != nil {
+		return Scope{}, err
+	}
+	return scope, nil
+}
+
+// ScopeEffectClass returns the effect-class key of a canonical scope: the
+// scope's business-type (kind) dimension. The deployment ruling
+// (EffectClassRuling) resolves that key; an omitted kind is an empty class and
+// stays unknown, which classifies conservatively (dual for the two event
+// capabilities). The class is never supplied by an operator flag: it is read
+// from the scope expression the release/approval is bound to.
+func ScopeEffectClass(scope Scope) EffectClass { return EffectClass(scope.Kind) }
+
 // CheckScopeMatch verifies that a requested scope and the scope recorded on a
 // release/approval are the same canonical scope. Any mismatch, empty scope,
 // malformed or non-canonical expression, and any unknown vocabulary refuses
@@ -505,6 +611,73 @@ func (r EffectClassRuling) impactOf(effectClass EffectClass) (EffectImpact, bool
 		return "", false, nil
 	}
 	return impact, true, nil
+}
+
+// Validate refuses a ruling outside the closed impact vocabulary and a ruling
+// above the entry bound. It is the construction-time check of the deployments
+// that assemble a gate or record a decision: a malformed ruling is a
+// deployment configuration error and the caller denies instead of guessing a
+// partial class. A nil/empty ruling is valid ("not configured").
+func (r EffectClassRuling) Validate() error {
+	if len(r) > maxEffectClassRulingEntries {
+		return fmt.Errorf("%w: ruling carries %d entries, above the bound of %d",
+			ErrEffectClassRuling, len(r), maxEffectClassRulingEntries)
+	}
+	for key, impact := range r {
+		if strings.TrimSpace(string(key)) == "" {
+			return fmt.Errorf("%w: an effect-class key is empty", ErrEffectClassRuling)
+		}
+		switch impact {
+		case EffectImpactRealDownstream, EffectImpactNoRealDownstream:
+		default:
+			return fmt.Errorf("%w: effect class %q carries impact %q outside the closed set %v",
+				ErrEffectClassRuling, key, impact, KnownEffectImpacts())
+		}
+	}
+	return nil
+}
+
+// ParseEffectClassRuling parses the deployment ruling carriage: a JSON object
+// mapping effect-class tokens to the closed impact set
+// ("real_downstream" | "no_real_downstream_effect"). Empty/blank input means
+// "not configured" and returns a nil ruling (every class unknown, event
+// capabilities conservatively dual). A malformed payload, an empty key, an
+// unknown impact or an over-bound ruling refuses with ErrEffectClassRuling:
+// the deployment configuration is never partially trusted.
+//
+// The ruling is trusted deployment configuration (EffectClassRulingConfigKey);
+// it is never an operator or caller-declared downgrade, and it can only narrow
+// the two event capabilities for scopes whose business-type dimension it
+// positively labels.
+func ParseEffectClassRuling(raw string) (EffectClassRuling, error) {
+	text := strings.TrimSpace(raw)
+	if text == "" {
+		return nil, nil
+	}
+	var decoded map[string]string
+	if err := json.Unmarshal([]byte(text), &decoded); err != nil {
+		return nil, fmt.Errorf("%w: the ruling must be a JSON object mapping effect-class tokens to impacts: %v",
+			ErrEffectClassRuling, err)
+	}
+	if len(decoded) > maxEffectClassRulingEntries {
+		return nil, fmt.Errorf("%w: ruling carries %d entries, above the bound of %d",
+			ErrEffectClassRuling, len(decoded), maxEffectClassRulingEntries)
+	}
+	if len(decoded) == 0 {
+		return nil, nil
+	}
+	ruling := make(EffectClassRuling, len(decoded))
+	for key, impact := range decoded {
+		class := EffectClass(strings.TrimSpace(key))
+		if class == "" {
+			return nil, fmt.Errorf("%w: an effect-class key is empty", ErrEffectClassRuling)
+		}
+		ruling[class] = EffectImpact(strings.TrimSpace(impact))
+	}
+	if err := ruling.Validate(); err != nil {
+		return nil, err
+	}
+	return ruling, nil
 }
 
 // RequiredApprovalClassForScope returns the conservative approval class of the

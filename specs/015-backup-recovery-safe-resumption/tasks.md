@@ -272,7 +272,7 @@
 
 - [x] T043 [P] [US4] 编写审批有效性契约测试 `internal/recovery/approvals_contract_test.go`（tags: contract）：single/dual 两档；dual=两条不同 principal 的 approve 且 `person_id` 互异（同一人双账号不算两人）；executor 排除按实例记录（不按「用户名不同」推断）；role 不符/principal 未注册/映射缺失→拒绝（无法证明不同人）；代次/哈希不符→失效；revoke 覆盖本 principal 先前 approve；硬门禁（缺证/未隔离/未知付款结果/开放缺口/既有资金门禁激活）不得被批准覆盖；仅适用 015 灾备后复服、不新增紧急绕过/管理员强制入口
 - [x] T044 [P] [US4] 编写放行/撤销/三态/幂等 PG 集成测试 `internal/recovery/release_integration_test.go`（tags: integration）：S8/S9 未获授权拒绝并审计；新提款创建/既有提款恢复/真实下游投递及可产生真实下游业务效果的消费恢复缺第二人 0 次放行；执行者自批 0 次；证据变化后旧批准 100% 失效、须重核重批；重复 approve/release/close ≥10 次零状态翻转；撤销必须显式、有授权、审计；`restored` 不得显示为 `verified`、`verified` 不得显示为 `released`（F16 术语）；F7（FR-022/023/024；SC-004/007）
-- [ ] T045 [P] [US4] 编写真实入口放行正例集成测试 `internal/app/recovery_release_integration_test.go`（tags: integration）：S8 前 `POST /withdrawals` 必须 503（`no_release` 类拒绝）；single 放行 `query` 后读路径可用而写路径仍拒绝；按依赖顺序 `chain_scan→deposit_confirmation→existing_withdrawal_recovery` 逐项放行；放行不得解锁/替代既有资金门禁（signer 交付、nonce hold、发送/执行门禁仍独立校验）；0 次直写放行（INV-2）
+- [x] T045 [P] [US4] 编写真实入口放行正例集成测试 `internal/app/recovery_release_integration_test.go`（tags: integration）：S8 前 `POST /withdrawals` 必须 503（`no_release` 类拒绝）；single 放行 `query` 后读路径可用而写路径仍拒绝；按依赖顺序 `chain_scan→deposit_confirmation→existing_withdrawal_recovery` 逐项放行；放行不得解锁/替代既有资金门禁（signer 交付、nonce hold、发送/执行门禁仍独立校验）；0 次直写放行（INV-2）
 - [x] T046 [P] [US4] 编写身份与授权路径验收测试 `internal/recovery/identity_path_integration_test.go`（tags: integration）：本地可操作身份配置——显式注册两个 person 的两个 principal 并完成双人批准；主体验证走部署受控配置（`TXHARBOR_RECOVERY_PRINCIPAL`）；缺映射/未注册 principal 拒绝；执行/核验/批准权限独立（一人可多 role，但 executor 不得批准自己执行的实例）；**禁止以任意 `person_id` 证明双人独立**（必须以显式映射+不同 person 证明）；部署名单内容待裁决、不阻塞本测试；**映射变更（F19）**：变更后旧批准立即失效（重核重批），变更审计可查（谁/何时/改了哪条映射），`person_id` 与当前映射不一致的批准按身份不可信拒绝（`approval_identity_unverified`）；保守 dual 不得抵消错映射（映射冲突时 0 放行）
 - [x] T047 [P] [US4] 编写代次与失效受控交错集成测试 `internal/recovery/generation_integration_test.go`（tags: integration；链 5）：写写反序——A 取证→B 取证并先提交→A 提交被丢弃且不写结果/不改缺口/不推进代次、仅 `result=discarded` 审计；批准后撤销→下一求值拒绝；检查后执行（隔离项被 rejected 后放行停止）；旧实例续跑/迟到核验→丢弃+审计；TTL 语义——有界、撤销后至迟于 TTL 到期/下一次求值拒绝，不得未经裁决把 TTL 变为「撤销后仍可执行」；TTL 到期+控制库不可达→拒绝；**单动作准入协议受控交错（F5/R3，逐项）**：①缓存命中后撤销——命中不得跳过本次准入的权威读取与授权校验，撤销后下一次准入拒绝；②证据/身份映射变化——代次/哈希/映射变化后下一次求值（未等 TTL）立即拒绝，缓存内旧代次放行不得用于新动作；③控制库不可达（含缓存过期）→拒绝；④撤销先于准入→拒绝；⑤准入后撤销→按在途＋unknown 纪律（不追溯中止已提交工作、不回滚），并阻止后续准入；后续重求值仍拒绝；缓存命中不得被追认为在途；⑥一次准入不得跨请求/循环步进/批次/异步重试复用；「未准入」（拒绝、无动作）与「已在途」（原门禁+unknown 纪律、不追溯中止）分别验收；外部副作用不可回滚：未知结果保持 unknown、不自动重付/重广播/重投递（FR-024；SC-007；INV-3/5/7）
 
@@ -287,7 +287,7 @@
 
 - [x] T048 [US4] 实现审批有效性于 `internal/recovery/approvals.go`（§3.1 逐字）：高影响档（dual）存在两条决策序最新 approve（不同 principal）且两人都有 `approver` role、两人 `person_id` 互不相同、两人 `person_id` 均 ≠ executor.person_id、两行 `scope_hash`/`evidence_generation`/`evidence_hash` 与当前一致、两行 `person_id` 与当前身份映射一致（映射变更→旧批准失效重批，F19）、均未被各自 revoke 覆盖；其余能力 single 档同条件一条；映射缺失/未注册/role 不符/执行者自批/代次不符/映射不一致/含 revoke→不满足；有效性派生、不在行上存布尔；append-only + `operation_id` 幂等（FR-023；依赖 T013；控制库版本守卫经 B2/T069）
 - [x] T049 [US4] 实现放行/撤销决策于 `internal/recovery/release.go`：`recovery_release` 逐字（`decision` CHECK(`release`,`revoke`)、`approval_refs` UUID[] 确定性排序、`evidence_generation`/`evidence_hash` 绑定、`operation_id` UNIQUE、append-only）；当前有效放行=最新 release 未被同 (I,C,S) 更晚 revoke 覆盖且 §3 条件全部成立、**每次门禁求值重算**；撤销显式且有授权审计；close 前置（全 7 能力有效 release；缺口未闭合不得 close）；supersede 仅显式双人批准；重复 release/revoke/close 按 `operation_id` 读回零翻转（FR-021/022/024；依赖 T048；版本守卫经 B2/T069）
-- [ ] T050 [US4] 实现能力范围/effect class 保守分类于 `internal/recovery/scope.go`：规范化 `scope_hash`（链/资产/业务类型/能力）；高影响档判定（新提款创建、既有提款恢复、向真实下游投递、可产生真实下游业务效果的消费恢复→dual）；真实下游 effect class 清单属部署前裁决——未配置/未知一律保守按 dual、不得默认 single；范围匹配失败→`scope_mismatch` 拒绝（FR-021/023；依赖 T048；版本守卫经 B2/T069）
+- [x] T050 [US4] 实现能力范围/effect class 保守分类于 `internal/recovery/scope.go`：规范化 `scope_hash`（链/资产/业务类型/能力）；高影响档判定（新提款创建、既有提款恢复、向真实下游投递、可产生真实下游业务效果的消费恢复→dual）；真实下游 effect class 清单属部署前裁决——未配置/未知一律保守按 dual、不得默认 single；范围匹配失败→`scope_mismatch` 拒绝（FR-021/023；依赖 T048；版本守卫经 B2/T069）
 
 ### 批次 B14 · 放行/状态 CLI（链 4）
 
@@ -297,7 +297,7 @@
 - **验证层次**: PG integration + app 级 integration。
 - **提交节点**: 本批退出时本地 commit（不 push）；US4 checkpoint 可验收。
 
-- [ ] T051 [US4] 实现 `recovery-admin approve/release/status` 接线于 `internal/app/recoveryadmin/approve.go` + `internal/app/recoveryadmin/status.go`：approve/revoke/release/revoke-release 校验对应审批记录（无有效批准不得 release）；主体绑定+自由文本仅审计+`operation_id` 幂等；`status` 只读、逐能力显示 `restored/verified/released` 三态与阻塞原因、拒绝分类；不得把未核验或回退后数据显示为正常一致；健康探针不得替代资金门禁判权；**有界只读复核 bounds（F13）**：定义可读范围（本实例及授权 scope 内的证据/核验/缺口/审计行；禁止无界全表扫描）、次数/时间/资源预算（部署配置，本地值仅测试输入）、耗尽行为（拒绝后续复核＋审计，不改变缺口/实例/批准/放行状态）；超时/预算耗尽/人工知悉≠缺口闭合/获准复服（FR-019）；术语（F16）：对外状态统一 `released`＝派生放行，`approved` 仅指有效批准记录、不构成放行（FR-022/026；依赖 T048–T050；版本守卫经 B2/T069，缺此检查不得称完成）
+- [x] T051 [US4] 实现 `recovery-admin approve/release/status` 接线于 `internal/app/recoveryadmin/approve.go` + `internal/app/recoveryadmin/status.go`：approve/revoke/release/revoke-release 校验对应审批记录（无有效批准不得 release）；主体绑定+自由文本仅审计+`operation_id` 幂等；`status` 只读、逐能力显示 `restored/verified/released` 三态与阻塞原因、拒绝分类；不得把未核验或回退后数据显示为正常一致；健康探针不得替代资金门禁判权；**有界只读复核 bounds（F13）**：定义可读范围（本实例及授权 scope 内的证据/核验/缺口/审计行；禁止无界全表扫描）、次数/时间/资源预算（部署配置，本地值仅测试输入）、耗尽行为（拒绝后续复核＋审计，不改变缺口/实例/批准/放行状态）；超时/预算耗尽/人工知悉≠缺口闭合/获准复服（FR-019）；术语（F16）：对外状态统一 `released`＝派生放行，`approved` 仅指有效批准记录、不构成放行（FR-022/026；依赖 T048–T050；版本守卫经 B2/T069，缺此检查不得称完成）
 
 **Checkpoint（Phase 6 · US4）**: S8/S9/S10/S11 通过、F7 拒绝矩阵全绿；7 能力独立条件与审计记录齐备；证据失效重批可观察；本地 commit（不 push）。
 
@@ -317,9 +317,9 @@
 - **验证层次**: unit + PG integration + Kafka 层（`make test-integration-kafka`）。
 - **提交节点**: 本批退出时本地 commit（不 push）。
 
-- [ ] T052 [P] [US5] 实现事件/下游边界报告于 `internal/recovery/boundary.go`：回退检测（PG 进度 vs broker committed offset，broker 不可读→unknown）；重复事件由既有 `consumer_inbox`/`consumer_versions` 幂等吸收、缺失的历史幂等记录不得静默补写为「已处理」、不得据缺失判定可重执行；下游去重稳定身份=`event_id`+source 三元组与检测/处置边界；可能的外部重复效果可检测可报告；MUST NOT 宣称跨系统恰好一次；未接入真实上游/下游回执时只声明本项目可验证范围（FR-027/028/029；依赖 T040）
-- [ ] T053 [P] [US5] 编写事件层回退/重复集成测试 `internal/events/recovery_boundary_integration_test.go`（tags: integration_kafka）：真实 broker；offset/inbox 回退被检测；重复消费幂等吸收零错误效果；缺失记录不触发有副作用的重处理；重新处理只能经既有 quarantine replay 等授权路径；Docker 缺位 → NOT RUN（FR-027；SC-006 事件侧）
-- [ ] T054 [US5] 编写应用层事件边界集成测试 `internal/app/recovery_eventboundary_integration_test.go`（tags: integration）：恢复后 `event-publisher`/`event-consumer` 路径门禁+回退检测可观察；重复不产生额外真实效果；未核验不显示正常；参考账本仅证据、非账本（FR-027/028/029；依赖 T052）
+- [x] T052 [P] [US5] 实现事件/下游边界报告于 `internal/recovery/boundary.go`：回退检测（PG 进度 vs broker committed offset，broker 不可读→unknown）；重复事件由既有 `consumer_inbox`/`consumer_versions` 幂等吸收、缺失的历史幂等记录不得静默补写为「已处理」、不得据缺失判定可重执行；下游去重稳定身份=`event_id`+source 三元组与检测/处置边界；可能的外部重复效果可检测可报告；MUST NOT 宣称跨系统恰好一次；未接入真实上游/下游回执时只声明本项目可验证范围（FR-027/028/029；依赖 T040）
+- [x] T053 [P] [US5] 编写事件层回退/重复集成测试 `internal/events/recovery_boundary_integration_test.go`（tags: integration_kafka）：真实 broker；offset/inbox 回退被检测；重复消费幂等吸收零错误效果；缺失记录不触发有副作用的重处理；重新处理只能经既有 quarantine replay 等授权路径；Docker 缺位 → NOT RUN（FR-027；SC-006 事件侧）
+- [x] T054 [US5] 编写应用层事件边界集成测试 `internal/app/recovery_eventboundary_integration_test.go`（tags: integration）：恢复后 `event-publisher`/`event-consumer` 路径门禁+回退检测可观察；重复不产生额外真实效果；未核验不显示正常；参考账本仅证据、非账本（FR-027/028/029；依赖 T052）
 
 **Checkpoint（Phase 7 · US5）**: 重复/回退/缺失三组场景全部收敛保守；对外结论限定本项目范围；本地 commit（不 push）。
 
@@ -339,9 +339,9 @@
 - **验证层次**: unit + PG integration。
 - **提交节点**: 本批退出时本地 commit（不 push）。
 
-- [ ] T055 [P] [US6] 实现恢复指标于 `internal/metrics/recovery.go`：有界低基数（ENUM label：capability/refusal_class/result；无原始 ID/tx hash）；放行/拒绝/缺口/丢弃/重试计数；度量分开记录并分类——`recovery point`、`db_restore_time`、`verification_time`、`per_capability_release_time`、`backup_lag`、`uncovered_interval`、缺口数量与处置状态；**不得以数据库可连接宣称 RTO 达标**；若配置了时间目标，超时 100% 记不达标+告警+升级且不单独永久禁止后续安全复服；未配置必需约束→显式「未配置」状态（FR-031/036；C1）
-- [ ] T056 [P] [US6] 实现演练记录模型于 `internal/recovery/drill.go`：`recovery_drill_run` 逐字（`scenario` 含 7 类失败注入标识、`recovery_point` JSONB、`db_restore_seconds`/`verification_seconds` NUMERIC 分开、`capability_release_seconds` JSONB per capability、`backup_lag`/`uncovered_interval` JSONB、`constraints_configured` BOOL、`test_inputs` JSONB、`gap_counts` JSONB、`result` CHECK(`ok`,`refused_safe`,`failed_injected`)、`log_ref`）；不写生产阈值承诺；时间口径分开、禁止用 `db_restore_seconds` 单独宣称 RTO 达标（FR-030/031/036）
-- [ ] T057 [US6] 实现 `recovery-admin drill` 接线于 `internal/app/recoveryadmin/drill.go`：隔离环境真实恢复流程（不得以重新初始化空库冒充恢复）、S12 分列记录、可重复且结果可存档；未配置必需约束标注用途与未配置状态；演练产物引用 `docs/evidence/015/`（FR-030；依赖 T055、T056）
+- [x] T055 [P] [US6] 实现恢复指标于 `internal/metrics/recovery.go`：有界低基数（ENUM label：capability/refusal_class/result；无原始 ID/tx hash）；放行/拒绝/缺口/丢弃/重试计数；度量分开记录并分类——`recovery point`、`db_restore_time`、`verification_time`、`per_capability_release_time`、`backup_lag`、`uncovered_interval`、缺口数量与处置状态；**不得以数据库可连接宣称 RTO 达标**；若配置了时间目标，超时 100% 记不达标+告警+升级且不单独永久禁止后续安全复服；未配置必需约束→显式「未配置」状态（FR-031/036；C1）
+- [x] T056 [P] [US6] 实现演练记录模型于 `internal/recovery/drill.go`：`recovery_drill_run` 逐字（`scenario` 含 7 类失败注入标识、`recovery_point` JSONB、`db_restore_seconds`/`verification_seconds` NUMERIC 分开、`capability_release_seconds` JSONB per capability、`backup_lag`/`uncovered_interval` JSONB、`constraints_configured` BOOL、`test_inputs` JSONB、`gap_counts` JSONB、`result` CHECK(`ok`,`refused_safe`,`failed_injected`)、`log_ref`）；不写生产阈值承诺；时间口径分开、禁止用 `db_restore_seconds` 单独宣称 RTO 达标（FR-030/031/036）
+- [x] T057 [US6] 实现 `recovery-admin drill` 接线于 `internal/app/recoveryadmin/drill.go`：隔离环境真实恢复流程（不得以重新初始化空库冒充恢复）、S12 分列记录、可重复且结果可存档；未配置必需约束标注用途与未配置状态；演练产物引用 `docs/evidence/015/`（FR-030；依赖 T055、T056）
 
 ### 批次 B17 · 独立演练通道（链 1/6/7）
 

@@ -21,13 +21,14 @@
 //     carried a release decision for the capability, so a release that was
 //     revoked or invalidated by a generation change refuses instead of being
 //     read as "released". No release-validity logic is re-implemented here.
-//   - If any release row exists for a funds/delivery capability
-//     (existing_withdrawal_recovery, new_withdrawal_creation, event_publishing,
-//     event_consuming — the conservative dual class of RequiredApprovalClass),
-//     close additionally requires the current release of every such capability
-//     to resolve to two distinct non-executor people; the explicit check keeps
-//     the T027 dual condition reviewable independent of the conservative
-//     approval-class table (T050/T049 may tighten; they must not silently
+//   - A capability whose current release classifies dual (T050 scope
+//     classification: existing_withdrawal_recovery and new_withdrawal_creation
+//     are inherently dual; event_publishing/event_consuming narrow only under
+//     a trusted positive deployment ruling that labels their released scope as
+//     having no real downstream effect) must resolve its current release to
+//     two distinct non-executor people before the instance may close. The
+//     explicit check keeps the T027 dual condition reviewable independent of
+//     the recording path (T050/T049 may tighten; they must not silently
 //     relax it).
 //   - An open evidence gap keeps the instance open: close is refused with
 //     refusal_class gap_open, the result marks the escalation and the audit
@@ -311,75 +312,61 @@ func CloseInstance(ctx context.Context, store *controlstore.Store, gate *Gate, r
 		}
 	}
 
-	// T027 dual condition: when this instance ever released a funds/delivery
-	// capability, close additionally requires the current release of every such
-	// capability to resolve to two distinct non-executor people. The gate's
-	// conservative approval classes already enforce dual for these
-	// capabilities; this explicit re-derivation keeps the close condition
-	// reviewable on its own and refuses if a future class table is relaxed.
+	// T027 dual condition: when this instance released a funds/delivery
+	// capability, close additionally requires the current release of every
+	// such capability to resolve to two distinct non-executor people. The
+	// dual set is derived from the same conservative scope classification the
+	// gate applies (T050): new_withdrawal_creation and
+	// existing_withdrawal_recovery are inherently dual, and the two event
+	// capabilities are dual unless the trusted deployment ruling positively
+	// labels the released scope's business type as having no real downstream
+	// effect. The judgement is re-derived here on the current release's own
+	// scope so it stays reviewable independent of the recording path and
+	// refuses if a future class table is relaxed.
 	dualChecked := false
 	if len(blockers) == 0 {
-		needsDual := false
+		dualChecked = true
+		ids := newGateIdentities(ctx, tx, locked.InstanceID, locked.OpenedBy)
+		if err := ids.ensureParticipants(); err != nil {
+			return result, err
+		}
 		for _, capability := range KnownCapabilities() {
-			class, err := RequiredApprovalClass(capability)
+			outcome := outcomes[capability]
+			if !outcome.allowed {
+				continue
+			}
+			releasedScope, err := ParseCapabilityScope(outcome.scope, capability)
+			if err != nil {
+				return result, fmt.Errorf("close guarded scope of capability %s: %w", capability, err)
+			}
+			class, err := gate.requiredApprovalClass(releasedScope)
 			if err != nil {
 				return result, err
 			}
 			if class != ApprovalClassDualNonExecutor {
 				continue
 			}
-			var hasRelease bool
-			if err := tx.QueryRow(ctx,
-				`SELECT EXISTS (SELECT 1 FROM recovery_release
-				 WHERE instance_id = $1 AND capability = $2 AND decision = 'release')`,
-				locked.InstanceID, string(capability)).Scan(&hasRelease); err != nil {
-				return result, fmt.Errorf("read release history of capability %s: %w", capability, err)
+			decision, err := store.CurrentReleaseDecision(ctx, tx, controlstore.DecisionKey{
+				InstanceID: locked.InstanceID,
+				Capability: string(capability),
+				ScopeHash:  outcome.scope,
+			})
+			if err != nil {
+				return result, fmt.Errorf("read current release of capability %s: %w", capability, err)
 			}
-			if hasRelease {
-				needsDual = true
-				break
+			persons, err := instanceApprovalPersons(ctx, store, ids, locked, decision.ApprovalRefs)
+			if err != nil {
+				return result, fmt.Errorf("re-derive the approval basis of capability %s: %w", capability, err)
 			}
-		}
-		if needsDual {
-			dualChecked = true
-			ids := newGateIdentities(ctx, tx, locked.InstanceID, locked.OpenedBy)
-			if err := ids.ensureParticipants(); err != nil {
-				return result, err
-			}
-			for _, capability := range KnownCapabilities() {
-				class, err := RequiredApprovalClass(capability)
-				if err != nil {
-					return result, err
+			if len(persons) < 2 {
+				reason := fmt.Sprintf(
+					"capability %s was released during this instance; close requires dual two-person approval of its current release and only %d distinct non-executor person(s) are valid",
+					capability, len(persons))
+				outcomes[capability] = capabilityOutcome{
+					refusalClass: string(RefusalApprovalMissing),
+					reason:       reason,
 				}
-				if class != ApprovalClassDualNonExecutor {
-					continue
-				}
-				outcome := outcomes[capability]
-				if !outcome.allowed {
-					continue
-				}
-				decision, err := store.CurrentReleaseDecision(ctx, tx, controlstore.DecisionKey{
-					InstanceID: locked.InstanceID,
-					Capability: string(capability),
-					ScopeHash:  outcome.scope,
-				})
-				if err != nil {
-					return result, fmt.Errorf("read current release of capability %s: %w", capability, err)
-				}
-				persons, err := instanceApprovalPersons(ctx, store, ids, locked, decision.ApprovalRefs)
-				if err != nil {
-					return result, fmt.Errorf("re-derive the approval basis of capability %s: %w", capability, err)
-				}
-				if len(persons) < 2 {
-					reason := fmt.Sprintf(
-						"capability %s was released during this instance; close requires dual two-person approval of its current release and only %d distinct non-executor person(s) are valid",
-						capability, len(persons))
-					outcomes[capability] = capabilityOutcome{
-						refusalClass: string(RefusalApprovalMissing),
-						reason:       reason,
-					}
-					blockers = append(blockers, reason)
-				}
+				blockers = append(blockers, reason)
 			}
 		}
 	}

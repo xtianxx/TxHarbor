@@ -29,6 +29,8 @@
 
 每条批准/撤销记录必须含：授权主体与权限、能力、范围（`scope_hash`：链/资产/业务类型/能力）、理由、依据证据的 **代次 + 证据哈希**、时间与结果；写入 `recovery_approval`（append-only，`operation_id` UNIQUE）。
 
+范围与档位（T050）：`scope_hash` 为规范化能力范围（键排序、大小写/数值/空白归一；能力与链必填），批准/放行只按规范能力 scope 匹配——跨能力 scope、旧 opaque（如 `chain=1;surface=serve`）与非规范化串一律 `scope_mismatch` 拒绝、零写入，旧批准须在规范 scope 上重核重批。审批档由 scope 级 `RequiredApprovalClassForScope` 结合受控部署 effect-class ruling（`TXHARBOR_RECOVERY_EFFECT_CLASS_RULING`）判定；未配置/未知一律保守 dual，调用者不得自声明降档。批准行写入的快照固定为保守编译档（ruling 不可作为批准请求输入）；scope+ruling 的收窄只在门禁/放行的派生判定生效，保守 dual 快照可满足收窄后的 single 要求（反向不成立）。
+
 生效（由门禁派生评估，非行上布尔）：
 
 1. 实例 open；principal 已注册且具 `approver` role；

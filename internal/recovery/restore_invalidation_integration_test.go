@@ -51,8 +51,6 @@ import (
 	"github.com/xtianxx/txharbor/internal/recovery/controlstore"
 )
 
-const rsiScope = "chain=1;asset=usdc;kind=restore-invalidation"
-
 // rsiGateFixture extends the recovery fixture with the approver identity and
 // returns a gateFixture view over the same control store and instance.
 func rsiGateFixture(t *testing.T, f *bkpFixture) *gateFixture {
@@ -61,7 +59,7 @@ func rsiGateFixture(t *testing.T, f *bkpFixture) *gateFixture {
 	gateRegister(t, f.ctx, f.store, f.instanceID, "auth:approver", "approver")
 	return &gateFixture{
 		ctx: f.ctx, dsn: f.ctrlDSN, pool: f.ctrl, store: f.store,
-		instanceID: f.instanceID, scope: rsiScope,
+		instanceID: f.instanceID,
 	}
 }
 
@@ -401,7 +399,7 @@ func TestRestoreStartInterleavingDoesNotRewindAdmittedAction(t *testing.T) {
 	admitted := make(chan admitOutcome, 1)
 	go func() {
 		decision, err := gate.Admit(f.ctx, GateRequest{
-			InstanceID: f.instanceID, Capability: CapabilityQuery, ScopeHash: rsiScope,
+			InstanceID: f.instanceID, Capability: CapabilityQuery, ScopeHash: gateScopeFor(CapabilityQuery),
 			Actor: "deploy:executor", OperationID: gateOperation("rsi-admit"), Action: "test:restore-interleaving",
 		})
 		admitted <- admitOutcome{decision: decision, err: err}

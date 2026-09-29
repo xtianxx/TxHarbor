@@ -386,7 +386,7 @@ func TestIsolationReleaseRequiresVerifiedDependencySet(t *testing.T) {
 	admit := func(capability Capability) GateDecision {
 		t.Helper()
 		d, err := gate.Admit(f.ctx, GateRequest{
-			InstanceID: f.instanceID, Capability: capability, ScopeHash: f.scope,
+			InstanceID: f.instanceID, Capability: capability, ScopeHash: gateScopeFor(capability),
 			Actor: "deploy:executor", OperationID: gateOperation("iso-admit"),
 		})
 		if err != nil {
@@ -457,7 +457,7 @@ func TestNewWithdrawalCreationCannotPassWhileExistingRecoveryUnreleased(t *testi
 	admit := func(capability Capability) GateDecision {
 		t.Helper()
 		d, err := gate.Admit(f.ctx, GateRequest{
-			InstanceID: f.instanceID, Capability: capability, ScopeHash: f.scope,
+			InstanceID: f.instanceID, Capability: capability, ScopeHash: gateScopeFor(capability),
 			Actor: "deploy:executor", OperationID: gateOperation("iso-dependency-admit"),
 		})
 		if err != nil {
@@ -523,7 +523,7 @@ func TestOldInstanceIsolationUnprovenRefusesAllEffectfulAdmissions(t *testing.T)
 	for _, capability := range effectful {
 		// (a) An unbound (old or forgotten) caller cannot act in recovery mode.
 		d, err := gate.Admit(f.ctx, GateRequest{
-			Capability: capability, ScopeHash: f.scope, Actor: "deploy:old-writer", OperationID: gateOperation("iso-f5-unbound"),
+			Capability: capability, ScopeHash: gateScopeFor(capability), Actor: "deploy:old-writer", OperationID: gateOperation("iso-f5-unbound"),
 		})
 		if err != nil {
 			t.Fatalf("unbound Admit(%s): %v", capability, err)
@@ -535,7 +535,7 @@ func TestOldInstanceIsolationUnprovenRefusesAllEffectfulAdmissions(t *testing.T)
 
 		// (b) A caller bound to an old/unknown instance id is refused.
 		d, err = gate.Admit(f.ctx, GateRequest{
-			InstanceID: oldInstance, Capability: capability, ScopeHash: f.scope, Actor: "deploy:old-writer", OperationID: gateOperation("iso-f5-old"),
+			InstanceID: oldInstance, Capability: capability, ScopeHash: gateScopeFor(capability), Actor: "deploy:old-writer", OperationID: gateOperation("iso-f5-old"),
 		})
 		if err != nil {
 			t.Fatalf("old-instance Admit(%s): %v", capability, err)
@@ -549,7 +549,7 @@ func TestOldInstanceIsolationUnprovenRefusesAllEffectfulAdmissions(t *testing.T)
 		// isolation evidence is unproven, and the reason names the missing
 		// evidence (old_writers_stopped is the first item of every closure).
 		d, err = gate.Admit(f.ctx, GateRequest{
-			InstanceID: f.instanceID, Capability: capability, ScopeHash: f.scope, Actor: "deploy:executor", OperationID: gateOperation("iso-f5-current"),
+			InstanceID: f.instanceID, Capability: capability, ScopeHash: gateScopeFor(capability), Actor: "deploy:executor", OperationID: gateOperation("iso-f5-current"),
 		})
 		if err != nil {
 			t.Fatalf("current-instance Admit(%s): %v", capability, err)

@@ -77,7 +77,7 @@ func EventPublisher(ctx context.Context, args []string, d Deps) int {
 	// means normal mode (FR-023); once configured, a missing gate TTL, an
 	// unreachable control store or an unknown/incompatible schema refuses
 	// startup — no degraded pass-through.
-	wiring, err := assembleEventsRecovery(ctx, cfg, d.getenv(), eventPublishingScope(cfg.ChainID))
+	wiring, err := assembleEventsRecovery(ctx, cfg, d.getenv(), recovery.CapabilityEventPublishing)
 	if err != nil {
 		fmt.Fprintf(stderr, "txharbor event-publisher: %s\n", logx.Redact(err.Error()))
 		return 1

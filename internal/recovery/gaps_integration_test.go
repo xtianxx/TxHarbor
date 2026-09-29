@@ -185,7 +185,7 @@ func gapOpenValid(t *testing.T, f *gateFixture, gaps *Gaps, objectKey string, ca
 func gapAdmit(t *testing.T, f *gateFixture, gate *Gate, capability Capability) GateDecision {
 	t.Helper()
 	decision, err := gate.Admit(f.ctx, GateRequest{
-		InstanceID: f.instanceID, Capability: capability, ScopeHash: f.scope,
+		InstanceID: f.instanceID, Capability: capability, ScopeHash: gateScopeFor(capability),
 		Actor: "deploy:executor", OperationID: gateOperation("gap-admit"),
 	})
 	if err != nil {

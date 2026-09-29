@@ -185,6 +185,15 @@ const (
 	// binding is refused (T022/T027 instance-bound execution).
 	EnvRecoveryInstance = "TXHARBOR_RECOVERY_INSTANCE"
 	EnvRecoveryGateTTL  = "TXHARBOR_RECOVERY_GATE_TTL"
+	// EnvRecoveryEffectClassRuling carries the trusted deployment ruling of
+	// the real downstream effect classes (T050): a JSON object mapping
+	// effect-class tokens to "real_downstream" or
+	// "no_real_downstream_effect". It is deployment configuration, never an
+	// operator flag; an absent key means "not configured" and the two event
+	// capabilities stay conservatively dual. The recovery package parses and
+	// validates it (recovery.ParseEffectClassRuling); this package only checks
+	// that the value is a JSON object of string values.
+	EnvRecoveryEffectClassRuling = "TXHARBOR_RECOVERY_EFFECT_CLASS_RULING"
 	// EnvRecoveryEvidenceFreshnessPrefix prefixes the per-evidence-category
 	// freshness tolerance keys: TXHARBOR_RECOVERY_EVIDENCE_FRESHNESS_<CATEGORY>.
 	EnvRecoveryEvidenceFreshnessPrefix = "TXHARBOR_RECOVERY_EVIDENCE_FRESHNESS_"
@@ -454,6 +463,12 @@ type RecoveryConfig struct {
 	// GateTTL bounds the gate-evaluation cache (required by the gate; no
 	// default).
 	GateTTL time.Duration
+	// EffectClassRulingJSON is the raw JSON object of the trusted effect-class
+	// ruling (EnvRecoveryEffectClassRuling). Empty means "not configured"; the
+	// recovery package parses and validates the closed impact vocabulary
+	// (recovery.ParseEffectClassRuling) at assembly, where a malformed ruling
+	// refuses the command by key name.
+	EffectClassRulingJSON string
 	// RPOTarget is the configured recovery-point objective.
 	RPOTarget time.Duration
 	// RTOTarget is the configured recovery-time objective.
@@ -1527,6 +1542,16 @@ func (c *Config) loadRecovery015(getenv Getenv, errs *[]error) {
 	}
 	if raw, ok := getenv(EnvRecoveryArtifactDir); ok && raw != "" {
 		c.Recovery.ArtifactDir = raw
+	}
+	if raw, ok := getenv(EnvRecoveryEffectClassRuling); ok && strings.TrimSpace(raw) != "" {
+		trimmed := strings.TrimSpace(raw)
+		var ruling map[string]string
+		if err := json.Unmarshal([]byte(trimmed), &ruling); err != nil {
+			*errs = append(*errs, invalid(EnvRecoveryEffectClassRuling,
+				"must be a JSON object mapping effect-class tokens to impacts: %v", err))
+		} else {
+			c.Recovery.EffectClassRulingJSON = trimmed
+		}
 	}
 	positiveDuration := func(name string, dest *time.Duration) {
 		raw, ok := getenv(name)

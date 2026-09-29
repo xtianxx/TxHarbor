@@ -79,13 +79,6 @@ const (
 	// status review and of its gate evaluations (GateRequest.Action).
 	recoveryActionStatusReview = "status_review"
 
-	// recoveryStatusProbeScope is the unrecorded review marker scope used when
-	// the instance records no release/approval scope and the operator
-	// configured no --scope: every decision stream is empty at it, so the
-	// derived class is exactly the gate's evaluation order (dependencies,
-	// isolation, gaps, then no_release). The value is never written anywhere.
-	recoveryStatusProbeScope = "review=status"
-
 	// recoveryStatusAuditFallbackActor is the audit actor label of a refusal
 	// whose deployment principal is not configured. It is an audit label only
 	// and never authorizes anything.
@@ -175,7 +168,10 @@ func recoveryAdminStatus(ctx context.Context, args []string, d Deps) int {
 		instanceArg = openID
 	}
 
-	var scopeFilter string
+	var (
+		scopeFilter           string
+		scopeFilterCapability recovery.Capability
+	)
 	if raw := strings.TrimSpace(*scopeFlag); raw != "" {
 		scopeFilter, err = recovery.CanonicalScopeHash(raw)
 		if err != nil {
@@ -185,6 +181,16 @@ func recoveryAdminStatus(ctx context.Context, args []string, d Deps) int {
 				recovery.RefusalScopeMismatch, logx.Redact(reason))
 			return 1
 		}
+		filterScope, parseErr := recovery.ParseScope(scopeFilter)
+		if parseErr != nil {
+			// Unreachable: CanonicalScopeHash parsed the same expression.
+			reason := fmt.Sprintf("--scope %q cannot be attributed to a capability: %v", raw, parseErr)
+			recoveryStatusRefuse(ctx, env, instanceArg, "", string(recovery.RefusalScopeMismatch), reason)
+			fmt.Fprintf(stderr, "txharbor recovery-admin status: refused: refusal_class=%s %s (no state changed)\n",
+				recovery.RefusalScopeMismatch, logx.Redact(reason))
+			return 1
+		}
+		scopeFilterCapability = filterScope.Capability
 	}
 
 	if refusalClass, err := recoveryStatusRequireParticipant(ctx, env, instanceArg); err != nil {
@@ -197,7 +203,11 @@ func recoveryAdminStatus(ctx context.Context, args []string, d Deps) int {
 	if code != 0 {
 		return code
 	}
-	gate, err := recovery.NewGate(env.store, recovery.GateOptions{TTL: ttl})
+	ruling, code := recoveryGateEffectClassRuling(d, "status")
+	if code != 0 {
+		return code
+	}
+	gate, err := recovery.NewGate(env.store, recovery.GateOptions{TTL: ttl, EffectClassRuling: ruling})
 	if err != nil {
 		fmt.Fprintf(stderr, "txharbor recovery-admin status: %s\n", logx.Redact(err.Error()))
 		return 1
@@ -206,13 +216,14 @@ func recoveryAdminStatus(ctx context.Context, args []string, d Deps) int {
 	reviewCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 	review := &recoveryStatusReview{
-		pool:        env.pool,
-		instanceID:  instanceArg,
-		scopeFilter: scopeFilter,
-		principal:   env.principal,
-		operation:   recoveryActionStatusReview + ":" + uuid.NewString(),
-		maxReads:    maxReads,
-		maxRows:     maxRows,
+		pool:                  env.pool,
+		instanceID:            instanceArg,
+		scopeFilter:           scopeFilter,
+		scopeFilterCapability: scopeFilterCapability,
+		principal:             env.principal,
+		operation:             recoveryActionStatusReview + ":" + uuid.NewString(),
+		maxReads:              maxReads,
+		maxRows:               maxRows,
 	}
 	if err := review.run(reviewCtx, gate); err != nil {
 		refusalClass := ""
@@ -400,8 +411,11 @@ type recoveryStatusReview struct {
 	pool        *pgxpool.Pool
 	instanceID  string
 	scopeFilter string
-	principal   string
-	operation   string
+	// scopeFilterCapability is the capability named by a configured --scope
+	// filter: a canonical scope names exactly one capability stream (T050).
+	scopeFilterCapability recovery.Capability
+	principal             string
+	operation             string
 
 	maxReads int
 	maxRows  int
@@ -412,8 +426,13 @@ type recoveryStatusReview struct {
 	verification map[string]map[string]int64
 	gaps         []recoveryStatusGap
 	scopes       []string
-	auditCensus  map[string]int64
-	capabilities []recoveryStatusCapability
+	// unattributable holds recorded scopes outside the canonical capability
+	// form (legacy opaque strings, non-canonical expressions). They match no
+	// canonical stream, are never translated or guessed, and are surfaced so
+	// the operator re-approves/re-releases at the canonical scope.
+	unattributable []string
+	auditCensus    map[string]int64
+	capabilities   []recoveryStatusCapability
 }
 
 // spend accounts one bounded read/evaluation against the 次数 budget.
@@ -676,23 +695,22 @@ SELECT result, count(*) FROM recovery_audit
 }
 
 // evaluate runs the single derived release evaluation for every capability at
-// every recorded scope (or at the filter/marker scope when none is recorded).
-// Each evaluation is audited by the gate as request_action=status_review; the
-// review itself writes no decision.
+// every recorded canonical scope of that capability. A recorded scope outside
+// the canonical capability form (T050) is never translated or evaluated: it
+// matches no canonical stream and is surfaced as unattributable for
+// re-approval/re-release. When a capability records no scope and the instance
+// records canonical scopes of exactly one chain, the review probes that
+// capability's canonical scope (a value never written) so the derived class is
+// exactly the gate's evaluation order (dependencies at their mapped scopes,
+// isolation, gaps, then no_release). Each evaluation is audited by the gate as
+// request_action=status_review; the review itself writes no decision.
 func (r *recoveryStatusReview) evaluate(ctx context.Context, gate *recovery.Gate) error {
-	scopes := r.scopes
-	marker := false
-	if r.scopeFilter != "" {
-		// A configured --scope is the authoritative range: evaluate exactly
-		// it, even when no decision stream is recorded at it (the gate then
-		// derives the capability's blocking class at that scope).
-		if len(scopes) == 0 {
-			scopes = []string{r.scopeFilter}
+	byCapability, chains := r.canonicalScopes()
+	var probeChain uint64
+	if len(chains) == 1 {
+		for chain := range chains {
+			probeChain = chain
 		}
-	}
-	if len(scopes) == 0 {
-		scopes = []string{recoveryStatusProbeScope}
-		marker = true
 	}
 	for _, capability := range recovery.KnownCapabilities() {
 		line := recoveryStatusCapability{
@@ -700,6 +718,29 @@ func (r *recoveryStatusReview) evaluate(ctx context.Context, gate *recovery.Gate
 			restored:   r.restore.probeCount > 0,
 		}
 		line.verified, line.verification, line.divergent = r.capabilityVerified(capability)
+
+		scopes := byCapability[capability]
+		marker := false
+		switch {
+		case r.scopeFilter != "":
+			// A configured --scope is the authoritative range: evaluate exactly
+			// the single capability stream it names, even when no decision
+			// stream is recorded at it.
+			scopes = nil
+			if r.scopeFilterCapability == capability {
+				scopes = []string{r.scopeFilter}
+			}
+		case len(scopes) == 0 && probeChain != 0:
+			// No stream is recorded for this capability: probe its canonical
+			// capability scope on the deployment chain the instance recorded.
+			probe, err := recovery.CapabilityScope(probeChain, capability)
+			if err != nil {
+				return err
+			}
+			scopes = []string{probe}
+			marker = true
+		}
+
 		for _, scope := range scopes {
 			if err := r.spend(); err != nil {
 				return err
@@ -729,13 +770,50 @@ func (r *recoveryStatusReview) evaluate(ctx context.Context, gate *recovery.Gate
 				line.released = true
 			}
 		}
-		if !line.released && len(line.scopes) > 0 {
-			line.refusalClass = line.scopes[0].refusalClass
-			line.reason = line.scopes[0].reason
+		if !line.released {
+			switch {
+			case len(line.scopes) > 0:
+				line.refusalClass = line.scopes[0].refusalClass
+				line.reason = line.scopes[0].reason
+			case r.scopeFilter != "":
+				line.refusalClass = string(recovery.RefusalNoRelease)
+				line.reason = fmt.Sprintf(
+					"the configured --scope names capability %s; capability %s was not evaluated at a scope it was never granted at",
+					r.scopeFilterCapability, capability)
+			default:
+				line.refusalClass = string(recovery.RefusalNoRelease)
+				line.reason = "no release decision exists for this capability at any canonical scope (no canonical scope was recorded and none can be probed)"
+			}
 		}
 		r.capabilities = append(r.capabilities, line)
 	}
 	return nil
+}
+
+// canonicalScopes attributes the recorded decision scopes to the capability
+// they canonically name. A scope that does not parse, or that parses but is not
+// in canonical form, is never mapped onto a capability: it is recorded as
+// unattributable (re-approval/re-release required) and matches no canonical
+// stream. The returned chains set bounds the probe scope: a probe is only
+// defensible when the instance recorded scopes of exactly one chain.
+func (r *recoveryStatusReview) canonicalScopes() (map[recovery.Capability][]string, map[uint64]bool) {
+	byCapability := make(map[recovery.Capability][]string)
+	chains := make(map[uint64]bool)
+	for _, raw := range r.scopes {
+		scope, err := recovery.ParseScope(raw)
+		if err != nil {
+			r.unattributable = append(r.unattributable, raw)
+			continue
+		}
+		canonical, err := scope.Canonical()
+		if err != nil || canonical != raw {
+			r.unattributable = append(r.unattributable, raw)
+			continue
+		}
+		byCapability[scope.Capability] = append(byCapability[scope.Capability], raw)
+		chains[scope.ChainID] = true
+	}
+	return byCapability, chains
 }
 
 // statusCapabilityCategories is the display-side map of the V1-V9 categories
@@ -870,14 +948,26 @@ func (r *recoveryStatusReview) render(w io.Writer) {
 			"; `approved` is not a state (an approval is a decision record, never a release). This review writes no gap/instance/approval/release state and grants nothing.")
 	fmt.Fprintln(w,
 		"  note: released is the phase-one recovery evaluation only. The existing fund gates stay independently enforced at the real action site (phase two) and are never substituted by this review or by any health signal; phase_two_evaluated=false means phase two remains the action site's obligation.")
+	if len(r.unattributable) > 0 {
+		fmt.Fprintf(w,
+			"  note: %d recorded scope(s) are not canonical capability scopes; they match no canonical stream (T050) and are never translated or matched by guessing — re-approval and re-release at the canonical capability scope are required.\n",
+			len(r.unattributable))
+		for i, scope := range r.unattributable {
+			if i >= r.maxRows {
+				fmt.Fprintf(w, "  unattributable_scope=... (%d more not shown)\n", len(r.unattributable)-i)
+				break
+			}
+			fmt.Fprintf(w, "  unattributable_scope=%s\n", logx.Redact(scope))
+		}
+	}
 	if r.scopeFilter == "" && len(r.scopes) == 0 {
 		fmt.Fprintln(w,
-			"  note: no release/approval scope is recorded for this instance; each capability was evaluated with an unrecorded marker scope, so the derived class is the gate's own order (dependencies, isolation, gaps, then no_release).")
+			"  note: no release/approval scope is recorded for this instance; no canonical scope exists to evaluate, so every capability reports released=false with no_release.")
 	}
-	if r.scopeFilter != "" && len(r.scopes) == 0 {
+	if r.scopeFilter != "" {
 		fmt.Fprintf(w,
-			"  note: no decision stream is recorded at the requested --scope filter %s; each capability was evaluated there and reports the gate's own class at that scope (no release exists at it).\n",
-			r.scopeFilter)
+			"  note: the review evaluated only the %s stream named by --scope %s; other capabilities are not evaluated at a scope they were never granted at.\n",
+			r.scopeFilterCapability, r.scopeFilter)
 	}
 	fmt.Fprintln(w,
 		"  note: the bounded review bounds (time/reads/rows) come from deployment configuration; exhausting any of them refuses the rest of the review, is audited, and changes no gap/instance/approval/release state. A timeout, an exhausted budget and human knowledge are never gap closure or a resumption permission.")

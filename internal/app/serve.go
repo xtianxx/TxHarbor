@@ -771,9 +771,12 @@ type recoveryAdmitter interface {
 type serveRecoveryWiring struct {
 	gate recoveryAdmitter
 	pool *pgxpool.Pool
-	// scope is the opaque non-empty capability scope of the serve surface
-	// (T050 owns the canonical scope vocabulary).
-	scope string
+	// scopes maps every capability of the closed seven to its canonical
+	// business scope on this deployment chain (T050). Entry identity is not a
+	// scope dimension: the serve read path, the scan loops and the withdrawal
+	// entry all derive their scope from the same constructor, so one release
+	// covers every entry that acts on that capability.
+	scopes map[recovery.Capability]string
 	// actor is the audit label of the deployment principal; it authorizes
 	// nothing by itself.
 	actor string
@@ -792,14 +795,27 @@ func (w *serveRecoveryWiring) close() {
 	}
 }
 
-// admit evaluates one single action of capability through the gate. It is the
-// only call point: no admission logic is re-derived or copied here — T012's
-// derived evaluation is the single authority.
+// admit evaluates one single action of capability through the gate at the
+// canonical scope of that capability (T050). It is the only call point: no
+// admission logic is re-derived or copied here — T012's derived evaluation is
+// the single authority.
 func (w *serveRecoveryWiring) admit(ctx context.Context, capability recovery.Capability, action string) (recovery.GateDecision, error) {
+	scope, ok := w.scopes[capability]
+	if !ok {
+		// Unreachable: the assembly refuses a chain that cannot derive every
+		// capability scope, and capabilities come from the closed set. Fail
+		// closed with a closed-set class instead of admitting at a default.
+		return recovery.GateDecision{
+			Allowed:      false,
+			RefusalClass: recovery.RefusalScopeMismatch,
+			Reason:       fmt.Sprintf("capability %q has no canonical scope in this assembly; refusing", capability),
+			Capability:   capability,
+		}, nil
+	}
 	return w.gate.Admit(ctx, recovery.GateRequest{
 		InstanceID: w.instance,
 		Capability: capability,
-		ScopeHash:  w.scope,
+		ScopeHash:  scope,
 		Actor:      w.actor,
 		Action:     action,
 	})
@@ -813,18 +829,11 @@ func (w *serveRecoveryWiring) retryAfter() time.Duration {
 	return recoveryGateRetryInterval
 }
 
-// serveRecoveryScope is the opaque non-empty capability scope of the serve
-// surface (T050 owns the canonical scope form; until then it is this stable
-// string). Release decisions for the serve capabilities must be recorded at
-// this scope.
-func serveRecoveryScope(chainID uint64) string {
-	return fmt.Sprintf("chain=%d;surface=serve", chainID)
-}
-
 // assembleServeRecovery builds the serve-side gate wiring. It is fail-closed
 // in both directions: without TXHARBOR_RECOVERY_CONTROL_DSN the process is in
 // normal mode and returns (nil, nil) — a bound instance without the control
 // store refuses; with the control store configured, a missing gate TTL, an
+// unparsable effect-class ruling, an unusable deployment chain, an
 // unreachable store or an unknown/incompatible schema version refuses startup
 // instead of degrading to pass-through (INV-5/INV-11).
 func assembleServeRecovery(ctx context.Context, cfg *config.Config, getenv func(string) (string, bool)) (*serveRecoveryWiring, error) {
@@ -845,6 +854,14 @@ func assembleServeRecovery(ctx context.Context, cfg *config.Config, getenv func(
 			"%s is required when %s is configured and must be a positive duration; the resumption gate has no default TTL",
 			config.EnvRecoveryGateTTL, config.EnvRecoveryControlDSN)
 	}
+	ruling, err := recoveryEffectClassRuling(cfg)
+	if err != nil {
+		return nil, fmt.Errorf("gate assembly: %s", logx.Redact(err.Error()))
+	}
+	scopes, err := recoveryCapabilityScopes(cfg.ChainID)
+	if err != nil {
+		return nil, fmt.Errorf("recovery capability scopes: %s", logx.Redact(err.Error()))
+	}
 	pool, err := db.OpenPool(ctx, cfg.Recovery.ControlDSN, cfg.ProbeTimeout)
 	if err != nil {
 		return nil, fmt.Errorf("control store unavailable: %s", logx.Redact(err.Error()))
@@ -854,7 +871,7 @@ func assembleServeRecovery(ctx context.Context, cfg *config.Config, getenv func(
 		pool.Close()
 		return nil, fmt.Errorf("control store unavailable: %s", logx.Redact(err.Error()))
 	}
-	gate, err := recovery.NewGate(store, recovery.GateOptions{TTL: cfg.Recovery.GateTTL})
+	gate, err := recovery.NewGate(store, recovery.GateOptions{TTL: cfg.Recovery.GateTTL, EffectClassRuling: ruling})
 	if err != nil {
 		pool.Close()
 		return nil, fmt.Errorf("gate assembly: %s", logx.Redact(err.Error()))
@@ -862,7 +879,7 @@ func assembleServeRecovery(ctx context.Context, cfg *config.Config, getenv func(
 	return &serveRecoveryWiring{
 		gate:     gate,
 		pool:     pool,
-		scope:    serveRecoveryScope(cfg.ChainID),
+		scopes:   scopes,
 		actor:    cfg.Recovery.Principal,
 		instance: instance,
 	}, nil

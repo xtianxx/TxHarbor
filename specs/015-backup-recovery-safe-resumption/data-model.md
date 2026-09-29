@@ -125,12 +125,14 @@ release_valid(I, C, S) :=
 | `event_consuming` | — | 旧 consumer 停止 + 幂等/进度核验 + effect class 范围确认 |
 
 - `new_withdrawal_creation → existing_withdrawal_recovery` 是保守固有依赖（禁止"只开入口不备处置"）；依赖图变化属规格变更，不在配置面放开。
+- **依赖范围映射（T050）**：依赖 D 不用被依赖能力 C 的 scope 串求值，而在显式映射 `DependencyScope(S_C, D)` 上求值——同一链/资产/业务类型，仅替换能力维度；映射 scope 上无有效 release → `capability_dependency_closed`。入口标识不是范围维度，同一链同一能力的所有入口收敛到同一规范化 scope（等价表示一致），不同链/资产/业务类型/实例/契约维度不合并。
 
 ### 3.3 求值来源与失败分类
 
 - 求值只读控制库（实例行 + 最新决策 + 检查项 + 缺口 + 参与人/映射）；**绝不读数据 DB 授权行作为放行依据**。
 - 有界 TTL 缓存（部署配置）；**代次感知失效（F5）**：缓存键含实例+能力+scope+代次+哈希；任何代次/哈希变化立即失效（发现者=求值器，下一次真实动作前求值即拒绝，不得等 TTL）；缓存过期且控制库不可达 → 拒绝。
 - **单动作准入协议（R3）**：缓存命中与未命中均在**动作准入前**于共同锁（实例行锁，与决策写入同一锁）内读取权威 `(state, evidence_generation, evidence_hash)` 并按代次协议校验——**键含代次≠最新性证明**；缓存只复用仍有效的计算结果，不得用旧 allow 跳过本次授权检查；控制库不可达即拒绝；顺序=判定点（锁内）→释锁→实际动作，**一次准入=当次调用单个明确动作**，不得跨请求/循环步进/批次/异步重试复用；撤销先于准入→拒绝，准入后撤销→在途＋unknown（不追溯中止已提交工作、不回滚）并阻止后续准入；**缓存命中不得被追认为在途**；不宣称跨系统原子；区分「未准入」（拒绝）与「已在途」（按原门禁处理、未知结果按 unknown 纪律）。
+- **范围规范化与匹配（T050）**：`scope_hash` 统一为规范化能力范围（链/资产/业务类型/能力，键排序、大小写/数值/空白归一；能力与链必填）。入口只通过规范化构造器生成 scope；决策写入器与门禁按规范能力 scope 匹配，任何非规范化串、旧 opaque 串或命名其他能力的 scope 一律 `scope_mismatch` 拒绝、零写入，不猜测转换（旧批准只有在对同一规范化 scope 重核重批后才可能生效）。审批档由 `RequiredApprovalClassForScope` 结合受控部署 effect-class ruling 判定（`TXHARBOR_RECOVERY_EFFECT_CLASS_RULING`）；未配置/未知一律保守 dual，调用者不得自声明降档；批准行快照固定取保守编译档（ruling 不是批准请求输入），收窄只作用于门禁/放行的派生判定。
 - 控制库 schema 版本未知/不兼容 → 拒绝（fail-closed；以 `control_store_unavailable` 表达并审计注记版本，T069）。
 - 拒绝分类（`refusal_class` 闭集）：`no_instance`（正常态不拒绝，仅标记 normal）、`instance_mismatch`、`no_release`、`release_invalidated_generation`、`release_revoked`、`capability_dependency_closed`、`isolation_unproven`、`gap_open`、`approval_missing`、`approval_identity_unverified`、`approval_executor_excluded`、`approval_stale`、`hard_gate_active`、`control_store_unavailable`、`scope_mismatch`。全部 fail-closed，全部审计。
 

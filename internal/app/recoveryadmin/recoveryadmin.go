@@ -32,8 +32,13 @@
 // instance. T051 implements `approve`/`release` in approve.go (the append-only
 // approve/revoke/release/revoke-release wiring over the T048/T049 decision
 // writers, no direct row writes) and `status` in status.go (the bounded
-// read-only per-capability restored/verified/released review). Every other
-// action is still the stub.
+// read-only per-capability restored/verified/released review). T057 implements
+// `drill` in drill.go: the isolated-environment real recovery flow (real
+// pg_restore, never a re-initialized empty database) with the S12 measurements
+// recorded separately (T055 RTO evaluation, T056 drill model) and archived
+// under docs/evidence/015/. Every action of the fixed surface is wired; the B0
+// stub helper remains for historical reference only and is never reached by a
+// known action.
 //
 // It lives in its own package (rather than internal/app) for the same reason as
 // internal/app/reconcileadmin: the delivered command imports internal/recovery
@@ -316,8 +321,31 @@ var recoveryAdminActions = []recoveryAdminAction{
 	},
 	{
 		name:    "drill",
-		summary: "record a full disaster-recovery drill (independent drill channel)",
-		usage:   "drill",
+		summary: "run the isolated recovery drill and record the S12 measurements",
+		usage:   "drill --manifest M --target-dsn TARGET --instance ID --chain-id CHAIN [--scenario S] [--out DIR] [--record-only] [--operation-id ID] [--backup-lag-seconds N] [--uncovered-interval-seconds N] [--signer-endpoint URL] [--rpc-url URL] [--broker-dsn DSN]",
+		flags: []recoveryAdminFlag{
+			{name: "manifest", usage: "manifest path (required); the control store must hold verified evidence bound to this instance and backup_id"},
+			{name: "target-dsn", usage: "isolated recovery-environment DSN (required; must address " + "TXHARBOR_PG_DSN" + ", never the control store)"},
+			{name: "instance", usage: "open recovery instance id (required)"},
+			{name: "chain-id", usage: "scope chain id (required; the per-capability observation scope dimension)"},
+			{name: "scenario", usage: "drill scenario (default full_recovery): full_recovery or one of the seven failure injections (f1_backup_unusable_or_unverified, f2_restore_interrupted_or_partial, f3_version_or_schema_incompatible, f4_external_fact_ahead, f5_old_instance_not_isolated, f6_unprovable_evidence_gap, f7_unauthorized_or_stale_approval)"},
+			{name: "out", usage: "archive directory (default docs/evidence/015/drill)"},
+			{name: "record-only", usage: "record from the current control-store facts without running a restore (requires accepted restore_probe evidence)"},
+			{name: "operation-id", usage: "idempotency key (optional); same id+input replays the recorded outcome with zero side effects, a changed input conflicts with zero writes; omitted = a real rerun"},
+			{name: "backup-lag-seconds", usage: "operator-provided backup-lag local input (optional; recorded as an explicit test input, never a production RPO measurement)"},
+			{name: "uncovered-interval-seconds", usage: "operator-provided uncovered-interval local input (optional; same rule)"},
+			{name: "signer-endpoint", usage: "signer boundary endpoint for reachability probing (optional)"},
+			{name: "rpc-url", usage: "RPC fact-source URL for the verification phase (optional; missing = verification not_configured, never a pass)"},
+			{name: "broker-dsn", usage: "broker DSN for reachability probing (optional)"},
+		},
+		required: []string{"manifest", "target-dsn", "instance", "chain-id"},
+		notes: []string{
+			"The drill executes the real recovery flow (real pg_restore into the environment's own isolated data database plus the four probes); a re-initialized empty database is never a drill. --record-only records from the current facts and requires accepted restore_probe evidence.",
+			"Timing scopes are recorded separately: recovery point, db_restore_seconds, verification_seconds, per-capability release seconds, backup_lag, uncovered_interval and gap counts/dispositions. A reachable database or a completed restore is never an RTO measurement; RTO is judged end-to-end only when all seven capabilities are observed released, and an exceeded configured target is recorded not-met + alerted + escalated without permanently blocking later safe resumption.",
+			"Required constraints (TXHARBOR_RECOVERY_RPO_TARGET/_RTO_TARGET/_BACKUP_FREQUENCY/_RETENTION) that are not configured are recorded as an explicit unconfigured state with their purpose; local drill values are test inputs only, never production thresholds (T000-P stays OPEN).",
+			"No approval or release is created: per-capability release state is observed through the derived gate evaluation at the canonical scope chain=<chain>;capability=<capability>, and refusals are recorded as such. Evidence gaps, isolation and approvals remain the only blockers. Per-capability release times are therefore measured by a --record-only run after the real approve/release commands; a restore-mode run records the restore/verification scopes and the fail-closed observations of that moment.",
+			"Requires TXHARBOR_RECOVERY_CONTROL_DSN, TXHARBOR_PG_DSN, TXHARBOR_RECOVERY_PRINCIPAL, TXHARBOR_RECOVERY_GATE_TTL and an executor participant binding; archive files are written under docs/evidence/015/ (or --out) and referenced by log_ref.",
+		},
 	},
 }
 
@@ -395,6 +423,10 @@ func Run(ctx context.Context, args []string, d Deps) int {
 		// T051: bounded read-only per-capability reconstructed state
 		// (restored/verified/released + blocking reason + refusal class).
 		return recoveryAdminStatus(ctx, args[1:], d)
+	case "drill":
+		// T057: the isolated-environment real recovery drill and the S12
+		// measurement record (T055 RTO evaluation + T056 drill model).
+		return recoveryAdminDrill(ctx, args[1:], d)
 	}
 	action, ok := recoveryAdminActionByName(args[0])
 	if !ok {
@@ -507,7 +539,7 @@ func recoveryAdminUsage(w io.Writer) {
 		fmt.Fprintf(w, "  %-16s %s\n", action.name, action.summary)
 	}
 	fmt.Fprintln(w)
-	fmt.Fprintln(w, "Wired today: `migrate up|status` (T008), `control participant-register|identity-map-set|identity-map-show` (T010), `backup`/`verify-backup` (T020/T021), `restore` (T022), `instance-open`/`instance-close` (T027), `checklist-set`/`checklist-verify` (T028/T029), `verify` (T042) and `approve`/`release`/`status` (T051). Every other action is the B0 stub and reports NOT IMPLEMENTED (non-zero); missing arguments and unknown actions exit 2. Required configuration values are refused by name and never defaulted; the authenticated subject comes from TXHARBOR_RECOVERY_PRINCIPAL and free text never authorizes.")
+	fmt.Fprintln(w, "Wired today: `migrate up|status` (T008), `control participant-register|identity-map-set|identity-map-show` (T010), `backup`/`verify-backup` (T020/T021), `restore` (T022), `instance-open`/`instance-close` (T027), `checklist-set`/`checklist-verify` (T028/T029), `verify` (T042), `approve`/`release`/`status` (T051) and `drill` (T057). Missing arguments and unknown actions exit 2. Required configuration values are refused by name and never defaulted; the authenticated subject comes from TXHARBOR_RECOVERY_PRINCIPAL and free text never authorizes.")
 }
 
 // recoveryAdminActionUsage prints one action's accepted argument form.

@@ -110,7 +110,7 @@ func TestAssembleEventsRecoveryConfigModes(t *testing.T) {
 		if err != nil {
 			t.Fatalf("config.Load: %v", err)
 		}
-		wiring, err := assembleEventsRecovery(ctx, cfg, fakeEnv(env), eventPublishingScope(cfg.ChainID))
+		wiring, err := assembleEventsRecovery(ctx, cfg, fakeEnv(env), recovery.CapabilityEventPublishing)
 		if err != nil {
 			t.Fatalf("assembleEventsRecovery: %v", err)
 		}
@@ -131,7 +131,7 @@ func TestAssembleEventsRecoveryConfigModes(t *testing.T) {
 		if err != nil {
 			t.Fatalf("config.Load: %v", err)
 		}
-		_, err = assembleEventsRecovery(ctx, cfg, fakeEnv(env), eventConsumingScope(cfg.ChainID))
+		_, err = assembleEventsRecovery(ctx, cfg, fakeEnv(env), recovery.CapabilityEventConsuming)
 		if err == nil {
 			t.Fatal("a bound instance without the control store must refuse (fail-closed)")
 		}
@@ -149,7 +149,7 @@ func TestAssembleEventsRecoveryConfigModes(t *testing.T) {
 		if err != nil {
 			t.Fatalf("config.Load: %v", err)
 		}
-		_, err = assembleEventsRecovery(ctx, cfg, fakeEnv(env), eventPublishingScope(cfg.ChainID))
+		_, err = assembleEventsRecovery(ctx, cfg, fakeEnv(env), recovery.CapabilityEventPublishing)
 		if err == nil {
 			t.Fatal("a configured control store without the gate TTL must refuse (the gate has no default)")
 		}

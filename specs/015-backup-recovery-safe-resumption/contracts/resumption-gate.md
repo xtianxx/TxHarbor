@@ -52,6 +52,14 @@
 - **单动作准入协议（R3）**：①缓存命中与未命中均须在**本次动作准入前**读取控制库权威 `(state, evidence_generation, evidence_hash)`，并在共同锁（实例行锁）内校验代次协议——缓存键含代次/哈希**不构成最新性证明**；②缓存只复用仍有效的计算结果，**不得复用旧 allow 跳过本次授权检查**，控制库不可达即拒绝；③顺序=判定点（锁内）→释锁点→实际动作：一次准入只覆盖当次调用的**单个明确动作**，不得跨请求/循环步进/批次/异步重试复用；④撤销先于准入→拒绝；准入后撤销→按在途＋unknown 处理（不追溯中止已提交工作、不回滚）并阻止后续准入；**缓存命中不得被追认为在途**；不宣称跨系统原子。
 - **两阶段判权（F20）**：本门禁（recovery allow）AND 动作处既有原门禁独立评估；`release_valid` 公式中的 `existing_fund_gates` 是对第二阶段的引用，禁止替代/合并/短路。
 - 进程重启读取同一控制库 → **不自动解除隔离**（FR-009）；放行状态不驻留进程内存。
+
+### 2.1 规范化范围与依赖覆盖映射（T050 接线；FR-021/023）
+
+- **业务授权范围** = 链 / 资产 / 业务类型（kind）/ 能力；`scope_hash` 是规范化后的唯一串（键排序、大小写/数值/空白归一；`capability` 与 `chain` 必填）。入口标识（serve 面 / worker / 命令名）**不是**范围维度：同一链上同一能力的全部入口（如 serve 执行写路径与 worker/signer 家族）共用同一规范化 scope，等价表示一致、一次放行覆盖全部入口；不同链/资产/业务类型/实例/契约维度不得合并，未表达的维度不是通配。
+- **能力是范围维度**：`approve`/`release` 记录的 `scope_hash` 必须命名同一能力（`ParseCapabilityScope`）；跨能力 scope、旧 opaque（如 `chain=1;surface=serve`）与非规范化串一律 `scope_mismatch` 拒绝、零写入、不猜测转换——旧批准不因"看起来等价"而生效，须在规范化 scope 上重核、重批、重放行。
+- **依赖覆盖按显式映射求值**：能力 C 的 `requires_capabilities` 依赖 D 在 `DependencyScope(S, D)`（同一链/资产/业务类型，仅替换能力维度）上求值，禁止直接复用 C 的 scope 串。依赖 scope 上无有效 release → `capability_dependency_closed`。
+- **入口 scope 粒度**：当前入口构造器只表达链 + 能力（`chain=<id>;capability=<c>`）；`asset`/`kind` 维度保留给范围契约上更细的部署授权，但入口不会消费更细的 scope——在更细 scope 上放行只构成一条更窄的授权流，不解除入口能力。是否需要入口级资产/业务类型粒度属部署前裁决（不阻塞当前实现，需要时须入口显式表达该维度）。
+- **审批档**由 `RequiredApprovalClassForScope(scope)` 判定：新提款创建、既有提款恢复恒 dual；事件发布/消费在部署 ruling 未配置或未对 scope 的业务类型明确判定"无真实下游效果"时恒 dual；其余能力不低于编译内置档。effect class 只来自受控部署配置（`TXHARBOR_RECOVERY_EFFECT_CLASS_RULING`），调用者不得自声明降档；未配置/未知一律保守 dual。批准行快照固定取保守档（ruling 不是请求输入）；scope+ruling 的收窄只在派生判定（门禁与放行基座）生效——保守 dual 快照可满足被收窄为 single 的要求，反向不成立。
 - 状态暴露：`recovery-admin status` 与 serve 状态面逐能力显示 `restored/verified/released` 三态与阻塞原因；`restored` 不得显示为 `verified`，`verified` 不得显示为 `released`（术语 F16：`released`=派生放行；`approved` 仅指有效批准记录，不构成放行）；健康探针不得替代资金门禁判权（FR-026）。
 
 ## 3. Isolation Checklist（000018 模式的恢复版；FR-010/011）

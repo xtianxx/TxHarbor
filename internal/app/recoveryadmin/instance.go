@@ -244,7 +244,11 @@ func recoveryAdminInstanceClose(ctx context.Context, args []string, d Deps) int 
 	if code != 0 {
 		return code
 	}
-	gate, err := recovery.NewGate(env.store, recovery.GateOptions{TTL: ttl})
+	ruling, code := recoveryGateEffectClassRuling(d, "instance-close")
+	if code != 0 {
+		return code
+	}
+	gate, err := recovery.NewGate(env.store, recovery.GateOptions{TTL: ttl, EffectClassRuling: ruling})
 	if err != nil {
 		fmt.Fprintf(stderr, "txharbor recovery-admin instance-close: %s\n", logx.Redact(err.Error()))
 		return 1
@@ -317,6 +321,25 @@ func instanceRequireParticipant(ctx context.Context, env *recoveryOpEnv, instanc
 	}
 	return fmt.Errorf("%s %s is not bound to instance %s under any participant role; register the participant first",
 		command, env.principal, instanceID)
+}
+
+// recoveryGateEffectClassRuling resolves the trusted deployment effect-class
+// ruling (T050) for the derived evaluation. An absent/blank key means "not
+// configured" (nil: every effect class unknown, the event capabilities stay
+// conservatively dual); a malformed value refuses by exact key name, because a
+// deployment configuration error is never guessed around.
+func recoveryGateEffectClassRuling(d Deps, command string) (recovery.EffectClassRuling, int) {
+	raw, ok := d.getenvValue(recovery.EffectClassRulingConfigKey)
+	if !ok || strings.TrimSpace(raw) == "" {
+		return nil, 0
+	}
+	ruling, err := recovery.ParseEffectClassRuling(strings.TrimSpace(raw))
+	if err != nil {
+		fmt.Fprintf(d.stderr(), "txharbor recovery-admin %s: %s: %s\n",
+			command, recovery.EffectClassRulingConfigKey, logx.Redact(err.Error()))
+		return nil, 1
+	}
+	return ruling, 0
 }
 
 // recoveryGateTTL reads the required gate cache TTL for the close guard. The

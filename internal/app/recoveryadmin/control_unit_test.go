@@ -173,16 +173,23 @@ func TestControlBadOperationIDIsUsageError(t *testing.T) {
 }
 
 // TestRecoveryAdminUnwiredActionsRemainStub pins the wiring boundary after
-// B8/T027-T029: migrate/control/backup/verify-backup/restore/instance-open/
-// instance-close/checklist-set/checklist-verify act (or refuse fail-closed),
-// `drill` is still the B0 stub, and a wired command that lacks required
+// T057: every action of the fixed surface is wired, so no known action answers
+// NOT IMPLEMENTED anymore, and a wired command that lacks required
 // configuration refuses by exact key name instead of claiming success.
 func TestRecoveryAdminUnwiredActionsRemainStub(t *testing.T) {
 	env := controlTestEnv("postgres://u:c@127.0.0.1:1/control?sslmode=disable",
 		"postgres://u:d@127.0.0.1:1/data?sslmode=disable", "deploy:manager")
+	// drill is wired (T057): it refuses without the required flags (exit 2),
+	// never answers NOT IMPLEMENTED and never claims a drill.
 	code, _, stderr := runRecoveryAdmin(t, []string{"drill"}, env)
-	if code != 1 || !strings.Contains(stderr, "NOT IMPLEMENTED") {
-		t.Fatalf("drill must remain the B0 stub: exit=%d stderr=%q", code, stderr)
+	if code != 2 || strings.Contains(stderr, "NOT IMPLEMENTED") {
+		t.Fatalf("drill is wired (T057): exit=%d stderr=%q", code, stderr)
+	}
+	code, stdout, stderr := runRecoveryAdmin(t, []string{"drill", "--manifest", "m.json", "--target-dsn",
+		"postgres://u:d@127.0.0.1:1/data?sslmode=disable", "--instance", "11111111-1111-4111-8111-111111111111",
+		"--chain-id", "1"}, env)
+	if code == 0 || strings.Contains(stderr, "NOT IMPLEMENTED") {
+		t.Fatalf("drill must refuse without a reachable control store: exit=%d stdout=%q", code, stdout)
 	}
 
 	// The B8 lifecycle/checklist actions are wired: with an unreachable control
@@ -213,7 +220,7 @@ func TestRecoveryAdminUnwiredActionsRemainStub(t *testing.T) {
 	// backup is wired (T021): without the required artifact directory it
 	// refuses by key name - it never reports NOT IMPLEMENTED and never claims
 	// a backup.
-	code, stdout, stderr := runRecoveryAdmin(t, []string{"backup", "--chain-id", "1"}, env)
+	code, stdout, stderr = runRecoveryAdmin(t, []string{"backup", "--chain-id", "1"}, env)
 	if code != 1 {
 		t.Fatalf("backup without the required artifact dir must refuse: exit=%d stderr=%q", code, stderr)
 	}

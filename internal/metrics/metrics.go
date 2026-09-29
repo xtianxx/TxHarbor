@@ -219,6 +219,13 @@ type Metrics struct {
 	// task id, business key, principal or payload.
 	recon reconciliationMetrics
 
+	// 015 backup/recovery/drill surface (internal/metrics/recovery.go; T055):
+	// release/refusal/gap/evidence-write counts, the separate timing scopes,
+	// configured/unconfigured constraints and the RTO evaluation. Fixed-
+	// vocabulary labels only; never an instance/backup id, digest, tx hash,
+	// principal or log ref.
+	recovery recoveryMetrics
+
 	handler http.Handler
 }
 
@@ -618,6 +625,7 @@ func New(ready func() bool) *Metrics {
 	m.registerSigner(registry)
 	m.events = registerEvents(registry)
 	m.recon = registerReconciliation(registry)
+	m.recovery = registerRecovery(registry)
 	return m
 }
 

@@ -92,11 +92,19 @@ const (
 	// recovPrincipal is the deployment principal the process commands bind. It
 	// never authorizes anything by itself.
 	recovPrincipal = "deploy:recov-test-executor"
-
-	// recovScopeHash is the opaque non-empty capability scope used by the
-	// gate-layer checks (T050 owns the canonical form).
-	recovScopeHash = "chain=31337;surface=recov-isolation-integration"
 )
+
+// recovScopeHash returns the canonical capability scope of one capability on
+// the scene chain (T050): the production constructor the real entries use, so
+// the gate-layer defaults are asserted against the same stream keys.
+func recovScopeHash(t *testing.T, capability recovery.Capability) string {
+	t.Helper()
+	scope, err := recovery.CapabilityScope(31337, capability)
+	if err != nil {
+		t.Fatalf("CapabilityScope(%s): %v", capability, err)
+	}
+	return scope
+}
 
 // recovScene is one data database plus one independent control-store database
 // inside a single test PostgreSQL container, and (optionally) an Anvil RPC the
@@ -832,7 +840,7 @@ func TestRecoveryIsolationRealServeEntryPointsDefaultDeny(t *testing.T) {
 				dec, err := gate.Admit(scene.ctx, recovery.GateRequest{
 					InstanceID: tc.binding,
 					Capability: tc.capability,
-					ScopeHash:  recovScopeHash,
+					ScopeHash:  recovScopeHash(t, tc.capability),
 					Actor:      recovPrincipal,
 				})
 				if err != nil {

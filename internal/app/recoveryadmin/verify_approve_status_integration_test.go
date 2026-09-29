@@ -667,3 +667,491 @@ func TestRecoveryAdminVerifyApproveReleaseStatusRealEntry(t *testing.T) {
 		}
 	}
 }
+
+// ---------------------------------------------------------------------------
+// S11 positive: every capability released, then the instance closes
+// ---------------------------------------------------------------------------
+
+// raSeedPositiveDepositCoverage seeds the restored deposit frontier and the
+// confirmation policy so V1's deposit coverage is provable (the negative test
+// deliberately leaves the checkpoint absent and establishes the S7 gap).
+func raSeedPositiveDepositCoverage(t *testing.T, f *cliFixture, rpcURL string) {
+	t.Helper()
+	client, err := eth.Dial(context.Background(), rpcURL, 10*time.Second)
+	if err != nil {
+		t.Fatalf("dial anvil: %v", err)
+	}
+	defer client.Close()
+	tip, err := client.BlockNumber(context.Background())
+	if err != nil {
+		t.Fatalf("chain tip: %v", err)
+	}
+	if _, err := f.data.Exec(f.ctx,
+		`INSERT INTO deposit_checkpoint (chain_id, start_block, config_hash, next_block)
+		 VALUES ($1, 0, $2, $3)`,
+		raChainID, strings.Repeat("b", 64), tip+1); err != nil {
+		t.Fatalf("seed deposit_checkpoint: %v", err)
+	}
+	if _, err := f.data.Exec(f.ctx,
+		`INSERT INTO confirmation_policy_history (chain_id, policy_seq, threshold, operator, reason)
+		 VALUES ($1, 1, 1, 'bootstrap', 'S11 positive close fixture')`,
+		raChainID); err != nil {
+		t.Fatalf("seed confirmation_policy_history: %v", err)
+	}
+}
+
+// raRunAllChecklist double-signs every isolation item of the closed set: the
+// S11 positive close needs all seven capabilities' isolation dependency sets
+// verified, and authorization_recheck (the V8 surface) is deliberately left
+// out of the negative test.
+func raRunAllChecklist(t *testing.T, f *cliFixture, env func(string) map[string]string) {
+	t.Helper()
+	for i, item := range recovery.KnownIsolationItemKeys() {
+		code, out, errOut := runRecoveryAdmin(t, []string{
+			"checklist-set", "--instance", f.instanceID, "--item", string(item),
+			"--evidence-ref", "evidence:" + string(item) + ":ra-positive",
+			"--operation-id", fmt.Sprintf("ra-pos-chk-set-%d", i+1),
+		}, env("deploy:executor"))
+		if code != 0 || !strings.Contains(out, "state=evidenced") {
+			t.Fatalf("checklist-set %s: exit=%d stdout=%q stderr=%q", item, code, out, errOut)
+		}
+		code, out, errOut = runRecoveryAdmin(t, []string{
+			"checklist-verify", "--instance", f.instanceID, "--item", string(item),
+			"--operation-id", fmt.Sprintf("ra-pos-chk-verify-%d", i+1),
+		}, env("auth:verifier"))
+		if code != 0 || !strings.Contains(out, "state=verified") {
+			t.Fatalf("checklist-verify %s: exit=%d stdout=%q stderr=%q", item, code, out, errOut)
+		}
+	}
+}
+
+// raCloseAllOpenGaps closes every open gap of the fixture instance through the
+// real T041 gap service with new external evidence: FR-019 says only new
+// evidence closes a gap, and the instance-close guard refuses while any gap is
+// open. This is the operator evidence path — no gap/instance/approval/release
+// success record is inserted directly, and no approval or release row is
+// written by this helper.
+func raCloseAllOpenGaps(t *testing.T, f *cliFixture) int {
+	t.Helper()
+	gaps, err := recovery.NewGaps(f.store)
+	if err != nil {
+		t.Fatalf("NewGaps: %v", err)
+	}
+	all, err := gaps.List(f.ctx, f.instanceID)
+	if err != nil {
+		t.Fatalf("list gaps: %v", err)
+	}
+	closed := 0
+	for _, gap := range all {
+		if gap.State == recovery.GapStateClosed {
+			continue
+		}
+		evidence := []byte(`{"kind":"operator_reconciliation","object_key":"` + gap.ObjectKey +
+			`","source":"trusted copy of the data DB plus canonical chain facts at the restore point","recorded_by":"deploy:executor"}`)
+		if _, err := gaps.Close(f.ctx, recovery.CloseGapRequest{
+			InstanceID:      f.instanceID,
+			GapID:           gap.GapID,
+			ClosureEvidence: evidence,
+			Actor:           "deploy:executor",
+			OperationID:     "ra-pos-gap-close-" + gap.GapID,
+			Reason:          "S11 positive fixture: reconciliation evidence for the restored coverage",
+		}); err != nil {
+			t.Fatalf("close gap %s (%s): %v", gap.GapID, gap.ObjectKey, err)
+		}
+		closed++
+	}
+	if closed == 0 {
+		t.Fatalf("the real verify entry established no open gap to close; the S11 positive fixture is not exercising the gap guard")
+	}
+	return closed
+}
+
+// raApprovalClass is the conservative class the T050 scope layer requires for
+// a capability at the fixture chain (no effect-class ruling configured): the
+// same class the CLI records in the approval snapshot.
+func raApprovalClass(t *testing.T, capability recovery.Capability) recovery.ApprovalClass {
+	t.Helper()
+	scope, err := recovery.Scope{ChainID: raChainID, Capability: capability}.Canonical()
+	if err != nil {
+		t.Fatalf("canonical scope of %s: %v", capability, err)
+	}
+	parsed, err := recovery.ParseCapabilityScope(scope, capability)
+	if err != nil {
+		t.Fatalf("parse capability scope of %s: %v", capability, err)
+	}
+	class, err := recovery.RequiredApprovalClassForScope(parsed, recovery.ScopeEffectClass(parsed), nil)
+	if err != nil {
+		t.Fatalf("required class of %s: %v", capability, err)
+	}
+	return class
+}
+
+// TestRecoveryAdminS11PositiveCloseRealEntry drives the whole 015 US4 path
+// through the real entries to a successful instance close: real verify
+// (V1–V9), every open evidence gap closed through the real T041 evidence path,
+// approve/release of all seven capabilities at their canonical scopes (single
+// and dual, with the one-approval dual refusal), an explicit release revoke
+// and re-release, an explicit approval revoke with re-approval and
+// re-release, scope equivalence and scope out-of-bounds refusals, an
+// evidence change that invalidates an old approval, an operation-id replay,
+// status before the close, and `instance-close`.
+//
+// What close means here: the operator returns the deployment to daily
+// operation. It is only allowed while every one of the seven capabilities is
+// currently release-valid (derived, re-evaluated under the instance lock), no
+// evidence gap is open, and the funds/delivery releases carry two distinct
+// non-executor people. No approval, release or close success row is inserted
+// by the test: every state change arrives through the CLI entry functions.
+func TestRecoveryAdminS11PositiveCloseRealEntry(t *testing.T) {
+	f := newCLIFixture(t)
+	rpcURL := raStartAnvil(t)
+	raSeedV1ChainFacts(t, f, rpcURL)
+	raSeedPositiveDepositCoverage(t, f, rpcURL)
+
+	f.mapIdentity(t, "auth:approver-1", "person-approver-1")
+	f.mapIdentity(t, "auth:approver-2", "person-approver-2")
+	f.register(t, "auth:approver-1", "approver")
+	f.register(t, "auth:approver-2", "approver")
+
+	checklistEnv := func(principal string) map[string]string {
+		return f.raEnv(principal, f.dataDSN, rpcURL)
+	}
+	raRunAllChecklist(t, f, checklistEnv)
+
+	manifestPath, backupID := f.verifiedBackup(t)
+	restoredDSN := f.createDB(t, "restored")
+	code, restoredOut, restoredErr := f.cliRestore(t, manifestPath, restoredDSN, "ra-pos-restore-1")
+	if code != 0 || !strings.Contains(restoredOut, "restored=true") {
+		t.Fatalf("CLI restore: exit=%d stdout=%q stderr=%q", code, restoredOut, restoredErr)
+	}
+	if got := f.evidenceCount(t, "restore_probe", backupID); got != 1 {
+		t.Fatalf("restore_probe evidence rows after the real restore = %d, want 1", got)
+	}
+
+	env := func(principal string) map[string]string {
+		return f.raEnv(principal, restoredDSN, rpcURL)
+	}
+	approve := func(principal string, capability recovery.Capability, operationID string) (int, string, string) {
+		return runRecoveryAdmin(t, []string{
+			"approve", "--instance", f.instanceID, "--capability", string(capability),
+			"--scope", raScope(capability), "--operation-id", operationID,
+		}, env(principal))
+	}
+	release := func(capability recovery.Capability, revoke bool, operationID string) (int, string, string) {
+		args := []string{
+			"release", "--instance", f.instanceID, "--capability", string(capability),
+			"--scope", raScope(capability), "--operation-id", operationID,
+		}
+		if revoke {
+			args = append(args, "--revoke")
+		}
+		return runRecoveryAdmin(t, args, env("deploy:executor"))
+	}
+	// approveRevoke is the revoke arm of the approve entry: it withdraws the
+	// caller principal's own earlier approve rows of the same canonical
+	// (instance, capability, scope) stream (the approval-side twin of the
+	// release --revoke above).
+	approveRevoke := func(principal string, capability recovery.Capability, operationID string) (int, string, string) {
+		return runRecoveryAdmin(t, []string{
+			"approve", "--instance", f.instanceID, "--capability", string(capability),
+			"--scope", raScope(capability), "--operation-id", operationID, "--revoke",
+		}, env(principal))
+	}
+	status := func() (int, string, string) {
+		return runRecoveryAdmin(t, []string{"status", "--instance", f.instanceID}, env("deploy:executor"))
+	}
+
+	// --- S6: the real verify entry runs; its unknown observations establish
+	// open gaps (the fixture data cannot prove V2–V8), which is exactly the
+	// state S11 must refuse to close over. ---
+	code, verifyOut, verifyErr := runRecoveryAdmin(t, []string{
+		"verify", "--instance", f.instanceID, "--scope", "all", "--operation-id", "ra-pos-verify-1",
+	}, env("deploy:executor"))
+	if code != 0 {
+		t.Fatalf("verify: exit=%d stdout=%q stderr=%q", code, verifyOut, verifyErr)
+	}
+	t.Logf("S11 positive: real verify step:\n%s", verifyOut)
+
+	// --- Evidence change invalidates an old approval: approve chain_scan at
+	// the current generation, advance the generation with a real verify step,
+	// then the release must refuse approval_stale and write zero rows. ---
+	code, out, errOut := approve("auth:approver-1", recovery.CapabilityChainScan, "ra-pos-approve-chain-scan-old")
+	if code != 0 {
+		t.Fatalf("approve chain_scan before the evidence change: exit=%d stdout=%q stderr=%q", code, out, errOut)
+	}
+	code, verify2, verify2Err := runRecoveryAdmin(t, []string{
+		"verify", "--instance", f.instanceID, "--scope", "all", "--operation-id", "ra-pos-verify-2",
+	}, env("deploy:executor"))
+	if code != 0 {
+		t.Fatalf("verify step 2: exit=%d stdout=%q stderr=%q", code, verify2, verify2Err)
+	}
+	releaseRowsBefore := migrateCountRows(t, f.ctx, f.control,
+		`SELECT count(*) FROM recovery_release WHERE instance_id = $1`, f.instanceID)
+	code, out, errOut = release(recovery.CapabilityChainScan, false, "ra-pos-release-chain-scan-stale")
+	if code != 1 || !strings.Contains(errOut, "refusal_class=approval_stale") {
+		t.Fatalf("release over a stale approval must refuse approval_stale: exit=%d stdout=%q stderr=%q", code, out, errOut)
+	}
+	if got := migrateCountRows(t, f.ctx, f.control,
+		`SELECT count(*) FROM recovery_release WHERE instance_id = $1`, f.instanceID); got != releaseRowsBefore {
+		t.Fatalf("stale-approval release wrote %d row(s)", got-releaseRowsBefore)
+	}
+
+	// --- S11 precondition: on this run the instance still has open gaps, so
+	// the close must refuse (a positive close is never granted over an open
+	// gap). Every gap is then closed through the real T041 evidence path. ---
+	code, out, errOut = runRecoveryAdmin(t, []string{
+		"instance-close", "--instance", f.instanceID, "--operation-id", "ra-pos-close-open-gap",
+	}, env("deploy:executor"))
+	if code != 1 || !strings.Contains(errOut, "an open evidence gap blocks at least one capability") {
+		t.Fatalf("close over the open gaps must refuse: exit=%d stdout=%q stderr=%q", code, out, errOut)
+	}
+	closedGaps := raCloseAllOpenGaps(t, f)
+	t.Logf("S11 positive: closed %d open evidence gap(s) through the real gap service", closedGaps)
+
+	// --- Scope equivalence: an equivalent representation of the canonical
+	// scope canonicalizes onto the same stream. ---
+	code, out, errOut = runRecoveryAdmin(t, []string{
+		"approve", "--instance", f.instanceID, "--capability", "query",
+		"--scope", "Chain=031337;Capability=QUERY", "--operation-id", "ra-pos-approve-query-equiv",
+	}, env("auth:approver-1"))
+	if code != 0 || !strings.Contains(out, "scope_hash=capability=query;chain=31337") {
+		t.Fatalf("equivalent scope approval: exit=%d stdout=%q stderr=%q", code, out, errOut)
+	}
+
+	// --- Scope out-of-bounds: a scope naming another capability, and a legacy
+	// opaque pre-T050 scope, both refuse as scope_mismatch with zero writes. ---
+	approvalsBefore := migrateCountRows(t, f.ctx, f.control,
+		`SELECT count(*) FROM recovery_approval WHERE instance_id = $1`, f.instanceID)
+	code, out, errOut = runRecoveryAdmin(t, []string{
+		"approve", "--instance", f.instanceID, "--capability", "query",
+		"--scope", raScope(recovery.CapabilityChainScan), "--operation-id", "ra-pos-approve-cross-capability",
+	}, env("auth:approver-1"))
+	if code != 1 || !strings.Contains(errOut, "refusal_class=scope_mismatch") {
+		t.Fatalf("cross-capability scope approval must refuse scope_mismatch: exit=%d stdout=%q stderr=%q", code, out, errOut)
+	}
+	code, out, errOut = runRecoveryAdmin(t, []string{
+		"approve", "--instance", f.instanceID, "--capability", "query",
+		"--scope", "chain=31337;surface=serve", "--operation-id", "ra-pos-approve-legacy-opaque",
+	}, env("auth:approver-1"))
+	if code != 1 || !strings.Contains(errOut, "refusal_class=scope_mismatch") {
+		t.Fatalf("legacy opaque scope approval must refuse scope_mismatch: exit=%d stdout=%q stderr=%q", code, out, errOut)
+	}
+	// Both refusals wrote zero approval rows (the equivalent-scope approval
+	// already counted in approvalsBefore).
+	if got := migrateCountRows(t, f.ctx, f.control,
+		`SELECT count(*) FROM recovery_approval WHERE instance_id = $1`, f.instanceID); got != approvalsBefore {
+		t.Fatalf("refused scopes wrote approval rows: %d -> %d", approvalsBefore, got)
+	}
+
+	// --- Release query (single, the equivalent-scope approval) and replay the
+	// decision under the same operation id: zero writes, recorded=true. ---
+	code, out, errOut = release(recovery.CapabilityQuery, false, "ra-pos-release-query-1")
+	if code != 0 || !strings.Contains(out, "decision=release") {
+		t.Fatalf("release query: exit=%d stdout=%q stderr=%q", code, out, errOut)
+	}
+	releaseRowsAfterQuery := migrateCountRows(t, f.ctx, f.control,
+		`SELECT count(*) FROM recovery_release WHERE instance_id = $1`, f.instanceID)
+	code, out, errOut = release(recovery.CapabilityQuery, false, "ra-pos-release-query-1")
+	if code != 0 || !strings.Contains(out, "recorded=true") {
+		t.Fatalf("release query replay: exit=%d stdout=%q stderr=%q", code, out, errOut)
+	}
+	if got := migrateCountRows(t, f.ctx, f.control,
+		`SELECT count(*) FROM recovery_release WHERE instance_id = $1`, f.instanceID); got != releaseRowsAfterQuery {
+		t.Fatalf("release replay appended %d row(s)", got-releaseRowsAfterQuery)
+	}
+
+	// --- Explicit revoke and re-release: the revoke refuses the next
+	// evaluation; re-releasing (the approvals are untouched) converges. ---
+	code, out, errOut = release(recovery.CapabilityQuery, true, "ra-pos-revoke-query")
+	if code != 0 || !strings.Contains(out, "decision=revoke") {
+		t.Fatalf("revoke query release: exit=%d stdout=%q stderr=%q", code, out, errOut)
+	}
+	code, statusRevoked, statusRevokedErr := status()
+	if code != 0 {
+		t.Fatalf("status after revoke: exit=%d stdout=%q stderr=%q", code, statusRevoked, statusRevokedErr)
+	}
+	raMustContain(t, "status after revoke", statusRevoked,
+		"release_scope=capability=query;chain=31337 released=false refusal_class=release_revoked")
+	code, out, errOut = release(recovery.CapabilityQuery, false, "ra-pos-release-query-2")
+	if code != 0 || !strings.Contains(out, "decision=release") {
+		t.Fatalf("re-release query: exit=%d stdout=%q stderr=%q", code, out, errOut)
+	}
+
+	// --- Approval revoke (approve --revoke) and convergence: the approval
+	// side of the same four-decision-state cycle (approve, approve --revoke,
+	// release, release --revoke). Revoking approver-1's own approve decision
+	// collapses the release basis of the stream: the recorded release row
+	// still stands (this is not a release revoke), but the next derived
+	// evaluation refuses approval_missing; a re-approval plus a new release
+	// converge. ---
+	code, out, errOut = approveRevoke("auth:approver-1", recovery.CapabilityQuery, "ra-pos-revoke-approve-query")
+	if code != 0 || !strings.Contains(out, "decision=revoke") ||
+		!strings.Contains(out, "approval_class=single_non_executor") ||
+		!strings.Contains(out, "person_id=person-approver-1") {
+		t.Fatalf("approve --revoke query: exit=%d stdout=%q stderr=%q", code, out, errOut)
+	}
+	raMustContain(t, "approve --revoke note", out,
+		"the revoke covers only this principal's earlier approve rows",
+		"re-approval plus re-release is required to converge.")
+	if got := migrateCountRows(t, f.ctx, f.control,
+		`SELECT count(*) FROM recovery_approval
+		  WHERE instance_id = $1 AND capability = 'query' AND scope_hash = 'capability=query;chain=31337'
+		    AND decision = 'revoke' AND principal = 'auth:approver-1'
+		    AND operation_id = 'ra-pos-revoke-approve-query'`, f.instanceID); got != 1 {
+		t.Fatalf("approve --revoke must append exactly one revoke decision row through the real entry, got %d", got)
+	}
+	code, statusApprovalRevoked, statusApprovalRevokedErr := status()
+	if code != 0 {
+		t.Fatalf("status after the approval revoke: exit=%d stdout=%q stderr=%q", code, statusApprovalRevoked, statusApprovalRevokedErr)
+	}
+	raMustContain(t, "status after the approval revoke", statusApprovalRevoked,
+		"release_scope=capability=query;chain=31337 released=false refusal_class=approval_missing")
+	code, out, errOut = approve("auth:approver-1", recovery.CapabilityQuery, "ra-pos-approve-query-2")
+	if code != 0 || !strings.Contains(out, "decision=approve") ||
+		!strings.Contains(out, "person_id=person-approver-1") {
+		t.Fatalf("re-approve query after the approval revoke: exit=%d stdout=%q stderr=%q", code, out, errOut)
+	}
+	reApprovalQuery := cliField(out, "approval_id")
+	if reApprovalQuery == "" {
+		t.Fatalf("re-approve query printed no approval_id: %q", out)
+	}
+	code, out, errOut = release(recovery.CapabilityQuery, false, "ra-pos-release-query-3")
+	if code != 0 || !strings.Contains(out, "decision=release") ||
+		!strings.Contains(out, "approval_refs="+reApprovalQuery) {
+		t.Fatalf("re-release query after the approval revoke: exit=%d stdout=%q stderr=%q", code, out, errOut)
+	}
+	code, statusApprovalRegranted, statusApprovalRegrantedErr := status()
+	if code != 0 {
+		t.Fatalf("status after the re-approval and re-release: exit=%d stdout=%q stderr=%q", code, statusApprovalRegranted, statusApprovalRegrantedErr)
+	}
+	raMustContain(t, "status after the re-approval and re-release", statusApprovalRegranted,
+		"release_scope=capability=query;chain=31337 released=true")
+
+	// --- Release all seven capabilities at their canonical scopes. Dual
+	// capabilities require two distinct non-executor people: the one-approval
+	// attempt refuses with zero rows first. ---
+	for _, capability := range recovery.KnownCapabilities() {
+		if capability == recovery.CapabilityQuery {
+			continue // already released above
+		}
+		class := raApprovalClass(t, capability)
+		code, out, errOut = approve("auth:approver-1", capability, "ra-pos-approve-1-"+string(capability))
+		if code != 0 {
+			t.Fatalf("approve %s by approver-1: exit=%d stdout=%q stderr=%q", capability, code, out, errOut)
+		}
+		if class == recovery.ApprovalClassDualNonExecutor {
+			rowsBefore := migrateCountRows(t, f.ctx, f.control,
+				`SELECT count(*) FROM recovery_release WHERE instance_id = $1 AND capability = $2`, f.instanceID, string(capability))
+			code, out, errOut = release(capability, false, "ra-pos-release-single-"+string(capability))
+			if code != 1 || !strings.Contains(errOut, "refusal_class=approval_missing") {
+				t.Fatalf("dual capability %s with one approval must refuse approval_missing: exit=%d stdout=%q stderr=%q", capability, code, out, errOut)
+			}
+			if got := migrateCountRows(t, f.ctx, f.control,
+				`SELECT count(*) FROM recovery_release WHERE instance_id = $1 AND capability = $2`, f.instanceID, string(capability)); got != rowsBefore {
+				t.Fatalf("one-approval release of %s wrote %d row(s)", capability, got-rowsBefore)
+			}
+			code, out, errOut = approve("auth:approver-2", capability, "ra-pos-approve-2-"+string(capability))
+			if code != 0 || !strings.Contains(out, "person_id=person-approver-2") {
+				t.Fatalf("approve %s by approver-2: exit=%d stdout=%q stderr=%q", capability, code, out, errOut)
+			}
+		}
+		code, out, errOut = release(capability, false, "ra-pos-release-"+string(capability))
+		if code != 0 || !strings.Contains(out, "decision=release") {
+			t.Fatalf("release %s: exit=%d stdout=%q stderr=%q", capability, code, out, errOut)
+		}
+	}
+
+	// --- Status before the close: all seven capabilities released, no open
+	// gap, no writable state changed by the review. ---
+	code, statusOut, statusErr := status()
+	if code != 0 {
+		t.Fatalf("status before close: exit=%d stdout=%q stderr=%q", code, statusOut, statusErr)
+	}
+	for _, capability := range recovery.KnownCapabilities() {
+		line := ""
+		for _, candidate := range strings.Split(statusOut, "\n") {
+			if strings.HasPrefix(candidate, "  capability="+string(capability)+" ") {
+				line = candidate
+			}
+		}
+		if !strings.Contains(line, "released=true") {
+			t.Fatalf("status must show capability %s released=true before the close: %q\n%s", capability, line, statusOut)
+		}
+	}
+	if got := strings.Count(statusOut, "\n  capability="); got != len(recovery.KnownCapabilities()) {
+		t.Fatalf("status must render all %d capabilities, got %d", len(recovery.KnownCapabilities()), got)
+	}
+
+	// --- S11 positive: close. Every capability is release-valid and no gap is
+	// open, so the instance returns to daily operation. ---
+	code, out, errOut = runRecoveryAdmin(t, []string{
+		"instance-close", "--instance", f.instanceID, "--operation-id", "ra-pos-close-1",
+	}, env("deploy:executor"))
+	if code != 0 || !strings.Contains(out, "closed=true") {
+		t.Fatalf("S11 positive close: exit=%d stdout=%q stderr=%q", code, out, errOut)
+	}
+	if _, state := raInstanceState(t, f); state != "closed" {
+		t.Fatalf("instance after the close = %q, want closed (back to daily operation)", state)
+	}
+	// The close is recorded: refusal rows for the failed attempts and exactly
+	// two ok rows — the library close guard's lifecycle row plus the CLI
+	// operation row of the same command.
+	if got := raRefusalRows(t, f, "instance_close", string(recovery.RefusalGapOpen)); got < 1 {
+		t.Fatalf("the refused close over the open gap must be audited with refusal_class=gap_open, got %d", got)
+	}
+	closeAudits := migrateCountRows(t, f.ctx, f.control,
+		`SELECT count(*) FROM recovery_audit WHERE instance_id = $1 AND action = 'instance_close' AND result = 'ok'`, f.instanceID)
+	if closeAudits != 2 {
+		t.Fatalf("instance_close ok audit rows = %d, want 2 (library lifecycle row + CLI operation row)", closeAudits)
+	}
+
+	// The evidence census: every release row arrived through the CLI, and the
+	// dual capabilities carry two-person bases.
+	dualMissing := 0
+	for _, capability := range recovery.KnownCapabilities() {
+		if raApprovalClass(t, capability) != recovery.ApprovalClassDualNonExecutor {
+			continue
+		}
+		if got := migrateCountRows(t, f.ctx, f.control,
+			`SELECT count(*) FROM recovery_release WHERE instance_id = $1 AND capability = $2 AND decision = 'release' AND cardinality(approval_refs) = 2`,
+			f.instanceID, string(capability)); got < 1 {
+			dualMissing++
+		}
+	}
+	if dualMissing != 0 {
+		t.Fatalf("%d dual capability(ies) closed without a two-person release basis", dualMissing)
+	}
+
+	// --- Legacy pre-T050 scopes: a recorded opaque scope matches no canonical
+	// stream; the review surfaces it for re-approval/re-release instead of
+	// guessing a translation. The row is a negative fixture (an old-format
+	// stream), inserted only after the close so it cannot mask the positive
+	// path. ---
+	if _, err := f.control.Exec(f.ctx, `
+INSERT INTO recovery_release (release_id, instance_id, capability, scope_hash, decision,
+       evidence_generation, evidence_hash, operation_id, reason)
+SELECT gen_random_uuid(), instance_id, 'query', 'chain=31337;surface=serve', 'release',
+       evidence_generation, evidence_hash, 'ra-pos-legacy-scope-fixture', 'pre-T050 opaque scope fixture'
+FROM recovery_instance WHERE instance_id = $1`, f.instanceID); err != nil {
+		t.Fatalf("seed legacy scope fixture: %v", err)
+	}
+	code, statusLegacy, statusLegacyErr := status()
+	if code != 0 {
+		t.Fatalf("status with the legacy fixture: exit=%d stdout=%q stderr=%q", code, statusLegacy, statusLegacyErr)
+	}
+	raMustContain(t, "status legacy scope", statusLegacy,
+		"unattributable_scope=chain=31337;surface=serve",
+		"re-approval and re-release at the canonical capability scope are required")
+
+	// No command output may carry a plaintext DSN or its credentials.
+	parsed, err := url.Parse(restoredDSN)
+	if err != nil {
+		t.Fatalf("parse DSN: %v", err)
+	}
+	password, _ := parsed.User.Password()
+	for _, text := range []string{restoredOut, verifyOut, verify2, out, errOut, statusOut, statusLegacy} {
+		if strings.Contains(text, "postgres://") || (password != "" && strings.Contains(text, ":"+password+"@")) {
+			t.Fatalf("command output must never carry a plaintext DSN: %q", text)
+		}
+	}
+}

@@ -16,11 +16,13 @@
 //     inside the instance row lock (the same lock every decision writer
 //     takes): the principal's person_id from the current active
 //     recovery_identity mapping (a caller can never supply a person), the
-//     conservative required class of RequiredApprovalClass (a caller can
-//     never choose or force a class; T050 narrows the event classes, it never
-//     relaxes them), and the authoritative (evidence_generation,
-//     evidence_hash) token read under that lock (any later accepted evidence
-//     write immediately invalidates the row).
+//     conservative class snapshot of RequiredApprovalClassForScope with no
+//     deployment ruling (a caller can never choose or force a class; the
+//     scope-ruled narrowing is applied only at the derived evaluation), the
+//     canonical capability scope of ParseCapabilityScope (a legacy opaque
+//     scope refuses as scope_mismatch), and the authoritative
+//     (evidence_generation, evidence_hash) token read under that lock (any
+//     later accepted evidence write immediately invalidates the row).
 //   - Execution, verification and approval are independent permissions, but
 //     the instance executor (opened_by plus every executor-role participant,
 //     directly or through the current mapping — the same derivation the gate
@@ -104,9 +106,21 @@ var (
 // (instance, capability, scope_hash) stream. The carriage deliberately
 // carries no person_id and no approval class: a caller can never supply a
 // person or force a class. Person identity is resolved from the current
-// active mapping and the class from the conservative RequiredApprovalClass
-// matrix inside the write transaction. Reason is an audit annotation only;
-// OperationID is the persistent idempotency key.
+// active mapping and the class snapshot from the conservative scope
+// classification (RequiredApprovalClassForScope, T050) inside the write
+// transaction. Reason is an audit annotation only; OperationID is the
+// persistent idempotency key.
+//
+// ScopeHash must be a canonical capability scope of Capability
+// (ParseCapabilityScope): an equivalent representation is canonicalized, while
+// a legacy opaque string, a non-canonical expression or a scope naming another
+// capability refuses as scope_mismatch with zero writes.
+//
+// The recorded class snapshot is always the compiled conservative class (the
+// deployment effect-class ruling is not a request input): a ruling may narrow
+// the required class of a scope only where release validity is derived (gate
+// and release basis), and a conservative dual snapshot satisfies a narrowed
+// single requirement — never the other way around.
 type ApprovalRequest struct {
 	InstanceID  string
 	Capability  Capability
@@ -201,6 +215,25 @@ func decideApproval(ctx context.Context, store *controlstore.Store, req Approval
 		operationID:       operationID,
 	}
 
+	// T050: the approval binds to a canonical capability scope of the requested
+	// capability. An equivalent representation canonicalizes; a legacy opaque
+	// string, a non-canonical expression or a scope naming another capability
+	// refuses as scope_mismatch and writes zero decision rows.
+	requestedScope, err := ParseCapabilityScope(scope, req.Capability)
+	if err != nil {
+		refusal.class = RefusalScopeMismatch
+		refusal.reason = err.Error()
+		return refusedApproval(ctx, store, outcome, refusal)
+	}
+	canonicalScope, err := requestedScope.Canonical()
+	if err != nil {
+		refusal.class = RefusalScopeMismatch
+		refusal.reason = err.Error()
+		return refusedApproval(ctx, store, outcome, refusal)
+	}
+	scope = canonicalScope
+	refusal.scope = canonicalScope
+
 	// The subject must be an authenticated <kind>:<id> principal: free-form
 	// text can never stand in for authentication (approval-matrix §2).
 	principal, err := controlstore.NormalizePrincipal(principalText)
@@ -272,9 +305,14 @@ func decideApproval(ctx context.Context, store *controlstore.Store, req Approval
 		return refusedApprovalLocked(ctx, tx, outcome, refusal)
 	}
 
-	class, err := RequiredApprovalClass(req.Capability)
+	// The snapshot is the compiled conservative class: no deployment ruling is
+	// a request input, and a conservative dual snapshot can satisfy a
+	// scope-ruled single requirement at the derived evaluation but never the
+	// reverse (gate.approvalsValid re-derives the required class from the
+	// scope and the trusted ruling).
+	class, err := RequiredApprovalClassForScope(requestedScope, ScopeEffectClass(requestedScope), nil)
 	if err != nil {
-		// Unreachable: the capability was validated above.
+		// Unreachable: the capability and scope were validated above.
 		return outcome, fmt.Errorf("required approval class of %s: %w", req.Capability, err)
 	}
 	row := controlstore.ApprovalDecisionRequest{

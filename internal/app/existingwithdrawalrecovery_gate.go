@@ -22,10 +22,13 @@
 // single T012 derived evaluation (*recovery.Gate). No call point copies or
 // short-circuits the gate decision, and no configuration key disables it.
 //
-// Provisional scope: T050 owns the canonical scope_hash vocabulary. Until it
-// lands, this family records the stable opaque string of
-// existingWithdrawalRecoveryScope; release decisions must be recorded at the
-// same scope or the gate refuses (fail-closed).
+// Canonical scope (T050): every entry of this family acts on the capability
+// existing_withdrawal_recovery, so they all derive the same canonical business
+// scope through existingWithdrawalRecoveryScope (chain + capability; entry
+// identity is not a scope dimension and the serve-side execution path derives
+// the same scope). A release recorded at the canonical scope covers the whole
+// family; a pre-normalization opaque scope matches nothing and requires a
+// fresh approval/release.
 package app
 
 import (
@@ -103,11 +106,12 @@ func (w *existingWithdrawalRecoveryWiring) admit(ctx context.Context, capability
 	})
 }
 
-// existingWithdrawalRecoveryScope is the opaque non-empty capability scope of
-// the existing_withdrawal_recovery entry family (T050 owns the canonical scope
-// form; until then it is this stable string).
-func existingWithdrawalRecoveryScope(chainID uint64) string {
-	return fmt.Sprintf("chain=%d;capability=existing_withdrawal_recovery", chainID)
+// existingWithdrawalRecoveryScope is the canonical business scope of the
+// existing_withdrawal_recovery entry family (T050): chain + capability, no
+// entry identity. A zero chain or an unknown capability refuses; there is no
+// default scope.
+func existingWithdrawalRecoveryScope(chainID uint64) (string, error) {
+	return recoveryScopeFor(chainID, recovery.CapabilityExistingWithdrawalRecovery)
 }
 
 // assembleExistingWithdrawalRecovery builds the shared admission from the
@@ -137,6 +141,14 @@ func assembleExistingWithdrawalRecovery(ctx context.Context, cfg *config.Config,
 			"%s is required when %s is configured and must be a positive duration; the resumption gate has no default TTL",
 			config.EnvRecoveryGateTTL, config.EnvRecoveryControlDSN)
 	}
+	ruling, err := recoveryEffectClassRuling(cfg)
+	if err != nil {
+		return nil, fmt.Errorf("gate assembly: %s", logx.Redact(err.Error()))
+	}
+	scope, err := existingWithdrawalRecoveryScope(cfg.ChainID)
+	if err != nil {
+		return nil, fmt.Errorf("recovery capability scope: %s", logx.Redact(err.Error()))
+	}
 	pool, err := db.OpenPool(ctx, cfg.Recovery.ControlDSN, cfg.ProbeTimeout)
 	if err != nil {
 		return nil, fmt.Errorf("control store unavailable: %s", logx.Redact(err.Error()))
@@ -146,7 +158,7 @@ func assembleExistingWithdrawalRecovery(ctx context.Context, cfg *config.Config,
 		pool.Close()
 		return nil, fmt.Errorf("control store unavailable: %s", logx.Redact(err.Error()))
 	}
-	gate, err := recovery.NewGate(store, recovery.GateOptions{TTL: cfg.Recovery.GateTTL})
+	gate, err := recovery.NewGate(store, recovery.GateOptions{TTL: cfg.Recovery.GateTTL, EffectClassRuling: ruling})
 	if err != nil {
 		pool.Close()
 		return nil, fmt.Errorf("gate assembly: %s", logx.Redact(err.Error()))
@@ -154,7 +166,7 @@ func assembleExistingWithdrawalRecovery(ctx context.Context, cfg *config.Config,
 	return &existingWithdrawalRecoveryWiring{
 		gate:     gate,
 		pool:     pool,
-		scope:    existingWithdrawalRecoveryScope(cfg.ChainID),
+		scope:    scope,
 		actor:    cfg.Recovery.Principal,
 		instance: instance,
 	}, nil
@@ -188,6 +200,9 @@ func existingWithdrawalRecoveryConfigFromEnv(getenv func(string) (string, bool),
 			}
 			cfg.Recovery.GateTTL = ttl
 		}
+	}
+	if raw, ok := getenv(config.EnvRecoveryEffectClassRuling); ok {
+		cfg.Recovery.EffectClassRulingJSON = strings.TrimSpace(raw)
 	}
 	return cfg, nil
 }

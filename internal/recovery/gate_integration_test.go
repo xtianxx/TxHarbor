@@ -140,10 +140,30 @@ type gateFixture struct {
 	pool       *pgxpool.Pool
 	store      *controlstore.Store
 	instanceID string
-	scope      string
 }
 
-const gateTestScope = "chain=1;asset=usdc;kind=deposit"
+// gateScopeFor returns the canonical capability scope of c for the fixture
+// chain (chain 1, asset usdc, business type deposit). T050: the capability
+// dimension is part of the canonical scope, and the gate evaluates every
+// capability at its own scope.
+func gateScopeFor(c Capability) string {
+	scope, err := Scope{ChainID: 1, Asset: "usdc", Kind: "deposit", Capability: c}.Canonical()
+	if err != nil {
+		panic(err) // fixed canonical fixture inputs cannot fail
+	}
+	return scope
+}
+
+// gateScopeOtherAsset is the same canonical scope shape with a different asset
+// dimension: a valid but unrelated scope, used to prove a cross-scope approval
+// never matches.
+func gateScopeOtherAsset(c Capability) string {
+	scope, err := Scope{ChainID: 1, Asset: "other", Kind: "deposit", Capability: c}.Canonical()
+	if err != nil {
+		panic(err) // fixed canonical fixture inputs cannot fail
+	}
+	return scope
+}
 
 func gateOpenRecoveryInstance(t *testing.T, ctx context.Context, store *controlstore.Store) string {
 	t.Helper()
@@ -188,7 +208,7 @@ func gateBaseFixture(t *testing.T) *gateFixture {
 	gateRegister(t, ctx, store, instanceID, "deploy:executor", "executor")
 	gateRegister(t, ctx, store, instanceID, "auth:verifier", "verifier")
 	gateRegister(t, ctx, store, instanceID, "auth:approver", "approver")
-	return &gateFixture{ctx: ctx, dsn: dsn, pool: pool, store: store, instanceID: instanceID, scope: gateTestScope}
+	return &gateFixture{ctx: ctx, dsn: dsn, pool: pool, store: store, instanceID: instanceID}
 }
 
 func (f *gateFixture) token(t *testing.T) (int64, string) {
@@ -212,7 +232,7 @@ func (f *gateFixture) approve(t *testing.T, c Capability, principal, person stri
 	t.Helper()
 	generation, hash := f.token(t)
 	result, err := f.store.AppendApprovalDecision(f.ctx, controlstore.ApprovalDecisionRequest{
-		InstanceID: f.instanceID, Capability: string(c), ScopeHash: f.scope,
+		InstanceID: f.instanceID, Capability: string(c), ScopeHash: gateScopeFor(c),
 		Decision: "approve", ApprovalClassSnapshot: string(class),
 		Principal: principal, PersonID: person,
 		EvidenceGeneration: generation, EvidenceHash: hash,
@@ -228,7 +248,7 @@ func (f *gateFixture) revokeApproval(t *testing.T, c Capability, principal, pers
 	t.Helper()
 	generation, hash := f.token(t)
 	result, err := f.store.AppendApprovalDecision(f.ctx, controlstore.ApprovalDecisionRequest{
-		InstanceID: f.instanceID, Capability: string(c), ScopeHash: f.scope,
+		InstanceID: f.instanceID, Capability: string(c), ScopeHash: gateScopeFor(c),
 		Decision: "revoke", ApprovalClassSnapshot: string(ApprovalClassSingleNonExecutor),
 		Principal: principal, PersonID: person,
 		EvidenceGeneration: generation, EvidenceHash: hash,
@@ -244,7 +264,7 @@ func (f *gateFixture) release(t *testing.T, c Capability, refs []string) string 
 	t.Helper()
 	generation, hash := f.token(t)
 	result, err := f.store.AppendReleaseDecision(f.ctx, controlstore.ReleaseDecisionRequest{
-		InstanceID: f.instanceID, Capability: string(c), ScopeHash: f.scope,
+		InstanceID: f.instanceID, Capability: string(c), ScopeHash: gateScopeFor(c),
 		Decision: "release", ApprovalRefs: refs,
 		EvidenceGeneration: generation, EvidenceHash: hash,
 		Actor: "deploy:executor", OperationID: gateOperation("release"),
@@ -259,7 +279,7 @@ func (f *gateFixture) revokeRelease(t *testing.T, c Capability) string {
 	t.Helper()
 	generation, hash := f.token(t)
 	result, err := f.store.AppendReleaseDecision(f.ctx, controlstore.ReleaseDecisionRequest{
-		InstanceID: f.instanceID, Capability: string(c), ScopeHash: f.scope,
+		InstanceID: f.instanceID, Capability: string(c), ScopeHash: gateScopeFor(c),
 		Decision: "revoke", EvidenceGeneration: generation, EvidenceHash: hash,
 		Actor: "deploy:executor", OperationID: gateOperation("release-revoke"),
 	})
@@ -362,7 +382,7 @@ VALUES (gen_random_uuid(), $1, $2, 'verification_batch', '{}'::jsonb, $3, 'gate-
 
 func (f *gateFixture) admit(t *testing.T, gate *Gate, c Capability) GateDecision {
 	t.Helper()
-	return f.admitScope(t, gate, c, f.scope)
+	return f.admitScope(t, gate, c, gateScopeFor(c))
 }
 
 func (f *gateFixture) admitScope(t *testing.T, gate *Gate, c Capability, scope string) GateDecision {
@@ -428,7 +448,7 @@ func TestGateNormalModePassThroughWithoutInstance(t *testing.T) {
 	ctx, _, pool, store := gateControlStore(t)
 	gate := gateNewGate(t, store, GateOptions{})
 
-	decision, err := gate.Admit(ctx, GateRequest{Capability: CapabilityQuery, ScopeHash: gateTestScope})
+	decision, err := gate.Admit(ctx, GateRequest{Capability: CapabilityQuery, ScopeHash: gateScopeFor(CapabilityQuery)})
 	if err != nil {
 		t.Fatalf("Admit: %v", err)
 	}
@@ -454,7 +474,7 @@ func TestGateBaselineInstanceDoesNotArm(t *testing.T) {
 	}
 	gate := gateNewGate(t, store, GateOptions{})
 
-	decision, err := gate.Admit(ctx, GateRequest{Capability: CapabilityQuery, ScopeHash: gateTestScope})
+	decision, err := gate.Admit(ctx, GateRequest{Capability: CapabilityQuery, ScopeHash: gateScopeFor(CapabilityQuery)})
 	if err != nil {
 		t.Fatalf("Admit: %v", err)
 	}
@@ -464,7 +484,7 @@ func TestGateBaselineInstanceDoesNotArm(t *testing.T) {
 
 	// A binding to a baseline instance is still refused: only an open recovery
 	// instance is gateable.
-	bound, err := gate.Admit(ctx, GateRequest{InstanceID: baseline.InstanceID, Capability: CapabilityQuery, ScopeHash: gateTestScope})
+	bound, err := gate.Admit(ctx, GateRequest{InstanceID: baseline.InstanceID, Capability: CapabilityQuery, ScopeHash: gateScopeFor(CapabilityQuery)})
 	if err != nil {
 		t.Fatalf("bound Admit: %v", err)
 	}
@@ -481,7 +501,7 @@ func TestGateUnboundWhileRecoveryOpenRefuses(t *testing.T) {
 	instanceID := gateOpenRecoveryInstance(t, ctx, store)
 	gate := gateNewGate(t, store, GateOptions{})
 
-	decision, err := gate.Admit(ctx, GateRequest{Capability: CapabilityChainScan, ScopeHash: gateTestScope})
+	decision, err := gate.Admit(ctx, GateRequest{Capability: CapabilityChainScan, ScopeHash: gateScopeFor(CapabilityChainScan)})
 	if err != nil {
 		t.Fatalf("Admit: %v", err)
 	}
@@ -498,12 +518,12 @@ func TestGateUnboundWhileRecoveryOpenRefuses(t *testing.T) {
 
 func TestGateUnknownAndClosedInstanceBindingsRefuse(t *testing.T) {
 	ctx, _, pool, store := gateControlStore(t)
-	f := &gateFixture{ctx: ctx, pool: pool, store: store, scope: gateTestScope}
+	f := &gateFixture{ctx: ctx, pool: pool, store: store}
 	gate := gateNewGate(t, store, GateOptions{})
 
 	unknown, err := gate.Admit(ctx, GateRequest{
 		InstanceID: "11111111-2222-3333-4444-555555555555",
-		Capability: CapabilityQuery, ScopeHash: gateTestScope,
+		Capability: CapabilityQuery, ScopeHash: gateScopeFor(CapabilityQuery),
 	})
 	if err != nil {
 		t.Fatalf("Admit(unknown instance): %v", err)
@@ -521,7 +541,7 @@ func TestGateUnknownAndClosedInstanceBindingsRefuse(t *testing.T) {
 		t.Fatalf("close instance: %v", err)
 	}
 	closed, err := gate.Admit(ctx, GateRequest{
-		InstanceID: f.instanceID, Capability: CapabilityQuery, ScopeHash: gateTestScope,
+		InstanceID: f.instanceID, Capability: CapabilityQuery, ScopeHash: gateScopeFor(CapabilityQuery),
 	})
 	if err != nil {
 		t.Fatalf("Admit(closed instance): %v", err)
@@ -743,7 +763,7 @@ func TestGateControlStoreUnavailableRefusesEvenWithWarmCache(t *testing.T) {
 	// authoritative in-lock read is unconditional), never reuse the old allow.
 	f.pool.Close()
 	decision, err := gate.Admit(f.ctx, GateRequest{
-		InstanceID: f.instanceID, Capability: CapabilityQuery, ScopeHash: f.scope,
+		InstanceID: f.instanceID, Capability: CapabilityQuery, ScopeHash: gateScopeFor(CapabilityQuery),
 	})
 	if err == nil || !errors.Is(err, ErrGateControlStoreUnavailable) {
 		t.Fatalf("unreachable store error = %v, want ErrGateControlStoreUnavailable", err)
@@ -755,7 +775,7 @@ func TestGateControlStoreUnavailableRefusesEvenWithWarmCache(t *testing.T) {
 	// Expired cache + unreachable store: still refused (same fail-closed path).
 	now = now.Add(2 * time.Minute)
 	decision, err = gate.Admit(f.ctx, GateRequest{
-		InstanceID: f.instanceID, Capability: CapabilityQuery, ScopeHash: f.scope,
+		InstanceID: f.instanceID, Capability: CapabilityQuery, ScopeHash: gateScopeFor(CapabilityQuery),
 	})
 	if err == nil || decision.Allowed || decision.RefusalClass != RefusalControlStoreUnavailable {
 		t.Fatalf("expired cache + unreachable store = %+v / %v, want %s", decision, err, RefusalControlStoreUnavailable)
@@ -783,7 +803,7 @@ func TestGateApprovalMissingCases(t *testing.T) {
 	otherScopeApproval := func() string {
 		generation, hash := f2.token(t)
 		result, err := f2.store.AppendApprovalDecision(f2.ctx, controlstore.ApprovalDecisionRequest{
-			InstanceID: f2.instanceID, Capability: string(CapabilityQuery), ScopeHash: "chain=1;asset=other",
+			InstanceID: f2.instanceID, Capability: string(CapabilityQuery), ScopeHash: gateScopeOtherAsset(CapabilityQuery),
 			Decision: "approve", ApprovalClassSnapshot: string(ApprovalClassSingleNonExecutor),
 			Principal: "auth:approver", PersonID: "person-approver",
 			EvidenceGeneration: generation, EvidenceHash: hash, OperationID: gateOperation("approve-other-scope"),
@@ -959,7 +979,7 @@ func TestGateControlledInterleavingAdmissionBeforeRevoke(t *testing.T) {
 	admitted := make(chan admitResult, 1)
 	go func() {
 		decision, err := gate.Admit(f.ctx, GateRequest{
-			InstanceID: f.instanceID, Capability: CapabilityQuery, ScopeHash: f.scope,
+			InstanceID: f.instanceID, Capability: CapabilityQuery, ScopeHash: gateScopeFor(CapabilityQuery),
 			Actor: "deploy:executor", Action: "test:interleaving",
 		})
 		admitted <- admitResult{decision: decision, err: err}
@@ -984,7 +1004,7 @@ func TestGateControlledInterleavingAdmissionBeforeRevoke(t *testing.T) {
 	revoked := make(chan error, 1)
 	go func() {
 		_, err := revokeStore.AppendReleaseDecision(f.ctx, controlstore.ReleaseDecisionRequest{
-			InstanceID: f.instanceID, Capability: string(CapabilityQuery), ScopeHash: f.scope,
+			InstanceID: f.instanceID, Capability: string(CapabilityQuery), ScopeHash: gateScopeFor(CapabilityQuery),
 			Decision: "revoke", EvidenceGeneration: generation, EvidenceHash: hash,
 			Actor: "deploy:executor", OperationID: gateOperation("interleaved-revoke"),
 		})

@@ -81,13 +81,25 @@ func TestAssembleExistingWithdrawalRecoveryRefusesMissingGateTTL(t *testing.T) {
 	}
 }
 
-func TestExistingWithdrawalRecoveryScopeIsStableAndNonEmpty(t *testing.T) {
-	got := existingWithdrawalRecoveryScope(31337)
+func TestExistingWithdrawalRecoveryScopeIsCanonicalAndNonEmpty(t *testing.T) {
+	got, err := existingWithdrawalRecoveryScope(31337)
+	if err != nil {
+		t.Fatalf("existingWithdrawalRecoveryScope(31337): %v", err)
+	}
 	if got == "" {
 		t.Fatal("scope_hash must never be empty (the gate refuses an empty scope)")
 	}
-	if got != "chain=31337;capability=existing_withdrawal_recovery" {
-		t.Fatalf("existingWithdrawalRecoveryScope(31337) = %q", got)
+	// Canonical key order (T050): capability before chain. The value is the
+	// same canonical scope the serve-side execution path derives for this
+	// capability, so one release covers the whole entry family.
+	if want := "capability=existing_withdrawal_recovery;chain=31337"; got != want {
+		t.Fatalf("existingWithdrawalRecoveryScope(31337) = %q, want %q", got, want)
+	}
+	if again, err := recoveryScopeFor(31337, recovery.CapabilityExistingWithdrawalRecovery); err != nil || again != got {
+		t.Fatalf("existing family scope = %q, serve constructor = %q (err=%v); entry identity must not create a second scope", got, again, err)
+	}
+	if _, err := existingWithdrawalRecoveryScope(0); err == nil {
+		t.Fatal("chain 0 must refuse: the gate never substitutes a default scope")
 	}
 }
 
@@ -110,7 +122,7 @@ func TestWithdrawalWorkerAdmitRecoveryPassesCapabilityAndRefusal(t *testing.T) {
 	fake := &existingWithdrawalFakeGate{dec: recovery.GateDecision{
 		Allowed: false, RefusalClass: recovery.RefusalIsolationUnproven, Reason: "unverified",
 	}}
-	w := &WithdrawalWorker{Recovery: &existingWithdrawalRecoveryWiring{gate: fake, scope: "chain=31337;capability=existing_withdrawal_recovery"}}
+	w := &WithdrawalWorker{Recovery: &existingWithdrawalRecoveryWiring{gate: fake, scope: "capability=existing_withdrawal_recovery;chain=31337"}}
 	dec, err := w.admitRecovery(context.Background(), "worker_claim", "intent-1")
 	if err != nil {
 		t.Fatalf("admitRecovery error = %v", err)
@@ -143,7 +155,7 @@ func TestWithdrawalExecRecoveryRefuseSurfacesClosedClass(t *testing.T) {
 		Allowed: false, RefusalClass: recovery.RefusalGapOpen, Reason: "gap names the capability",
 	}}
 	stderr.Reset()
-	code := withdrawalExecRecoveryRefuse(context.Background(), &stderr, &existingWithdrawalRecoveryWiring{gate: fake, scope: "chain=31337;capability=existing_withdrawal_recovery"},
+	code := withdrawalExecRecoveryRefuse(context.Background(), &stderr, &existingWithdrawalRecoveryWiring{gate: fake, scope: "capability=existing_withdrawal_recovery;chain=31337"},
 		"claim_revoke", "op-2")
 	if code == 0 {
 		t.Fatal("refused admission exit = 0, want non-zero")
@@ -164,7 +176,7 @@ func TestWithdrawalWorkerRefusesClaimAndCycleBeforeExecution(t *testing.T) {
 	fake := &existingWithdrawalFakeGate{dec: recovery.GateDecision{
 		Allowed: false, RefusalClass: recovery.RefusalCapabilityDependencyClosed, Reason: "chain_scan not released",
 	}}
-	w := &WithdrawalWorker{Recovery: &existingWithdrawalRecoveryWiring{gate: fake, scope: "chain=31337;capability=existing_withdrawal_recovery"}}
+	w := &WithdrawalWorker{Recovery: &existingWithdrawalRecoveryWiring{gate: fake, scope: "capability=existing_withdrawal_recovery;chain=31337"}}
 
 	w.serveIntent(context.Background(), "intent-refused-claim")
 	if len(fake.requests) != 1 || fake.requests[0].Action != "worker_claim" {
@@ -188,7 +200,7 @@ func TestSignerDeliveryRecoveryGateAdapter(t *testing.T) {
 	fake := &existingWithdrawalFakeGate{dec: recovery.GateDecision{
 		Allowed: false, RefusalClass: recovery.RefusalInstanceMismatch, Reason: "unbound",
 	}}
-	refuse := signerDeliveryRecoveryGate(&existingWithdrawalRecoveryWiring{gate: fake, scope: "chain=31337;capability=existing_withdrawal_recovery"})
+	refuse := signerDeliveryRecoveryGate(&existingWithdrawalRecoveryWiring{gate: fake, scope: "capability=existing_withdrawal_recovery;chain=31337"})
 	err := refuse(context.Background(), signer.DeliveryGateRequest{SigningRequestID: "sr-2", ChainID: 31337})
 	if err == nil || !strings.Contains(err.Error(), "refusal_class=instance_mismatch") {
 		t.Fatalf("refusal = %v, want the closed refusal_class", err)
@@ -219,7 +231,7 @@ func TestExecutionHTTPAdmissionRefusesBeforeAuthAndDomain(t *testing.T) {
 		Allowed: false, RefusalClass: recovery.RefusalIsolationUnproven, Reason: "isolation unproven",
 	}}
 	h := executionRecoveryTestHandler(t, func(context.Context, uint64, func(string) (string, bool)) (*existingWithdrawalRecoveryWiring, error) {
-		return &existingWithdrawalRecoveryWiring{gate: fake, scope: "chain=31337;capability=existing_withdrawal_recovery"}, nil
+		return &existingWithdrawalRecoveryWiring{gate: fake, scope: "capability=existing_withdrawal_recovery;chain=31337"}, nil
 	})
 
 	rec := httptest.NewRecorder()

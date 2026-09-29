@@ -20,6 +20,18 @@ import (
 	"github.com/xtianxx/txharbor/internal/recovery"
 )
 
+// recovServeTestScopes derives the canonical serve scopes of one chain through
+// the production constructor, so the wiring units admit at the same scopes the
+// real assembly uses (T050).
+func recovServeTestScopes(t *testing.T, chainID uint64) map[recovery.Capability]string {
+	t.Helper()
+	scopes, err := recoveryCapabilityScopes(chainID)
+	if err != nil {
+		t.Fatalf("recoveryCapabilityScopes(%d): %v", chainID, err)
+	}
+	return scopes
+}
+
 // fakeRecoveryAdmitter scripts the gate admission surface without a control
 // store. Decisions are consumed in order; the last decision repeats once the
 // script is exhausted (so a re-admit converges). Requested admissions are
@@ -66,7 +78,7 @@ func TestRecoveryQueryGateRefusesBeforeNextHandler(t *testing.T) {
 		Reason:       "a recovery instance is open and this admission is not bound to it",
 		InstanceID:   "11111111-1111-1111-1111-111111111111",
 	})
-	wiring := &serveRecoveryWiring{gate: admitter, scope: "chain=1;surface=serve", actor: "deploy:tester"}
+	wiring := &serveRecoveryWiring{gate: admitter, scopes: recovServeTestScopes(t, 1), actor: "deploy:tester"}
 	called := false
 	next := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		called = true
@@ -114,7 +126,7 @@ func TestRecoveryQueryGateLeavesWritePathsUntouched(t *testing.T) {
 		Allowed:      false,
 		RefusalClass: recovery.RefusalInstanceMismatch,
 	})
-	wiring := &serveRecoveryWiring{gate: admitter, scope: "chain=1;surface=serve"}
+	wiring := &serveRecoveryWiring{gate: admitter, scopes: recovServeTestScopes(t, 1)}
 	called := false
 	next := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		called = true
@@ -144,7 +156,7 @@ func TestRecoveryQueryGateNormalModePassThrough(t *testing.T) {
 		Normal:       true,
 		RefusalClass: recovery.RefusalNoInstance,
 	})
-	wiring := &serveRecoveryWiring{gate: admitter, scope: "chain=1;surface=serve"}
+	wiring := &serveRecoveryWiring{gate: admitter, scopes: recovServeTestScopes(t, 1)}
 	called := false
 	next := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		called = true
@@ -175,7 +187,7 @@ func TestRecoveryQueryGateNormalModePassThrough(t *testing.T) {
 func TestRecoveryQueryGateUnavailableDecisionSurfacesClosedClass(t *testing.T) {
 	admitter := newFakeRecoveryAdmitter(recovery.GateDecision{Allowed: false})
 	admitter.errs = []error{errors.New("dial tcp: connection refused")}
-	wiring := &serveRecoveryWiring{gate: admitter, scope: "chain=1;surface=serve"}
+	wiring := &serveRecoveryWiring{gate: admitter, scopes: recovServeTestScopes(t, 1)}
 	next := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) })
 
 	rec := httptest.NewRecorder()
@@ -196,7 +208,7 @@ func TestRecoveryGateServeLoopStaysResidentWhileRefused(t *testing.T) {
 		Allowed:      false,
 		RefusalClass: recovery.RefusalInstanceMismatch,
 	})
-	wiring := &serveRecoveryWiring{gate: admitter, scope: "chain=1;surface=serve", retry: time.Millisecond}
+	wiring := &serveRecoveryWiring{gate: admitter, scopes: recovServeTestScopes(t, 1), retry: time.Millisecond}
 	innerCalled := make(chan struct{}, 1)
 	inner := func(context.Context, func() error) error {
 		innerCalled <- struct{}{}
@@ -240,7 +252,7 @@ func TestRecoveryGateServeLoopReentersAfterRefusedStep(t *testing.T) {
 		recovery.GateDecision{Allowed: false, RefusalClass: recovery.RefusalNoRelease}, // step #1
 		recovery.GateDecision{Allowed: true},                                           // loop start #2 (then repeated)
 	)
-	wiring := &serveRecoveryWiring{gate: admitter, scope: "chain=1;surface=serve", retry: time.Millisecond}
+	wiring := &serveRecoveryWiring{gate: admitter, scopes: recovServeTestScopes(t, 1), retry: time.Millisecond}
 	invocations := 0
 	inner := func(_ context.Context, checkLost func() error) error {
 		invocations++
@@ -266,7 +278,7 @@ func TestRecoveryGateServeLoopReentersAfterRefusedStep(t *testing.T) {
 
 func TestRecoveryStepGateKeepsLeaseGateFirst(t *testing.T) {
 	admitter := newFakeRecoveryAdmitter(recovery.GateDecision{Allowed: true})
-	wiring := &serveRecoveryWiring{gate: admitter, scope: "chain=1;surface=serve"}
+	wiring := &serveRecoveryWiring{gate: admitter, scopes: recovServeTestScopes(t, 1)}
 	leaseErr := errors.New("lease lost")
 	step := wiring.stepGate(context.Background(), recovery.CapabilityChainScan, "chain_scan",
 		func() error { return leaseErr })
@@ -318,8 +330,28 @@ func TestAssembleServeRecoveryRefusesMissingGateTTL(t *testing.T) {
 	}
 }
 
-func TestServeRecoveryScopeIsStableAndNonEmpty(t *testing.T) {
-	if got, want := serveRecoveryScope(31337), "chain=31337;surface=serve"; got != want {
-		t.Fatalf("serveRecoveryScope(31337) = %q, want %q", got, want)
+func TestServeRecoveryScopeIsCanonicalPerCapability(t *testing.T) {
+	scopes, err := recoveryCapabilityScopes(31337)
+	if err != nil {
+		t.Fatalf("recoveryCapabilityScopes(31337): %v", err)
+	}
+	if got, want := scopes[recovery.CapabilityQuery], "capability=query;chain=31337"; got != want {
+		t.Fatalf("query scope = %q, want %q (canonical key order)", got, want)
+	}
+	if got, want := scopes[recovery.CapabilityExistingWithdrawalRecovery], "capability=existing_withdrawal_recovery;chain=31337"; got != want {
+		t.Fatalf("existing_withdrawal_recovery scope = %q, want %q", got, want)
+	}
+	if len(scopes) != len(recovery.KnownCapabilities()) {
+		t.Fatalf("scope map covers %d capabilities, want %d", len(scopes), len(recovery.KnownCapabilities()))
+	}
+	// Entry identity is not a scope dimension: the serve constructor and the
+	// execution/signer family constructor converge on one scope.
+	existing, err := existingWithdrawalRecoveryScope(31337)
+	if err != nil || existing != scopes[recovery.CapabilityExistingWithdrawalRecovery] {
+		t.Fatalf("existing family scope = %q (err=%v), serve constructor = %q: entry identity must not split the stream",
+			existing, err, scopes[recovery.CapabilityExistingWithdrawalRecovery])
+	}
+	if _, err := recoveryCapabilityScopes(0); err == nil {
+		t.Fatal("chain 0 must refuse: there is no default scope")
 	}
 }

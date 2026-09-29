@@ -44,10 +44,11 @@
 // all seven capabilities currently release-valid and refuses over an open or
 // escalated gap; supersede stays explicit and two-person approved.
 //
-// scope_hash is passed through exactly as requested (T050 owns the canonical
-// vocabulary): this file never normalizes it, only exact matches are accepted,
-// and an approval recorded for a different scope refuses (scope_mismatch from
-// the shared judgment).
+// scope_hash is the canonical capability scope of T050 (ParseCapabilityScope):
+// an equivalent representation is canonicalized and recorded in its canonical
+// form, a legacy opaque/non-canonical scope or one naming another capability
+// refuses as scope_mismatch, and an approval recorded for a different
+// canonical scope refuses (scope_mismatch from the shared judgment).
 //
 // The control store is reached only through a *controlstore.Store built by
 // controlstore.NewStore, so the T069 schema-version guard (unknown or
@@ -94,11 +95,16 @@ var (
 )
 
 // ReleaseRequest is one append-only release/revoke request for one
-// (instance, capability, scope_hash) stream. ScopeHash is passed through
-// unchanged (T050 owns its canonical form); Reason is an audit annotation
-// only; OperationID is the persistent idempotency key. The caller can never
-// name the approvals to record: they are derived from the current approve
-// decisions of the instance's approvers.
+// (instance, capability, scope_hash) stream. ScopeHash must be a canonical
+// capability scope of Capability (ParseCapabilityScope, T050): an equivalent
+// representation is canonicalized and recorded in its canonical form, while a
+// legacy opaque string, a non-canonical expression or a scope naming another
+// capability refuses as scope_mismatch with zero writes. Reason is an audit
+// annotation only; OperationID is the persistent idempotency key. The caller
+// can never name the approvals to record: they are derived from the current
+// approve decisions of the instance's approvers, and the required class is the
+// scope-level conservative classification of the gate's trusted ruling (never
+// a caller declaration).
 type ReleaseRequest struct {
 	InstanceID  string
 	Capability  Capability
@@ -188,6 +194,25 @@ func decideRelease(ctx context.Context, store *controlstore.Store, gate *Gate, r
 		decision:          decision,
 		operationID:       operationID,
 	}
+
+	// T050: the release binds to a canonical capability scope of the requested
+	// capability. An equivalent representation canonicalizes; a legacy opaque
+	// string, a non-canonical expression or a scope naming another capability
+	// refuses as scope_mismatch and writes zero decision rows.
+	requestedScope, err := ParseCapabilityScope(scope, req.Capability)
+	if err != nil {
+		refusal.class = RefusalScopeMismatch
+		refusal.reason = err.Error()
+		return refusedRelease(ctx, store, outcome, refusal)
+	}
+	canonicalScope, err := requestedScope.Canonical()
+	if err != nil {
+		refusal.class = RefusalScopeMismatch
+		refusal.reason = err.Error()
+		return refusedRelease(ctx, store, outcome, refusal)
+	}
+	scope = canonicalScope
+	refusal.scope = canonicalScope
 
 	// The subject must be an authenticated <kind>:<id> principal: free-form
 	// text can never stand in for authentication (approval-matrix §2).
@@ -307,7 +332,14 @@ func decideRelease(ctx context.Context, store *controlstore.Store, gate *Gate, r
 //     are tried in the same deterministic order; the whole-basis refusal stays
 //     the reported class when no subset passes.
 func releaseApprovalBasisLocked(ctx context.Context, store *controlstore.Store, gate *Gate, tx pgx.Tx, token controlstore.InstanceToken, scope string, c Capability, ids *gateIdentities) ([]string, *gateRefusal) {
-	required, err := RequiredApprovalClass(c)
+	// The required class is the gate's scope-level conservative classification
+	// (T050): capability plus the scope's effect-class dimension resolved
+	// against the trusted deployment ruling carried by the gate.
+	requested, err := ParseCapabilityScope(scope, c)
+	if err != nil {
+		return nil, &gateRefusal{class: RefusalScopeMismatch, reason: err.Error()}
+	}
+	required, err := gate.requiredApprovalClass(requested)
 	if err != nil {
 		return nil, &gateRefusal{class: RefusalApprovalMissing, reason: err.Error(), cause: err}
 	}

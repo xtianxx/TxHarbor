@@ -729,7 +729,7 @@ func (s *t047Scene) seed(t *testing.T, capability Capability) {
 func (s *t047Scene) approve(t *testing.T, principal string, capability Capability) ApprovalOutcome {
 	t.Helper()
 	out, err := Approve(s.f.ctx, s.f.store, ApprovalRequest{
-		InstanceID: s.f.instanceID, Capability: capability, ScopeHash: s.f.scope,
+		InstanceID: s.f.instanceID, Capability: capability, ScopeHash: gateScopeFor(capability),
 		Principal: principal, Reason: "t047 approval", OperationID: gateOperation("t047-approve"),
 	})
 	if err != nil {
@@ -741,7 +741,7 @@ func (s *t047Scene) approve(t *testing.T, principal string, capability Capabilit
 func (s *t047Scene) revokeApproval(t *testing.T, principal string, capability Capability) ApprovalOutcome {
 	t.Helper()
 	out, err := RevokeApproval(s.f.ctx, s.f.store, ApprovalRequest{
-		InstanceID: s.f.instanceID, Capability: capability, ScopeHash: s.f.scope,
+		InstanceID: s.f.instanceID, Capability: capability, ScopeHash: gateScopeFor(capability),
 		Principal: principal, Reason: "t047 explicit revoke", OperationID: gateOperation("t047-approve-revoke"),
 	})
 	if err != nil {
@@ -753,7 +753,7 @@ func (s *t047Scene) revokeApproval(t *testing.T, principal string, capability Ca
 func (s *t047Scene) release(t *testing.T, capability Capability) ReleaseOutcome {
 	t.Helper()
 	out, err := Release(s.f.ctx, s.f.store, s.gate, ReleaseRequest{
-		InstanceID: s.f.instanceID, Capability: capability, ScopeHash: s.f.scope,
+		InstanceID: s.f.instanceID, Capability: capability, ScopeHash: gateScopeFor(capability),
 		Principal: "deploy:executor", Reason: "t047 release", OperationID: gateOperation("t047-release"),
 	})
 	if err != nil {
@@ -765,7 +765,7 @@ func (s *t047Scene) release(t *testing.T, capability Capability) ReleaseOutcome 
 func (s *t047Scene) revokeRelease(t *testing.T, capability Capability) ReleaseOutcome {
 	t.Helper()
 	out, err := RevokeRelease(s.f.ctx, s.f.store, s.gate, ReleaseRequest{
-		InstanceID: s.f.instanceID, Capability: capability, ScopeHash: s.f.scope,
+		InstanceID: s.f.instanceID, Capability: capability, ScopeHash: gateScopeFor(capability),
 		Principal: "deploy:executor", Reason: "t047 explicit release revoke", OperationID: gateOperation("t047-release-revoke"),
 	})
 	if err != nil {
@@ -777,7 +777,7 @@ func (s *t047Scene) revokeRelease(t *testing.T, capability Capability) ReleaseOu
 func (s *t047Scene) admit(t *testing.T, capability Capability) GateDecision {
 	t.Helper()
 	decision, err := s.gate.Admit(s.f.ctx, GateRequest{
-		InstanceID: s.f.instanceID, Capability: capability, ScopeHash: s.f.scope,
+		InstanceID: s.f.instanceID, Capability: capability, ScopeHash: gateScopeFor(capability),
 		Actor: "deploy:executor", OperationID: gateOperation("t047-admit"), Action: "test:t047",
 	})
 	if err != nil {
@@ -789,7 +789,7 @@ func (s *t047Scene) admit(t *testing.T, capability Capability) GateDecision {
 func (s *t047Scene) admitErr(t *testing.T, capability Capability) (GateDecision, error) {
 	t.Helper()
 	return s.gate.Admit(s.f.ctx, GateRequest{
-		InstanceID: s.f.instanceID, Capability: capability, ScopeHash: s.f.scope,
+		InstanceID: s.f.instanceID, Capability: capability, ScopeHash: gateScopeFor(capability),
 		Actor: "deploy:executor", OperationID: gateOperation("t047-admit-err"),
 	})
 }
@@ -1261,7 +1261,7 @@ func TestT047AdmissionBeforeRevokeIsInFlightAndNotRetracted(t *testing.T) {
 	admitted := make(chan admitResult, 1)
 	go func() {
 		decision, err := s.gate.Admit(s.f.ctx, GateRequest{
-			InstanceID: s.f.instanceID, Capability: CapabilityQuery, ScopeHash: s.f.scope,
+			InstanceID: s.f.instanceID, Capability: CapabilityQuery, ScopeHash: gateScopeFor(CapabilityQuery),
 			Actor: "deploy:executor", OperationID: inflightOp, Action: "test:t047-inflight",
 		})
 		admitted <- admitResult{decision: decision, err: err}
@@ -1282,7 +1282,7 @@ func TestT047AdmissionBeforeRevokeIsInFlightAndNotRetracted(t *testing.T) {
 	revoked := make(chan error, 1)
 	go func() {
 		_, err := RevokeRelease(s.f.ctx, revokeStore, s.gate, ReleaseRequest{
-			InstanceID: s.f.instanceID, Capability: CapabilityQuery, ScopeHash: s.f.scope,
+			InstanceID: s.f.instanceID, Capability: CapabilityQuery, ScopeHash: gateScopeFor(CapabilityQuery),
 			Principal: "deploy:executor", Reason: "interleaved revoke", OperationID: gateOperation("t047-revoke-interleaved"),
 		})
 		revoked <- err
