@@ -42,7 +42,10 @@ import (
 // VerifyBackupOptions is one isolated verification execution.
 type VerifyBackupOptions struct {
 	ManifestPath string
-	TargetDSN    string
+	// Binding is the deployment-derived opaque isolated target. TargetDSN is
+	// only an optional assertion and is never used for connections.
+	Binding   IsolatedTarget
+	TargetDSN string
 	// Verifier is the authenticated principal that ran the verification.
 	Verifier string
 	// InstanceID is optional: when set, the conclusion is bound to that open
@@ -51,9 +54,11 @@ type VerifyBackupOptions struct {
 	// ControlStore is required: a verification without a recorded control
 	// conclusion is not verification.
 	ControlStore *controlstore.Store
-	// ControlDSN, when set, is parsed only to prove the isolated target is
-	// not the control-store database.
-	ControlDSN string
+	// ControlDSN and AuthoritativeDSN establish the strict deployment topology.
+	ControlDSN       string
+	AuthoritativeDSN string
+	// ObserverDSN is a privileged observer on the target PostgreSQL cluster.
+	ObserverDSN string
 	// ProgramVersion is the running program identity.
 	ProgramVersion string
 	// OperationID is the idempotency key recorded on accepted evidence.
@@ -83,8 +88,14 @@ func ExecuteVerifyBackup(ctx context.Context, opts VerifyBackupOptions) (VerifyB
 	if strings.TrimSpace(opts.ManifestPath) == "" {
 		return result, errors.New("verify-backup requires a manifest path")
 	}
-	if strings.TrimSpace(opts.TargetDSN) == "" {
-		return result, errors.New("verify-backup requires an isolated target DSN")
+	boundDSN := opts.Binding.BoundDSN()
+	if strings.TrimSpace(boundDSN) == "" || strings.TrimSpace(opts.AuthoritativeDSN) == "" || strings.TrimSpace(opts.ControlDSN) == "" || strings.TrimSpace(opts.ObserverDSN) == "" {
+		return result, errors.New("verify-backup requires an opaque isolated target binding, authoritative target, control DSN, and privileged observer DSN")
+	}
+	if strings.TrimSpace(opts.TargetDSN) != "" {
+		if err := AssertIsolatedTarget(opts.Binding, opts.TargetDSN); err != nil {
+			return result, err
+		}
 	}
 	if strings.TrimSpace(opts.Verifier) == "" {
 		return result, errors.New("verify-backup requires the verifying principal")
@@ -93,23 +104,24 @@ func ExecuteVerifyBackup(ctx context.Context, opts VerifyBackupOptions) (VerifyB
 		return result, errors.New("verify-backup requires the running program version")
 	}
 	if opts.PG == nil {
-		return result, errors.New("verify-backup requires a PGCommand (the real pg_restore path); refusing to fake verification")
+		return result, errors.New("verify-backup requires PGCommand for the four read-only probes")
 	}
 	if opts.ControlStore == nil {
 		return result, errors.New("verify-backup requires the control store; a verification without a recorded conclusion is not verification")
 	}
-	if strings.TrimSpace(opts.ControlDSN) != "" {
-		controlTarget, err := controlstore.ParseDSNTarget(opts.ControlDSN)
-		if err != nil {
-			return result, fmt.Errorf("control DSN is invalid: %s", logx.Redact(err.Error()))
-		}
-		target, err := controlstore.ParseDSNTarget(opts.TargetDSN)
-		if err != nil {
-			return result, fmt.Errorf("target DSN is invalid: %s", logx.Redact(err.Error()))
-		}
-		if controlTarget.SameDatabase(target) {
-			return result, errors.New("the verification target addresses the control-store database; refusing")
-		}
+	openBindings, err := readOpenIsolatedBindings(ctx, opts.ControlStore)
+	if err != nil {
+		return result, fmt.Errorf("re-read open recovery target bindings: %w", err)
+	}
+	if _, err := BindIsolatedTarget(opts.AuthoritativeDSN, opts.ControlDSN, boundDSN, openBindings); err != nil {
+		return result, err
+	}
+	trustedTarget, err := strictTarget(boundDSN)
+	if err != nil {
+		return result, errors.New("bound isolated target identity is invalid")
+	}
+	if trustedTarget.DataTargetFingerprint().TargetFingerprint != opts.Binding.TargetFingerprint() || trustedTarget.DataTargetFingerprint().RoleFingerprint != opts.Binding.RoleFingerprint() {
+		return result, errors.New("opaque isolated target binding identity is inconsistent")
 	}
 
 	m, err := readManifestFile(opts.ManifestPath)
@@ -148,7 +160,7 @@ func ExecuteVerifyBackup(ctx context.Context, opts VerifyBackupOptions) (VerifyB
 
 	// Compatibility: a schema/program/carrier mismatch is refused without
 	// touching the target (F3: zero silent downgrade/rewrite).
-	serverVersion, err := serverVersionOf(ctx, opts.TargetDSN)
+	serverVersion, err := serverVersionOf(ctx, boundDSN)
 	if err != nil {
 		return result, fmt.Errorf("verification target is unreachable: %s", logx.Redact(err.Error()))
 	}
@@ -174,121 +186,112 @@ func ExecuteVerifyBackup(ctx context.Context, opts VerifyBackupOptions) (VerifyB
 		return result, nil
 	}
 
-	// Real isolated restore.
+	// The target-writer coordinator refuses a missing/non-clean guard, supervises
+	// and drains the child, runs the required probes, then accepts evidence and
+	// guard state in one transaction. Its only DSN is the opaque binding.
 	archivePath := resolveArtifactPath(opts.ManifestPath, m.Artifacts[0].Path)
 	archive, err := os.Open(archivePath)
 	if err != nil {
 		return result, fmt.Errorf("open artifact: %w", err)
 	}
-	restoreErr := pgRestoreInto(ctx, opts.PG, archive, opts.TargetDSN)
-	_ = archive.Close()
-	if restoreErr != nil {
-		rejected := *m
-		rejected.Verification = ManifestVerification{State: VerificationRejected, Verifier: opts.Verifier}
-		if writeErr := writeVerifiedManifest(opts.ManifestPath, &rejected); writeErr != nil {
-			return result, fmt.Errorf("verification refused (%v) and the rejected conclusion could not be recorded: %w", restoreErr, writeErr)
-		}
-		result.State = VerificationRejected
-		return result, nil
-	}
-
-	// Four checks on the real restored target.
-	outcome := probeRestoredTarget(ctx, opts.PG, opts.ManifestPath, m, opts.TargetDSN)
-	result.Checks = outcome.Checks
-	if !outcome.Checks.AllTrue() {
-		rejected := *m
-		rejected.Verification = ManifestVerification{
-			State: VerificationRejected, Verifier: opts.Verifier, Checks: outcome.Checks,
-		}
-		if writeErr := writeVerifiedManifest(opts.ManifestPath, &rejected); writeErr != nil {
-			return result, fmt.Errorf("verification probes failed (%s) and the rejected conclusion could not be recorded: %w",
-				strings.Join(outcome.Problems, "; "), writeErr)
-		}
-		result.State = VerificationRejected
-		return result, nil
-	}
-
-	// Accept: build the final manifest (with the evidence reference), compute
-	// its digest, record the control-store evidence first and publish the
-	// manifest only after the evidence is durable. A failure in either step
-	// leaves a manifest that restore still refuses (no verified flag and/or no
-	// matching evidence).
+	defer archive.Close()
 	evidenceID := newUUIDString()
 	evidenceRef := "control:recovery_evidence/" + evidenceID
 	verified := *m
-	verified.Verification = ManifestVerification{
-		State:       VerificationVerified,
-		VerifiedAt:  time.Now().UTC().Format(time.RFC3339),
-		Verifier:    opts.Verifier,
-		Target:      VerificationTargetIsolated,
-		Checks:      outcome.Checks,
-		EvidenceRef: evidenceRef,
-	}
-	canonical, err := verified.CanonicalJSON()
-	if err != nil {
-		return result, err
-	}
-	finalDigest, err := verified.Digest()
-	if err != nil {
-		return result, err
-	}
-	targetFingerprint := ""
-	if target, err := controlstore.ParseDSNTarget(opts.TargetDSN); err == nil {
-		targetFingerprint = target.DataTargetFingerprint().TargetFingerprint
-	}
-	scope, err := json.Marshal(map[string]any{
-		"backup_id":             verified.BackupID,
-		"manifest_version":      verified.ManifestVersion,
-		"manifest_digest":       finalDigest,
-		"verifier":              opts.Verifier,
-		"target_fingerprint":    targetFingerprint,
-		"target_role":           VerificationTargetIsolated,
-		"checks":                outcome.Checks,
-		"business_coverage":     outcome.Business,
-		"verification_coverage": outcome.Verification,
-		"coverage_boundary":     "sampled per FR-002 category over the declared authoritative objects; unprovable categories are recorded unknown and never counted as verified",
+	var outcome probeOutcome
+	var finalDigest string
+	writer, err := runTargetWriter(ctx, TargetWriterOptions{
+		OperationKind: TargetWriterOperationVerifyBackup,
+		Store:         opts.ControlStore, ControlDSN: opts.ControlDSN, TargetDSN: boundDSN,
+		ObserverDSN: opts.ObserverDSN, TrustedTarget: trustedTarget, IsolatedBinding: opts.Binding,
+		AuthoritativeDSN: opts.AuthoritativeDSN, InstanceID: token.InstanceID,
+		OperationID: verifyOperationID(opts, &verified), Archive: archive,
+		Probe: func(probeCtx context.Context, proof TargetWriterProof) (TargetWriterProbeResult, error) {
+			outcome = probeRestoredTarget(probeCtx, opts.PG, opts.ManifestPath, m, boundDSN)
+			if !outcome.Checks.AllTrue() {
+				return TargetWriterProbeResult{}, errors.New("four verification probes did not all pass")
+			}
+			evidence, _ := json.Marshal(map[string]any{"checks": outcome.Checks, "business": outcome.Business, "verification": outcome.Verification})
+			return TargetWriterProbeResult{Outcome: TargetWriterProbePassed, ApplicationName: proof.Application, Evidence: evidence}, nil
+		},
+		Acceptance: func(ctx context.Context, tx pgx.Tx, proof TargetWriterProof) (TargetWriterAcceptance, error) {
+			verified.Verification = ManifestVerification{State: VerificationVerified,
+				VerifiedAt: time.Now().UTC().Format(time.RFC3339), Verifier: opts.Verifier,
+				Target: VerificationTargetIsolated, Checks: outcome.Checks, EvidenceRef: evidenceRef}
+			canonical, err := verified.CanonicalJSON()
+			if err != nil {
+				return TargetWriterAcceptance{}, err
+			}
+			finalDigest, err = verified.Digest()
+			if err != nil {
+				return TargetWriterAcceptance{}, err
+			}
+			scope, err := json.Marshal(map[string]any{
+				"backup_id": verified.BackupID, "manifest_version": verified.ManifestVersion,
+				"manifest_digest": finalDigest, "verifier": opts.Verifier,
+				"target_fingerprint": opts.Binding.TargetFingerprint(), "target_role": VerificationTargetIsolated,
+				"checks": outcome.Checks, "business_coverage": outcome.Business,
+				"verification_coverage": outcome.Verification,
+				"coverage_boundary":     "sampled per FR-002 category over the declared authoritative objects; unprovable categories are recorded unknown and never counted as verified",
+			})
+			if err != nil {
+				return TargetWriterAcceptance{}, fmt.Errorf("encode verification evidence scope: %w", err)
+			}
+			// Publication intentionally precedes DB acceptance. A later failure
+			// leaves the guard dirty, so a verified bit alone is non-authoritative.
+			if err := writeFileAtomic(opts.ManifestPath, canonical); err != nil {
+				return TargetWriterAcceptance{}, err
+			}
+			var accepted EvidenceToken
+			if token.InstanceID != "" {
+				write, err := CommitEvidenceWriteTx(ctx, tx, EvidenceWriteRequest{InstanceID: token.InstanceID,
+					Token: token, Kind: MutationEvidenceSnapshotAccepted, Actor: opts.Verifier,
+					Reason: "isolated restore verification passed; backup_manifest evidence", OperationID: verifyOperationID(opts, &verified),
+					ResultDigest: []byte(finalDigest), Apply: func(ctx context.Context, tx pgx.Tx, next EvidenceToken) error {
+						if err := insertEvidence(ctx, tx, evidenceID, next.InstanceID, next.Generation, "backup_manifest", scope, finalDigest, evidenceRef, opts.Verifier); err != nil {
+							return err
+						}
+						accepted = next
+						return nil
+					}})
+				if err != nil || write.Discarded {
+					return TargetWriterAcceptance{}, errors.New("instance-bound verification evidence was not accepted")
+				}
+			} else {
+				if err := insertUnboundVerifyEvidenceTx(ctx, tx, evidenceID, scope, finalDigest, evidenceRef, opts.Verifier); err != nil {
+					return TargetWriterAcceptance{}, err
+				}
+			}
+			var txid int64
+			if err := tx.QueryRow(ctx, `SELECT txid_current()`).Scan(&txid); err != nil {
+				return TargetWriterAcceptance{}, err
+			}
+			return TargetWriterAcceptance{AcceptedRowRefs: []string{evidenceRef}, TransactionID: txid, AcceptedEvidenceToken: accepted}, nil
+		},
 	})
 	if err != nil {
-		return result, fmt.Errorf("encode verification evidence scope: %w", err)
+		return result, fmt.Errorf("isolated verification was not accepted: %w", err)
 	}
-
-	if token.InstanceID != "" {
-		written, err := CommitEvidenceWrite(ctx, opts.ControlStore, EvidenceWriteRequest{
-			InstanceID:   token.InstanceID,
-			Token:        token,
-			Kind:         MutationEvidenceSnapshotAccepted,
-			Actor:        opts.Verifier,
-			Reason:       "isolated restore verification passed; backup_manifest evidence",
-			OperationID:  verifyOperationID(opts, &verified),
-			ResultDigest: []byte(finalDigest),
-			Apply: func(ctx context.Context, tx pgx.Tx, accepted EvidenceToken) error {
-				return insertEvidence(ctx, tx, evidenceID, accepted.InstanceID, accepted.Generation,
-					"backup_manifest", scope, finalDigest, evidenceRef, opts.Verifier)
-			},
-		})
-		if err != nil {
-			return result, fmt.Errorf("verification evidence could not be recorded: %w", err)
-		}
-		if written.Discarded {
-			return result, fmt.Errorf("verification evidence was discarded: evidence changed during the verification (%s); re-run verify-backup", written.DiscardReason)
-		}
-	} else {
-		// DG-2 manifest-level conclusion: explicitly unbound (instance_id
-		// NULL, generation 0) and audited; it never pretends to be
-		// instance-bound and a later controlled command must sync-bind it.
-		if err := insertUnboundVerifyEvidence(ctx, opts.ControlStore, evidenceID, scope, finalDigest, evidenceRef, opts.Verifier); err != nil {
-			return result, err
-		}
-	}
-
-	if err := writeFileAtomic(opts.ManifestPath, canonical); err != nil {
-		return result, err
-	}
-	result.State = VerificationVerified
-	result.Checks = outcome.Checks
-	result.EvidenceRef = evidenceRef
-	result.ManifestDigest = finalDigest
+	result.State, result.Checks, result.EvidenceRef, result.ManifestDigest = VerificationVerified, outcome.Checks, evidenceRef, finalDigest
+	_ = writer
 	return result, nil
+}
+
+func readOpenIsolatedBindings(ctx context.Context, store *controlstore.Store) ([]IsolatedInstanceBinding, error) {
+	rows, err := store.Pool().Query(ctx, `SELECT target_guard_key, target_role_fingerprint FROM recovery_instance WHERE state='open'`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var bindings []IsolatedInstanceBinding
+	for rows.Next() {
+		var b IsolatedInstanceBinding
+		if err := rows.Scan(&b.TargetGuardKey, &b.TargetRoleFingerprint); err != nil {
+			return nil, err
+		}
+		bindings = append(bindings, b)
+	}
+	return bindings, rows.Err()
 }
 
 // writeVerifiedManifest publishes the (possibly rejected) manifest body.
@@ -305,11 +308,24 @@ func writeVerifiedManifest(path string, m *Manifest) error {
 // stating the unbound state explicitly (DG-2; never claims instance binding).
 func insertUnboundVerifyEvidence(ctx context.Context, store *controlstore.Store,
 	evidenceID string, scope []byte, digest, evidenceRef, verifier string) error {
+	tx, err := store.Pool().Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback(context.Background()) }()
+	if err := insertUnboundVerifyEvidenceTx(ctx, tx, evidenceID, scope, digest, evidenceRef, verifier); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
+}
+
+func insertUnboundVerifyEvidenceTx(ctx context.Context, tx pgx.Tx,
+	evidenceID string, scope []byte, digest, evidenceRef, verifier string) error {
 	const sql = `
 INSERT INTO recovery_evidence
     (evidence_id, instance_id, generation, kind, scope, artifact_hash, artifact_ref, observed_at, collected_by)
 VALUES ($1, NULL, 0, 'backup_manifest', $2, $3, $4, now(), $5)`
-	if _, err := store.Pool().Exec(ctx, sql, evidenceID, scope, digest, evidenceRef, verifier); err != nil {
+	if _, err := tx.Exec(ctx, sql, evidenceID, scope, digest, evidenceRef, verifier); err != nil {
 		return fmt.Errorf("insert manifest-level backup_manifest evidence: %w", err)
 	}
 	detail, err := json.Marshal(map[string]any{
@@ -321,7 +337,7 @@ VALUES ($1, NULL, 0, 'backup_manifest', $2, $3, $4, now(), $5)`
 	if err != nil {
 		return err
 	}
-	return controlstore.WriteAudit(ctx, store.Pool(), controlstore.AuditRecord{
+	return controlstore.WriteAudit(ctx, tx, controlstore.AuditRecord{
 		Actor:  verifier,
 		Action: "verify_backup",
 		Detail: detail,

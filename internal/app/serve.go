@@ -867,6 +867,10 @@ func assembleServeRecovery(ctx context.Context, cfg *config.Config, getenv func(
 	if err != nil {
 		return nil, fmt.Errorf("gate assembly: %s", logx.Redact(err.Error()))
 	}
+	trustedTarget, err := recovery.GateTargetBindingFromDSN(cfg.PGDSN)
+	if err != nil {
+		return nil, fmt.Errorf("%s is required to bind the recovery gate target: %s", config.EnvPGDSN, logx.Redact(err.Error()))
+	}
 	scopes, err := recoveryCapabilityScopes(cfg.ChainID)
 	if err != nil {
 		return nil, fmt.Errorf("recovery capability scopes: %s", logx.Redact(err.Error()))
@@ -880,7 +884,7 @@ func assembleServeRecovery(ctx context.Context, cfg *config.Config, getenv func(
 		pool.Close()
 		return nil, fmt.Errorf("control store unavailable: %s", logx.Redact(err.Error()))
 	}
-	gate, err := recovery.NewGate(store, recovery.GateOptions{TTL: cfg.Recovery.GateTTL, EffectClassRuling: ruling})
+	gate, err := recovery.NewGate(store, recovery.GateOptions{TTL: cfg.Recovery.GateTTL, EffectClassRuling: ruling, TrustedTarget: trustedTarget})
 	if err != nil {
 		pool.Close()
 		return nil, fmt.Errorf("gate assembly: %s", logx.Redact(err.Error()))

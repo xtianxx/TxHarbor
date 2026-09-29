@@ -61,6 +61,12 @@ type LocalPGCommand struct{}
 // an error; stdout/stderr are owned by the caller.
 func (LocalPGCommand) Run(ctx context.Context, name string, args []string, stdin io.Reader, stdout, stderr io.Writer) error {
 	cmd := exec.CommandContext(ctx, name, args...)
+	cmd.Env = os.Environ()
+	cleanup, err := protectPGChildArgs(cmd, name, args)
+	if err != nil {
+		return fmt.Errorf("prepare PostgreSQL child connection: %w", err)
+	}
+	defer cleanup()
 	cmd.Stdin = stdin
 	cmd.Stdout = stdout
 	cmd.Stderr = stderr

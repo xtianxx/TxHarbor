@@ -51,8 +51,10 @@ const CarrierKindPGDumpCustom = "pg_dump_custom"
 const VerificationTargetIsolated = "isolated"
 
 // Required backup coverage declarations. The excluded list is not decoration:
-// key material and real credentials are never in a backup, and a manifest
-// that fails to declare it is refused (T017, FR-002).
+// signer private keys and real credentials must both be declared excluded, and
+// a manifest that fails to declare either is refused (T017, FR-002). These
+// declarations describe intended coverage; they do not prove the artifact's
+// actual contents are secret-free.
 const (
 	CoverageExcludedSignerPrivateKeys = "signer_private_keys"
 	CoverageExcludedRealCredentials   = "real_credentials"
@@ -61,8 +63,8 @@ const (
 )
 
 // canonicalExcludedObjects is the exclusion declaration every manifest this
-// program produces carries: non-authoritative Redis/Kafka state and key
-// material are never part of a data-DB backup.
+// program produces carries: non-authoritative Redis/Kafka state, signer private
+// keys and real credentials are declared excluded from a data-DB backup.
 var canonicalExcludedObjects = []string{
 	CoverageExcludedRedis,
 	CoverageExcludedKafka,
@@ -671,6 +673,10 @@ func (m *Manifest) Validate(v ManifestValidation) error {
 	if !slices.Contains(m.Coverage.Excluded, CoverageExcludedSignerPrivateKeys) {
 		return fmt.Errorf("%w: coverage.excluded must declare that %s never enter a backup",
 			ErrManifestInvalid, CoverageExcludedSignerPrivateKeys)
+	}
+	if !slices.Contains(m.Coverage.Excluded, CoverageExcludedRealCredentials) {
+		return fmt.Errorf("%w: coverage.excluded must declare that %s never enter a backup",
+			ErrManifestInvalid, CoverageExcludedRealCredentials)
 	}
 	if err := ValidateRPOProof(RPOProofSnapshotTuple, m.RecoveryPoint); err != nil {
 		return err

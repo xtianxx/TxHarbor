@@ -31,6 +31,10 @@ import (
 
 const migratePGImage = "postgres:18.6-trixie"
 
+// The control-store schema currently embeds migrations 0001 through 0003;
+// the third adds durable target guards used by instance bindings.
+const migrateControlTargetVersion = 3
+
 func TestMain(m *testing.M) {
 	os.Exit(runRecoveryAdminIntegration(m))
 }
@@ -138,7 +142,7 @@ func TestMigrateIntegrationPositiveLifecycle(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("fresh status: exit=%d stderr=%q", code, stderr)
 	}
-	for _, want := range []string{"control_store=uninitialized", "current_version=0", "target_version=1", "pending=1"} {
+	for _, want := range []string{"control_store=uninitialized", "current_version=0", "target_version=3", "pending=3"} {
 		if !strings.Contains(stdout, want) {
 			t.Fatalf("fresh status must report %q: %q", want, stdout)
 		}
@@ -148,7 +152,7 @@ func TestMigrateIntegrationPositiveLifecycle(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("migrate up: exit=%d stdout=%q stderr=%q", code, upOut, upErr)
 	}
-	if !strings.Contains(upOut, "applied=1") || !strings.Contains(upOut, "current_version=1") {
+	if !strings.Contains(upOut, "applied=3") || !strings.Contains(upOut, "current_version=3") {
 		t.Fatalf("up must report the applied migration: %q", upOut)
 	}
 
@@ -183,7 +187,7 @@ func TestMigrateIntegrationPositiveLifecycle(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("status after up: exit=%d", code)
 	}
-	for _, want := range []string{"control_store=initialized", "current_version=1", "target_version=1", "pending=none"} {
+	for _, want := range []string{"control_store=initialized", "current_version=3", "target_version=3", "pending=none"} {
 		if !strings.Contains(statusOut, want) {
 			t.Fatalf("status after up must report %q: %q", want, statusOut)
 		}
@@ -266,7 +270,7 @@ func TestMigrateIntegrationRefusesUnknownVersion(t *testing.T) {
 	if code != 1 {
 		t.Fatalf("status over an unknown version must refuse with exit 1, got %d", code)
 	}
-	for _, want := range []string{"control_store_unavailable", "observed_version=999", "target_version=1"} {
+	for _, want := range []string{"control_store_unavailable", "observed_version=999", "target_version=3"} {
 		if !strings.Contains(stderr, want) {
 			t.Fatalf("refusal must contain %q: %q", want, stderr)
 		}
@@ -290,8 +294,8 @@ FROM recovery_audit WHERE action = 'migrate_status' ORDER BY audit_id DESC LIMIT
 		t.Fatalf("up refusal must be expressed as control_store_unavailable: %q", upErr)
 	}
 	if got := migrateCountRows(t, ctx, pool,
-		"SELECT count(*) FROM goose_db_version WHERE is_applied AND version_id = 1"); got != 0 {
-		t.Fatalf("up must not silently rewrite the unknown version back to 0001, got %d rows at version 1", got)
+		"SELECT count(*) FROM goose_db_version WHERE is_applied AND version_id = $1", migrateControlTargetVersion); got != 0 {
+		t.Fatalf("up must not silently rewrite the unknown version back to the current target, got %d rows at version %d", got, migrateControlTargetVersion)
 	}
 	var maxVersion int64
 	if err := pool.QueryRow(ctx,

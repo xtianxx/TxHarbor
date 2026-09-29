@@ -20,8 +20,10 @@ import (
 	"os"
 	"strings"
 	"testing"
+	"testing/fstest"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/testcontainers/testcontainers-go"
 	"github.com/testcontainers/testcontainers-go/modules/postgres"
@@ -32,6 +34,10 @@ import (
 )
 
 const controlPGImage = "postgres:18.6-trixie"
+const (
+	testTargetGuardKey        = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	testTargetRoleFingerprint = "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+)
 
 func TestMain(m *testing.M) {
 	os.Exit(runControlStoreIntegration(m))
@@ -125,7 +131,7 @@ func migratedControlStore(t *testing.T) (context.Context, *pgxpool.Pool, *Store,
 
 func openTestInstance(t *testing.T, ctx context.Context, store *Store) string {
 	t.Helper()
-	result, err := store.OpenInstance(ctx, OpenInstanceRequest{Kind: "recovery", OpenedBy: "deploy:executor"})
+	result, err := store.OpenInstance(ctx, OpenInstanceRequest{Kind: "recovery", OpenedBy: "deploy:executor", TargetGuardKey: testTargetGuardKey, TargetRoleFingerprint: testTargetRoleFingerprint})
 	if err != nil {
 		t.Fatalf("open instance: %v", err)
 	}
@@ -141,23 +147,164 @@ func countRows(t *testing.T, ctx context.Context, pool *pgxpool.Pool, sql string
 	return n
 }
 
-func TestSchemaGuardPositiveKnown0001(t *testing.T) {
+func TestSchemaGuardPositiveKnownCurrentSchema(t *testing.T) {
 	ctx, pool, store, _ := migratedControlStore(t)
 	if store == nil {
-		t.Fatal("store must be available at the known 0001 version")
+		t.Fatal("store must be available at the current known schema version")
 	}
 	state, err := InspectSchema(ctx, pool)
 	if err != nil {
 		t.Fatalf("inspect schema: %v", err)
 	}
-	if !state.VersionTable || state.Current != 1 || state.Target != 1 || len(state.Unknown) != 0 || len(state.Pending) != 0 {
+	if !state.VersionTable || state.Current != 3 || state.Target != 3 || len(state.Unknown) != 0 || len(state.Pending) != 0 {
 		t.Fatalf("unexpected schema state: %+v", state)
 	}
 	if len(state.RecoveryObjects) != len(controlTableNames) {
 		t.Fatalf("expected all %d recovery objects, got %v", len(controlTableNames), state.RecoveryObjects)
 	}
 	if err := state.CheckCompatible(); err != nil {
-		t.Fatalf("known 0001 must be compatible: %v", err)
+		t.Fatalf("current known schema must be compatible: %v", err)
+	}
+}
+
+func TestEntryChainInventoryIsImmutableAfterInsert(t *testing.T) {
+	ctx := context.Background()
+	dsn := startControlPostgres(t)
+	applyControlMigrationFiles(t, dsn, "0001_control_init.sql", "0002_entry_inventory.sql")
+	pool := openControlTestPool(t, dsn)
+	var instanceID string
+	if err := pool.QueryRow(ctx, `INSERT INTO recovery_instance
+		(instance_id, kind, state, evidence_hash, opened_by, entry_chain_inventory, entry_chain_inventory_version)
+		VALUES (gen_random_uuid(), 'recovery', 'open', $1, 'deploy:executor', '[1,10]'::jsonb, 1)
+		RETURNING instance_id::text`, EmptyEvidenceHash).Scan(&instanceID); err != nil {
+		t.Fatalf("insert valid inventory-bound instance: %v", err)
+	}
+	for name, update := range map[string]string{
+		"replace": `UPDATE recovery_instance SET entry_chain_inventory='[1]'::jsonb WHERE instance_id=$1`,
+		"clear":   `UPDATE recovery_instance SET entry_chain_inventory=NULL, entry_chain_inventory_version=NULL WHERE instance_id=$1`,
+		"version": `UPDATE recovery_instance SET entry_chain_inventory_version=NULL WHERE instance_id=$1`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			if _, err := pool.Exec(ctx, update, instanceID); err == nil {
+				t.Fatalf("inventory mutation unexpectedly succeeded")
+			}
+			var raw []byte
+			var version int32
+			if err := pool.QueryRow(ctx, `SELECT entry_chain_inventory, entry_chain_inventory_version FROM recovery_instance WHERE instance_id=$1`, instanceID).Scan(&raw, &version); err != nil {
+				t.Fatalf("read inventory after rejected mutation: %v", err)
+			}
+			if string(raw) != `[1, 10]` || version != 1 {
+				t.Fatalf("inventory after rejected mutation = %s/v%d, want [1, 10]/v1", raw, version)
+			}
+		})
+	}
+}
+
+func TestEntryChainInventoryCanBeOmittedOnlyAtInsert(t *testing.T) {
+	ctx := context.Background()
+	dsn := startControlPostgres(t)
+	// Apply 0001 only, seed a genuine legacy row while the inventory columns do
+	// not exist, then apply 0002. This models the upgrade path rather than
+	// mutating a row that was opened with a binding.
+	applyControlMigrationFiles(t, dsn, "0001_control_init.sql")
+	pool := openControlTestPool(t, dsn)
+	var id string
+	if err := pool.QueryRow(ctx, `INSERT INTO recovery_instance
+		(instance_id, kind, state, evidence_hash, opened_by)
+		VALUES (gen_random_uuid(), 'recovery', 'open', $1, 'legacy:executor')
+		RETURNING instance_id::text`, EmptyEvidenceHash).Scan(&id); err != nil {
+		t.Fatalf("insert pre-migration legacy row: %v", err)
+	}
+	applyControlMigrationFiles(t, dsn, "0002_entry_inventory.sql")
+	if _, err := pool.Exec(ctx, `UPDATE recovery_instance SET entry_chain_inventory='[1]'::jsonb, entry_chain_inventory_version=1 WHERE instance_id=$1`, id); err == nil {
+		t.Fatal("legacy null inventory was populated after insert")
+	}
+	var inventory []byte
+	if err := pool.QueryRow(ctx, `SELECT entry_chain_inventory FROM recovery_instance WHERE instance_id=$1`, id).Scan(&inventory); err != nil {
+		t.Fatalf("read legacy-shaped inventory: %v", err)
+	}
+	if inventory != nil {
+		t.Fatalf("legacy inventory = %s, want SQL NULL", inventory)
+	}
+}
+
+func TestTargetGuardMigrationUpgradesLegacyInstances(t *testing.T) {
+	ctx := context.Background()
+	dsn := startControlPostgres(t)
+	applyControlMigrationFiles(t, dsn, "0001_control_init.sql", "0002_entry_inventory.sql")
+	pool := openControlTestPool(t, dsn)
+	var id string
+	if err := pool.QueryRow(ctx, `INSERT INTO recovery_instance
+		(instance_id, kind, state, evidence_hash, opened_by)
+		VALUES (gen_random_uuid(), 'recovery', 'open', $1, 'legacy:executor')
+		RETURNING instance_id::text`, EmptyEvidenceHash).Scan(&id); err != nil {
+		t.Fatalf("insert instance before target-guard migration: %v", err)
+	}
+
+	// 0003 must add the referenced columns before creating the UPDATE trigger;
+	// running this upgrade with a pre-existing instance catches ordering errors
+	// that a schema-only or fresh-install check can miss.
+	applyControlMigrationFiles(t, dsn, "0003_target_guard.sql")
+	var guardKey, roleFingerprint *string
+	if err := pool.QueryRow(ctx, `SELECT target_guard_key, target_role_fingerprint
+		FROM recovery_instance WHERE instance_id=$1`, id).Scan(&guardKey, &roleFingerprint); err != nil {
+		t.Fatalf("read legacy instance after target-guard migration: %v", err)
+	}
+	if guardKey != nil || roleFingerprint != nil {
+		t.Fatalf("migration backfilled legacy target binding: key=%v role=%v", guardKey, roleFingerprint)
+	}
+	var triggerCount int
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM pg_trigger
+		WHERE tgname='recovery_instance_target_guard_immutable_trg' AND NOT tgisinternal`).Scan(&triggerCount); err != nil {
+		t.Fatalf("check target-guard trigger: %v", err)
+	}
+	if triggerCount != 1 {
+		t.Fatalf("target-guard trigger count=%d, want 1", triggerCount)
+	}
+	// A valid guard row cannot be used to retrofit a binding onto an instance
+	// that predates the target-guard migration. Both binding columns are
+	// immutable from INSERT onward, including a legacy NULL/NULL pair.
+	if _, err := pool.Exec(ctx, `INSERT INTO recovery_target_guard (target_guard_key, operation_id)
+VALUES ($1, 'legacy-upgrade-guard')`, testTargetGuardKey); err != nil {
+		t.Fatalf("insert valid target guard for legacy binding attempt: %v", err)
+	}
+	if _, err := pool.Exec(ctx, `UPDATE recovery_instance
+SET target_guard_key=$2, target_role_fingerprint=$3 WHERE instance_id=$1`, id, testTargetGuardKey, testTargetRoleFingerprint); err == nil {
+		t.Fatal("legacy NULL target binding was populated after insert")
+	}
+	if _, err := pool.Exec(ctx, `UPDATE recovery_instance
+SET state='closed', closed_by='legacy:migration-test', closed_at=now() WHERE instance_id=$1`, id); err != nil {
+		t.Fatalf("ordinary lifecycle update on legacy instance was rejected: %v", err)
+	}
+	var dispositionColumn, activeWriterColumn bool
+	if err := pool.QueryRow(ctx, `SELECT
+  EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='recovery_target_guard' AND column_name='disposition'),
+  EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='recovery_target_guard' AND column_name='active_writer')`).Scan(&dispositionColumn, &activeWriterColumn); err != nil {
+		t.Fatalf("check target guard lifecycle columns: %v", err)
+	}
+	if !dispositionColumn || !activeWriterColumn {
+		t.Fatalf("migration lacks separate disposition/active_writer: %t/%t", dispositionColumn, activeWriterColumn)
+	}
+}
+
+func applyControlMigrationFiles(t *testing.T, dsn string, names ...string) {
+	t.Helper()
+	files := fstest.MapFS{}
+	for _, name := range names {
+		data, err := schema.FS.ReadFile("controlstore/" + name)
+		if err != nil {
+			// schema.FS is rooted at this package's schema directory.
+			data, err = schema.FS.ReadFile(name)
+		}
+		if err != nil {
+			t.Fatalf("read embedded migration %s: %v", name, err)
+		}
+		files[name] = &fstest.MapFile{Data: data}
+	}
+	if err := db.MigrateUp(context.Background(), db.MigrateOptions{
+		DSN: dsn, LockTimeout: 10 * time.Second, ConnectTimeout: 5 * time.Second, FS: files,
+	}, io.Discard); err != nil {
+		t.Fatalf("apply control migrations %v: %v", names, err)
 	}
 }
 
@@ -176,7 +323,7 @@ func TestSchemaGuardMissingVersionTableRefuses(t *testing.T) {
 		t.Fatal("NewStore over a database without a version table must refuse")
 	} else if !IsControlStoreUnavailable(err) {
 		t.Fatalf("refusal must be control_store_unavailable, got %v", err)
-	} else if got := err.Error(); got == "" || !containsAll(got, "version table is missing", "observed_version=0", "target_version=1") {
+	} else if got := err.Error(); got == "" || !containsAll(got, "version table is missing", "observed_version=0", "target_version=3") {
 		t.Fatalf("refusal must annotate the observed state: %s", got)
 	}
 }
@@ -195,7 +342,7 @@ func TestSchemaGuardUnknownVersionRefusesAndAudits(t *testing.T) {
 		t.Fatalf("refusal must be control_store_unavailable, got %v", err)
 	}
 	var se *SchemaError
-	if !errors.As(err, &se) || se.ObservedVersion != 999 || se.TargetVersion != 1 {
+	if !errors.As(err, &se) || se.ObservedVersion != 999 || se.TargetVersion != 3 {
 		t.Fatalf("refusal must carry observed/target versions, got %v", err)
 	}
 	var result, refusalClass, observed string
@@ -234,7 +381,7 @@ func TestOpenInstancePartialUniqueConflictRefuses(t *testing.T) {
 	ctx, pool, store, _ := migratedControlStore(t)
 	first := openTestInstance(t, ctx, store)
 
-	_, err := store.OpenInstance(ctx, OpenInstanceRequest{Kind: "recovery", OpenedBy: "deploy:executor"})
+	_, err := store.OpenInstance(ctx, OpenInstanceRequest{Kind: "recovery", OpenedBy: "deploy:executor", TargetGuardKey: testTargetGuardKey, TargetRoleFingerprint: testTargetRoleFingerprint})
 	if err == nil || !errors.Is(err, ErrInstanceAlreadyOpen) {
 		t.Fatalf("second open instance must be refused with ErrInstanceAlreadyOpen, got %v", err)
 	}
@@ -547,7 +694,8 @@ func TestOpenInstanceRejectsCredentialDataTarget(t *testing.T) {
 
 	_, err := store.OpenInstance(ctx, OpenInstanceRequest{
 		Kind: "recovery", OpenedBy: "deploy:executor",
-		DataTarget: []byte(`{"dsn":"postgres://u:supersecret@db.example/txharbor"}`),
+		DataTarget:     []byte(`{"dsn":"postgres://u:supersecret@db.example/txharbor"}`),
+		TargetGuardKey: testTargetGuardKey, TargetRoleFingerprint: testTargetRoleFingerprint,
 	})
 	if err == nil {
 		t.Fatal("a data_target embedding a DSN must be refused")
@@ -560,6 +708,7 @@ func TestOpenInstanceRejectsCredentialDataTarget(t *testing.T) {
 	payload := mustJSON(fp.DataTargetFingerprint())
 	result, err := store.OpenInstance(ctx, OpenInstanceRequest{
 		Kind: "recovery", OpenedBy: "deploy:executor", DataTarget: payload,
+		TargetGuardKey: testTargetGuardKey, TargetRoleFingerprint: testTargetRoleFingerprint,
 	})
 	if err != nil {
 		t.Fatalf("fingerprint data_target: %v", err)
@@ -573,6 +722,77 @@ func TestOpenInstanceRejectsCredentialDataTarget(t *testing.T) {
 		if containsAll(text, secret) {
 			t.Fatalf("stored data_target leaks %q: %s", secret, text)
 		}
+	}
+}
+
+func TestInstanceOpenBootstrapsUnknownGuardAndBindsTargetImmutably(t *testing.T) {
+	ctx, pool, store, _ := migratedControlStore(t)
+	id := openTestInstance(t, ctx, store)
+	guard, found, err := ReadTargetGuard(ctx, pool, testTargetGuardKey)
+	if err != nil || !found || guard.State != TargetGuardUnknown || guard.ActiveWriter || guard.LaunchIntent {
+		t.Fatalf("new target inventory = %+v found=%t err=%v; want untouched unknown", guard, found, err)
+	}
+	tx, err := pool.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	token, err := LockInstance(ctx, tx, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if token.TargetGuardKey != testTargetGuardKey || token.TargetRoleFingerprint != testTargetRoleFingerprint {
+		t.Fatalf("stored immutable target binding = %q/%q", token.TargetGuardKey, token.TargetRoleFingerprint)
+	}
+	otherKey := "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+	if err := InitializeTargetGuard(ctx, tx, otherKey, "immutable-test-target"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tx.Exec(ctx, `UPDATE recovery_instance SET target_guard_key = $2 WHERE instance_id = $1`, id, otherKey); err == nil {
+		t.Fatal("changing an established target binding must be rejected")
+	}
+}
+
+func TestInstanceTargetBindingRefusesRoleMismatchAndLegacyNull(t *testing.T) {
+	ctx, pool, store, _ := migratedControlStore(t)
+	id := openTestInstance(t, ctx, store)
+	tx, err := pool.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	token, err := LockInstance(ctx, tx, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	otherRole := "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+	if err := RequireInstanceTargetBinding(ctx, tx, token, testTargetGuardKey, otherRole); err == nil {
+		t.Fatal("a role fingerprint mismatch must refuse")
+	}
+	_ = tx.Rollback(ctx)
+	if _, err := pool.Exec(ctx, `UPDATE recovery_instance SET state = 'closed', closed_by = 'deploy:executor', closed_at = now() WHERE instance_id = $1`, id); err != nil {
+		t.Fatal(err)
+	}
+
+	legacyID := uuid.NewString()
+	if _, err := pool.Exec(ctx, `INSERT INTO recovery_instance
+(instance_id, kind, state, evidence_generation, evidence_hash, opened_by)
+VALUES ($1, 'recovery', 'open', 0, $2, 'deploy:executor')`, legacyID, EmptyEvidenceHash); err != nil {
+		t.Fatal(err)
+	}
+	legacyTx, err := pool.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = legacyTx.Rollback(ctx) }()
+	legacy, err := LockInstance(ctx, legacyTx, legacyID)
+	if err != nil {
+		t.Fatalf("read legacy-null binding: %v", err)
+	}
+	if legacy.TargetGuardKey != "" || legacy.TargetRoleFingerprint != "" {
+		t.Fatalf("legacy target binding was unexpectedly backfilled: %+v", legacy)
+	}
+	if err := RequireInstanceTargetBinding(ctx, legacyTx, legacy, testTargetGuardKey, testTargetRoleFingerprint); err == nil {
+		t.Fatal("legacy-null target binding must refuse lifecycle action")
 	}
 }
 

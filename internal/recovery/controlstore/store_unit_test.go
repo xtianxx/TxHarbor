@@ -14,10 +14,10 @@ func TestSchemaStateCheckCompatible(t *testing.T) {
 	known := func() SchemaState {
 		return SchemaState{
 			VersionTable: true,
-			Known:        []int64{1},
-			Target:       1,
-			Applied:      []int64{1},
-			Current:      1,
+			Known:        []int64{1, 2},
+			Target:       2,
+			Applied:      []int64{1, 2},
+			Current:      2,
 		}
 	}
 
@@ -32,7 +32,7 @@ func TestSchemaStateCheckCompatible(t *testing.T) {
 		state.VersionTable = false
 		state.Applied = nil
 		state.Current = 0
-		state.Pending = []int64{1}
+		state.Pending = []int64{1, 2}
 		err := state.CheckCompatible()
 		if err == nil {
 			t.Fatal("expected refusal for missing version table")
@@ -58,16 +58,16 @@ func TestSchemaStateCheckCompatible(t *testing.T) {
 		if !IsControlStoreUnavailable(err) {
 			t.Fatalf("expected control_store_unavailable, got %v", err)
 		}
-		if !strings.Contains(err.Error(), "observed_version=999") || !strings.Contains(err.Error(), "target_version=1") {
+		if !strings.Contains(err.Error(), "observed_version=999") || !strings.Contains(err.Error(), "target_version=2") {
 			t.Fatalf("refusal must carry observed/target versions: %v", err)
 		}
 	})
 
 	t.Run("newer than known refuses", func(t *testing.T) {
 		state := known()
-		state.Applied = []int64{2}
-		state.Current = 2
-		state.Unknown = []int64{2}
+		state.Applied = []int64{3}
+		state.Current = 3
+		state.Unknown = []int64{3}
 		state.Pending = nil
 		err := state.CheckCompatible()
 		if err == nil || !IsControlStoreUnavailable(err) {
@@ -76,7 +76,7 @@ func TestSchemaStateCheckCompatible(t *testing.T) {
 	})
 
 	t.Run("pending migration is not compatible", func(t *testing.T) {
-		state := SchemaState{VersionTable: true, Known: []int64{1}, Target: 1, Pending: []int64{1}}
+		state := SchemaState{VersionTable: true, Known: []int64{1, 2}, Target: 2, Pending: []int64{1, 2}}
 		err := state.CheckCompatible()
 		if err == nil || !IsControlStoreUnavailable(err) {
 			t.Fatalf("expected control_store_unavailable for pending migrations, got %v", err)
@@ -87,9 +87,22 @@ func TestSchemaStateCheckCompatible(t *testing.T) {
 	})
 }
 
+func TestValidateEntryChainInventory(t *testing.T) {
+	for _, chains := range [][]uint64{{1}, {1, 10, 31337}} {
+		if err := ValidateEntryChainInventory(chains); err != nil {
+			t.Errorf("ValidateEntryChainInventory(%v): %v", chains, err)
+		}
+	}
+	for _, chains := range [][]uint64{nil, {}, {0}, {1, 1}, {2, 1}} {
+		if err := ValidateEntryChainInventory(chains); err == nil {
+			t.Errorf("ValidateEntryChainInventory(%v) unexpectedly succeeded", chains)
+		}
+	}
+}
+
 func TestSchemaStateCheckMigratable(t *testing.T) {
 	t.Run("pristine empty database is migratable", func(t *testing.T) {
-		state := SchemaState{Known: []int64{1}, Target: 1, Pending: []int64{1}}
+		state := SchemaState{Known: []int64{1, 2}, Target: 2, Pending: []int64{1, 2}}
 		if err := state.CheckMigratable(); err != nil {
 			t.Fatalf("expected pristine database to be migratable, got %v", err)
 		}
@@ -107,8 +120,8 @@ func TestSchemaStateCheckMigratable(t *testing.T) {
 
 	t.Run("unknown version refuses", func(t *testing.T) {
 		state := SchemaState{
-			VersionTable: true, Known: []int64{1}, Target: 1,
-			Applied: []int64{999}, Current: 999, Unknown: []int64{999}, Pending: []int64{1},
+			VersionTable: true, Known: []int64{1, 2}, Target: 2,
+			Applied: []int64{999}, Current: 999, Unknown: []int64{999}, Pending: []int64{1, 2},
 		}
 		err := state.CheckMigratable()
 		if err == nil || !IsControlStoreUnavailable(err) {
@@ -118,7 +131,7 @@ func TestSchemaStateCheckMigratable(t *testing.T) {
 
 	t.Run("recovery objects without version table refuse", func(t *testing.T) {
 		state := SchemaState{
-			Known: []int64{1}, Target: 1, Pending: []int64{1},
+			Known: []int64{1, 2}, Target: 2, Pending: []int64{1, 2},
 			RecoveryObjects: []string{"recovery_instance", "recovery_audit"},
 		}
 		err := state.CheckMigratable()
@@ -131,7 +144,7 @@ func TestSchemaStateCheckMigratable(t *testing.T) {
 	})
 
 	t.Run("newer than known refuses", func(t *testing.T) {
-		state := SchemaState{VersionTable: true, Known: []int64{1}, Target: 1, Applied: []int64{2}, Current: 2}
+		state := SchemaState{VersionTable: true, Known: []int64{1, 2}, Target: 2, Applied: []int64{3}, Current: 3}
 		if err := state.CheckMigratable(); err == nil || !IsControlStoreUnavailable(err) {
 			t.Fatalf("expected control_store_unavailable, got %v", err)
 		}

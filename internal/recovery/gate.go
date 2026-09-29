@@ -4,10 +4,12 @@
 //
 // Rules of this file (all fail-closed):
 //
-//   - Normal state: no open `recovery` instance means pass-through — the daily
-//     runtime is unchanged. The normal verdict is still read authoritatively
-//     from the control store on every admission; a missing/invalid cache TTL or
-//     an unreachable control store refuses instead of passing.
+//   - Normal state: no open `recovery` instance normally means pass-through,
+//     except that any known recovery-instance target binding must have a
+//     present, clean target guard. This prevents close/supersede from turning
+//     unresolved target state into normal-mode pass-through. The control store
+//     cannot prove cleanliness for unrelated unbound external targets without
+//     a trusted inventory of those targets.
 //   - Armed state: while a `recovery` instance is open, every admission denies
 //     by default. A capability is released only by the derived evaluation:
 //     instance open + capability in the closed set + every requires_capabilities
@@ -247,12 +249,41 @@ type GateDecision struct {
 // of a scope (T050). A nil ruling means "not configured": the event
 // capabilities stay conservatively dual. A malformed ruling refuses
 // construction (ErrEffectClassRuling) — a deployment configuration error is
-// never guessed around.
+// never guessed around. TrustedTarget must be independently derived from the
+// deployment's configured data DSN for bound recovery admissions; a zero value
+// is permitted at construction but refuses those admissions.
 type GateOptions struct {
 	TTL               time.Duration
 	Now               func() time.Time
 	FundGates         FundGateChecker
 	EffectClassRuling EffectClassRuling
+	TrustedTarget     GateTargetBinding
+}
+
+// GateTargetBinding is the deployment-trusted identity of the data target
+// protected by this gate. It contains fingerprints only, never a DSN.
+type GateTargetBinding struct {
+	TargetGuardKey        string
+	TargetRoleFingerprint string
+}
+
+// GateTargetBindingFromDSN derives the credential-free target identity used
+// to bind a gate to deployment configuration. Parse errors are deliberately
+// replaced because DSN parser errors may include credential material.
+func GateTargetBindingFromDSN(dsn string) (GateTargetBinding, error) {
+	target, err := controlstore.ParseDSNTarget(dsn)
+	if err != nil {
+		return GateTargetBinding{}, errors.New("trusted target DSN is invalid or not safely identifiable")
+	}
+	key, err := controlstore.TargetGuardKey(target)
+	if err != nil {
+		return GateTargetBinding{}, errors.New("trusted target identity is invalid")
+	}
+	role := target.DataTargetFingerprint().RoleFingerprint
+	if !gateFingerprint(key) || !gateFingerprint(role) {
+		return GateTargetBinding{}, errors.New("trusted target identity is incomplete")
+	}
+	return GateTargetBinding{TargetGuardKey: key, TargetRoleFingerprint: role}, nil
 }
 
 // Gate is the single derived release evaluator. It is safe for concurrent use.
@@ -262,6 +293,7 @@ type Gate struct {
 	now       func() time.Time
 	fundGates FundGateChecker
 	ruling    EffectClassRuling
+	target    GateTargetBinding
 
 	mu    sync.Mutex
 	cache map[gateCacheKey]gateCapabilityFacts
@@ -301,6 +333,7 @@ func NewGate(store *controlstore.Store, opts GateOptions) (*Gate, error) {
 		now:       now,
 		fundGates: opts.FundGates,
 		ruling:    opts.EffectClassRuling,
+		target:    opts.TrustedTarget,
 		cache:     make(map[gateCacheKey]gateCapabilityFacts),
 	}, nil
 }
@@ -319,9 +352,10 @@ func (g *Gate) requiredApprovalClass(scope Scope) (ApprovalClass, error) {
 // non-nil error means the evaluation could not complete (unknown capability,
 // control store unavailable) and the caller must deny.
 //
-// Outside recovery mode (no open recovery instance) the admission passes
-// through unchanged and writes no audit row. In recovery mode every outcome is
-// audited; refusals always carry a closed-set refusal class.
+// Outside recovery mode (no open recovery instance and no unresolved guard for
+// a target bound to a recovery instance) the admission passes through unchanged
+// and writes no audit row. In recovery mode every outcome is audited; refusals
+// always carry a closed-set refusal class.
 func (g *Gate) Admit(ctx context.Context, req GateRequest) (GateDecision, error) {
 	if !req.Capability.Known() {
 		return GateDecision{Allowed: false, Capability: req.Capability},
@@ -376,8 +410,9 @@ func (g *Gate) Admit(ctx context.Context, req GateRequest) (GateDecision, error)
 
 // admitUnbound evaluates a caller that is not bound to a recovery instance.
 // No open instance (or an open documentation-only `baseline` instance) passes
-// through; an open `recovery` instance refuses — a process that is not bound
-// to the open instance must never keep acting inside recovery mode.
+// through only when every known recovery-instance target guard is clean; an
+// open `recovery` instance refuses — a process that is not bound to the open
+// instance must never keep acting inside recovery mode.
 //
 // Residual boundary: instance-open committing concurrently with an in-flight
 // normal-mode admission is not ordered here (no cross-system atomicity is
@@ -390,6 +425,21 @@ func (g *Gate) admitUnbound(ctx context.Context, req GateRequest) (GateDecision,
 		return d, fmt.Errorf("%w: %v", ErrGateControlStoreUnavailable, err)
 	}
 	if openID == "" || kind != "recovery" {
+		unresolvedID, unresolved, guardErr := g.unresolvedRecoveryTargetGuard(ctx)
+		if guardErr != nil {
+			d := g.unavailableDecision(req, guardErr)
+			g.audit(ctx, req, d, nil)
+			return d, fmt.Errorf("%w: %v", ErrGateControlStoreUnavailable, guardErr)
+		}
+		if unresolved {
+			d := GateDecision{
+				Allowed: false, RefusalClass: RefusalIsolationUnproven,
+				Reason:     "a target bound to a recovery instance has a missing or unresolved target guard; normal-mode pass-through is denied",
+				InstanceID: unresolvedID, Capability: req.Capability, ScopeHash: req.ScopeHash,
+			}
+			g.audit(ctx, req, d, nil)
+			return d, nil
+		}
 		return GateDecision{
 			Allowed:      true,
 			Normal:       true,
@@ -409,6 +459,38 @@ func (g *Gate) admitUnbound(ctx context.Context, req GateRequest) (GateDecision,
 	}
 	g.audit(ctx, req, d, nil)
 	return d, nil
+}
+
+// unresolvedRecoveryTargetGuard checks the trusted persisted inventory rather
+// than request identity. A deployment-trusted target key scopes known bindings
+// to the target this gate protects; legacy or malformed persisted keys remain
+// global blockers because their target cannot be identified. If the gate has
+// no valid trusted key, retain the conservative all-target check.
+func (g *Gate) unresolvedRecoveryTargetGuard(ctx context.Context) (string, bool, error) {
+	var id string
+	trustedKey := g.target.TargetGuardKey
+	if !gateFingerprint(trustedKey) {
+		trustedKey = ""
+	}
+	err := g.store.Pool().QueryRow(ctx, `
+SELECT i.instance_id::text
+FROM recovery_instance i
+LEFT JOIN recovery_target_guard tg ON tg.target_guard_key = i.target_guard_key
+WHERE i.kind = 'recovery'
+  AND ($1 = '' OR i.target_guard_key IS NULL OR i.target_guard_key !~ '^sha256:[0-9a-f]{64}$'
+       OR i.target_guard_key = $1)
+  AND (i.target_guard_key IS NULL OR i.target_guard_key = ''
+       OR i.target_role_fingerprint IS NULL OR i.target_role_fingerprint = ''
+       OR tg.target_guard_key IS NULL OR tg.disposition <> 'clean' OR tg.active_writer)
+ORDER BY i.opened_at DESC, i.instance_id DESC
+LIMIT 1`, trustedKey).Scan(&id)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return "", false, nil
+	}
+	if err != nil {
+		return "", false, fmt.Errorf("read recovery target guard inventory: %w", err)
+	}
+	return id, true, nil
 }
 
 // admitBound evaluates an admission bound to one instance. The instance row is
@@ -480,6 +562,52 @@ func (g *Gate) admitBound(ctx context.Context, req GateRequest) (GateDecision, e
 		g.audit(ctx, req, d, nil)
 		return d, nil
 	}
+	// The deployment's independently configured target is required for a
+	// bound admission. The locked instance binding is compared against it; no
+	// request identity or instance-derived value can establish trust.
+	if !gateFingerprint(g.target.TargetGuardKey) || !gateFingerprint(g.target.TargetRoleFingerprint) {
+		abort()
+		d := GateDecision{Allowed: false, RefusalClass: RefusalIsolationUnproven,
+			Reason:     "trusted deployment target binding is missing or incomplete; refusing bound recovery admission",
+			InstanceID: token.InstanceID, Capability: req.Capability, ScopeHash: req.ScopeHash}
+		g.audit(ctx, req, d, nil)
+		return d, nil
+	}
+	if token.TargetGuardKey != g.target.TargetGuardKey || token.TargetRoleFingerprint != g.target.TargetRoleFingerprint {
+		abort()
+		d := GateDecision{Allowed: false, RefusalClass: RefusalInstanceMismatch,
+			Reason:     "bound recovery instance target does not match the trusted deployment target",
+			InstanceID: token.InstanceID, Capability: req.Capability, ScopeHash: req.ScopeHash}
+		g.audit(ctx, req, d, nil)
+		return d, nil
+	}
+	// The locked persisted binding has matched the immutable deployment
+	// binding above. Continue using the locked row for guard access; never allow
+	// request-supplied identity to select or override the guarded target.
+	if !gateFingerprint(token.TargetGuardKey) || !gateFingerprint(token.TargetRoleFingerprint) {
+		abort()
+		d := GateDecision{Allowed: false, RefusalClass: RefusalIsolationUnproven,
+			Reason:     "bound recovery instance has no persisted target binding; refusing legacy or incomplete instance",
+			InstanceID: token.InstanceID, Capability: req.Capability, ScopeHash: req.ScopeHash}
+		g.audit(ctx, req, d, nil)
+		return d, nil
+	}
+	guard, found, guardErr := controlstore.ReadTargetGuard(ctx, tx, token.TargetGuardKey)
+	if guardErr != nil {
+		abort()
+		d := g.unavailableDecision(req, guardErr)
+		d.InstanceID = token.InstanceID
+		g.audit(ctx, req, d, nil)
+		return d, fmt.Errorf("%w: %v", ErrGateControlStoreUnavailable, guardErr)
+	}
+	if !found || guard.Key != token.TargetGuardKey || guard.State != controlstore.TargetGuardClean || guard.ActiveWriter {
+		abort()
+		d := GateDecision{Allowed: false, RefusalClass: RefusalIsolationUnproven,
+			Reason:     fmt.Sprintf("persisted target guard is missing or unresolved (state=%q active_writer=%t); recovery release is denied", guard.State, guard.ActiveWriter),
+			InstanceID: token.InstanceID, Capability: req.Capability, ScopeHash: req.ScopeHash}
+		g.audit(ctx, req, d, nil)
+		return d, nil
+	}
 
 	g.invalidateCache(token)
 	ev := g.evaluateLocked(ctx, tx, token, req)
@@ -509,6 +637,18 @@ func (g *Gate) admitBound(ctx context.Context, req GateRequest) (GateDecision, e
 		return d, fmt.Errorf("%w: %v", ErrGateControlStoreUnavailable, ev.refusal.cause)
 	}
 	return d, nil
+}
+
+func gateFingerprint(value string) bool {
+	if len(value) != len("sha256:")+64 || !strings.HasPrefix(value, "sha256:") {
+		return false
+	}
+	for _, r := range value[len("sha256:"):] {
+		if !(r >= '0' && r <= '9' || r >= 'a' && r <= 'f') {
+			return false
+		}
+	}
+	return true
 }
 
 // openInstance reads the current open instance (at most one globally, INV-1).

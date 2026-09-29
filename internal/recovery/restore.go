@@ -74,6 +74,9 @@ type RestoreOptions struct {
 	// ControlDSN is parsed only, to prove the target is not the control
 	// store database (the control store is outside the data restore set).
 	ControlDSN string
+	// ObserverDSN is an explicit connection with visibility into tagged target
+	// sessions. It is never inferred from TargetDSN.
+	ObserverDSN string
 	// TargetDSN is the explicit restore target.
 	TargetDSN string
 	// TargetDeclaration defaults to isolated.
@@ -147,10 +150,20 @@ func ExecuteRestore(ctx context.Context, opts RestoreOptions) (RestoreResult, er
 	if run.result.Declaration == "" {
 		run.result.Declaration = TargetIsolated
 	}
+	// TargetReason is persisted in restore audit/evidence detail. Reject
+	// credential-shaped annotations before any precondition work can write an
+	// audit row, advance evidence, or touch the target. Keep the refusal generic:
+	// the supplied text must never enter an error, log, or audit record.
+	if err := ValidateRestoreTargetReason(opts.TargetReason); err != nil {
+		run.blocked = append(run.blocked, err.Error())
+		return run.fail()
+	}
 
 	// Structural preconditions.
 	run.require(strings.TrimSpace(opts.ManifestPath) != "", "manifest path is required")
 	run.require(strings.TrimSpace(opts.TargetDSN) != "", "target DSN is required")
+	run.require(strings.TrimSpace(opts.ControlDSN) != "", "control DSN is required")
+	run.require(strings.TrimSpace(opts.ObserverDSN) != "", "explicit target observer DSN is required")
 	run.require(strings.TrimSpace(opts.InstanceID) != "", "recovery instance id is required")
 	run.require(strings.TrimSpace(opts.Actor) != "", "restore actor (authenticated principal) is required")
 	run.require(strings.TrimSpace(opts.ProgramVersion) != "", "running program version is required")
@@ -252,110 +265,108 @@ func ExecuteRestore(ctx context.Context, opts RestoreOptions) (RestoreResult, er
 		return run.fail()
 	}
 
-	// Pre-write invalidation marker (duplicate-restore timing; F5/INV-3,
-	// data-model §5). A new real restore changes the authoritative data set,
-	// so every release/approval bound to the pre-restore evidence generation
-	// must stop being usable for admission BEFORE the first target write. The
-	// marker commits through the same generation protocol every decision write
-	// uses: the generation advances and the hash refreshes, so the old
-	// authorization basis is stale from that commit on. If the restore then
-	// fails or is interrupted, the generation stays advanced — the old
-	// permission is never restored by the failure. The accepted restore_probe
-	// evidence is still written only after all four probes pass.
-	marker, err := CommitEvidenceWrite(ctx, opts.ControlStore, EvidenceWriteRequest{
-		InstanceID:   token.InstanceID,
-		Token:        token,
-		Kind:         MutationRestoreStarted,
-		Actor:        opts.Actor,
-		Reason:       "restore started: pre-write invalidation of the previous evidence generation",
-		OperationID:  restoreOperationID(opts, m),
-		ResultDigest: []byte(digest),
-		Apply: func(ctx context.Context, tx pgx.Tx, accepted EvidenceToken) error {
-			return insertRestoreStartedMarker(ctx, tx, accepted, m, digest,
-				run.result.TargetFingerprint, string(run.result.Declaration), opts)
-		},
-	})
+	defer archive.Close()
+	trustedTarget, err := controlstore.ParseDSNTarget(opts.TargetDSN)
 	if err != nil {
-		_ = archive.Close()
-		run.blocked = append(run.blocked,
-			"restore start marker could not be recorded (the target was not touched): "+logx.Redact(err.Error()))
+		run.blocked = append(run.blocked, "target identity is invalid")
 		return run.fail()
 	}
-	if marker.Discarded {
-		_ = archive.Close()
-		run.blocked = append(run.blocked,
-			"restore start marker was discarded (evidence changed during the restore start: "+
-				marker.DiscardReason+"); re-run against the current evidence generation")
-		return run.fail()
-	}
-
-	// Real restore.
-	restoreErr := pgRestoreInto(ctx, opts.PG, archive, opts.TargetDSN)
-	_ = archive.Close()
-	if restoreErr != nil {
-		// Interruption/partial restore: never restored, no restored evidence.
-		// The pre-write marker stays committed, so the old releases/approvals
-		// remain stale; retry = rebuild the target database, then rerun
-		// (idempotent).
-		run.blocked = append(run.blocked, "pg_restore did not complete: "+restoreErr.Error())
-		return run.fail()
-	}
-
-	// Four probes; only an all-pass result is accepted evidence.
-	outcome := probeRestoredTarget(ctx, opts.PG, opts.ManifestPath, m, opts.TargetDSN)
-	run.result.Checks = outcome.Checks
-	if !outcome.Checks.AllTrue() {
-		run.blocked = append(run.blocked, "restore probes did not pass: "+strings.Join(outcome.Problems, "; "))
-		return run.fail()
-	}
-
+	operationID := restoreOperationID(opts, m)
 	evidenceID := newUUIDString()
 	evidenceRef := "control:recovery_evidence/" + evidenceID
-	scope, err := json.Marshal(map[string]any{
-		"backup_id":             m.BackupID,
-		"manifest_version":      m.ManifestVersion,
-		"manifest_digest":       digest,
-		"target_fingerprint":    run.result.TargetFingerprint,
-		"target_role":           string(run.result.Declaration),
-		"target_reason":         strings.TrimSpace(opts.TargetReason),
-		"checks":                outcome.Checks,
-		"business_coverage":     outcome.Business,
-		"verification_coverage": outcome.Verification,
-		"coverage_boundary":     "sampled per FR-002 category over the declared authoritative objects; unprovable categories are recorded unknown and never counted as restored",
-	})
-	if err != nil {
-		run.blocked = append(run.blocked, "encode restore evidence scope: "+err.Error())
-		return run.fail()
-	}
-	written, err := CommitEvidenceWrite(ctx, opts.ControlStore, EvidenceWriteRequest{
-		InstanceID: token.InstanceID,
-		// The acceptance is captured on the marker's accepted token: it was
-		// observed before pg_restore/probes derived this result, and it still
-		// fails closed if any writer commits in between (discard).
-		Token:        marker.Token,
-		Kind:         MutationRestoreProbeAccepted,
-		Actor:        opts.Actor,
-		Reason:       "restore probes passed; restored evidence",
-		OperationID:  restoreOperationID(opts, m),
-		ResultDigest: []byte(digest),
-		Apply: func(ctx context.Context, tx pgx.Tx, accepted EvidenceToken) error {
-			return insertEvidence(ctx, tx, evidenceID, accepted.InstanceID, accepted.Generation,
-				"restore_probe", scope, digest, evidenceRef, opts.Actor)
+	var outcome probeOutcome
+	_, err = runTargetWriter(ctx, TargetWriterOptions{
+		OperationKind: TargetWriterOperationRestore,
+		Store:         opts.ControlStore, ControlDSN: opts.ControlDSN, TargetDSN: opts.TargetDSN,
+		ObserverDSN: opts.ObserverDSN, TrustedTarget: trustedTarget, InstanceID: token.InstanceID,
+		OperationID: operationID, Archive: archive,
+		Prelaunch: func(ctx context.Context, tx pgx.Tx, locked controlstore.InstanceToken) (EvidenceToken, error) {
+			write, err := CommitEvidenceWriteTx(ctx, tx, EvidenceWriteRequest{
+				InstanceID: locked.InstanceID, Token: LockedEvidenceToken(locked), Kind: MutationRestoreStarted,
+				Actor: opts.Actor, Reason: "restore started: pre-write invalidation of the previous evidence generation",
+				OperationID: operationID, ResultDigest: []byte(digest),
+				Apply: func(ctx context.Context, tx pgx.Tx, accepted EvidenceToken) error {
+					return insertRestoreStartedMarker(ctx, tx, accepted, m, digest,
+						run.result.TargetFingerprint, string(run.result.Declaration), opts)
+				},
+			})
+			if err != nil {
+				return EvidenceToken{}, err
+			}
+			if write.Discarded {
+				return EvidenceToken{}, errors.New("restore start marker discarded")
+			}
+			return write.Token, nil
+		},
+		Probe: func(ctx context.Context, proof TargetWriterProof) (TargetWriterProbeResult, error) {
+			probeDSN, err := ConninfoWithAttemptApplicationName(opts.TargetDSN, proof.Application)
+			if err != nil {
+				return TargetWriterProbeResult{}, err
+			}
+			outcome = probeRestoredTarget(ctx, opts.PG, opts.ManifestPath, m, probeDSN)
+			if !outcome.Checks.AllTrue() {
+				return TargetWriterProbeResult{}, errors.New("restore probes did not all pass")
+			}
+			basis, err := json.Marshal(outcome)
+			if err != nil {
+				return TargetWriterProbeResult{}, err
+			}
+			return TargetWriterProbeResult{Outcome: TargetWriterProbePassed, ApplicationName: proof.Application, Evidence: basis}, nil
+		},
+		Acceptance: func(ctx context.Context, tx pgx.Tx, proof TargetWriterProof) (TargetWriterAcceptance, error) {
+			scope, err := json.Marshal(map[string]any{
+				"backup_id": m.BackupID, "manifest_version": m.ManifestVersion, "manifest_digest": digest,
+				"target_fingerprint": run.result.TargetFingerprint, "target_role": string(run.result.Declaration),
+				"target_reason": strings.TrimSpace(opts.TargetReason), "checks": outcome.Checks,
+				"business_coverage": outcome.Business, "verification_coverage": outcome.Verification,
+				"coverage_boundary": "sampled per FR-002 category over the declared authoritative objects; unprovable categories are recorded unknown and never counted as restored",
+				"writer_probe":      json.RawMessage(proof.Probe.Evidence),
+			})
+			if err != nil {
+				return TargetWriterAcceptance{}, err
+			}
+			write, err := CommitEvidenceWriteTx(ctx, tx, EvidenceWriteRequest{
+				InstanceID: proof.MarkerToken.InstanceID, Token: proof.MarkerToken,
+				Kind: MutationRestoreProbeAccepted, Actor: opts.Actor, Reason: "restore probes passed; restored evidence",
+				OperationID: operationID, ResultDigest: []byte(digest),
+				Apply: func(ctx context.Context, tx pgx.Tx, accepted EvidenceToken) error {
+					return insertEvidence(ctx, tx, evidenceID, accepted.InstanceID, accepted.Generation,
+						"restore_probe", scope, digest, evidenceRef, opts.Actor)
+				},
+			})
+			if err != nil {
+				return TargetWriterAcceptance{}, err
+			}
+			if write.Discarded {
+				return TargetWriterAcceptance{}, errors.New("restore evidence token is stale")
+			}
+			var txid int64
+			if err := tx.QueryRow(ctx, `SELECT txid_current()`).Scan(&txid); err != nil {
+				return TargetWriterAcceptance{}, err
+			}
+			return TargetWriterAcceptance{AcceptedRowRefs: []string{evidenceRef}, TransactionID: txid, AcceptedEvidenceToken: write.Token}, nil
 		},
 	})
+	run.result.Checks = outcome.Checks
 	if err != nil {
-		run.blocked = append(run.blocked, "restored evidence could not be recorded: "+err.Error())
-		return run.fail()
-	}
-	if written.Discarded {
-		run.blocked = append(run.blocked, "restored evidence was discarded: evidence changed during the restore ("+
-			written.DiscardReason+"); re-run against the current evidence generation")
+		run.blocked = append(run.blocked, "supervised target restore was not accepted: "+err.Error())
 		return run.fail()
 	}
 
 	run.result.Restored = true
 	run.result.EvidenceRef = evidenceRef
 	return run.result, nil
+}
+
+// ValidateRestoreTargetReason rejects values that the shared redaction
+// boundary recognizes as credential-shaped. This is a pattern-based guard,
+// not arbitrary secret recognition. The returned error is deliberately
+// generic and never includes the supplied value.
+func ValidateRestoreTargetReason(reason string) error {
+	if secretShaped(reason) {
+		return errors.New("target reason contains credential-shaped material")
+	}
+	return nil
 }
 
 // dependencies probes the configured V9 dependencies. A configured-but-

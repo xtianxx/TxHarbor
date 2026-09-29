@@ -33,6 +33,7 @@ package recovery_test
 import (
 	"context"
 	"crypto/ecdsa"
+	"debug/elf"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -137,6 +138,24 @@ func drillDockerHealthy(ctx context.Context) (healthy bool) {
 		return false
 	}
 	return true
+}
+
+// requireDrillLocalPGRestore skips only full drill scenarios that need the
+// production target writer to launch a direct local pg_restore ELF. The
+// container-backed PGCommand remains suitable for backup/archive operations,
+// but cannot satisfy that executable boundary. Refusal-only checks should not
+// call this helper because they are expected to refuse before launching it.
+func requireDrillLocalPGRestore(t *testing.T) {
+	t.Helper()
+	path, err := exec.LookPath("pg_restore")
+	if err != nil {
+		t.Skipf("NOT RUN: drill scenario requires a direct local pg_restore ELF; pg_restore is not available on PATH (%v)", err)
+	}
+	binary, err := elf.Open(path)
+	if err != nil {
+		t.Skipf("NOT RUN: drill scenario requires a direct local pg_restore ELF; PATH pg_restore is not an ELF executable (%v)", err)
+	}
+	_ = binary.Close()
 }
 
 // ---------------------------------------------------------------------------
@@ -419,11 +438,27 @@ func newDrillEnv(t *testing.T, withAnvil bool) *drillEnv {
 	}
 	e.store = store
 
+	// Bind the recovery instance to the authoritative fixture data database.
+	// The target key and role fingerprint are derived from its actual DSN; the
+	// control-store open path creates the corresponding guard inventory.
+	dataTarget, err := controlstore.ParseDSNTarget(e.dataDSN)
+	if err != nil {
+		t.Fatalf("parse authoritative data target: %v", err)
+	}
+	targetGuardKey, err := controlstore.TargetGuardKey(dataTarget)
+	if err != nil {
+		t.Fatalf("derive authoritative target guard key: %v", err)
+	}
+	targetRoleFingerprint := dataTarget.DataTargetFingerprint().RoleFingerprint
+
 	// One open recovery instance through the real entry point.
 	opened, err := recovery.OpenInstance(ctx, store, recovery.OpenInstanceRequest{
-		Kind:     "recovery",
-		OpenedBy: "deploy:executor",
-		Reason:   "drill: isolated recovery environment (local test input only)",
+		Kind:                  "recovery",
+		OpenedBy:              "deploy:executor",
+		Reason:                "drill: isolated recovery environment (local test input only)",
+		EntryChains:           []uint64{1},
+		TargetGuardKey:        targetGuardKey,
+		TargetRoleFingerprint: targetRoleFingerprint,
 	})
 	if err != nil {
 		t.Fatalf("open recovery instance: %v", err)
@@ -744,16 +779,20 @@ func (e *drillEnv) backup() recovery.BackupResult {
 // verified conclusion (a rejected/unverified result fails the caller).
 func (e *drillEnv) verifyBackup(manifestPath, targetDSN, operationID string) recovery.VerifyBackupResult {
 	e.t.Helper()
+	binding := e.bindVerifyTarget(targetDSN)
 	result, err := recovery.ExecuteVerifyBackup(e.ctx, recovery.VerifyBackupOptions{
-		ManifestPath:   manifestPath,
-		TargetDSN:      targetDSN,
-		Verifier:       "auth:verifier",
-		InstanceID:     e.instanceID,
-		ControlStore:   e.store,
-		ControlDSN:     e.ctrlDSN,
-		ProgramVersion: drillProgramVersion,
-		OperationID:    operationID,
-		PG:             e.pg,
+		ManifestPath:     manifestPath,
+		Binding:          binding,
+		TargetDSN:        targetDSN,
+		Verifier:         "auth:verifier",
+		InstanceID:       e.instanceID,
+		ControlStore:     e.store,
+		ControlDSN:       e.ctrlDSN,
+		AuthoritativeDSN: e.dataDSN,
+		ObserverDSN:      e.adminDSN,
+		ProgramVersion:   drillProgramVersion,
+		OperationID:      operationID,
+		PG:               e.pg,
 	})
 	if err != nil {
 		e.t.Fatalf("ExecuteVerifyBackup: %v", err)
@@ -762,6 +801,75 @@ func (e *drillEnv) verifyBackup(manifestPath, targetDSN, operationID string) rec
 		e.t.Fatalf("verify-backup state = %s, want verified (checks=%+v)", result.State, result.Checks)
 	}
 	return result
+}
+
+// bindVerifyTarget models the deployment-configured isolated verification
+// database. Its binding is derived from the actual fixture DSNs and open
+// instance inventory. The clean row is explicitly controlled test-only
+// baseline evidence required for this positive verification assertion; it is
+// not evidence about a production target.
+func (e *drillEnv) bindVerifyTarget(targetDSN string) recovery.IsolatedTarget {
+	e.t.Helper()
+	var openBinding recovery.IsolatedInstanceBinding
+	if err := e.ctrl.QueryRow(e.ctx,
+		`SELECT target_guard_key, target_role_fingerprint
+		   FROM recovery_instance WHERE instance_id = $1`, e.instanceID,
+	).Scan(&openBinding.TargetGuardKey, &openBinding.TargetRoleFingerprint); err != nil {
+		e.t.Fatalf("read open target binding: %v", err)
+	}
+	binding, err := recovery.BindIsolatedTarget(e.dataDSN, e.ctrlDSN, targetDSN,
+		[]recovery.IsolatedInstanceBinding{openBinding})
+	if err != nil {
+		e.t.Fatalf("bind isolated verification target: %v", err)
+	}
+	tx, err := e.ctrl.Begin(e.ctx)
+	if err != nil {
+		e.t.Fatalf("begin isolated verification target baseline: %v", err)
+	}
+	defer func() { _ = tx.Rollback(e.ctx) }()
+	evidence := []byte(fmt.Sprintf(
+		`{"controlled_test_baseline":true,"fixture":"recovery-drill","purpose":"isolated-verification-target","target_guard_key":%q,"target_role_fingerprint":%q}`,
+		binding.TargetGuardKey(), binding.RoleFingerprint()))
+	if err := controlstore.InitializeTargetGuard(e.ctx, tx, binding.TargetGuardKey(), e.operation("verify-target-init")); err != nil {
+		e.t.Fatalf("initialize isolated verification target guard: %v", err)
+	}
+	if err := controlstore.ResolveTargetGuardClean(e.ctx, tx, binding.TargetGuardKey(), e.operation("verify-target-baseline"), evidence); err != nil {
+		e.t.Fatalf("resolve controlled isolated verification target baseline: %v", err)
+	}
+	if err := tx.Commit(e.ctx); err != nil {
+		e.t.Fatalf("commit isolated verification target baseline: %v", err)
+	}
+	return binding
+}
+
+// seedAuthoritativeTargetCleanBaseline is test-only controlled baseline
+// evidence for gate scenarios that assert a valid release path. OpenInstance
+// has already created the authoritative guard inventory through the normal
+// store path; this resolves that inventory only for these isolated drill
+// fixtures and makes no claim about production target cleanliness.
+func (e *drillEnv) seedAuthoritativeTargetCleanBaseline() {
+	e.t.Helper()
+	var targetGuardKey string
+	if err := e.ctrl.QueryRow(e.ctx,
+		`SELECT target_guard_key FROM recovery_instance WHERE instance_id = $1`, e.instanceID,
+	).Scan(&targetGuardKey); err != nil {
+		e.t.Fatalf("read authoritative target guard key: %v", err)
+	}
+	tx, err := e.ctrl.Begin(e.ctx)
+	if err != nil {
+		e.t.Fatalf("begin authoritative target baseline: %v", err)
+	}
+	defer func() { _ = tx.Rollback(e.ctx) }()
+	evidence := []byte(fmt.Sprintf(
+		`{"controlled_test_baseline":true,"fixture":"recovery-drill","purpose":"gate-release-test-only","target_guard_key":%q}`,
+		targetGuardKey))
+	if err := controlstore.ResolveTargetGuardClean(e.ctx, tx, targetGuardKey,
+		e.operation("authoritative-target-baseline"), evidence); err != nil {
+		e.t.Fatalf("resolve test-only authoritative target baseline: %v", err)
+	}
+	if err := tx.Commit(e.ctx); err != nil {
+		e.t.Fatalf("commit authoritative target baseline: %v", err)
+	}
 }
 
 // restore runs the real restore executor (real pg_restore through the pinned
@@ -1024,7 +1132,11 @@ func (e *drillEnv) scope(capability recovery.Capability) string {
 
 func (e *drillEnv) gate() *recovery.Gate {
 	e.t.Helper()
-	gate, err := recovery.NewGate(e.store, recovery.GateOptions{TTL: time.Minute})
+	trustedTarget, err := recovery.GateTargetBindingFromDSN(e.dataDSN)
+	if err != nil {
+		e.t.Fatalf("GateTargetBindingFromDSN: %v", err)
+	}
+	gate, err := recovery.NewGate(e.store, recovery.GateOptions{TTL: time.Minute, TrustedTarget: trustedTarget})
 	if err != nil {
 		e.t.Fatalf("NewGate: %v", err)
 	}

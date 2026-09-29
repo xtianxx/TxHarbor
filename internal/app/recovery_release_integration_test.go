@@ -146,7 +146,11 @@ func t045NewScene(t *testing.T) *t045Scene {
 	if err != nil {
 		t.Fatalf("NewChecklist: %v", err)
 	}
-	gate, err := recovery.NewGate(scene.store, recovery.GateOptions{TTL: 30 * time.Second})
+	trustedTarget, err := recovery.GateTargetBindingFromDSN(scene.dataDSN)
+	if err != nil {
+		t.Fatalf("derive gate target binding: %v", err)
+	}
+	gate, err := recovery.NewGate(scene.store, recovery.GateOptions{TTL: 30 * time.Second, TrustedTarget: trustedTarget})
 	if err != nil {
 		t.Fatalf("NewGate: %v", err)
 	}
@@ -486,8 +490,13 @@ func TestT045ReleaseDoesNotUnlockOriginalGates(t *testing.T) {
 	// Two-phase authority (FR-025): a released capability does not unlock the
 	// original fund gates. The phase-two call point still refuses with
 	// hard_gate_active while the recovery release is valid.
+	trustedTarget, err := recovery.GateTargetBindingFromDSN(s.dataDSN)
+	if err != nil {
+		t.Fatalf("derive gate target binding: %v", err)
+	}
 	failingGate, err := recovery.NewGate(s.store, recovery.GateOptions{
-		TTL: 30 * time.Second,
+		TTL:           30 * time.Second,
+		TrustedTarget: trustedTarget,
 		FundGates: func(context.Context, recovery.GateRequest) error {
 			return fmt.Errorf("capacity red line active")
 		},

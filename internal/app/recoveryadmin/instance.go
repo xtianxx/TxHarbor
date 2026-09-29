@@ -28,10 +28,12 @@ package recoveryadmin
 
 import (
 	"context"
+	"encoding/hex"
 	"encoding/json"
 	"flag"
 	"fmt"
 	"io"
+	"strconv"
 	"strings"
 	"time"
 
@@ -127,13 +129,21 @@ func recoveryAdminInstanceOpen(ctx context.Context, args []string, d Deps) int {
 		fmt.Fprintf(stderr, "txharbor recovery-admin instance-open: refused: %s\n", logx.Redact(err.Error()))
 		return 1
 	}
+	entryChains, err := recoveryOpEntryChains(d, "instance-open")
+	if err != nil {
+		fmt.Fprintf(stderr, "txharbor recovery-admin instance-open: %s\n", logx.Redact(err.Error()))
+		return 1
+	}
 
 	inputDigest := recoveryOpInputDigest(action, map[string]string{
-		"kind":        instanceKind,
-		"supersede":   supersedeID,
-		"approvals":   strings.Join(refs, ","),
-		"opened_by":   env.principal,
-		"reason_hash": recoveryOpInputDigest("reason", map[string]string{"value": strings.TrimSpace(*reason)}),
+		"kind":                    instanceKind,
+		"supersede":               supersedeID,
+		"approvals":               strings.Join(refs, ","),
+		"opened_by":               env.principal,
+		"entry_chains":            fmt.Sprint(entryChains),
+		"target_guard_key":        env.targetGuardKey,
+		"target_role_fingerprint": env.targetRoleFingerprint,
+		"reason_hash":             recoveryOpInputDigest("reason", map[string]string{"value": strings.TrimSpace(*reason)}),
 	})
 	release, recorded, err := recoveryOpBegin(ctx, env.pool, action, operation)
 	if err != nil {
@@ -148,11 +158,35 @@ func recoveryAdminInstanceOpen(ctx context.Context, args []string, d Deps) int {
 		return code
 	}
 
+	// Opening (including the explicit supersede path) serializes with every
+	// recovery attempt against this configured endpoint. This session lock is
+	// held through guard inventory initialization and the immutable instance
+	// binding transaction; it is not evidence that the deployment DSN is
+	// complete or protected from alternate endpoint aliases.
+	var targetKeyBytes recovery.TargetKey
+	keyHex := strings.TrimPrefix(env.targetGuardKey, "sha256:")
+	decodedKey, err := hex.DecodeString(keyHex)
+	if err != nil || len(decodedKey) != len(targetKeyBytes) {
+		fmt.Fprintf(stderr, "txharbor recovery-admin instance-open: configured target identity is invalid; refusing\n")
+		return 1
+	}
+	copy(targetKeyBytes[:], decodedKey)
+	targetLock, err := recovery.AcquireTargetLock(ctx, env.controlDSN, targetKeyBytes, recoveryOpConnectTimeout, 50*time.Millisecond)
+	if err != nil {
+		fmt.Fprintf(stderr, "txharbor recovery-admin instance-open: target lock unavailable: %s\n", logx.Redact(err.Error()))
+		return 1
+	}
+	defer func() { _ = targetLock.Release(context.Background()) }()
+
 	if supersedeID == "" {
 		result, err := recovery.OpenInstance(ctx, env.store, recovery.OpenInstanceRequest{
-			Kind:     instanceKind,
-			OpenedBy: env.principal,
-			Reason:   strings.TrimSpace(*reason),
+			Kind:                  instanceKind,
+			OpenedBy:              env.principal,
+			Reason:                strings.TrimSpace(*reason),
+			EntryChains:           entryChains,
+			DataTarget:            env.dataTargetFingerprint,
+			TargetGuardKey:        env.targetGuardKey,
+			TargetRoleFingerprint: env.targetRoleFingerprint,
 		})
 		if err != nil {
 			_ = recoveryOpRecordInstance(ctx, env.pool, "", action, operation, env.principal, controlstore.AuditRefused,
@@ -173,11 +207,14 @@ func recoveryAdminInstanceOpen(ctx context.Context, args []string, d Deps) int {
 	}
 
 	result, err := recovery.SupersedeInstance(ctx, env.store, recovery.SupersedeInstanceRequest{
-		InstanceID:   supersedeID,
-		OpenedBy:     env.principal,
-		Reason:       strings.TrimSpace(*reason),
-		ApprovalRefs: refs,
-		OperationID:  operation,
+		InstanceID:            supersedeID,
+		OpenedBy:              env.principal,
+		Reason:                strings.TrimSpace(*reason),
+		ApprovalRefs:          refs,
+		OperationID:           operation,
+		TrustedEntryChains:    entryChains,
+		TargetGuardKey:        env.targetGuardKey,
+		TargetRoleFingerprint: env.targetRoleFingerprint,
 	})
 	if err != nil {
 		_ = recoveryOpRecordInstance(ctx, env.pool, supersedeID, action, operation, env.principal, controlstore.AuditRefused,
@@ -236,7 +273,7 @@ func recoveryAdminInstanceClose(ctx context.Context, args []string, d Deps) int 
 	}
 	defer env.pool.Close()
 
-	if err := instanceRequireParticipant(ctx, env, instanceID, "instance-close"); err != nil {
+	if err := instanceRequireParticipant(ctx, env, instanceID, "executor", "instance-close"); err != nil {
 		fmt.Fprintf(stderr, "txharbor recovery-admin instance-close: refused: %s\n", logx.Redact(err.Error()))
 		return 1
 	}
@@ -248,15 +285,29 @@ func recoveryAdminInstanceClose(ctx context.Context, args []string, d Deps) int 
 	if code != 0 {
 		return code
 	}
-	gate, err := recovery.NewGate(env.store, recovery.GateOptions{TTL: ttl, EffectClassRuling: ruling})
+	gate, err := recovery.NewGate(env.store, recovery.GateOptions{
+		TTL: ttl, EffectClassRuling: ruling,
+		TrustedTarget: recovery.GateTargetBinding{
+			TargetGuardKey:        env.targetGuardKey,
+			TargetRoleFingerprint: env.targetRoleFingerprint,
+		},
+	})
+	if err != nil {
+		fmt.Fprintf(stderr, "txharbor recovery-admin instance-close: %s\n", logx.Redact(err.Error()))
+		return 1
+	}
+	entryChains, err := recoveryOpEntryChains(d, "instance-close")
 	if err != nil {
 		fmt.Fprintf(stderr, "txharbor recovery-admin instance-close: %s\n", logx.Redact(err.Error()))
 		return 1
 	}
 
 	inputDigest := recoveryOpInputDigest(recoveryActionInstanceClose, map[string]string{
-		"instance_id": instanceID,
-		"reason_hash": recoveryOpInputDigest("reason", map[string]string{"value": strings.TrimSpace(*reason)}),
+		"instance_id":             instanceID,
+		"entry_chains":            fmt.Sprint(entryChains),
+		"target_guard_key":        env.targetGuardKey,
+		"target_role_fingerprint": env.targetRoleFingerprint,
+		"reason_hash":             recoveryOpInputDigest("reason", map[string]string{"value": strings.TrimSpace(*reason)}),
 	})
 	release, recorded, err := recoveryOpBegin(ctx, env.pool, recoveryActionInstanceClose, operation)
 	if err != nil {
@@ -272,10 +323,13 @@ func recoveryAdminInstanceClose(ctx context.Context, args []string, d Deps) int 
 	}
 
 	result, err := recovery.CloseInstance(ctx, env.store, gate, recovery.CloseInstanceRequest{
-		InstanceID:  instanceID,
-		Actor:       env.principal,
-		Reason:      strings.TrimSpace(*reason),
-		OperationID: operation,
+		InstanceID:            instanceID,
+		Actor:                 env.principal,
+		Reason:                strings.TrimSpace(*reason),
+		OperationID:           operation,
+		TrustedEntryChains:    entryChains,
+		TargetGuardKey:        env.targetGuardKey,
+		TargetRoleFingerprint: env.targetRoleFingerprint,
 	})
 	if err != nil {
 		_ = recoveryOpRecordInstance(ctx, env.pool, instanceID, recoveryActionInstanceClose, operation, env.principal, controlstore.AuditRefused,
@@ -300,10 +354,40 @@ func recoveryAdminInstanceClose(ctx context.Context, args []string, d Deps) int 
 	return 0
 }
 
+// recoveryOpEntryChains resolves the trusted complete inventory from
+// deployment configuration. No CLI argument can override or narrow it.
+func recoveryOpEntryChains(d Deps, command string) ([]uint64, error) {
+	raw, ok := d.getenvValue(config.EnvRecoveryEntryChains)
+	if !ok || strings.TrimSpace(raw) == "" {
+		return nil, fmt.Errorf("%s is required (trusted complete deployment entry-chain inventory; refusing)", config.EnvRecoveryEntryChains)
+	}
+	chains, err := config.ParseRecoveryEntryChains(raw)
+	if err != nil {
+		return nil, fmt.Errorf("%s is invalid: %w", config.EnvRecoveryEntryChains, err)
+	}
+	runtimeRaw, configured := d.getenvValue(config.EnvChainID)
+	if !configured || strings.TrimSpace(runtimeRaw) == "" {
+		return nil, fmt.Errorf("%s is required to bind recovery administration to this single-runtime deployment", config.EnvChainID)
+	}
+	runtimeChain, err := strconv.ParseUint(strings.TrimSpace(runtimeRaw), 10, 64)
+	if err != nil || runtimeChain == 0 {
+		return nil, fmt.Errorf("%s is not a positive chain ID; refusing entry inventory binding", config.EnvChainID)
+	}
+	found := false
+	for _, chain := range chains {
+		found = found || chain == runtimeChain
+	}
+	if !found {
+		return nil, fmt.Errorf("runtime chain %d from %s is not in the trusted deployment entry-chain inventory", runtimeChain, config.EnvChainID)
+	}
+	return chains, nil
+}
+
 // instanceRequireParticipant enforces the close subject binding: the
-// authenticated principal must have an active identity mapping and a
-// participant binding of any role on the instance being closed.
-func instanceRequireParticipant(ctx context.Context, env *recoveryOpEnv, instanceID, command string) error {
+// authenticated principal must have an active identity mapping and an executor
+// participant binding on the instance being closed. Core transaction logic
+// repeats this check as the authorization boundary.
+func instanceRequireParticipant(ctx context.Context, env *recoveryOpEnv, instanceID, role, command string) error {
 	if _, ok, err := env.store.ActivePersonID(ctx, env.principal); err != nil {
 		return fmt.Errorf("resolve the principal identity mapping: %w", err)
 	} else if !ok {
@@ -315,12 +399,12 @@ func instanceRequireParticipant(ctx context.Context, env *recoveryOpEnv, instanc
 		return fmt.Errorf("read participant bindings: %w", err)
 	}
 	for _, binding := range bindings {
-		if binding.Principal == env.principal {
+		if binding.Principal == env.principal && binding.Role == role {
 			return nil
 		}
 	}
-	return fmt.Errorf("%s %s is not bound to instance %s under any participant role; register the participant first",
-		command, env.principal, instanceID)
+	return fmt.Errorf("%s %s is not bound to instance %s with role %s; register the participant first",
+		command, env.principal, instanceID, role)
 }
 
 // recoveryGateEffectClassRuling resolves the trusted deployment effect-class

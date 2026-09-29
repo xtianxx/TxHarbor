@@ -84,7 +84,8 @@ const (
 	ActionStoreConnect     = "store_connect"
 )
 
-// controlTableNames are the 11 recovery_* entities of data-model.md §1. They
+// controlTableNames are the recovery_* entities of data-model.md §1 plus the
+// durable target-guard inventory introduced by control-store schema 0003. They
 // are used by the version guard to distinguish "pristine empty database"
 // (bootstrap allowed) from "recovery objects without a version table"
 // (unknown state, refused).
@@ -100,9 +101,11 @@ var controlTableNames = []string{
 	"recovery_release",
 	"recovery_audit",
 	"recovery_drill_run",
+	"recovery_target_guard",
 }
 
-// ControlTableNames returns the 11 recovery_* entity names of data-model §1.
+// ControlTableNames returns all recovery-owned table names, including the
+// target-guard inventory introduced by schema 0003.
 // The list is informational (version guard, status and tests); it is never a
 // substitute for the version check.
 func ControlTableNames() []string {
@@ -397,16 +400,21 @@ func recordStoreConnectRefusal(ctx context.Context, pool *pgxpool.Pool, state Sc
 // SELECT ... FOR UPDATE and validate (state, evidence_generation,
 // evidence_hash) before accepting any write.
 type InstanceToken struct {
-	InstanceID           string
-	Kind                 string
-	State                string
-	EvidenceGeneration   int64
-	EvidenceHash         string
-	SupersedesInstanceID string
-	OpenedBy             string
-	OpenedAt             time.Time
-	RestorePoint         []byte
-	DataTarget           []byte
+	InstanceID            string
+	Kind                  string
+	State                 string
+	EvidenceGeneration    int64
+	EvidenceHash          string
+	SupersedesInstanceID  string
+	OpenedBy              string
+	OpenedAt              time.Time
+	RestorePoint          []byte
+	DataTarget            []byte
+	EntryChainInventory   []uint64
+	EntryChainVersion     int32
+	EntryChainBound       bool
+	TargetGuardKey        string
+	TargetRoleFingerprint string
 }
 
 // LockInstance locks the recovery instance row FOR UPDATE inside tx and
@@ -424,21 +432,35 @@ func LockInstance(ctx context.Context, tx pgx.Tx, instanceID string) (InstanceTo
 	const sql = `
 SELECT instance_id::text, kind, state, evidence_generation, evidence_hash,
        COALESCE(supersedes_instance_id::text, ''), opened_by, opened_at,
-       restore_point, data_target
+       restore_point, data_target, entry_chain_inventory, entry_chain_inventory_version,
+       target_guard_key, target_role_fingerprint
 FROM recovery_instance
 WHERE instance_id = $1
 FOR UPDATE`
 	var token InstanceToken
+	var entryChainVersion *int32
+	var targetGuardKey, targetRoleFingerprint *string
 	err = tx.QueryRow(ctx, sql, id).Scan(
 		&token.InstanceID, &token.Kind, &token.State, &token.EvidenceGeneration,
 		&token.EvidenceHash, &token.SupersedesInstanceID, &token.OpenedBy,
-		&token.OpenedAt, &token.RestorePoint, &token.DataTarget)
+		&token.OpenedAt, &token.RestorePoint, &token.DataTarget,
+		&token.EntryChainInventory, &entryChainVersion, &targetGuardKey, &targetRoleFingerprint)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return InstanceToken{}, fmt.Errorf("%w: %s", ErrInstanceNotFound, id)
 	}
 	if err != nil {
 		return InstanceToken{}, fmt.Errorf("lock recovery instance %s: %w", id, err)
 	}
+	if entryChainVersion != nil {
+		token.EntryChainVersion = *entryChainVersion
+	}
+	if targetGuardKey != nil {
+		token.TargetGuardKey = *targetGuardKey
+	}
+	if targetRoleFingerprint != nil {
+		token.TargetRoleFingerprint = *targetRoleFingerprint
+	}
+	token.EntryChainBound = token.EntryChainInventory != nil && token.EntryChainVersion == 1
 	return token, nil
 }
 
@@ -450,11 +472,14 @@ FOR UPDATE`
 // DataTarget are optional JSONB payloads; DataTarget must be credential-free
 // (fingerprints only) and is validated as such.
 type OpenInstanceRequest struct {
-	Kind         string
-	OpenedBy     string
-	Reason       string
-	RestorePoint []byte
-	DataTarget   []byte
+	Kind                  string
+	OpenedBy              string
+	Reason                string
+	RestorePoint          []byte
+	DataTarget            []byte
+	EntryChainInventory   []uint64
+	TargetGuardKey        string
+	TargetRoleFingerprint string
 }
 
 // OpenInstanceResult carries the control-store-generated instance id.
@@ -465,9 +490,104 @@ type OpenInstanceResult struct {
 const insertOpenInstanceSQL = `
 INSERT INTO recovery_instance
     (instance_id, kind, state, restore_point, data_target, evidence_generation,
-     evidence_hash, opened_by, reason)
-VALUES (gen_random_uuid(), $1, 'open', $2, $3, 0, $4, $5, $6)
+     evidence_hash, opened_by, reason, entry_chain_inventory, entry_chain_inventory_version,
+     target_guard_key, target_role_fingerprint)
+VALUES (gen_random_uuid(), $1, 'open', $2, $3, 0, $4, $5, $6, $7, CASE WHEN $7::jsonb IS NULL THEN NULL ELSE 1 END, $8, $9)
 RETURNING instance_id::text`
+
+// validateOpenTargetGuard runs after the new instance row has been inserted,
+// preserving instance→guard transaction-lock order. The FK requires a guard
+// inventory row first; provisionOpenTargetGuard inserts only-if-absent while
+// the caller's dedicated target session lock serializes open/bootstrap.
+func validateOpenTargetGuard(ctx context.Context, tx pgx.Tx, key string) error {
+	if err := lockTargetGuard(ctx, tx, key); err != nil {
+		return err
+	}
+	guard, found, err := ReadTargetGuard(ctx, tx, key)
+	if err != nil {
+		return err
+	}
+	if !found {
+		return errors.New("target guard inventory disappeared during instance open")
+	}
+	if !targetGuardConsistent(guard, true) {
+		return errors.New("target guard is dirty, active, or inconsistent; refusing instance open")
+	}
+	return nil
+}
+
+func provisionOpenTargetGuard(ctx context.Context, tx pgx.Tx, key, operationID string) error {
+	if !sha256FingerprintPattern.MatchString(key) {
+		return errors.New("target guard key must be a full sha256 fingerprint")
+	}
+	operationID, err := normalizeOperationID(operationID)
+	if err != nil {
+		return err
+	}
+	_, err = tx.Exec(ctx, `INSERT INTO recovery_target_guard (target_guard_key, disposition, operation_id)
+VALUES ($1, 'unknown', $2) ON CONFLICT (target_guard_key) DO NOTHING`, key, operationID)
+	if err != nil {
+		return fmt.Errorf("provision target guard inventory: %w", err)
+	}
+	return nil
+}
+
+func targetGuardConsistent(guard TargetGuard, allowClean bool) bool {
+	intentPair := guard.LaunchIntent == (guard.AttemptAppName != "") && guard.LaunchIntent == (guard.LaunchIntentAt != nil)
+	if !intentPair || guard.ActiveWriter && (guard.State != TargetGuardUnknown || !guard.LaunchIntent) {
+		return false
+	}
+	switch guard.State {
+	case TargetGuardUnknown:
+		return !guard.ActiveWriter && !guard.LaunchIntent && guard.LaunchedAt == nil && guard.RebuildRequiredAt == nil && guard.CleanAt == nil && guard.RebuildEvidence == nil
+	case TargetGuardClean:
+		return allowClean && !guard.ActiveWriter && guard.CleanAt != nil && guard.RebuildRequiredAt == nil && len(guard.RebuildEvidence) > 0 && json.Valid(guard.RebuildEvidence)
+	default:
+		return false
+	}
+}
+
+// RequireInstanceTargetBinding verifies the immutable configured-target
+// binding while preserving the lifecycle lock order: instance row first,
+// target guard transaction lock second.
+func RequireInstanceTargetBinding(ctx context.Context, tx pgx.Tx, token InstanceToken, key, roleFingerprint string) error {
+	if !sha256FingerprintPattern.MatchString(key) || !sha256FingerprintPattern.MatchString(roleFingerprint) ||
+		token.TargetGuardKey == "" || token.TargetRoleFingerprint == "" {
+		return errors.New("instance target guard binding is missing (legacy-null); refusing lifecycle action")
+	}
+	if token.TargetGuardKey != key || token.TargetRoleFingerprint != roleFingerprint {
+		return errors.New("configured data target does not match the immutable instance target guard binding")
+	}
+	if err := lockTargetGuard(ctx, tx, key); err != nil {
+		return err
+	}
+	guard, found, err := ReadTargetGuard(ctx, tx, key)
+	if err != nil {
+		return err
+	}
+	if !found {
+		return errors.New("bound target guard inventory is missing; refusing lifecycle action")
+	}
+	if !targetGuardConsistent(guard, true) {
+		return errors.New("bound target guard is dirty, active, or inconsistent; refusing lifecycle action")
+	}
+	return nil
+}
+
+// ValidateEntryChainInventory accepts only a complete-shape candidate: a
+// nonempty, strictly ascending list of positive IDs. Completeness is supplied
+// by deployment assembly, not inferable by this structural validator.
+func ValidateEntryChainInventory(chains []uint64) error {
+	if len(chains) == 0 {
+		return errors.New("trusted entry chain inventory must be nonempty")
+	}
+	for i, chain := range chains {
+		if chain == 0 || (i > 0 && chains[i-1] >= chain) {
+			return errors.New("trusted entry chain inventory must contain positive, strictly ascending unique IDs")
+		}
+	}
+	return nil
+}
 
 // OpenInstance creates an open recovery instance. The partial unique index
 // recovery_instance_one_open_uniq allows at most one open instance globally
@@ -496,16 +616,36 @@ func (s *Store) OpenInstance(ctx context.Context, req OpenInstanceRequest) (Open
 			return OpenInstanceResult{}, err
 		}
 	}
+	if !sha256FingerprintPattern.MatchString(req.TargetGuardKey) || !sha256FingerprintPattern.MatchString(req.TargetRoleFingerprint) {
+		return OpenInstanceResult{}, errors.New("instance open requires a full target guard key and role fingerprint")
+	}
+	var inventoryJSON []byte
+	if req.EntryChainInventory != nil {
+		if err := ValidateEntryChainInventory(req.EntryChainInventory); err != nil {
+			return OpenInstanceResult{}, err
+		}
+		inventoryJSON, err = json.Marshal(req.EntryChainInventory)
+		if err != nil {
+			return OpenInstanceResult{}, fmt.Errorf("encode entry chain inventory: %w", err)
+		}
+	}
 
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
 		return OpenInstanceResult{}, fmt.Errorf("begin open instance: %w", err)
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
+	// The target FK requires inventory before the instance row. Only an absent
+	// row is inserted, and the app holds the dedicated session target lock; the
+	// guarded read/validation itself takes the transaction lock after the new
+	// instance row exists below.
+	if err := provisionOpenTargetGuard(ctx, tx, req.TargetGuardKey, uuid.NewString()); err != nil {
+		return OpenInstanceResult{}, err
+	}
 
 	var instanceID string
 	err = tx.QueryRow(ctx, insertOpenInstanceSQL, kind, jsonOrNil(restorePoint), jsonOrNil(dataTarget),
-		EmptyEvidenceHash, openedBy, req.Reason).Scan(&instanceID)
+		EmptyEvidenceHash, openedBy, req.Reason, jsonOrNil(inventoryJSON), req.TargetGuardKey, req.TargetRoleFingerprint).Scan(&instanceID)
 	if err != nil {
 		_ = tx.Rollback(ctx)
 		if isUniqueViolation(err, "recovery_instance_one_open_uniq") {
@@ -529,6 +669,12 @@ func (s *Store) OpenInstance(ctx context.Context, req OpenInstanceRequest) (Open
 			return OpenInstanceResult{}, ErrInstanceAlreadyOpen
 		}
 		return OpenInstanceResult{}, fmt.Errorf("open recovery instance: %w", err)
+	}
+	// Match lifecycle writers' global lock order: instance row first, then the
+	// target guard transaction lock. The insert and absent-row bootstrap commit
+	// together, so a failed inventory check leaves neither behind.
+	if err := validateOpenTargetGuard(ctx, tx, req.TargetGuardKey); err != nil {
+		return OpenInstanceResult{}, err
 	}
 
 	target, err := json.Marshal(map[string]any{"instance_id": instanceID, "kind": kind})

@@ -12,7 +12,9 @@
 package recovery
 
 import (
+	"errors"
 	"testing"
+	"time"
 )
 
 // TestDrillRunRecordReadRoundTrip covers the storage round-trip: separate
@@ -196,5 +198,90 @@ func TestDrillRunRefusalsWriteNothing(t *testing.T) {
 	// The control store stays compatible (the store handle is untouched).
 	if _, err := store.Pool().Exec(ctx, `SELECT 1`); err != nil {
 		t.Fatalf("store pool broken: %v", err)
+	}
+}
+
+// TestDrillRunRecordOnlyGenerationIsAtomicWithInsert controls the race between
+// accepting a restore probe and inserting a record-only drill. The competing
+// transaction owns the instance-row lock; RecordDrillRun blocks, then sees the
+// advanced generation after that transaction commits and refuses the insert.
+func TestDrillRunRecordOnlyGenerationIsAtomicWithInsert(t *testing.T) {
+	ctx, _, pool, store := generationControlStore(t)
+	instanceID := openGenerationInstance(t, ctx, store)
+
+	var generation int64
+	if err := pool.QueryRow(ctx, `SELECT evidence_generation FROM recovery_instance WHERE instance_id = $1`, instanceID).Scan(&generation); err != nil {
+		t.Fatalf("read initial evidence generation: %v", err)
+	}
+	lockTx, err := pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin generation interleaving transaction: %v", err)
+	}
+	defer func() { _ = lockTx.Rollback(ctx) }()
+	var lockedGeneration int64
+	if err := lockTx.QueryRow(ctx, `SELECT evidence_generation FROM recovery_instance WHERE instance_id = $1 FOR UPDATE`, instanceID).Scan(&lockedGeneration); err != nil {
+		t.Fatalf("lock recovery instance: %v", err)
+	}
+	if lockedGeneration != generation {
+		t.Fatalf("locked generation=%d, initial=%d", lockedGeneration, generation)
+	}
+
+	result := make(chan error, 1)
+	go func() {
+		_, err := RecordDrillRun(ctx, store, DrillRunInput{
+			InstanceID:                 instanceID,
+			Scenario:                   DrillScenarioFullRecovery,
+			RecoveryPoint:              []byte(`{"wall_clock":"2026-09-01T00:00:00Z"}`),
+			BackupLag:                  []byte(`{"state":"unknown"}`),
+			UncoveredInterval:          []byte(`{"state":"unknown"}`),
+			TestInputs:                 []byte(`{"purpose":"local drill inputs only","unconfigured_constraints":["rto_target"]}`),
+			Result:                     DrillResultRefusedSafe,
+			Actor:                      "deploy:executor",
+			ExpectedEvidenceGeneration: &generation,
+		})
+		result <- err
+	}()
+
+	// Wait until the writer is actually blocked on the row lock, avoiding a
+	// timing-only sleep that could let it start after the generation update.
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		var waiting bool
+		if err := pool.QueryRow(ctx, `
+SELECT EXISTS (
+    SELECT 1 FROM pg_stat_activity
+    WHERE wait_event_type = 'Lock'
+      AND query LIKE '%SELECT kind, state, evidence_generation FROM recovery_instance%'
+)`).Scan(&waiting); err != nil {
+			t.Fatalf("observe blocked drill insert: %v", err)
+		}
+		if waiting {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("RecordDrillRun did not block on the locked instance row")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	if _, err := lockTx.Exec(ctx, `UPDATE recovery_instance SET evidence_generation = evidence_generation + 1 WHERE instance_id = $1`, instanceID); err != nil {
+		t.Fatalf("advance evidence generation while holding lock: %v", err)
+	}
+	if err := lockTx.Commit(ctx); err != nil {
+		t.Fatalf("commit generation advance: %v", err)
+	}
+	if err := <-result; !errors.Is(err, ErrDrillStaleGeneration) {
+		t.Fatalf("stale record-only insert error=%v, want ErrDrillStaleGeneration", err)
+	}
+
+	var rows, audits int
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM recovery_drill_run WHERE instance_id = $1`, instanceID).Scan(&rows); err != nil {
+		t.Fatalf("count drill rows: %v", err)
+	}
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM recovery_audit WHERE action = $1 AND instance_id = $2`, ActionDrillRun, instanceID).Scan(&audits); err != nil {
+		t.Fatalf("count drill audits: %v", err)
+	}
+	if rows != 0 || audits != 0 {
+		t.Fatalf("stale generation wrote drill rows=%d audit rows=%d; want zero", rows, audits)
 	}
 }

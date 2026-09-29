@@ -207,7 +207,13 @@ func recoveryAdminStatus(ctx context.Context, args []string, d Deps) int {
 	if code != 0 {
 		return code
 	}
-	gate, err := recovery.NewGate(env.store, recovery.GateOptions{TTL: ttl, EffectClassRuling: ruling})
+	gate, err := recovery.NewGate(env.store, recovery.GateOptions{
+		TTL: ttl, EffectClassRuling: ruling,
+		TrustedTarget: recovery.GateTargetBinding{
+			TargetGuardKey:        env.targetGuardKey,
+			TargetRoleFingerprint: env.targetRoleFingerprint,
+		},
+	})
 	if err != nil {
 		fmt.Fprintf(stderr, "txharbor recovery-admin status: %s\n", logx.Redact(err.Error()))
 		return 1
@@ -238,10 +244,10 @@ func recoveryAdminStatus(ctx context.Context, args []string, d Deps) int {
 		}
 		recoveryStatusRefuse(ctx, env, instanceArg, review.operation, refusalClass, reason)
 		if refusalClass != "" {
-			fmt.Fprintf(stderr, "txharbor recovery-admin status: refused: refusal_class=%s %s (no gap/instance/approval/release state changed)\n",
+			fmt.Fprintf(stderr, "txharbor recovery-admin status: refused: refusal_class=%s close_ready=unknown %s (no gap/instance/approval/release state changed)\n",
 				refusalClass, logx.Redact(reason))
 		} else {
-			fmt.Fprintf(stderr, "txharbor recovery-admin status: refused: %s (no gap/instance/approval/release state changed)\n",
+			fmt.Fprintf(stderr, "txharbor recovery-admin status: refused: close_ready=unknown %s (no gap/instance/approval/release state changed)\n",
 				logx.Redact(reason))
 		}
 		return 1
@@ -356,11 +362,13 @@ func recoveryStatusRefuse(ctx context.Context, env *recoveryOpEnv, instanceID, o
 
 // recoveryStatusInstance is the read instance row of one review.
 type recoveryStatusInstance struct {
-	kind         string
-	state        string
-	generation   int64
-	evidenceHash string
-	openedBy     string
+	kind              string
+	state             string
+	generation        int64
+	evidenceHash      string
+	openedBy          string
+	entryChains       []uint64
+	entryChainVersion *int32
 }
 
 // recoveryStatusRestoreFacts is the restore-probe census of one review.
@@ -487,10 +495,12 @@ func (r *recoveryStatusReview) loadInstance(ctx context.Context) error {
 		return err
 	}
 	err := r.pool.QueryRow(ctx,
-		`SELECT kind, state, evidence_generation, evidence_hash, opened_by
+		`SELECT kind, state, evidence_generation, evidence_hash, opened_by,
+                entry_chain_inventory, entry_chain_inventory_version
 		   FROM recovery_instance WHERE instance_id = $1`, r.instanceID).
 		Scan(&r.instance.kind, &r.instance.state, &r.instance.generation,
-			&r.instance.evidenceHash, &r.instance.openedBy)
+			&r.instance.evidenceHash, &r.instance.openedBy, &r.instance.entryChains,
+			&r.instance.entryChainVersion)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return fmt.Errorf("recovery instance %s does not exist; the status review reads one existing instance", r.instanceID)
 	}
@@ -887,7 +897,7 @@ func (r *recoveryStatusReview) render(w io.Writer) {
 		scopeFilter = r.scopeFilter
 	}
 	fmt.Fprintf(w,
-		"txharbor recovery-admin status: instance=%s kind=%s state=%s generation=%d evidence_hash=%s opened_by=%s principal=%s review_operation_id=%s scope_filter=%s reads=%d/%d max_rows=%d mode=bounded_read_only_review\n",
+		"txharbor recovery-admin status: instance=%s kind=%s state=%s generation=%d evidence_hash=%s opened_by=%s principal=%s review_operation_id=%s scope_filter=%s reads=%d/%d max_rows=%d mode=bounded_read_only_review close_ready=unknown (status is not an atomic close guard)\n",
 		r.instanceID, r.instance.kind, r.instance.state, r.instance.generation, r.instance.evidenceHash,
 		r.instance.openedBy, r.principal, recoveryOpDisplayID(r.operation), scopeFilter,
 		r.reads, r.maxReads, r.maxRows)
@@ -900,6 +910,11 @@ func (r *recoveryStatusReview) render(w io.Writer) {
 	} else {
 		fmt.Fprintln(w,
 			"  restored=false reason=\"no accepted restore-probe evidence for this instance; nothing proves the data set was restored (restored is never inferred from connectivity or a status field)\"")
+	}
+	if r.instance.entryChainVersion != nil && *r.instance.entryChainVersion == 1 && controlstore.ValidateEntryChainInventory(r.instance.entryChains) == nil {
+		fmt.Fprintf(w, "  bound_entry_chain_inventory_version=1 bound_entry_chains=%v (deployment-complete snapshot; status scope results below remain partial observations, not close_ready)\n", r.instance.entryChains)
+	} else {
+		fmt.Fprintln(w, "  bound_entry_chain_inventory=unknown (legacy-null or malformed; no inventory is inferred from release rows); close_ready=unknown")
 	}
 
 	for _, capability := range r.capabilities {
@@ -917,7 +932,7 @@ func (r *recoveryStatusReview) render(w io.Writer) {
 				marker = " unrecorded_marker_scope=true"
 			}
 			fmt.Fprintf(w,
-				"    release_scope=%s%s released=%t refusal_class=%s release_id=%s phase_two_evaluated=%t reason=%s\n",
+				"    release_scope=%s%s released=%t refusal_class=%s scope_partial=true release_id=%s phase_two_evaluated=%t reason=%s\n",
 				scope.scopeHash, marker, scope.allowed, displayOrNone(scope.refusalClass),
 				displayOrNone(scope.releaseID), scope.phaseTwo, displayOrNone(scope.reason))
 		}

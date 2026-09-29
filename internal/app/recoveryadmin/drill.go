@@ -192,6 +192,18 @@ func recoveryAdminDrill(ctx context.Context, args []string, d Deps) int {
 		fmt.Fprintln(stderr, "txharbor recovery-admin drill: environment lookup is not wired; refusing")
 		return 1
 	}
+	// A real restore needs an explicit deployment-configured observer with
+	// visibility into tagged target sessions. Never infer it from --target-dsn.
+	// Record-only does not execute a restore and retains its existing contract.
+	observerDSN := ""
+	if !*recordOnly {
+		var ok bool
+		observerDSN, ok = d.getenvValue(config.EnvRecoveryObserverDSN)
+		if !ok || strings.TrimSpace(observerDSN) == "" {
+			fmt.Fprintf(stderr, "txharbor recovery-admin drill: %s is required (not configured); refusing\n", config.EnvRecoveryObserverDSN)
+			return 1
+		}
+	}
 
 	env, code := recoveryOpOpen(ctx, d, "drill")
 	if env == nil {
@@ -265,8 +277,10 @@ func recoveryAdminDrill(ctx context.Context, args []string, d Deps) int {
 		for key, value := range extra {
 			detail[key] = value
 		}
-		_ = recoveryOpRecord(ctx, env.pool, recoveryActionDrill, operation, env.principal,
-			controlstore.AuditRefused, detail, target)
+		if err := recoveryOpRecord(ctx, env.pool, recoveryActionDrill, operation, env.principal,
+			controlstore.AuditRefused, detail, target); err != nil {
+			reason += "; audit refusal could not be persisted: " + logx.Redact(err.Error())
+		}
 		if refusalClass != "" {
 			fmt.Fprintf(stderr, "txharbor recovery-admin drill: refused: refusal_class=%s %s\n",
 				refusalClass, logx.Redact(reason))
@@ -287,11 +301,22 @@ func recoveryAdminDrill(ctx context.Context, args []string, d Deps) int {
 	if replayed, code := recoveryDrillReplay(stderr, stdout, recorded, inputDigest, operation); replayed {
 		return code
 	}
+	boundEntryChains, inventoryErr := recoveryDrillBoundEntryChains(ctx, env.pool, instanceID)
+	if inventoryErr != nil {
+		// Missing/legacy/malformed inventory is never inferred from --chain-id.
+		boundEntryChains = nil
+	}
 
 	// --record-only never claims a restore: a real restore must already have
 	// been accepted for this instance, otherwise this refuses.
+	var recordGeneration *int64
 	if *recordOnly {
-		accepted, err := recoveryDrillHasRestoreEvidence(ctx, env.pool, instanceID)
+		manifestDigest, digestErr := manifest.Digest()
+		if digestErr != nil {
+			return refuse(string(recovery.RefusalControlStoreUnavailable), "compute manifest digest: "+digestErr.Error(), nil)
+		}
+		accepted, generation, err := recoveryDrillHasRestoreEvidence(ctx, env.pool, instanceID, manifest.BackupID,
+			manifestDigest, recoveryTargetFingerprint(*targetDSN))
 		if err != nil {
 			return refuse(string(recovery.RefusalControlStoreUnavailable), err.Error(), nil)
 		}
@@ -299,6 +324,7 @@ func recoveryAdminDrill(ctx context.Context, args []string, d Deps) int {
 			return refuse("",
 				"record-only requires an accepted restore_probe evidence row for this instance (a real restore must have happened; a re-initialized empty database is never a drill)", nil)
 		}
+		recordGeneration = &generation
 	}
 
 	programVersion, err := recovery.CurrentProgramVersion()
@@ -307,7 +333,8 @@ func recoveryAdminDrill(ctx context.Context, args []string, d Deps) int {
 		return 1
 	}
 	drillID := uuid.NewString()
-	restoreStarted := time.Now().UTC()
+	// Retain the monotonic clock component for the elapsed restore scope.
+	restoreStarted := time.Now()
 
 	// ------------------------------------------------------------------
 	// Phase 1: real restore (or an explicit record-only skip).
@@ -319,11 +346,19 @@ func recoveryAdminDrill(ctx context.Context, args []string, d Deps) int {
 		restoreRefusal   string
 	)
 	if !*recordOnly {
+		// The started marker is durable before the first destructive side effect.
+		// An interrupted operation is intentionally not retried under the same id.
+		if err := recoveryOpRecord(ctx, env.pool, recoveryActionDrill, operation, env.principal,
+			controlstore.AuditRefused, map[string]any{"stage": "started", "input_digest": inputDigest}, target); err != nil {
+			fmt.Fprintf(stderr, "txharbor recovery-admin drill: cannot persist pre-restore operation marker: %s\n", logx.Redact(err.Error()))
+			return 1
+		}
 		result, err := recovery.ExecuteRestore(ctx, recovery.RestoreOptions{
 			ManifestPath:      strings.TrimSpace(*manifestPath),
 			InstanceID:        instanceID,
 			ControlStore:      env.store,
 			ControlDSN:        env.controlDSN,
+			ObserverDSN:       observerDSN,
 			TargetDSN:         *targetDSN,
 			TargetDeclaration: recovery.TargetIsolated,
 			TargetReason:      "recovery drill (isolated environment)",
@@ -345,17 +380,30 @@ func recoveryAdminDrill(ctx context.Context, args []string, d Deps) int {
 			dbRestoreSeconds = &seconds
 			// The restored run's real marker is the timing origin of the
 			// per-capability release observation.
-			if observed, err := recoveryDrillRestoreStartedAt(ctx, env.pool, instanceID); err == nil && !observed.IsZero() {
+			if observed, markerErr := recoveryDrillRestoreStartedAt(ctx, env.pool, instanceID, manifest.BackupID,
+				recoveryTargetFingerprint(*targetDSN)); markerErr == nil && !observed.IsZero() {
 				restoreStarted = observed
+			} else if markerErr != nil || observed.IsZero() {
+				restoreState = "observation_error"
+				restoreRefusal = "restore-start marker could not be observed for this restore"
+				if markerErr != nil {
+					restoreRefusal += ": " + logx.Redact(markerErr.Error())
+				}
 			}
 		}
 	} else {
 		// Record-only measures release times against the real restore marker
 		// (never against this invocation's wall clock).
-		if observed, err := recoveryDrillRestoreStartedAt(ctx, env.pool, instanceID); err == nil {
+		if observed, err := recoveryDrillRestoreStartedAt(ctx, env.pool, instanceID, manifest.BackupID,
+			recoveryTargetFingerprint(*targetDSN)); err == nil && !observed.IsZero() {
 			restoreStarted = observed
 		} else {
 			restoreStarted = time.Time{}
+			restoreState = "observation_error"
+			restoreRefusal = "record-only could not observe the restore-start marker for this evidence generation"
+			if err != nil {
+				restoreRefusal += ": " + logx.Redact(err.Error())
+			}
 		}
 	}
 
@@ -381,7 +429,10 @@ func recoveryAdminDrill(ctx context.Context, args []string, d Deps) int {
 			"the evidence-gap facts could not be read: "+gapErr.Error(), nil)
 	}
 	releaseSeconds, releaseObservations, releaseRefusals, releaseErr := recoveryDrillObserveReleases(
-		ctx, env, instanceID, chainID, gateTTL, restoreStarted)
+		ctx, env, instanceID, boundEntryChains, gateTTL, restoreStarted)
+	if len(boundEntryChains) == 0 && releaseErr == nil {
+		releaseErr = errors.New("bound entry-chain inventory is missing or invalid")
+	}
 
 	// ------------------------------------------------------------------
 	// Phase 4: constraint states + RTO evaluation.
@@ -392,23 +443,30 @@ func recoveryAdminDrill(ctx context.Context, args []string, d Deps) int {
 			unconfigured = append(unconfigured, constraint.Key)
 		}
 	}
+	fullComplete := recoveryDrillFullRecoveryComplete(*recordOnly, restoreState, verificationState, strings.TrimSpace(*rpcURL) != "",
+		releaseSeconds, releaseObservations, releaseErr, openGapCount, boundEntryChains)
 	measured, measuredKnown := recoveryDrillSafeResumption(releaseSeconds)
+	measuredKnown = measuredKnown && fullComplete
 	rtoEval := metrics.EvaluateRTOTarget(
 		rtoTarget, time.Duration(measured*float64(time.Second)), metrics.RTOScopeSafeResumption, measuredKnown)
 
 	// Result classification (observed, never operator-declared).
-	refusalObserved := restoreState == "refused" || verificationState == "refused" ||
-		verificationState == "discarded" || openGapCount > 0
+	refusalObserved := restoreState == "refused" || restoreState == "observation_error" || verificationState == "refused" ||
+		verificationState == "discarded" || openGapCount > 0 || releaseErr != nil
 	injection, isInjection := scenario.FailureInjection()
 	var drillResult recovery.DrillResult
 	switch {
-	case isInjection && refusalObserved:
+	case isInjection && recoveryDrillInjectionObserved(injection, restoreState, restoreBlocked, verificationState, openGapCount, releaseRefusals) && releaseErr == nil:
 		drillResult = recovery.DrillResultFailedInjected
+	case isInjection && (releaseErr != nil || restoreState == "observation_error" || refusalObserved):
+		drillResult = recovery.DrillResultRefusedSafe
 	case isInjection:
 		return refuse("", fmt.Sprintf(
 			"declared failure injection %s (%s) was not observed in this flow (restore=%s verification=%s open_gaps=%d); refusing to record a false injection claim",
 			injection, scenario, restoreState, verificationState, openGapCount), nil)
 	case refusalObserved:
+		drillResult = recovery.DrillResultRefusedSafe
+	case !fullComplete:
 		drillResult = recovery.DrillResultRefusedSafe
 	default:
 		drillResult = recovery.DrillResultOK
@@ -438,6 +496,7 @@ func recoveryAdminDrill(ctx context.Context, args []string, d Deps) int {
 		RestoreState:             restoreState,
 		RestoreBlocked:           restoreBlocked,
 		RestoreRefusal:           restoreRefusal,
+		ReleaseObservationError:  recoveryDrillOptionalError(releaseErr),
 		VerificationState:        verificationState,
 		VerificationRef:          verificationRef,
 		VerificationRefusal:      logx.Redact(verificationRefusal),
@@ -470,34 +529,37 @@ func recoveryAdminDrill(ctx context.Context, args []string, d Deps) int {
 	if err := recoveryDrillWriteArchive(archivePath, &archive); err != nil {
 		return refuse("", "the drill archive cannot be written: "+err.Error(), nil)
 	}
-
 	testInputs, err := archive.TestInputs()
 	if err != nil {
 		_ = os.Remove(archivePath)
 		return refuse("", "the drill test-input annotation cannot be encoded: "+err.Error(), nil)
 	}
 	run, err := recovery.RecordDrillRun(ctx, env.store, recovery.DrillRunInput{
-		InstanceID:               instanceID,
-		DrillID:                  drillID,
-		Scenario:                 scenario,
-		RecoveryPoint:            recoveryPoint,
-		DBRestoreSeconds:         dbRestoreSeconds,
-		VerificationSeconds:      verificationSeconds,
-		CapabilityReleaseSeconds: releaseSeconds,
-		BackupLag:                archive.BackupLagJSON(),
-		UncoveredInterval:        archive.UncoveredIntervalJSON(),
-		ConstraintsConfigured:    constraintsConfigured,
-		TestInputs:               testInputs,
-		GapCounts:                archive.GapCountsJSON(),
-		Result:                   drillResult,
-		LogRef:                   archivePath,
-		Actor:                    env.principal,
-		OperationID:              operation,
+		InstanceID:                 instanceID,
+		DrillID:                    drillID,
+		Scenario:                   scenario,
+		RecoveryPoint:              recoveryPoint,
+		DBRestoreSeconds:           dbRestoreSeconds,
+		VerificationSeconds:        verificationSeconds,
+		CapabilityReleaseSeconds:   releaseSeconds,
+		BackupLag:                  archive.BackupLagJSON(),
+		UncoveredInterval:          archive.UncoveredIntervalJSON(),
+		ConstraintsConfigured:      constraintsConfigured,
+		TestInputs:                 testInputs,
+		GapCounts:                  archive.GapCountsJSON(),
+		Result:                     drillResult,
+		LogRef:                     archivePath,
+		Actor:                      env.principal,
+		OperationID:                operation,
+		ExpectedEvidenceGeneration: recordGeneration,
 	})
 	if err != nil {
 		_ = os.Remove(archivePath)
 		if errors.Is(err, controlstore.ErrOperationConflict) {
 			return refuse("", "operation_conflict: "+err.Error(), nil)
+		}
+		if errors.Is(err, recovery.ErrDrillStaleGeneration) {
+			return refuse("", "record-only restore probe became stale before the drill row was inserted", nil)
 		}
 		fmt.Fprintf(stderr, "txharbor recovery-admin drill: the drill run could not be recorded: %s\n", logx.Redact(err.Error()))
 		return 1
@@ -516,14 +578,18 @@ func recoveryAdminDrill(ctx context.Context, args []string, d Deps) int {
 		"verification_seconds":       verificationSeconds,
 		"capability_release_seconds": releaseSeconds,
 		"release_refusals":           releaseRefusals,
+		"release_observation_error":  recoveryDrillOptionalError(releaseErr),
 		"gaps":                       gapCounts,
 		"constraints_configured":     constraintsConfigured,
 		"unconfigured_constraints":   unconfigured,
 		"rto":                        rtoEval,
 		"archive":                    archivePath,
 	}
-	_ = recoveryOpRecord(ctx, env.pool, recoveryActionDrill, operation, env.principal,
-		controlstore.AuditOK, detail, target)
+	if err := recoveryOpRecord(ctx, env.pool, recoveryActionDrill, operation, env.principal,
+		controlstore.AuditOK, detail, target); err != nil {
+		fmt.Fprintf(stderr, "txharbor recovery-admin drill: run recorded but terminal audit could not be persisted: %s\n", logx.Redact(err.Error()))
+		return 1
+	}
 
 	recoveryDrillPrint(stdout, stderr, run, archive, releaseSeconds, rtoEval, archivePath, releaseErr)
 
@@ -531,6 +597,10 @@ func recoveryAdminDrill(ctx context.Context, args []string, d Deps) int {
 		fmt.Fprintf(stderr,
 			"txharbor recovery-admin drill: ALERT+ESCALATION rto_target_exceeded measured=%.3fs target=%.3fs (recorded not-met; the timeout never permanently blocks later safe resumption)\n",
 			rtoEval.Measured.Seconds(), rtoEval.Target.Seconds())
+	}
+	if run.Result == recovery.DrillResultRefusedSafe {
+		fmt.Fprintf(stderr, "txharbor recovery-admin drill: required recovery stage was incomplete or refused; recorded result=%s\n", run.Result)
+		return 1
 	}
 	return 0
 }
@@ -705,25 +775,93 @@ func recoveryDrillTargetGuard(env *recoveryOpEnv, targetDSN string) error {
 // real restore happened — a re-initialized empty database has none).
 func recoveryDrillHasRestoreEvidence(ctx context.Context, pool interface {
 	QueryRow(context.Context, string, ...any) pgx.Row
-}, instanceID string) (bool, error) {
-	var count int64
+}, instanceID, backupID, manifestDigest, targetFingerprint string) (bool, int64, error) {
+	var generation int64
 	if err := pool.QueryRow(ctx,
-		`SELECT count(*) FROM recovery_evidence WHERE instance_id = $1 AND kind = 'restore_probe'`,
-		instanceID).Scan(&count); err != nil {
-		return false, fmt.Errorf("read accepted restore evidence: %w", err)
+		`SELECT evidence_generation FROM recovery_instance WHERE instance_id = $1`, instanceID).Scan(&generation); err != nil {
+		return false, 0, fmt.Errorf("read current evidence generation: %w", err)
 	}
-	return count > 0, nil
+	var found bool
+	err := pool.QueryRow(ctx, `
+SELECT EXISTS (
+    SELECT 1 FROM recovery_evidence
+    WHERE instance_id = $1 AND kind = 'restore_probe' AND generation = $2
+      AND artifact_hash = $3 AND scope->>'backup_id' = $4
+      AND scope->>'manifest_digest' = $3
+      AND scope->>'target_fingerprint' = $5
+)`, instanceID, generation, manifestDigest, backupID, targetFingerprint).Scan(&found)
+	if err != nil {
+		return false, 0, fmt.Errorf("read accepted restore evidence: %w", err)
+	}
+	return found, generation, nil
+}
+
+// recoveryDrillBoundEntryChains reads only the instance's deployment-bound
+// inventory. The required --chain-id is an observation input, not inventory.
+func recoveryDrillBoundEntryChains(ctx context.Context, pool interface {
+	QueryRow(context.Context, string, ...any) pgx.Row
+}, instanceID string) ([]uint64, error) {
+	var chains []uint64
+	var version *int32
+	err := pool.QueryRow(ctx, `SELECT entry_chain_inventory, entry_chain_inventory_version FROM recovery_instance WHERE instance_id = $1`, instanceID).
+		Scan(&chains, &version)
+	if err != nil {
+		return nil, fmt.Errorf("read bound entry-chain inventory: %w", err)
+	}
+	if version == nil || *version != 1 || controlstore.ValidateEntryChainInventory(chains) != nil {
+		return nil, errors.New("bound entry-chain inventory is missing or invalid")
+	}
+	return chains, nil
+}
+
+// recoveryDrillFullRecoveryComplete is the sole positive classification gate:
+// an executed restore, an executed verification phase, no gaps, and all seven
+// capabilities observed released and measured in this generation. An
+// unconfigured verification phase is unknown, not complete.
+func recoveryDrillFullRecoveryComplete(recordOnly bool, restoreState, verificationState string,
+	verificationConfigured bool, releaseSeconds map[recovery.Capability]float64,
+	releaseObservations map[string]string, releaseErr error, openGapCount int, chains []uint64) bool {
+	if recordOnly || restoreState != "executed" || openGapCount != 0 || releaseErr != nil {
+		return false
+	}
+	if len(chains) == 0 || controlstore.ValidateEntryChainInventory(chains) != nil {
+		return false
+	}
+	if !verificationConfigured || verificationState != "executed" {
+		return false
+	}
+	if _, complete := recoveryDrillSafeResumption(releaseSeconds); !complete {
+		return false
+	}
+	for _, chain := range chains {
+		for _, capability := range recovery.KnownCapabilities() {
+			scope := "chain=" + strconv.FormatUint(chain, 10) + ";capability=" + string(capability)
+			if releaseObservations[scope] != "released" {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+func recoveryDrillOptionalError(err error) string {
+	if err == nil {
+		return ""
+	}
+	return logx.Redact(err.Error())
 }
 
 // recoveryDrillRestoreStartedAt reads the latest real restore-start marker
 // (the timing origin of the per-capability release observation).
 func recoveryDrillRestoreStartedAt(ctx context.Context, pool interface {
 	QueryRow(context.Context, string, ...any) pgx.Row
-}, instanceID string) (time.Time, error) {
+}, instanceID, backupID, targetFingerprint string) (time.Time, error) {
 	var at time.Time
 	err := pool.QueryRow(ctx,
-		`SELECT created_at FROM recovery_audit WHERE instance_id = $1 AND action = $2 ORDER BY audit_id DESC LIMIT 1`,
-		instanceID, recovery.ActionRestoreStarted).Scan(&at)
+		`SELECT created_at FROM recovery_audit WHERE instance_id = $1 AND action = $2
+         AND target->>'backup_id' = $3 AND target->>'target_fingerprint' = $4
+         ORDER BY audit_id DESC LIMIT 1`,
+		instanceID, recovery.ActionRestoreStarted, backupID, targetFingerprint).Scan(&at)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return time.Time{}, nil
 	}
@@ -824,9 +962,15 @@ func recoveryDrillGapCounts(ctx context.Context, env *recoveryOpEnv, instanceID 
 // current release, relative to the real restore start) plus the observation
 // and refusal breakdown. It creates no approval and no release.
 func recoveryDrillObserveReleases(ctx context.Context, env *recoveryOpEnv, instanceID string,
-	chainID uint64, gateTTL time.Duration, restoreStarted time.Time) (
+	chains []uint64, gateTTL time.Duration, restoreStarted time.Time) (
 	map[recovery.Capability]float64, map[string]string, map[string]string, error) {
-	gate, err := recovery.NewGate(env.store, recovery.GateOptions{TTL: gateTTL})
+	gate, err := recovery.NewGate(env.store, recovery.GateOptions{
+		TTL: gateTTL,
+		TrustedTarget: recovery.GateTargetBinding{
+			TargetGuardKey:        env.targetGuardKey,
+			TargetRoleFingerprint: env.targetRoleFingerprint,
+		},
+	})
 	if err != nil {
 		return nil, nil, nil, err
 	}
@@ -834,57 +978,110 @@ func recoveryDrillObserveReleases(ctx context.Context, env *recoveryOpEnv, insta
 	observations := map[string]string{}
 	refusals := map[string]string{}
 	var firstErr error
-	for _, capability := range recovery.KnownCapabilities() {
-		scopeHash, err := recovery.CanonicalScopeHash(
-			"chain=" + strconv.FormatUint(chainID, 10) + ";capability=" + string(capability))
-		if err != nil {
-			if firstErr == nil {
-				firstErr = err
+	for _, chainID := range chains {
+		for _, capability := range recovery.KnownCapabilities() {
+			scope := "chain=" + strconv.FormatUint(chainID, 10) + ";capability=" + string(capability)
+			scopeHash, err := recovery.CanonicalScopeHash(scope)
+			if err != nil {
+				if firstErr == nil {
+					firstErr = err
+				}
+				continue
 			}
-			continue
-		}
-		decision, err := gate.Admit(ctx, recovery.GateRequest{
-			InstanceID: instanceID,
-			Capability: capability,
-			ScopeHash:  scopeHash,
-			Action:     "drill_observe",
-		})
-		if err != nil {
-			if firstErr == nil {
-				firstErr = err
+			decision, err := gate.Admit(ctx, recovery.GateRequest{
+				InstanceID: instanceID,
+				Capability: capability,
+				ScopeHash:  scopeHash,
+				Action:     "drill_observe",
+			})
+			if err != nil {
+				if firstErr == nil {
+					firstErr = err
+				}
+				continue
 			}
-			continue
-		}
-		if !decision.Allowed {
-			class := string(decision.RefusalClass)
-			if class == "" {
-				class = "no_release"
+			if !decision.Allowed {
+				class := string(decision.RefusalClass)
+				if class == "" {
+					class = "no_release"
+				}
+				refusals[scope] = class
+				observations[scope] = "not_released"
+				continue
 			}
-			refusals[string(capability)] = class
-			observations[string(capability)] = "not_released"
-			continue
-		}
-		observations[string(capability)] = "released"
-		if decision.DecisionRef == "" {
-			continue
-		}
-		var releasedAt time.Time
-		if err := env.pool.QueryRow(ctx,
-			`SELECT created_at FROM recovery_release WHERE release_id = $1`, decision.DecisionRef).Scan(&releasedAt); err != nil {
-			if firstErr == nil {
-				firstErr = fmt.Errorf("read release decision %s: %w", decision.DecisionRef, err)
+			observations[scope] = "not_measured"
+			if decision.DecisionRef == "" {
+				continue
 			}
-			continue
+			var releasedAt time.Time
+			if err := env.pool.QueryRow(ctx,
+				`SELECT created_at FROM recovery_release WHERE release_id = $1`, decision.DecisionRef).Scan(&releasedAt); err != nil {
+				if firstErr == nil {
+					firstErr = fmt.Errorf("read release decision %s: %w", decision.DecisionRef, err)
+				}
+				continue
+			}
+			if restoreStarted.IsZero() || releasedAt.Before(restoreStarted) {
+				// A release that predates the restore start is not bound to the
+				// current evidence generation; it is never a measured safe
+				// resumption of this run.
+				continue
+			}
+			observations[scope] = "released"
+			elapsed := releasedAt.Sub(restoreStarted).Seconds()
+			if prior, ok := seconds[capability]; !ok || elapsed > prior {
+				seconds[capability] = elapsed
+			}
 		}
-		if restoreStarted.IsZero() || releasedAt.Before(restoreStarted) {
-			// A release that predates the restore start is not bound to the
-			// current evidence generation; it is never a measured safe
-			// resumption of this run.
-			continue
-		}
-		seconds[capability] = releasedAt.Sub(restoreStarted).Seconds()
 	}
 	return seconds, observations, refusals, firstErr
+}
+
+// recoveryDrillInjectionObserved accepts only a scenario-specific causal
+// signal. Generic restore/verification refusals and any unrelated release
+// blocker are deliberately insufficient.
+func recoveryDrillInjectionObserved(injection, restoreState string, restoreBlocked []string,
+	verificationState string, openGaps int, releaseRefusals map[string]string) bool {
+	contains := func(needles ...string) bool {
+		for _, text := range restoreBlocked {
+			lower := strings.ToLower(text)
+			for _, needle := range needles {
+				if strings.Contains(lower, needle) {
+					return true
+				}
+			}
+		}
+		return false
+	}
+	refusalHas := func(needles ...string) bool {
+		for _, class := range releaseRefusals {
+			lower := strings.ToLower(class)
+			for _, needle := range needles {
+				if strings.Contains(lower, needle) {
+					return true
+				}
+			}
+		}
+		return false
+	}
+	switch injection {
+	case "F1":
+		return restoreState == "refused" && contains("manifest is not usable", "backup is not verified", "backup artifact is unavailable", "backup artifact is corrupt")
+	case "F2":
+		return restoreState == "refused" && contains("restore interrupted", "restore was interrupted", "partial restore")
+	case "F3":
+		return restoreState == "refused" && contains("version incompatible", "schema incompatible", "unsupported server version")
+	case "F4":
+		return verificationState == "refused" && contains("external fact ahead", "fact is ahead", "divergent external")
+	case "F5":
+		return refusalHas("isolation_unproven", "old_instance_not_isolated")
+	case "F6":
+		return openGaps > 0 && refusalHas("gap")
+	case "F7":
+		return refusalHas("approval", "authorization", "stale_approval", "insufficient_authority")
+	default:
+		return false
+	}
 }
 
 // recoveryDrillSafeResumption derives the end-to-end safe-resumption duration
@@ -955,6 +1152,7 @@ type recoveryDrillArchive struct {
 	RestoreState             string                          `json:"restore_state"`
 	RestoreBlocked           []string                        `json:"restore_blocked,omitempty"`
 	RestoreRefusal           string                          `json:"restore_refusal,omitempty"`
+	ReleaseObservationError  string                          `json:"release_observation_error,omitempty"`
 	VerificationState        string                          `json:"verification_state"`
 	VerificationRef          string                          `json:"verification_ref,omitempty"`
 	VerificationRefusal      string                          `json:"verification_refusal,omitempty"`
@@ -984,18 +1182,19 @@ type recoveryDrillArchive struct {
 // RTO evaluation. A run with unconfigured constraints always names them.
 func (a recoveryDrillArchive) TestInputs() ([]byte, error) {
 	payload := map[string]any{
-		"purpose":                  a.Purpose,
-		"local_values_only":        a.LocalValuesOnly,
-		"constraints":              a.Constraints,
-		"unconfigured_constraints": a.UnconfiguredConstraints,
-		"rto":                      a.RTO,
-		"rto_target_configured":    a.RTOTargetConfigured,
-		"restore_state":            a.RestoreState,
-		"verification_state":       a.VerificationState,
-		"release_observations":     a.ReleaseObservations,
-		"release_refusals":         a.ReleaseRefusals,
-		"gate_ttl":                 a.GateTTL,
-		"record_only":              a.RecordOnly,
+		"purpose":                   a.Purpose,
+		"local_values_only":         a.LocalValuesOnly,
+		"constraints":               a.Constraints,
+		"unconfigured_constraints":  a.UnconfiguredConstraints,
+		"rto":                       a.RTO,
+		"rto_target_configured":     a.RTOTargetConfigured,
+		"restore_state":             a.RestoreState,
+		"verification_state":        a.VerificationState,
+		"release_observations":      a.ReleaseObservations,
+		"release_refusals":          a.ReleaseRefusals,
+		"release_observation_error": a.ReleaseObservationError,
+		"gate_ttl":                  a.GateTTL,
+		"record_only":               a.RecordOnly,
 	}
 	return json.Marshal(payload)
 }
@@ -1039,15 +1238,26 @@ func recoveryDrillReplay(stderr, stdout io.Writer, recorded *recoveryOpRecorded,
 		return false, 0
 	}
 	var detail map[string]any
-	_ = json.Unmarshal(recorded.Detail, &detail)
+	if err := json.Unmarshal(recorded.Detail, &detail); err != nil {
+		fmt.Fprintf(stderr, "txharbor recovery-admin drill: operation_id=%s has an unreadable audit record; refusing ambiguous replay\n", operation)
+		return true, 1
+	}
 	if digest, _ := detail["input_digest"].(string); digest != inputDigest {
 		fmt.Fprintf(stderr, "txharbor recovery-admin drill: operation_conflict operation_id=%s (the operation id was recorded with a different input; zero writes)\n", operation)
 		return true, 1
 	}
+	if stage, _ := detail["stage"].(string); stage == "started" {
+		fmt.Fprintf(stderr, "txharbor recovery-admin drill: operation_id=%s has a started but non-terminal restore marker; refusing ambiguous retry\n", operation)
+		return true, 1
+	}
 	if recorded.Result == controlstore.AuditOK {
+		result, _ := detail["result"].(string)
 		fmt.Fprintf(stdout,
-			"txharbor recovery-admin drill: replayed=true operation_id=%s result=ok drill_id=%v result_class=%v archive=%v (read back from the recorded outcome; zero side effects)\n",
-			operation, detail["drill_id"], detail["result"], detail["archive"])
+			"txharbor recovery-admin drill: replayed=true operation_id=%s result=%s drill_id=%v result_class=%v archive=%v (read back from the recorded outcome; zero side effects)\n",
+			operation, recorded.Result, detail["drill_id"], result, detail["archive"])
+		if result == string(recovery.DrillResultRefusedSafe) {
+			return true, 1
+		}
 		return true, 0
 	}
 	fmt.Fprintf(stderr,

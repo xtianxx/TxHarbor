@@ -74,6 +74,9 @@ var (
 	ErrUnknownDrillScenario = errors.New("unknown drill scenario")
 	// ErrUnknownDrillResult marks a result outside the closed set.
 	ErrUnknownDrillResult = errors.New("unknown drill result")
+	// ErrDrillStaleGeneration marks a record-only run whose accepted evidence
+	// generation changed before the drill row was inserted.
+	ErrDrillStaleGeneration = errors.New("record-only drill evidence generation is stale")
 )
 
 // DrillScenario is one member of the closed drill scenario set: the positive
@@ -262,6 +265,11 @@ type DrillRunInput struct {
 	// replay identity: an operation_id replay returns the originally recorded
 	// row. Invalid UUIDs are refused; empty means the writer generates one.
 	DrillID string
+	// ExpectedEvidenceGeneration, when non-nil, requires the current instance
+	// generation to match while RecordDrillRun holds its instance-row lock.
+	// Record-only drills use this to bind the run to their accepted restore
+	// probe generation. Nil leaves this guard disabled.
+	ExpectedEvidenceGeneration *int64
 }
 
 // DrillRun is one persisted recovery_drill_run row.
@@ -354,9 +362,10 @@ func RecordDrillRun(ctx context.Context, store *controlstore.Store, input DrillR
 	// Serialize on the instance row (the same lock every decision write uses)
 	// so the idempotency read-back and the insert cannot interleave.
 	var kind, state string
+	var currentGeneration int64
 	err = tx.QueryRow(ctx,
-		`SELECT kind, state FROM recovery_instance WHERE instance_id = $1 FOR UPDATE`, prepared.instanceID).
-		Scan(&kind, &state)
+		`SELECT kind, state, evidence_generation FROM recovery_instance WHERE instance_id = $1 FOR UPDATE`, prepared.instanceID).
+		Scan(&kind, &state, &currentGeneration)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return DrillRun{}, fmt.Errorf("drill run instance %s does not exist", prepared.instanceID)
 	}
@@ -385,6 +394,10 @@ func RecordDrillRun(ctx context.Context, store *controlstore.Store, input DrillR
 			run.Recorded = true
 			return run, nil
 		}
+	}
+	if input.ExpectedEvidenceGeneration != nil && currentGeneration != *input.ExpectedEvidenceGeneration {
+		return DrillRun{}, fmt.Errorf("%w: expected %d, current %d", ErrDrillStaleGeneration,
+			*input.ExpectedEvidenceGeneration, currentGeneration)
 	}
 
 	drillID := prepared.drillID

@@ -40,6 +40,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/xtianxx/txharbor/internal/config"
@@ -79,12 +80,15 @@ func (d Deps) getenvValue(key string) (string, bool) {
 // the control-store pool/store and the parsed target identities. The data DSN
 // is carried for the executors but never echoed.
 type recoveryOpEnv struct {
-	principal          string
-	dataDSN            string
-	controlDSN         string
-	controlFingerprint string
-	pool               *pgxpool.Pool
-	store              *controlstore.Store
+	principal             string
+	dataDSN               string
+	controlDSN            string
+	controlFingerprint    string
+	targetGuardKey        string
+	targetRoleFingerprint string
+	dataTargetFingerprint []byte
+	pool                  *pgxpool.Pool
+	store                 *controlstore.Store
 }
 
 // recoveryOpConfig validates the by-name configuration common to the wired
@@ -159,6 +163,24 @@ func recoveryOpOpen(ctx context.Context, d Deps, command string) (*recoveryOpEnv
 			command, config.EnvRecoveryControlDSN, logx.Redact(err.Error()))
 		return nil, 1
 	}
+	dataTarget, err := controlstore.ParseDSNTarget(dataDSN)
+	needsTargetBinding := command == "instance-open" || command == "instance-close"
+	if err != nil || (needsTargetBinding && (strings.TrimSpace(dataTarget.Host) == "" || dataTarget.Host != strings.TrimSpace(dataTarget.Host) || strings.Contains(dataTarget.Host, ",") || dataTarget.Port == 0 || strings.TrimSpace(dataTarget.Database) == "" || strings.TrimSpace(dataTarget.Role) == "")) {
+		fmt.Fprintf(d.stderr(), "txharbor recovery-admin %s: %s has an unknown or ambiguous host/port/database/role identity; refusing\n",
+			command, config.EnvPGDSN)
+		return nil, 1
+	}
+	targetGuardKey, err := controlstore.TargetGuardKey(dataTarget)
+	if err != nil {
+		fmt.Fprintf(d.stderr(), "txharbor recovery-admin %s: %s target identity is invalid: %s\n",
+			command, config.EnvPGDSN, logx.Redact(err.Error()))
+		return nil, 1
+	}
+	dataTargetFingerprint, err := json.Marshal(dataTarget.DataTargetFingerprint())
+	if err != nil {
+		fmt.Fprintf(d.stderr(), "txharbor recovery-admin %s: could not encode configured target fingerprint; refusing\n", command)
+		return nil, 1
+	}
 	pool, err := db.OpenPool(ctx, controlDSN, recoveryOpConnectTimeout)
 	if err != nil {
 		fmt.Fprintf(d.stderr(), "txharbor recovery-admin %s: control store unavailable: %s\n",
@@ -173,12 +195,15 @@ func recoveryOpOpen(ctx context.Context, d Deps, command string) (*recoveryOpEnv
 		return nil, 1
 	}
 	return &recoveryOpEnv{
-		principal:          principal,
-		dataDSN:            dataDSN,
-		controlDSN:         controlDSN,
-		controlFingerprint: controlTarget.DataTargetFingerprint().TargetFingerprint,
-		pool:               pool,
-		store:              store,
+		principal:             principal,
+		dataDSN:               dataDSN,
+		controlDSN:            controlDSN,
+		controlFingerprint:    controlTarget.DataTargetFingerprint().TargetFingerprint,
+		targetGuardKey:        targetGuardKey,
+		targetRoleFingerprint: dataTarget.DataTargetFingerprint().RoleFingerprint,
+		dataTargetFingerprint: dataTargetFingerprint,
+		pool:                  pool,
+		store:                 store,
 	}, 0
 }
 
@@ -200,6 +225,14 @@ func recoveryOpArtifactDir(d Deps, out, command string) (string, int) {
 		return "", 1
 	}
 	return strings.TrimSpace(value), 0
+}
+
+// recoveryOpSafeText keeps credential-shaped material out of operator output
+// and persisted operation audit fields. It is intentionally redaction, not a
+// general-purpose secret detector; semantic inputs continue to use the
+// original value.
+func recoveryOpSafeText(value string) string {
+	return logx.Redact(value)
 }
 
 // recoveryOpInstanceContext resolves the instance the command is bound to:
@@ -235,6 +268,37 @@ func recoveryOpOpenInstance(ctx context.Context, env *recoveryOpEnv) (string, bo
 		return "", false, fmt.Errorf("look up the open recovery instance: %w", err)
 	}
 	return instanceID, true, nil
+}
+
+// recoveryOpOpenTargetBindings reads the complete target-binding inventory
+// for every open instance. Null legacy bindings are retained as empty values
+// so the opaque isolated-target constructor can fail closed.
+func recoveryOpOpenTargetBindings(ctx context.Context, pool *pgxpool.Pool) ([]recovery.IsolatedInstanceBinding, error) {
+	rows, err := pool.Query(ctx, `SELECT target_guard_key, target_role_fingerprint
+FROM recovery_instance WHERE state = 'open'`)
+	if err != nil {
+		return nil, fmt.Errorf("list open recovery instance target bindings: %w", err)
+	}
+	defer rows.Close()
+	var bindings []recovery.IsolatedInstanceBinding
+	for rows.Next() {
+		var key, role pgtype.Text
+		if err := rows.Scan(&key, &role); err != nil {
+			return nil, fmt.Errorf("scan open recovery instance target binding: %w", err)
+		}
+		binding := recovery.IsolatedInstanceBinding{}
+		if key.Valid {
+			binding.TargetGuardKey = key.String
+		}
+		if role.Valid {
+			binding.TargetRoleFingerprint = role.String
+		}
+		bindings = append(bindings, binding)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("list open recovery instance target bindings: %w", err)
+	}
+	return bindings, nil
 }
 
 // recoveryOpRequireParticipant enforces the T021 subject rule: the
@@ -352,8 +416,8 @@ func recoveryAdminBackup(ctx context.Context, args []string, d Deps) int {
 	})
 	if err != nil {
 		_ = recoveryOpRecord(ctx, env.pool, recoveryActionBackup, operation, env.principal, controlstore.AuditRefused,
-			map[string]any{"input_digest": inputDigest, "reason": logx.Redact(err.Error())},
-			map[string]any{"chain_id": strings.TrimSpace(*chainID), "artifact_dir": artifactDir})
+			map[string]any{"input_digest": inputDigest, "reason": recoveryOpSafeText(err.Error())},
+			map[string]any{"chain_id": strings.TrimSpace(*chainID), "artifact_dir": recoveryOpSafeText(artifactDir)})
 		fmt.Fprintf(stderr, "txharbor recovery-admin backup: refused: %s\n", logx.Redact(err.Error()))
 		return 1
 	}
@@ -366,13 +430,13 @@ func recoveryAdminBackup(ctx context.Context, args []string, d Deps) int {
 		},
 		map[string]any{
 			"backup_id":     result.Manifest.BackupID,
-			"manifest_path": result.ManifestPath,
+			"manifest_path": recoveryOpSafeText(result.ManifestPath),
 			"chain_id":      strings.TrimSpace(*chainID),
 			"instance_id":   instanceID,
 		})
 	fmt.Fprintf(stdout,
 		"txharbor recovery-admin backup: backup_id=%s manifest=%s artifact=%s verification=%s operation_id=%s principal=%s instance=%s\n",
-		result.Manifest.BackupID, result.ManifestPath, result.ArtifactPath,
+		result.Manifest.BackupID, recoveryOpSafeText(result.ManifestPath), recoveryOpSafeText(result.ArtifactPath),
 		result.Manifest.Verification.State, recoveryOpDisplayID(operation), env.principal, instanceID)
 	return 0
 }
@@ -383,15 +447,20 @@ func recoveryAdminVerifyBackup(ctx context.Context, args []string, d Deps) int {
 	fs := flag.NewFlagSet("txharbor recovery-admin verify-backup", flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	manifestPath := fs.String("manifest", "", "manifest path (required)")
-	targetDSN := fs.String("target-dsn", "", "isolated target DSN (required)")
+	targetDSN := fs.String("target-dsn", "", "optional assertion of the deployment-configured isolated target (never used as the connection target)")
 	instanceFlag := fs.String("instance", "", "recovery instance id (optional; binds the conclusion)")
 	operationID := fs.String("operation-id", "", "idempotent operation identity (optional)")
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
-	if fs.NArg() > 0 || strings.TrimSpace(*manifestPath) == "" || strings.TrimSpace(*targetDSN) == "" {
+	if fs.NArg() > 0 || strings.TrimSpace(*manifestPath) == "" {
 		recoveryAdminActionUsage(stderr, recoveryAdminActionByNameOrZero("verify-backup"))
 		return 2
+	}
+	observerDSN, ok := d.getenvValue(config.EnvRecoveryObserverDSN)
+	if !ok || strings.TrimSpace(observerDSN) == "" {
+		fmt.Fprintf(stderr, "txharbor recovery-admin verify-backup: %s is required (not configured); refusing\n", config.EnvRecoveryObserverDSN)
+		return 1
 	}
 	operation, err := recoveryOpOperationID(*operationID)
 	if err != nil {
@@ -423,10 +492,31 @@ func recoveryAdminVerifyBackup(ctx context.Context, args []string, d Deps) int {
 		fmt.Fprintf(stderr, "txharbor recovery-admin verify-backup: refused: %s\n", logx.Redact(err.Error()))
 		return 1
 	}
+	configuredIsolated, ok := d.getenvValue(config.EnvRecoveryIsolatedTargetDSN)
+	if !ok || strings.TrimSpace(configuredIsolated) == "" {
+		fmt.Fprintf(stderr, "txharbor recovery-admin verify-backup: %s is required (not configured); refusing\n", config.EnvRecoveryIsolatedTargetDSN)
+		return 1
+	}
+	openBindings, err := recoveryOpOpenTargetBindings(ctx, env.pool)
+	if err != nil {
+		fmt.Fprintf(stderr, "txharbor recovery-admin verify-backup: open instance target bindings unavailable: %s\n", logx.Redact(err.Error()))
+		return 1
+	}
+	isolated, err := recovery.BindIsolatedTarget(env.dataDSN, env.controlDSN, configuredIsolated, openBindings)
+	if err != nil {
+		fmt.Fprintf(stderr, "txharbor recovery-admin verify-backup: isolated target refused: %s\n", logx.Redact(err.Error()))
+		return 1
+	}
+	if strings.TrimSpace(*targetDSN) != "" {
+		if err := recovery.AssertIsolatedTarget(isolated, *targetDSN); err != nil {
+			fmt.Fprintf(stderr, "txharbor recovery-admin verify-backup: isolated target assertion refused: %s\n", logx.Redact(err.Error()))
+			return 1
+		}
+	}
 
 	inputDigest := recoveryOpInputDigest(recoveryActionVerifyBackup, map[string]string{
 		"manifest":    strings.TrimSpace(*manifestPath),
-		"target":      recoveryTargetFingerprint(*targetDSN),
+		"target":      isolated.TargetFingerprint(),
 		"instance_id": instanceID,
 		"control_dsn": env.controlFingerprint,
 	})
@@ -448,20 +538,23 @@ func recoveryAdminVerifyBackup(ctx context.Context, args []string, d Deps) int {
 		return 1
 	}
 	result, err := recovery.ExecuteVerifyBackup(ctx, recovery.VerifyBackupOptions{
-		ManifestPath:   strings.TrimSpace(*manifestPath),
-		TargetDSN:      *targetDSN,
-		Verifier:       env.principal,
-		InstanceID:     instanceID,
-		ControlStore:   env.store,
-		ControlDSN:     env.controlDSN,
-		ProgramVersion: programVersion,
-		OperationID:    operation,
-		PG:             recovery.LocalPGCommand{},
+		ManifestPath:     strings.TrimSpace(*manifestPath),
+		Binding:          isolated,
+		TargetDSN:        strings.TrimSpace(*targetDSN),
+		Verifier:         env.principal,
+		InstanceID:       instanceID,
+		ControlStore:     env.store,
+		ControlDSN:       env.controlDSN,
+		AuthoritativeDSN: env.dataDSN,
+		ObserverDSN:      observerDSN,
+		ProgramVersion:   programVersion,
+		OperationID:      operation,
+		PG:               recovery.LocalPGCommand{},
 	})
 	if err != nil {
 		_ = recoveryOpRecord(ctx, env.pool, recoveryActionVerifyBackup, operation, env.principal, controlstore.AuditRefused,
 			map[string]any{"input_digest": inputDigest, "reason": logx.Redact(err.Error())},
-			map[string]any{"manifest_path": strings.TrimSpace(*manifestPath)})
+			map[string]any{"manifest_path": recoveryOpSafeText(strings.TrimSpace(*manifestPath))})
 		fmt.Fprintf(stderr, "txharbor recovery-admin verify-backup: refused: %s\n", logx.Redact(err.Error()))
 		return 1
 	}
@@ -479,10 +572,10 @@ func recoveryAdminVerifyBackup(ctx context.Context, args []string, d Deps) int {
 			},
 			"manifest_digest": result.ManifestDigest,
 		},
-		map[string]any{"manifest_path": result.ManifestPath, "instance_id": instanceID})
+		map[string]any{"manifest_path": recoveryOpSafeText(result.ManifestPath), "instance_id": instanceID})
 	fmt.Fprintf(stdout,
 		"txharbor recovery-admin verify-backup: manifest=%s verification=%s readable=%t structure_constraints=%t business_state_probes=%t verification_executable=%t evidence_ref=%s operation_id=%s verifier=%s instance=%s\n",
-		result.ManifestPath, result.State, checks.Readable, checks.StructureConstraints,
+		recoveryOpSafeText(result.ManifestPath), result.State, checks.Readable, checks.StructureConstraints,
 		checks.BusinessStateProbes, checks.VerificationExecutable, result.EvidenceRef,
 		recoveryOpDisplayID(operation), env.principal, instanceID)
 	if result.State != recovery.VerificationVerified {
@@ -571,7 +664,7 @@ func recoveryOpReplay(stderr, stdout io.Writer, recorded *recoveryOpRecorded, in
 	switch recorded.Result {
 	case controlstore.AuditOK:
 		fmt.Fprintf(stdout, "txharbor recovery-admin: replayed=true operation_id=%s result=ok manifest=%v verification=%v\n",
-			operation, target["manifest_path"], detail["verification"])
+			operation, recoveryOpSafeText(fmt.Sprint(target["manifest_path"])), detail["verification"])
 		return true, 0
 	default:
 		fmt.Fprintf(stderr, "txharbor recovery-admin: replayed=true operation_id=%s result=%s (the recorded refusal replays; zero side effects)\n",

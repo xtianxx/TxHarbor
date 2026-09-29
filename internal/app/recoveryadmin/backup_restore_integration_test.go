@@ -3,22 +3,21 @@
 // backup_restore_integration_test.go runs the real `recovery-admin
 // backup|verify-backup|restore` CLI (in-process Run with the deployment env)
 // against a real PostgreSQL 18.6 fixture (testcontainers) and isolated target
-// databases, with the real pg_dump/pg_restore binaries of the pinned image.
+// databases, with native pg_restore and the real pg_dump binary in the fixture.
 //
-// Tool path: the host carries no PostgreSQL client. The test puts a PATH shim
-// named pg_dump/pg_restore in front of PATH; the shim executes the real binary
-// inside the fixture container (`docker exec -i`) and rewrites the --dbname
-// DSN to the container loopback (one server, same database). The shim also
-// appends every tool invocation to a counter file: that counter is the
-// call-count instrument only — it never substitutes for the real tool, and
-// every positive path below performs a real dump/restore.
+// Tool path: pg_dump uses a test-only PATH shim to execute the real binary
+// inside the fixture container (`docker exec -i`) and rewrite the --dbname
+// DSN. pg_restore must be native and direct: the production guard rejects PATH
+// shell shims. Positive tests requiring restore skip explicitly when native
+// pg_restore is unavailable. The shim counter instruments pg_dump only;
+// positive restore assertions inspect actual restored data.
 //
 // Covered:
 //
 //   - S1/S2: real CLI backup (unverified manifest) and verify-backup (real
 //     isolated pg_restore + four checks, verified conclusion + evidence row);
 //   - operation_id semantics on the real CLI: same id + same input replays
-//     with zero tool calls, zero new evidence and an untouched target; same id
+//     with zero recorded pg_dump shim calls, zero new evidence and an untouched target; same id
 //     with a changed target conflicts with zero writes anywhere; an omitted id
 //     is a real rerun (non-replay) that appends a new evidence row through the
 //     generation protocol;
@@ -47,6 +46,7 @@ import (
 	"io"
 	"net/url"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -72,9 +72,8 @@ const cliBkpPGImage = "postgres:18.6-trixie"
 // dump-derived data (same fixture idea as internal/recovery).
 const cliProbeTable = "snapshot_probe_015"
 
-// cliPGShim executes the real tool of the same name inside the fixture
-// container. It is test scaffolding around the real binary: the archive
-// streams over stdin/stdout exactly like the production path.
+// cliPGShim executes pg_dump inside the fixture container. It is test
+// scaffolding around the real binary; pg_restore is never shimmed.
 const cliPGShim = `#!/usr/bin/env bash
 set -euo pipefail
 tool="$(basename "$0")"
@@ -115,6 +114,21 @@ type cliFixture struct {
 	artDir     string
 	callsFile  string
 	seq        int
+}
+
+// requireNativePGRestore checks the host PATH before the fixture adds any
+// test-only PATH entries. A real restore executable is required for positive
+// restore evidence; successful stubs are not acceptable substitutes.
+func requireNativePGRestore(t *testing.T) {
+	t.Helper()
+	path, err := exec.LookPath("pg_restore")
+	if err != nil {
+		t.Skip("NOT RUN: native direct pg_restore unavailable")
+	}
+	version, err := exec.Command(path, "--version").CombinedOutput()
+	if err != nil || !strings.HasPrefix(strings.TrimSpace(string(version)), "pg_restore (PostgreSQL ") {
+		t.Skip("NOT RUN: native direct pg_restore unavailable")
+	}
 }
 
 func newCLIFixture(t *testing.T) *cliFixture {
@@ -174,29 +188,76 @@ func newCLIFixture(t *testing.T) *cliFixture {
 
 	// One open recovery instance with an executor and a verifier, through the
 	// real control-store write paths.
+	targetBinding := cliTargetBinding(t, f.dataDSN)
 	opened, err := store.OpenInstance(ctx, controlstore.OpenInstanceRequest{
-		Kind: "recovery", OpenedBy: "deploy:executor",
+		Kind: "recovery", OpenedBy: "deploy:executor", EntryChainInventory: []uint64{31337},
+		TargetGuardKey:        targetBinding.TargetGuardKey,
+		TargetRoleFingerprint: targetBinding.TargetRoleFingerprint,
 	})
 	if err != nil {
 		t.Fatalf("open recovery instance: %v", err)
 	}
 	f.instanceID = opened.InstanceID
+	cliResolveFixtureTargetGuard(t, f, targetBinding.TargetGuardKey)
 	f.mapIdentity(t, "deploy:executor", "person-executor")
 	f.mapIdentity(t, "auth:verifier", "person-verifier")
 	f.register(t, "deploy:executor", "executor")
 	f.register(t, "auth:verifier", "verifier")
 
-	// PATH shim for the real client binaries inside the pinned container.
+	// PATH shim for pg_dump only. pg_restore resolves directly to the native
+	// executable checked by tests that perform real restores.
 	binDir := t.TempDir()
-	for _, tool := range []string{"pg_dump", "pg_restore"} {
-		if err := os.WriteFile(filepath.Join(binDir, tool), []byte(cliPGShim), 0o755); err != nil {
-			t.Fatalf("write %s shim: %v", tool, err)
-		}
+	if err := os.WriteFile(filepath.Join(binDir, "pg_dump"), []byte(cliPGShim), 0o755); err != nil {
+		t.Fatalf("write pg_dump shim: %v", err)
 	}
 	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 	t.Setenv("TXHARBOR_TEST_PG_CONTAINER", f.ctrID)
 	t.Setenv("TXHARBOR_TEST_CALLS", f.callsFile)
 	return f
+}
+
+// cliResolveFixtureTargetGuard models the explicit deployment-controlled
+// clean baseline required before the fixture can exercise release behavior.
+// It records the rebuild evidence and state transition atomically; production
+// code remains fail-closed when no such evidence exists.
+func cliResolveFixtureTargetGuard(t *testing.T, f *cliFixture, key string) {
+	t.Helper()
+	ctx := f.ctx
+	tx, err := f.control.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin fixture target-guard resolution: %v", err)
+	}
+	defer tx.Rollback(ctx)
+	evidence := []byte(`{"fixture":"isolated PostgreSQL instance; no target writer was launched","disposition":"clean"}`)
+	const operationID = "cli-fixture-target-clean"
+	if err := controlstore.RecordTargetGuardRebuild(ctx, tx, f.instanceID, key,
+		"deploy:test-fixture", operationID, evidence); err != nil {
+		t.Fatalf("record fixture target-guard evidence: %v", err)
+	}
+	if err := controlstore.ResolveTargetGuardClean(ctx, tx, key, operationID, evidence); err != nil {
+		t.Fatalf("resolve fixture target guard clean: %v", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		t.Fatalf("commit fixture target-guard resolution: %v", err)
+	}
+}
+
+// cliTargetBinding derives the same credential-free endpoint and role
+// identities used by the production instance-open path.
+func cliTargetBinding(t *testing.T, dsn string) recovery.IsolatedInstanceBinding {
+	t.Helper()
+	target, err := controlstore.ParseDSNTarget(dsn)
+	if err != nil {
+		t.Fatalf("parse data target: %v", err)
+	}
+	key, err := controlstore.TargetGuardKey(target)
+	if err != nil {
+		t.Fatalf("derive target guard key: %v", err)
+	}
+	return recovery.IsolatedInstanceBinding{
+		TargetGuardKey:        key,
+		TargetRoleFingerprint: target.DataTargetFingerprint().RoleFingerprint,
+	}
 }
 
 func (f *cliFixture) mapIdentity(t *testing.T, principal, person string) {
@@ -261,13 +322,15 @@ func cliDBNameOf(t *testing.T, dsn string) string {
 func (f *cliFixture) env(principal string) map[string]string {
 	return map[string]string{
 		config.EnvRecoveryControlDSN:  f.controlDSN,
+		config.EnvRecoveryObserverDSN: f.baseDSN,
 		config.EnvPGDSN:               f.dataDSN,
 		config.EnvRecoveryPrincipal:   principal,
 		config.EnvRecoveryArtifactDir: f.artDir,
+		config.EnvRecoveryEntryChains: "31337",
 	}
 }
 
-// toolCalls counts the real client invocations recorded by the PATH shim.
+// toolCalls counts pg_dump invocations recorded by the test-only PATH shim.
 func (f *cliFixture) toolCalls(t *testing.T) int {
 	t.Helper()
 	file, err := os.Open(f.callsFile)
@@ -446,12 +509,26 @@ func (f *cliFixture) cliBackup(t *testing.T, operationID string) string {
 
 // cliVerify runs the real CLI verify-backup.
 func (f *cliFixture) cliVerify(t *testing.T, manifestPath, targetDSN, operationID string) (int, string, string) {
+	// No operator assertion is needed: the CLI must use its opaque deployment
+	// binding even when the isolated database differs from the authoritative DB.
+	return f.cliVerifyWithConfiguredTarget(t, manifestPath, "", targetDSN, operationID)
+}
+
+func (f *cliFixture) cliVerifyWithConfiguredTarget(t *testing.T, manifestPath, assertedDSN, configuredDSN, operationID string) (int, string, string) {
 	t.Helper()
-	args := []string{"verify-backup", "--manifest", manifestPath, "--target-dsn", targetDSN, "--instance", f.instanceID}
+	args := []string{"verify-backup", "--manifest", manifestPath, "--instance", f.instanceID}
+	if strings.TrimSpace(assertedDSN) != "" {
+		args = append(args, "--target-dsn", assertedDSN)
+	}
 	if operationID != "" {
 		args = append(args, "--operation-id", operationID)
 	}
-	return runRecoveryAdmin(t, args, f.env("auth:verifier"))
+	env := f.env("auth:verifier")
+	env[config.EnvRecoveryIsolatedTargetDSN] = configuredDSN
+	// The fixture's PostgreSQL owner is privileged and observes the same target
+	// endpoint, independently of the opaque restore binding.
+	env[config.EnvRecoveryObserverDSN] = configuredDSN
+	return runRecoveryAdmin(t, args, env)
 }
 
 // cliRestoreArgs is the real CLI restore invocation under test.
@@ -488,18 +565,15 @@ func (f *cliFixture) verifiedBackup(t *testing.T) (manifestPath, backupID string
 // TestVerifyBackupCLIOperationIDSemantics covers G3 on the real CLI: replay,
 // conflict and the explicit non-replay rerun.
 func TestVerifyBackupCLIOperationIDSemantics(t *testing.T) {
+	requireNativePGRestore(t)
 	f := newCLIFixture(t)
 	manifestPath := f.cliBackup(t, "op-bkp-1")
 	backupID := f.manifestBackupID(t, manifestPath)
 
 	target := f.createDB(t, "verify")
-	callsBefore := f.toolCalls(t)
 	code, out, errOut := f.cliVerify(t, manifestPath, target, "op-ver-1")
 	if code != 0 || !strings.Contains(out, "verification=verified") {
 		t.Fatalf("verify-backup: exit=%d stdout=%q stderr=%q", code, out, errOut)
-	}
-	if f.toolCalls(t) <= callsBefore {
-		t.Fatal("verify-backup reported verified without invoking the real tool")
 	}
 	if got := f.evidenceCount(t, "backup_manifest", backupID); got != 1 {
 		t.Fatalf("backup_manifest evidence rows = %d, want 1", got)
@@ -517,7 +591,7 @@ func TestVerifyBackupCLIOperationIDSemantics(t *testing.T) {
 		t.Fatalf("verify-backup replay: exit=%d stdout=%q stderr=%q", code, out, errOut)
 	}
 	if got := f.toolCalls(t); got != calls {
-		t.Fatalf("a replayed verify-backup invoked the tool %d more time(s)", got-calls)
+		t.Fatalf("a replayed verify-backup invoked the pg_dump shim %d more time(s)", got-calls)
 	}
 	if got := f.evidenceCount(t, "backup_manifest", backupID); got != 1 {
 		t.Fatalf("a replayed verify-backup wrote evidence: %d rows", got)
@@ -534,7 +608,7 @@ func TestVerifyBackupCLIOperationIDSemantics(t *testing.T) {
 		t.Fatalf("operation_id conflict must refuse: exit=%d stderr=%q", code, errOut)
 	}
 	if got := f.toolCalls(t); got != calls {
-		t.Fatalf("a conflicting operation invoked the tool %d time(s)", got-calls)
+		t.Fatalf("a conflicting operation invoked the pg_dump shim %d time(s)", got-calls)
 	}
 	if got := f.evidenceCount(t, "backup_manifest", backupID); got != 1 {
 		t.Fatalf("a conflicting operation wrote evidence: %d rows", got)
@@ -546,16 +620,12 @@ func TestVerifyBackupCLIOperationIDSemantics(t *testing.T) {
 	// Omitted operation id: a real rerun (non-replay) that appends a new
 	// evidence row through the generation protocol.
 	rerun := f.createDB(t, "verify_rerun")
-	calls = f.toolCalls(t)
 	code, out, errOut = f.cliVerify(t, manifestPath, rerun, "")
 	if code != 0 || !strings.Contains(out, "verification=verified") {
 		t.Fatalf("verify-backup rerun: exit=%d stdout=%q stderr=%q", code, out, errOut)
 	}
 	if strings.Contains(out, "replayed=true") {
 		t.Fatalf("an omitted operation id must be a real rerun, not a replay: %q", out)
-	}
-	if f.toolCalls(t) <= calls {
-		t.Fatal("the omitted-id rerun did not invoke the real tool")
 	}
 	if got := f.evidenceCount(t, "backup_manifest", backupID); got != 2 {
 		t.Fatalf("backup_manifest evidence rows after the rerun = %d, want 2 (append)", got)
@@ -565,11 +635,39 @@ func TestVerifyBackupCLIOperationIDSemantics(t *testing.T) {
 	}
 }
 
+// A caller-provided target DSN is only an assertion. A mismatch against the
+// deployment-configured endpoint must refuse before invoking pg_restore or
+// writing verification evidence.
+func TestVerifyBackupCLIRejectsTargetAssertionMismatch(t *testing.T) {
+	f := newCLIFixture(t)
+	manifestPath := f.cliBackup(t, "op-bkp-target-assertion")
+	backupID := f.manifestBackupID(t, manifestPath)
+	configured := f.createDB(t, "trusted_verify")
+	asserted := f.createDB(t, "untrusted_verify")
+	callsBefore := f.toolCalls(t)
+	code, stdout, stderr := f.cliVerifyWithConfiguredTarget(t, manifestPath, asserted, configured, "")
+	if code != 1 || !strings.Contains(stderr, "assertion refused") {
+		t.Fatalf("mismatched target assertion must refuse: exit=%d stdout=%q stderr=%q", code, stdout, stderr)
+	}
+	if got := f.toolCalls(t); got != callsBefore {
+		t.Fatalf("mismatched target assertion invoked PostgreSQL tools: calls %d -> %d", callsBefore, got)
+	}
+	if got := f.evidenceCount(t, "backup_manifest", backupID); got != 0 {
+		t.Fatalf("mismatched target assertion wrote verification evidence: %d rows", got)
+	}
+	for _, output := range []string{stdout, stderr} {
+		if strings.Contains(output, "secret") || strings.Contains(output, "postgres://") {
+			t.Fatalf("target assertion refusal leaked DSN material: stdout=%q stderr=%q", stdout, stderr)
+		}
+	}
+}
+
 // TestRestoreCLIOperationIDReplayRerunAndInterruption covers G3 on the real
 // CLI restore path: successful replay does not touch the target, conflicts
 // write nothing, an omitted id is a real rerun with appended evidence, and an
 // interrupted attempt is never reused as success.
 func TestRestoreCLIOperationIDReplayRerunAndInterruption(t *testing.T) {
+	requireNativePGRestore(t)
 	f := newCLIFixture(t)
 	manifestPath, backupID := f.verifiedBackup(t)
 
@@ -580,9 +678,6 @@ func TestRestoreCLIOperationIDReplayRerunAndInterruption(t *testing.T) {
 	if code != 0 || !strings.Contains(out, "restored=true") {
 		t.Fatalf("restore: exit=%d stdout=%q stderr=%q", code, out, errOut)
 	}
-	if f.toolCalls(t) <= calls {
-		t.Fatal("restore reported restored=true without invoking the real tool")
-	}
 	if got := f.evidenceCount(t, "restore_probe", backupID); got != 1 {
 		t.Fatalf("restore_probe evidence rows = %d, want 1", got)
 	}
@@ -592,7 +687,7 @@ func TestRestoreCLIOperationIDReplayRerunAndInterruption(t *testing.T) {
 		t.Fatalf("the restore target was not actually restored (tables=%d probe rows=%d)", tables, rows)
 	}
 
-	// Successful replay (scenario 1): recorded outcome, zero tool calls, zero
+	// Successful replay (scenario 1): recorded outcome, zero pg_dump shim calls, zero
 	// new evidence, target untouched.
 	calls = f.toolCalls(t)
 	code, out, errOut = f.cliRestore(t, manifestPath, target, "op-rst-1")
@@ -600,7 +695,7 @@ func TestRestoreCLIOperationIDReplayRerunAndInterruption(t *testing.T) {
 		t.Fatalf("restore replay: exit=%d stdout=%q stderr=%q", code, out, errOut)
 	}
 	if got := f.toolCalls(t); got != calls {
-		t.Fatalf("a replayed restore invoked the tool %d more time(s)", got-calls)
+		t.Fatalf("a replayed restore invoked the pg_dump shim %d more time(s)", got-calls)
 	}
 	if got := f.evidenceCount(t, "restore_probe", backupID); got != 1 {
 		t.Fatalf("a replayed restore wrote evidence: %d rows", got)
@@ -617,7 +712,7 @@ func TestRestoreCLIOperationIDReplayRerunAndInterruption(t *testing.T) {
 		t.Fatalf("restore operation_id conflict must refuse: exit=%d stderr=%q", code, errOut)
 	}
 	if got := f.toolCalls(t); got != calls {
-		t.Fatalf("a conflicting restore invoked the tool %d time(s)", got-calls)
+		t.Fatalf("a conflicting restore invoked the pg_dump shim %d time(s)", got-calls)
 	}
 	if got := f.evidenceCount(t, "restore_probe", backupID); got != 1 {
 		t.Fatalf("a conflicting restore wrote evidence: %d rows", got)
@@ -635,9 +730,6 @@ func TestRestoreCLIOperationIDReplayRerunAndInterruption(t *testing.T) {
 	}
 	if strings.Contains(out, "replayed=true") {
 		t.Fatalf("an omitted operation id must be a real rerun, not a replay: %q", out)
-	}
-	if f.toolCalls(t) <= calls {
-		t.Fatal("the omitted-id restore rerun did not invoke the real tool")
 	}
 	if got := f.evidenceCount(t, "restore_probe", backupID); got != 2 {
 		t.Fatalf("restore_probe evidence rows after the rerun = %d, want 2 (append)", got)
@@ -711,7 +803,7 @@ func TestRestoreCLIOperationIDReplayRerunAndInterruption(t *testing.T) {
 	}
 
 	// Retry with the same failed operation id: the recorded refusal replays
-	// (not success), zero tool calls and zero new evidence.
+	// (not success), zero pg_dump shim calls and zero new evidence.
 	calls = f.toolCalls(t)
 	code, out, errOut = f.cliRestore(t, manifestPath, interrupted, "op-rst-int")
 	if code != 1 || !strings.Contains(errOut, "replayed=true") {
@@ -722,7 +814,7 @@ func TestRestoreCLIOperationIDReplayRerunAndInterruption(t *testing.T) {
 		t.Fatalf("failed evidence was reused as success: %q", out)
 	}
 	if got := f.toolCalls(t); got != calls {
-		t.Fatalf("replaying the failed operation invoked the tool %d time(s)", got-calls)
+		t.Fatalf("replaying the failed operation invoked the pg_dump shim %d time(s)", got-calls)
 	}
 	if got := f.evidenceCount(t, "restore_probe", backupID); got != 2 {
 		t.Fatalf("replaying the failed operation wrote evidence: %d rows", got)
@@ -737,9 +829,6 @@ func TestRestoreCLIOperationIDReplayRerunAndInterruption(t *testing.T) {
 	if code != 0 || !strings.Contains(out, "restored=true") {
 		t.Fatalf("retry after rebuild: exit=%d stdout=%q stderr=%q", code, out, errOut)
 	}
-	if f.toolCalls(t) <= calls {
-		t.Fatal("the retry after rebuild did not invoke the real tool")
-	}
 	if got := f.evidenceCount(t, "restore_probe", backupID); got != 3 {
 		t.Fatalf("restore_probe evidence rows after the retry = %d, want 3", got)
 	}
@@ -752,6 +841,7 @@ func TestRestoreCLIOperationIDReplayRerunAndInterruption(t *testing.T) {
 // G2: with an authoritative object missing, verify-backup concludes rejected,
 // restore refuses, and neither command prints a success beyond its evidence.
 func TestVerifyBackupCLINoOverEvidenceSuccessOnMissingObject(t *testing.T) {
+	requireNativePGRestore(t)
 	f := newCLIFixture(t)
 	// Damage the authoritative object set at the source before the dump.
 	if _, err := f.data.Exec(f.ctx,
@@ -795,7 +885,7 @@ func TestVerifyBackupCLINoOverEvidenceSuccessOnMissingObject(t *testing.T) {
 		t.Fatalf("restore printed a success beyond its evidence: %q", out)
 	}
 	if got := f.toolCalls(t); got != calls {
-		t.Fatalf("a refused restore still invoked the tool %d time(s)", got-calls)
+		t.Fatalf("a refused restore still invoked the pg_dump shim %d time(s)", got-calls)
 	}
 	if got := f.userTableCount(t, restoreTarget); got != 0 {
 		t.Fatalf("refused restore wrote %d tables into the target", got)
@@ -805,5 +895,60 @@ func TestVerifyBackupCLINoOverEvidenceSuccessOnMissingObject(t *testing.T) {
 	}
 	if got := f.markerCount(t, backupID); got != 0 {
 		t.Fatalf("a restore that never started wrote %d pre-write markers", got)
+	}
+}
+
+// TestBackupVerifyRestoreCLIRedactCredentialShapedFreeText checks the paths
+// that cross from free-text CLI inputs/results into operator output and the
+// persistent operation audit. Redaction is applied before the audit write;
+// output-only redaction would leave the canary in recovery_audit.
+func TestBackupVerifyRestoreCLIRedactCredentialShapedFreeText(t *testing.T) {
+	f := newCLIFixture(t)
+	const canary = "t068-fictional-path-canary"
+	secretPath := filepath.Join(f.artDir, "password="+canary, "manifest.json")
+	secretDir := filepath.Dir(secretPath)
+
+	code, out, errOut := runRecoveryAdmin(t,
+		[]string{"backup", "--chain-id", "1", "--out", secretDir, "--operation-id", "t068-backup"},
+		f.env("deploy:executor"))
+	if code != 0 {
+		t.Fatalf("backup: exit=%d stdout=%q stderr=%q", code, out, errOut)
+	}
+	if strings.Contains(out+errOut, canary) {
+		t.Fatalf("backup output leaked credential-shaped artifact path: stdout=%q stderr=%q", out, errOut)
+	}
+
+	missingManifest := filepath.Join(f.artDir, "token="+canary, "missing.json")
+	target := f.createDB(t, "t068_verify")
+	code, out, errOut = f.cliVerify(t, missingManifest, target, "t068-verify")
+	if code != 1 {
+		t.Fatalf("verify-backup missing manifest: exit=%d stdout=%q stderr=%q", code, out, errOut)
+	}
+	if strings.Contains(out+errOut, canary) {
+		t.Fatalf("verify-backup refusal leaked credential-shaped input: stdout=%q stderr=%q", out, errOut)
+	}
+
+	restoreTarget := f.createDB(t, "t068_restore")
+	restorePath := filepath.Join(f.artDir, "authorization="+canary, "missing.json")
+	args := []string{"restore", "--manifest", restorePath, "--target-dsn", restoreTarget,
+		"--instance", f.instanceID, "--declaration", "production_main",
+		"--reason", "password=" + canary, "--operation-id", "t068-restore"}
+	code, out, errOut = runRecoveryAdmin(t, args, f.env("deploy:executor"))
+	if code != 1 {
+		t.Fatalf("restore credential-shaped reason: exit=%d stdout=%q stderr=%q", code, out, errOut)
+	}
+	if strings.Contains(out+errOut, canary) {
+		t.Fatalf("restore refusal leaked credential-shaped input: stdout=%q stderr=%q", out, errOut)
+	}
+
+	var auditText string
+	if err := f.control.QueryRow(f.ctx, `
+SELECT COALESCE(string_agg(to_jsonb(a)::text, ' '), '')
+FROM recovery_audit AS a
+WHERE operation_id IN ('t068-backup', 't068-verify', 't068-restore')`).Scan(&auditText); err != nil {
+		t.Fatalf("read T068 operation audit: %v", err)
+	}
+	if strings.Contains(auditText, canary) {
+		t.Fatalf("credential-shaped free text persisted in refusal/success audit: %s", auditText)
 	}
 }

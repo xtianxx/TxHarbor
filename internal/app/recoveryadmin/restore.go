@@ -80,11 +80,25 @@ func recoveryAdminRestore(ctx context.Context, args []string, d Deps) int {
 	switch decl {
 	case recovery.TargetIsolated, recovery.TargetProductionMain:
 	default:
-		fmt.Fprintf(stderr, "txharbor recovery-admin restore: unknown --declaration %q (want isolated|production_main)\n", *declaration)
+		fmt.Fprintf(stderr, "txharbor recovery-admin restore: unknown --declaration %q (want isolated|production_main)\n", recoveryOpSafeText(*declaration))
 		return 2
 	}
 	if decl == recovery.TargetProductionMain && strings.TrimSpace(*reason) == "" {
 		fmt.Fprintln(stderr, "txharbor recovery-admin restore: production_main requires an explicit --reason (refusing)")
+		return 1
+	}
+	// A reason is audit annotation only. Reject secret-shaped input before
+	// opening the control store or beginning an operation so neither it nor a
+	// redacted derivative can be persisted as a refusal record.
+	if err := recovery.ValidateRestoreTargetReason(strings.TrimSpace(*reason)); err != nil {
+		fmt.Fprintf(stderr, "txharbor recovery-admin restore: refused: %s\n", logx.Redact(err.Error()))
+		return 1
+	}
+	// The observer is an explicit deployment credential with visibility into
+	// tagged target sessions. Never infer it from the requested target.
+	observerDSN, ok := d.getenvValue(config.EnvRecoveryObserverDSN)
+	if !ok || strings.TrimSpace(observerDSN) == "" {
+		fmt.Fprintf(stderr, "txharbor recovery-admin restore: %s is required (not configured); refusing\n", config.EnvRecoveryObserverDSN)
 		return 1
 	}
 	operation, err := recoveryOpOperationID(*operationID)
@@ -109,6 +123,16 @@ func recoveryAdminRestore(ctx context.Context, args []string, d Deps) int {
 		return code
 	}
 	defer env.pool.Close()
+
+	// A CLI declaration is not evidence that a target is isolated. Bind the
+	// requested target to the deployment's authoritative data endpoint and role
+	// before beginning an operation (which persists an audit/marker) or invoking
+	// any child process. This compares configured identities only; it cannot see
+	// through DNS aliases.
+	if err := recoveryRestoreTargetPreflight(*targetDSN, env.dataDSN, env.controlDSN, decl); err != nil {
+		fmt.Fprintf(stderr, "txharbor recovery-admin restore: refused: %s\n", logx.Redact(err.Error()))
+		return 1
+	}
 
 	if err := recoveryOpRequireParticipant(ctx, env, instanceID, "executor", "restore"); err != nil {
 		fmt.Fprintf(stderr, "txharbor recovery-admin restore: refused: %s\n", logx.Redact(err.Error()))
@@ -143,6 +167,7 @@ func recoveryAdminRestore(ctx context.Context, args []string, d Deps) int {
 		InstanceID:        instanceID,
 		ControlStore:      env.store,
 		ControlDSN:        env.controlDSN,
+		ObserverDSN:       observerDSN,
 		TargetDSN:         *targetDSN,
 		TargetDeclaration: decl,
 		TargetReason:      strings.TrimSpace(*reason),
@@ -158,16 +183,18 @@ func recoveryAdminRestore(ctx context.Context, args []string, d Deps) int {
 		// Explicit blocked state with the missing items; no success claim.
 		fmt.Fprintf(stderr, "txharbor recovery-admin restore: restored=false blocked=%d operation_id=%s principal=%s instance=%s\n",
 			len(result.Blocked), recoveryOpDisplayID(operation), env.principal, instanceID)
-		for _, item := range result.Blocked {
-			fmt.Fprintf(stderr, "  missing_precondition=%s\n", logx.Redact(item))
+		blocked := make([]string, len(result.Blocked))
+		for i, item := range result.Blocked {
+			blocked[i] = recoveryOpSafeText(item)
+			fmt.Fprintf(stderr, "  missing_precondition=%s\n", blocked[i])
 		}
 		if target := result.TargetFingerprint; target != "" {
 			fmt.Fprintf(stderr, "  target_fingerprint=%s\n", target)
 		}
 		_ = recoveryOpRecord(ctx, env.pool, recoveryActionRestore, operation, env.principal, controlstore.AuditRefused,
-			map[string]any{"input_digest": inputDigest, "blocked": result.Blocked, "reason": logx.Redact(err.Error())},
+			map[string]any{"input_digest": inputDigest, "blocked": blocked, "reason": recoveryOpSafeText(err.Error())},
 			map[string]any{
-				"manifest_path":      strings.TrimSpace(*manifestPath),
+				"manifest_path":      recoveryOpSafeText(strings.TrimSpace(*manifestPath)),
 				"target_fingerprint": result.TargetFingerprint,
 				"instance_id":        instanceID,
 				"declaration":        string(decl),
@@ -191,14 +218,14 @@ func recoveryAdminRestore(ctx context.Context, args []string, d Deps) int {
 	}
 	_ = recoveryOpRecord(ctx, env.pool, recoveryActionRestore, operation, env.principal, controlstore.AuditOK, detail,
 		map[string]any{
-			"manifest_path":      strings.TrimSpace(*manifestPath),
+			"manifest_path":      recoveryOpSafeText(strings.TrimSpace(*manifestPath)),
 			"target_fingerprint": result.TargetFingerprint,
 			"instance_id":        instanceID,
 			"declaration":        string(result.Declaration),
 		})
 	fmt.Fprintf(stdout,
 		"txharbor recovery-admin restore: restored=%t declaration=%s target_fingerprint=%s manifest=%s evidence_ref=%s readable=%t structure_constraints=%t business_state_probes=%t verification_executable=%t operation_id=%s principal=%s instance=%s\n",
-		result.Restored, result.Declaration, result.TargetFingerprint, strings.TrimSpace(*manifestPath),
+		result.Restored, result.Declaration, result.TargetFingerprint, recoveryOpSafeText(strings.TrimSpace(*manifestPath)),
 		result.EvidenceRef, result.Checks.Readable, result.Checks.StructureConstraints,
 		result.Checks.BusinessStateProbes, result.Checks.VerificationExecutable,
 		recoveryOpDisplayID(operation), env.principal, instanceID)
@@ -211,4 +238,43 @@ func recoveryAdminRestore(ctx context.Context, args []string, d Deps) int {
 		return 1
 	}
 	return 0
+}
+
+// recoveryRestoreTargetPreflight rejects the control database and requires
+// the endpoint key and role fingerprint to match deployment authority. An
+// authoritative target cannot be called isolated merely by declaration; it
+// requires the production_main declaration and its explicit reason.
+func recoveryRestoreTargetPreflight(requestedDSN, authoritativeDSN, controlDSN string, declaration recovery.TargetDeclaration) error {
+	requested, err := controlstore.ParseDSNTarget(requestedDSN)
+	if err != nil {
+		return fmt.Errorf("requested target identity is invalid")
+	}
+	authoritative, err := controlstore.ParseDSNTarget(authoritativeDSN)
+	if err != nil {
+		return fmt.Errorf("deployment authoritative target identity is invalid")
+	}
+	control, err := controlstore.ParseDSNTarget(controlDSN)
+	if err != nil {
+		return fmt.Errorf("control database identity is invalid")
+	}
+	if requested.SameDatabase(control) {
+		return fmt.Errorf("requested target addresses the recovery control database")
+	}
+	requestedKey, err := controlstore.TargetGuardKey(requested)
+	if err != nil {
+		return fmt.Errorf("requested target endpoint identity is invalid")
+	}
+	authoritativeKey, err := controlstore.TargetGuardKey(authoritative)
+	if err != nil {
+		return fmt.Errorf("deployment authoritative endpoint identity is invalid")
+	}
+	requestedRole := requested.DataTargetFingerprint().RoleFingerprint
+	authoritativeRole := authoritative.DataTargetFingerprint().RoleFingerprint
+	if requestedKey != authoritativeKey || requestedRole != authoritativeRole {
+		return fmt.Errorf("requested target does not match deployment-configured authoritative endpoint and role")
+	}
+	if declaration != recovery.TargetProductionMain {
+		return fmt.Errorf("requested target matches deployment-configured authoritative data target; isolated declaration refused (use production_main with explicit --reason)")
+	}
+	return nil
 }

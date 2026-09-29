@@ -15,6 +15,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/xtianxx/txharbor/internal/config"
 	"github.com/xtianxx/txharbor/internal/recovery"
@@ -78,6 +79,28 @@ func TestAssembleExistingWithdrawalRecoveryRefusesMissingGateTTL(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), config.EnvRecoveryGateTTL) {
 		t.Fatalf("refusal %q does not name %s", err, config.EnvRecoveryGateTTL)
+	}
+}
+
+func TestAssembleExistingWithdrawalRecoveryRefusesInvalidTrustedTarget(t *testing.T) {
+	env := fakeEnv(map[string]string{
+		config.EnvPGDSN:              "not-a-postgres-dsn-with-secret=secret",
+		config.EnvRecoveryControlDSN: "postgres://user:secret@127.0.0.1:1/control?sslmode=disable",
+		config.EnvRecoveryGateTTL:    time.Minute.String(),
+	})
+	cfg, err := existingWithdrawalRecoveryConfigFromEnv(env, 31337)
+	if err != nil {
+		t.Fatalf("existingWithdrawalRecoveryConfigFromEnv: %v", err)
+	}
+	wiring, err := assembleExistingWithdrawalRecovery(context.Background(), cfg, fakeEnv(map[string]string{}))
+	if err == nil || wiring != nil {
+		t.Fatalf("invalid trusted target: wiring=%v err=%v, want fail-closed refusal", wiring, err)
+	}
+	if !strings.Contains(err.Error(), config.EnvPGDSN) {
+		t.Errorf("refusal %q does not name %s", err, config.EnvPGDSN)
+	}
+	if strings.Contains(err.Error(), "secret") || strings.Contains(err.Error(), "not-a-postgres-dsn") {
+		t.Errorf("refusal leaked target DSN material: %q", err)
 	}
 }
 

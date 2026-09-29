@@ -49,15 +49,21 @@ func TestVerifyBackupRejectsMissingAuthoritativeObject(t *testing.T) {
 
 	// Real isolated verify: a real pg_restore plus the four checks, concluded
 	// rejected (never verified) because a required probe cannot complete.
+	requireLocalPGRestore(t)
 	verifyTarget := f.createDatabase(t, "tgt_probe_negative")
+	binding := f.bindTestVerifyTarget(t, verifyTarget)
 	result, err := ExecuteVerifyBackup(f.ctx, VerifyBackupOptions{
-		ManifestPath:   backup.ManifestPath,
-		TargetDSN:      verifyTarget,
-		Verifier:       "auth:verifier",
-		InstanceID:     f.instanceID,
-		ControlStore:   f.store,
-		ProgramVersion: bkpProgramVersion,
-		PG:             f.pg,
+		ManifestPath:     backup.ManifestPath,
+		Binding:          binding,
+		TargetDSN:        verifyTarget,
+		Verifier:         "auth:verifier",
+		InstanceID:       f.instanceID,
+		ControlStore:     f.store,
+		ControlDSN:       f.ctrlDSN,
+		AuthoritativeDSN: f.srcDSN,
+		ObserverDSN:      verifyTarget,
+		ProgramVersion:   bkpProgramVersion,
+		PG:               f.pg,
 	})
 	if err != nil {
 		t.Fatalf("ExecuteVerifyBackup returned an unexpected error: %v", err)

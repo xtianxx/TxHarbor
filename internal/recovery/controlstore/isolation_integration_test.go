@@ -79,8 +79,15 @@ const (
 	trustBaseDB   = "txharbor"
 	trustBaseUser = "txharbor"
 	trustBasePass = "txharbor"
-	trustScope    = "chain=31337;asset=usdc;kind=withdrawal"
 )
+
+// trustScope returns a canonical capability-scoped expression. Older fixture
+// strings omitted the required capability dimension, so gate admission
+// refused them as scope_mismatch before these tests reached their trust-boundary
+// assertions.
+func trustScope(capability recovery.Capability) string {
+	return fmt.Sprintf("asset=usdc;capability=%s;chain=31337;kind=withdrawal", capability)
+}
 
 type trustFixture struct {
 	t     *testing.T
@@ -150,7 +157,11 @@ func newTrustFixture(t *testing.T) *trustFixture {
 		t.Fatalf("controlstore.NewStore: %v", err)
 	}
 	f.store = store
-	gate, err := recovery.NewGate(store, recovery.GateOptions{TTL: time.Minute})
+	target, err := recovery.GateTargetBindingFromDSN(f.dataDSN)
+	if err != nil {
+		t.Fatalf("GateTargetBindingFromDSN: %v", err)
+	}
+	gate, err := recovery.NewGate(store, recovery.GateOptions{TTL: time.Minute, TrustedTarget: target})
 	if err != nil {
 		t.Fatalf("recovery.NewGate: %v", err)
 	}
@@ -271,13 +282,23 @@ func (f *trustFixture) restoreInto(t *testing.T, archive []byte, dsn string) {
 
 func (f *trustFixture) openInstance(t *testing.T) string {
 	t.Helper()
+	target, err := f.targetBinding(t)
+	if err != nil {
+		t.Fatalf("GateTargetBindingFromDSN: %v", err)
+	}
 	result, err := f.store.OpenInstance(f.ctx, controlstore.OpenInstanceRequest{
-		Kind: "recovery", OpenedBy: "deploy:executor", Reason: "trust-boundary fixture",
+		Kind: "recovery", OpenedBy: "deploy:executor", Reason: "trust-boundary fixture", EntryChainInventory: []uint64{1},
+		TargetGuardKey: target.TargetGuardKey, TargetRoleFingerprint: target.TargetRoleFingerprint,
 	})
 	if err != nil {
 		t.Fatalf("open recovery instance: %v", err)
 	}
 	return result.InstanceID
+}
+
+func (f *trustFixture) targetBinding(t *testing.T) (recovery.GateTargetBinding, error) {
+	t.Helper()
+	return recovery.GateTargetBindingFromDSN(f.dataDSN)
 }
 
 func (f *trustFixture) mapIdentity(t *testing.T, principal, person string) {
@@ -373,7 +394,7 @@ func (f *trustFixture) approve(t *testing.T, instanceID string, capability recov
 	t.Helper()
 	token := f.token(t, instanceID)
 	result, err := f.store.AppendApprovalDecision(f.ctx, controlstore.ApprovalDecisionRequest{
-		InstanceID: instanceID, Capability: string(capability), ScopeHash: trustScope,
+		InstanceID: instanceID, Capability: string(capability), ScopeHash: trustScope(capability),
 		Decision: "approve", ApprovalClassSnapshot: string(class),
 		Principal: principal, PersonID: person,
 		EvidenceGeneration: token.Generation, EvidenceHash: token.Hash,
@@ -389,7 +410,7 @@ func (f *trustFixture) release(t *testing.T, instanceID string, capability recov
 	t.Helper()
 	token := f.token(t, instanceID)
 	result, err := f.store.AppendReleaseDecision(f.ctx, controlstore.ReleaseDecisionRequest{
-		InstanceID: instanceID, Capability: string(capability), ScopeHash: trustScope,
+		InstanceID: instanceID, Capability: string(capability), ScopeHash: trustScope(capability),
 		Decision: "release", ApprovalRefs: refs,
 		EvidenceGeneration: token.Generation, EvidenceHash: token.Hash,
 		Actor: "deploy:executor", OperationID: f.op("release"),
@@ -403,7 +424,7 @@ func (f *trustFixture) release(t *testing.T, instanceID string, capability recov
 func (f *trustFixture) admit(t *testing.T, gate *recovery.Gate, instanceID string, capability recovery.Capability) recovery.GateDecision {
 	t.Helper()
 	d, err := gate.Admit(f.ctx, recovery.GateRequest{
-		InstanceID: instanceID, Capability: capability, ScopeHash: trustScope,
+		InstanceID: instanceID, Capability: capability, ScopeHash: trustScope(capability),
 		Actor: "deploy:executor", OperationID: f.op("admit"),
 	})
 	if err != nil {
@@ -418,11 +439,54 @@ func (f *trustFixture) admit(t *testing.T, gate *recovery.Gate, instanceID strin
 // gate has really observed as allowing.
 func (f *trustFixture) releaseQueryFully(t *testing.T, gate *recovery.Gate, instanceID string) {
 	t.Helper()
+	f.seedTargetGuardClean(t, instanceID)
 	f.seedIsolationVerified(t, instanceID, recovery.CapabilityQuery)
 	approval := f.approve(t, instanceID, recovery.CapabilityQuery, "auth:approver", "person-approver", recovery.ApprovalClassSingleNonExecutor)
 	f.release(t, instanceID, recovery.CapabilityQuery, []string{approval})
 	if d := f.admit(t, gate, instanceID, recovery.CapabilityQuery); !d.Allowed {
 		t.Fatalf("positive control: query must be released, got %+v", d)
+	}
+}
+
+// seedTargetGuardClean is a controlled test-fixture baseline: positive gate
+// controls need the persisted target guard to be explicitly clean. Instance
+// open intentionally creates only unknown inventory, so this fixture records
+// synthetic, clearly-labeled test evidence through the supported audit and
+// resolution operations rather than weakening gate assertions.
+func (f *trustFixture) seedTargetGuardClean(t *testing.T, instanceID string) {
+	t.Helper()
+	target, err := f.targetBinding(t)
+	if err != nil {
+		t.Fatalf("GateTargetBindingFromDSN: %v", err)
+	}
+	guard, found, err := controlstore.ReadTargetGuard(f.ctx, f.ctrlPool, target.TargetGuardKey)
+	if err != nil {
+		t.Fatalf("read target guard: %v", err)
+	}
+	if !found {
+		t.Fatal("instance open did not create target guard inventory")
+	}
+	if guard.State == controlstore.TargetGuardClean && !guard.ActiveWriter {
+		return
+	}
+	if guard.State != controlstore.TargetGuardUnknown || guard.ActiveWriter || guard.LaunchIntent {
+		t.Fatalf("cannot establish fixture clean target from guard %+v", guard)
+	}
+	tx, err := f.ctrlPool.Begin(f.ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = tx.Rollback(f.ctx) }()
+	op := f.op("target-clean")
+	evidence := []byte(`{"fixture":"synthetic controlled baseline; test-only"}`)
+	if err := controlstore.RecordTargetGuardRebuild(f.ctx, tx, instanceID, target.TargetGuardKey, "deploy:executor", op, evidence); err != nil {
+		t.Fatalf("record fixture target baseline: %v", err)
+	}
+	if err := controlstore.ResolveTargetGuardClean(f.ctx, tx, target.TargetGuardKey, op, evidence); err != nil {
+		t.Fatalf("resolve fixture target guard clean: %v", err)
+	}
+	if err := tx.Commit(f.ctx); err != nil {
+		t.Fatalf("commit fixture target baseline: %v", err)
 	}
 }
 
@@ -568,7 +632,7 @@ func TestControlTargetIndependenceRefusedByRealCommand(t *testing.T) {
 func TestDataDBBackupCarriesNoRecoveryObjects(t *testing.T) {
 	f := newTrustFixture(t)
 
-	// Fixture sanity: the control store was migrated with all 11 entities, so
+	// Fixture sanity: the control store was migrated with all 12 entities, so
 	// a "recovery_" match below would be detectable if it ever leaked.
 	if got, want := trustDBTableCount(t, f.ctx, f.ctrlPool, "recovery\\_%"), len(controlstore.ControlTableNames()); got != want {
 		t.Fatalf("control database has %d recovery_* tables, want %d", got, want)
@@ -663,7 +727,7 @@ func TestDataDBRestoreLeavesControlFactsUntouched(t *testing.T) {
 	// The approval row is still there and still bound to this instance; it is
 	// never read from the data DB (research §3).
 	decision, err := f.store.CurrentApprovalDecision(f.ctx, nil, controlstore.DecisionKey{
-		InstanceID: instanceID, Capability: string(recovery.CapabilityQuery), ScopeHash: trustScope,
+		InstanceID: instanceID, Capability: string(recovery.CapabilityQuery), ScopeHash: trustScope(recovery.CapabilityQuery),
 	}, "auth:approver")
 	if err != nil {
 		t.Fatalf("read approval decision: %v", err)
@@ -696,7 +760,11 @@ func TestControlStoreLossRefusesGate(t *testing.T) {
 		if err != nil {
 			t.Fatalf("NewStore over reachable control database: %v", err)
 		}
-		gate, err := recovery.NewGate(store, recovery.GateOptions{TTL: time.Minute})
+		target, err := recovery.GateTargetBindingFromDSN(f.dataDSN)
+		if err != nil {
+			t.Fatalf("GateTargetBindingFromDSN: %v", err)
+		}
+		gate, err := recovery.NewGate(store, recovery.GateOptions{TTL: time.Minute, TrustedTarget: target})
 		if err != nil {
 			t.Fatalf("NewGate: %v", err)
 		}
@@ -704,7 +772,7 @@ func TestControlStoreLossRefusesGate(t *testing.T) {
 		return gate
 	}()
 	d, err := lostGate.Admit(f.ctx, recovery.GateRequest{
-		InstanceID: instanceID, Capability: recovery.CapabilityNewWithdrawalCreation, ScopeHash: trustScope,
+		InstanceID: instanceID, Capability: recovery.CapabilityNewWithdrawalCreation, ScopeHash: trustScope(recovery.CapabilityNewWithdrawalCreation),
 		Actor: "deploy:executor", OperationID: f.op("admit-unreachable"),
 	})
 	if err == nil || !errors.Is(err, recovery.ErrGateControlStoreUnavailable) {
@@ -718,7 +786,7 @@ func TestControlStoreLossRefusesGate(t *testing.T) {
 	// hold their pool. Every subsequent admission refuses.
 	f.dropAndRecreate(t, f.ctrlName)
 	d, err = f.gate.Admit(f.ctx, recovery.GateRequest{
-		InstanceID: instanceID, Capability: recovery.CapabilityNewWithdrawalCreation, ScopeHash: trustScope,
+		InstanceID: instanceID, Capability: recovery.CapabilityNewWithdrawalCreation, ScopeHash: trustScope(recovery.CapabilityNewWithdrawalCreation),
 		Actor: "deploy:executor", OperationID: f.op("admit-lost"),
 	})
 	if err == nil || !errors.Is(err, recovery.ErrGateControlStoreUnavailable) {
@@ -754,7 +822,7 @@ func TestSameInstanceDisasterRequiresControlRebuild(t *testing.T) {
 	// concerned).
 	f.dropAndRecreate(t, f.ctrlName)
 	if d, err := f.gate.Admit(f.ctx, recovery.GateRequest{
-		InstanceID: firstInstance, Capability: recovery.CapabilityQuery, ScopeHash: trustScope,
+		InstanceID: firstInstance, Capability: recovery.CapabilityQuery, ScopeHash: trustScope(recovery.CapabilityQuery),
 		OperationID: f.op("post-disaster"),
 	}); err == nil || !errors.Is(err, recovery.ErrGateControlStoreUnavailable) || d.Allowed {
 		t.Fatalf("post-disaster admission = (%+v, %v), want a fail-closed control_store_unavailable refusal", d, err)
@@ -772,7 +840,11 @@ func TestSameInstanceDisasterRequiresControlRebuild(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewStore over the rebuilt control database: %v", err)
 	}
-	rebuiltGate, err := recovery.NewGate(rebuiltStore, recovery.GateOptions{TTL: time.Minute})
+	target, err := recovery.GateTargetBindingFromDSN(f.dataDSN)
+	if err != nil {
+		t.Fatalf("GateTargetBindingFromDSN: %v", err)
+	}
+	rebuiltGate, err := recovery.NewGate(rebuiltStore, recovery.GateOptions{TTL: time.Minute, TrustedTarget: target})
 	if err != nil {
 		t.Fatalf("NewGate over the rebuilt store: %v", err)
 	}
@@ -811,6 +883,9 @@ func TestSameInstanceDisasterRequiresControlRebuild(t *testing.T) {
 			t.Fatalf("checklist.Verify(%s) on the rebuilt instance: %v", item, err)
 		}
 	}
+	// The rebuilt data target also requires an explicit controlled clean
+	// transition; opening provisioned an unknown target-guard row only.
+	rebuilt.seedTargetGuardClean(t, newInstance)
 	approval := rebuilt.approve(t, newInstance, recovery.CapabilityQuery, "auth:approver", "person-approver", recovery.ApprovalClassSingleNonExecutor)
 	rebuilt.release(t, newInstance, recovery.CapabilityQuery, []string{approval})
 	if d := rebuilt.admit(t, rebuiltGate, newInstance, recovery.CapabilityQuery); !d.Allowed {
@@ -840,7 +915,7 @@ func TestSameInstanceDisasterRequiresControlRebuild(t *testing.T) {
 		t.Fatalf("rebuilt control store has %d open instances, want exactly 1", openRows)
 	}
 	oldReleases, err := rebuiltStore.CurrentReleaseDecision(f.ctx, nil, controlstore.DecisionKey{
-		InstanceID: firstInstance, Capability: string(recovery.CapabilityQuery), ScopeHash: trustScope,
+		InstanceID: firstInstance, Capability: string(recovery.CapabilityQuery), ScopeHash: trustScope(recovery.CapabilityQuery),
 	})
 	if err != nil {
 		t.Fatalf("read old release from rebuilt store: %v", err)
@@ -861,7 +936,7 @@ func TestControlRollbackNegativeF6(t *testing.T) {
 	f.releaseQueryFully(t, f.gate, instanceA)
 	approvalA := func() string {
 		decision, err := f.store.CurrentApprovalDecision(f.ctx, nil, controlstore.DecisionKey{
-			InstanceID: instanceA, Capability: string(recovery.CapabilityQuery), ScopeHash: trustScope,
+			InstanceID: instanceA, Capability: string(recovery.CapabilityQuery), ScopeHash: trustScope(recovery.CapabilityQuery),
 		}, "auth:approver")
 		if err != nil || !decision.Found {
 			t.Fatalf("approval A lookup = (%+v, %v), want found", decision, err)
@@ -881,7 +956,11 @@ func TestControlRollbackNegativeF6(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewStore over the blind-restored control database: %v", err)
 	}
-	restoredGate, err := recovery.NewGate(restoredStore, recovery.GateOptions{TTL: time.Minute})
+	target, err := recovery.GateTargetBindingFromDSN(f.dataDSN)
+	if err != nil {
+		t.Fatalf("GateTargetBindingFromDSN: %v", err)
+	}
+	restoredGate, err := recovery.NewGate(restoredStore, recovery.GateOptions{TTL: time.Minute, TrustedTarget: target})
 	if err != nil {
 		t.Fatalf("NewGate over the blind-restored store: %v", err)
 	}
@@ -892,6 +971,7 @@ func TestControlRollbackNegativeF6(t *testing.T) {
 		ControlStore:   restoredStore,
 		ControlDSN:     restoredDSN,
 		TargetDSN:      restoredDSN, // the control store itself
+		ObserverDSN:    restoredDSN,
 		Actor:          "deploy:executor",
 		ProgramVersion: "018.0",
 		PG:             pg,
@@ -920,11 +1000,15 @@ func TestControlRollbackNegativeF6(t *testing.T) {
 		t.Fatalf("self-written close: %v", err)
 	}
 	instanceB := "22222222-3333-4444-8555-666666666666"
+	target, err = f.targetBinding(t)
+	if err != nil {
+		t.Fatalf("GateTargetBindingFromDSN: %v", err)
+	}
 	if _, err := restoredPool.Exec(f.ctx,
 		`INSERT INTO recovery_instance
-		     (instance_id, kind, state, supersedes_instance_id, evidence_generation, evidence_hash, opened_by, reason)
-		 VALUES ($1, 'recovery', 'open', $2, 0, $3, 'deploy:operator', 'self-written supersede row (unsupported)')`,
-		instanceB, instanceA, controlstore.EmptyEvidenceHash); err != nil {
+		     (instance_id, kind, state, supersedes_instance_id, evidence_generation, evidence_hash, opened_by, reason, target_guard_key, target_role_fingerprint)
+		 VALUES ($1, 'recovery', 'open', $2, 0, $3, 'deploy:operator', 'self-written supersede row (unsupported)', $4, $5)`,
+		instanceB, instanceA, controlstore.EmptyEvidenceHash, target.TargetGuardKey, target.TargetRoleFingerprint); err != nil {
 		t.Fatalf("self-written supersede insert: %v", err)
 	}
 	var auditRowsAfter int
@@ -954,7 +1038,7 @@ func TestControlRollbackNegativeF6(t *testing.T) {
 	// Old approvals are instance-bound (inert for the new instance): the
 	// recorded approval of A is not the current decision of B...
 	decisionB, err := restoredStore.CurrentApprovalDecision(f.ctx, nil, controlstore.DecisionKey{
-		InstanceID: instanceB, Capability: string(recovery.CapabilityQuery), ScopeHash: trustScope,
+		InstanceID: instanceB, Capability: string(recovery.CapabilityQuery), ScopeHash: trustScope(recovery.CapabilityQuery),
 	}, "auth:approver")
 	if err != nil {
 		t.Fatalf("read B approval decision: %v", err)
@@ -974,7 +1058,7 @@ func TestControlRollbackNegativeF6(t *testing.T) {
 	f2.register(t, instanceB, "auth:approver", "approver")
 	f2.seedIsolationVerified(t, instanceB, recovery.CapabilityQuery)
 	releaseB, err := restoredStore.AppendReleaseDecision(f.ctx, controlstore.ReleaseDecisionRequest{
-		InstanceID: instanceB, Capability: string(recovery.CapabilityQuery), ScopeHash: trustScope,
+		InstanceID: instanceB, Capability: string(recovery.CapabilityQuery), ScopeHash: trustScope(recovery.CapabilityQuery),
 		Decision: "release", ApprovalRefs: []string{approvalA},
 		EvidenceGeneration: f2.token(t, instanceB).Generation, EvidenceHash: f2.token(t, instanceB).Hash,
 		Actor: "deploy:executor", OperationID: f2.op("forged-release"),
@@ -983,7 +1067,7 @@ func TestControlRollbackNegativeF6(t *testing.T) {
 		t.Fatalf("append release referencing the old instance's approval: %v", err)
 	}
 	d, err := restoredGate.Admit(f.ctx, recovery.GateRequest{
-		InstanceID: instanceB, Capability: recovery.CapabilityQuery, ScopeHash: trustScope,
+		InstanceID: instanceB, Capability: recovery.CapabilityQuery, ScopeHash: trustScope(recovery.CapabilityQuery),
 		Actor: "deploy:executor", OperationID: f2.op("forged-admit"),
 	})
 	if err != nil {

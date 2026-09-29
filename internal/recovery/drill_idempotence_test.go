@@ -32,6 +32,7 @@ import (
 // decision command ten times with the same operation id (plus a real
 // mid-sequence revocation) and asserts one row, one verdict, zero flips.
 func TestT060DrillRepeatedVerifyApproveReleaseCloseNoFlips(t *testing.T) {
+	requireDrillLocalPGRestore(t)
 	env := newDrillEnv(t, true)
 	env.seedLiveBusinessState()
 	backup := env.backup()
@@ -222,6 +223,7 @@ func TestT060DrillRepeatedVerifyApproveReleaseCloseNoFlips(t *testing.T) {
 // advance per committed start marker; the final rebuild + rerun leaves one
 // authoritative restored dataset with zero duplicated external effects.
 func TestT060DrillRestoreReentryConvergesWithSingleState(t *testing.T) {
+	requireDrillLocalPGRestore(t)
 	env := newDrillEnv(t, false)
 	env.seedLiveBusinessState()
 	env.seedProbeTable()
@@ -360,8 +362,51 @@ func (e *drillEnv) evidenceGeneration() int64 {
 // exactly once.
 func TestT060DrillInstanceCloseOnlyWhenAllReleasedAndIdempotent(t *testing.T) {
 	env := newDrillEnv(t, false)
+	env.seedAuthoritativeTargetCleanBaseline()
 	liveBefore := drillFingerprint(t, env.data)
 	gate := env.gate()
+	var targetGuardKey, targetRoleFingerprint string
+	if err := env.ctrl.QueryRow(env.ctx,
+		`SELECT target_guard_key, target_role_fingerprint FROM recovery_instance WHERE instance_id = $1`, env.instanceID,
+	).Scan(&targetGuardKey, &targetRoleFingerprint); err != nil {
+		t.Fatalf("read authoritative target binding: %v", err)
+	}
+	entryScope := func(capability recovery.Capability) string {
+		scope, err := recovery.CapabilityScope(1, capability)
+		if err != nil {
+			t.Fatalf("capability scope %s: %v", capability, err)
+		}
+		return scope
+	}
+	approveAtEntry := func(capability recovery.Capability, principal string) {
+		t.Helper()
+		if _, err := recovery.Approve(env.ctx, env.store, recovery.ApprovalRequest{
+			InstanceID: env.instanceID, Capability: capability, ScopeHash: entryScope(capability),
+			Principal: principal, Reason: "drill approval (local test input only)", OperationID: env.operation("approve-entry"),
+		}); err != nil {
+			t.Fatalf("Approve(%s by %s): %v", capability, principal, err)
+		}
+	}
+	releaseAtEntry := func(capability recovery.Capability) {
+		t.Helper()
+		if _, err := recovery.Release(env.ctx, env.store, gate, recovery.ReleaseRequest{
+			InstanceID: env.instanceID, Capability: capability, ScopeHash: entryScope(capability),
+			Principal: "deploy:executor", Reason: "drill release (local test input only)", OperationID: env.operation("release-entry"),
+		}); err != nil {
+			t.Fatalf("Release(%s): %v", capability, err)
+		}
+	}
+	admitAtEntry := func(capability recovery.Capability) recovery.GateDecision {
+		t.Helper()
+		decision, err := gate.Admit(env.ctx, recovery.GateRequest{
+			InstanceID: env.instanceID, Capability: capability, ScopeHash: entryScope(capability),
+			Actor: "deploy:executor", OperationID: env.operation("admit-entry"), Action: "drill",
+		})
+		if err != nil {
+			t.Fatalf("gate.Admit(%s): %v", capability, err)
+		}
+		return decision
+	}
 
 	// S3: a fresh recovery instance has every capability default-closed.
 	for _, capability := range recovery.KnownCapabilities() {
@@ -397,19 +442,19 @@ func TestT060DrillInstanceCloseOnlyWhenAllReleasedAndIdempotent(t *testing.T) {
 		if capability == recovery.CapabilityQuery {
 			continue
 		}
-		env.approve(capability, "auth:approver")
+		approveAtEntry(capability, "auth:approver")
 		if dual[capability] {
-			env.approve(capability, "auth:approver2")
+			approveAtEntry(capability, "auth:approver2")
 		}
-		env.release(gate, capability)
+		releaseAtEntry(capability)
 	}
 
 	// 已开放与未开放项可分别观察: the released dependency root is admitted
 	// while the still-unreleased query stays refused.
-	if d := env.admit(gate, recovery.CapabilityChainScan); !d.Allowed {
+	if d := admitAtEntry(recovery.CapabilityChainScan); !d.Allowed {
 		t.Fatalf("a released capability was not admitted: %s (%s)", d.RefusalClass, d.Reason)
 	}
-	if d := env.admit(gate, recovery.CapabilityQuery); d.Allowed || d.RefusalClass != recovery.RefusalNoRelease {
+	if d := admitAtEntry(recovery.CapabilityQuery); d.Allowed || d.RefusalClass != recovery.RefusalNoRelease {
 		t.Fatalf("the unreleased capability = %+v, want no_release", d)
 	}
 
@@ -419,6 +464,7 @@ func TestT060DrillInstanceCloseOnlyWhenAllReleasedAndIdempotent(t *testing.T) {
 	partial, err := recovery.CloseInstance(env.ctx, env.store, gate, recovery.CloseInstanceRequest{
 		InstanceID: env.instanceID, Actor: "deploy:executor",
 		Reason: "drill: close over the partial release set", OperationID: "drill-idem-close-partial",
+		TrustedEntryChains: []uint64{1}, TargetGuardKey: targetGuardKey, TargetRoleFingerprint: targetRoleFingerprint,
 	})
 	if !errors.Is(err, recovery.ErrInstanceCloseBlocked) {
 		t.Fatalf("close over the partial release set = (%+v, %v), want ErrInstanceCloseBlocked", partial, err)
@@ -442,9 +488,9 @@ func TestT060DrillInstanceCloseOnlyWhenAllReleasedAndIdempotent(t *testing.T) {
 	}
 
 	// Release the remaining capability, then close with the complete set.
-	env.approve(recovery.CapabilityQuery, "auth:approver")
-	env.release(gate, recovery.CapabilityQuery)
-	if d := env.admit(gate, recovery.CapabilityQuery); !d.Allowed {
+	approveAtEntry(recovery.CapabilityQuery, "auth:approver")
+	releaseAtEntry(recovery.CapabilityQuery)
+	if d := admitAtEntry(recovery.CapabilityQuery); !d.Allowed {
 		t.Fatalf("query not admitted after its release: %s (%s)", d.RefusalClass, d.Reason)
 	}
 
@@ -452,6 +498,7 @@ func TestT060DrillInstanceCloseOnlyWhenAllReleasedAndIdempotent(t *testing.T) {
 	first, err := recovery.CloseInstance(env.ctx, env.store, gate, recovery.CloseInstanceRequest{
 		InstanceID: env.instanceID, Actor: "deploy:executor",
 		Reason: "drill: all seven capabilities released", OperationID: "drill-idem-close-instance",
+		TrustedEntryChains: []uint64{1}, TargetGuardKey: targetGuardKey, TargetRoleFingerprint: targetRoleFingerprint,
 	})
 	if err != nil || !first.Closed {
 		t.Fatalf("close over the complete release set = (%+v, %v), want closed", first, err)
@@ -472,6 +519,7 @@ func TestT060DrillInstanceCloseOnlyWhenAllReleasedAndIdempotent(t *testing.T) {
 		}
 		if _, err := recovery.CloseInstance(env.ctx, env.store, gate, recovery.CloseInstanceRequest{
 			InstanceID: env.instanceID, Actor: "deploy:executor", Reason: "repeated close", OperationID: op,
+			TrustedEntryChains: []uint64{1}, TargetGuardKey: targetGuardKey, TargetRoleFingerprint: targetRoleFingerprint,
 		}); err == nil {
 			t.Fatalf("repeated close #%d succeeded; a closed instance must never re-close", i+1)
 		}

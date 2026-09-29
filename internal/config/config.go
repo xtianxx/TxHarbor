@@ -177,7 +177,15 @@ const (
 	// under the shared prefix. None of these names collides with the withdrawal
 	// kill-test keys (TXHARBOR_RECOVERY_KILL_CHILD/_DSN/_READY/_DISPATCH), and
 	// no existing key is renamed.
-	EnvRecoveryControlDSN  = "TXHARBOR_RECOVERY_CONTROL_DSN"
+	EnvRecoveryControlDSN = "TXHARBOR_RECOVERY_CONTROL_DSN"
+	// EnvRecoveryIsolatedTargetDSN is the deployment-owned disposable target
+	// used only for backup verification. It is distinct from the authoritative
+	// TXHARBOR_PG_DSN and must never come from operator input.
+	EnvRecoveryIsolatedTargetDSN = "TXHARBOR_RECOVERY_ISOLATED_TARGET_DSN"
+	// EnvRecoveryObserverDSN is a privileged observer connection to the same
+	// target endpoint, used to supervise and drain recovery child processes.
+	// It has no default and must never be included in audit data.
+	EnvRecoveryObserverDSN = "TXHARBOR_RECOVERY_OBSERVER_DSN"
 	EnvRecoveryPrincipal   = "TXHARBOR_RECOVERY_PRINCIPAL"
 	EnvRecoveryArtifactDir = "TXHARBOR_RECOVERY_ARTIFACT_DIR"
 	// EnvRecoveryInstance binds an operator command to one recovery instance:
@@ -185,6 +193,11 @@ const (
 	// binding is refused (T022/T027 instance-bound execution).
 	EnvRecoveryInstance = "TXHARBOR_RECOVERY_INSTANCE"
 	EnvRecoveryGateTTL  = "TXHARBOR_RECOVERY_GATE_TTL"
+	// EnvRecoveryEntryChains is the deployment-controlled, complete inventory
+	// of chains served by this deployment. Its completeness is a deployment
+	// trust assumption: runtime code checks membership and binds an immutable
+	// snapshot, but must never infer completeness from releases or operator input.
+	EnvRecoveryEntryChains = "TXHARBOR_RECOVERY_ENTRY_CHAINS"
 	// EnvRecoveryEffectClassRuling carries the trusted deployment ruling of
 	// the real downstream effect classes (T050): a JSON object mapping
 	// effect-class tokens to "real_downstream" or
@@ -302,6 +315,10 @@ const (
 
 // Config is the validated application configuration.
 type Config struct {
+	// PGDSN is the deployment-owned data target. Recovery administration
+	// derives its immutable endpoint/role identity from this value; operator
+	// command input never supplies a target DSN. Deployment completeness and
+	// protection from alternate network aliases remain deployment assumptions.
 	PGDSN              string
 	RPCURL             string
 	ChainID            uint64
@@ -455,6 +472,14 @@ type RecoveryConfig struct {
 	// data-DB backup/restore set, and it must never equal the data DSN (that
 	// equality is refused by the recovery-admin migrate/trust-boundary check).
 	ControlDSN string
+	// IsolatedTargetDSN is the explicitly configured disposable verification
+	// database. It is optional for ordinary runtime commands and required by
+	// recovery-admin verify-backup. Never include it in logs or audit records.
+	IsolatedTargetDSN string
+	// ObserverDSN is the privileged observer connection to the same PostgreSQL
+	// target endpoint used by verify-backup supervision. It is optional for
+	// ordinary commands and required by verify-backup. Never audit or log it.
+	ObserverDSN string
 	// Principal is the authenticated caller identity binding ("<kind>:<id>",
 	// controlled deployment config; free text never authorizes).
 	Principal string
@@ -463,6 +488,9 @@ type RecoveryConfig struct {
 	// GateTTL bounds the gate-evaluation cache (required by the gate; no
 	// default).
 	GateTTL time.Duration
+	// EntryChains is the sorted, unique complete deployment entry-chain set.
+	// Empty means it was not configured; lifecycle entry points refuse that.
+	EntryChains []uint64
 	// EffectClassRulingJSON is the raw JSON object of the trusted effect-class
 	// ruling (EnvRecoveryEffectClassRuling). Empty means "not configured"; the
 	// recovery package parses and validates the closed impact vocabulary
@@ -1526,11 +1554,33 @@ func (c *Config) loadRecon014(getenv Getenv, errs *[]error) {
 // EnvRecoveryEvidenceFreshnessPrefix; a missing tolerance keeps a conclusion
 // conservative (unknown), never a pass.
 func (c *Config) loadRecovery015(getenv Getenv, errs *[]error) {
+	if raw, ok := getenv(EnvRecoveryEntryChains); ok {
+		chains, err := ParseRecoveryEntryChains(raw)
+		if err != nil {
+			*errs = append(*errs, invalid(EnvRecoveryEntryChains, "%v", err))
+		} else {
+			c.Recovery.EntryChains = chains
+		}
+	}
 	if raw, ok := getenv(EnvRecoveryControlDSN); ok && raw != "" {
 		if err := validateDSN(raw); err != nil {
 			*errs = append(*errs, invalid(EnvRecoveryControlDSN, "%v", err))
 		} else {
 			c.Recovery.ControlDSN = raw
+		}
+	}
+	if raw, ok := getenv(EnvRecoveryIsolatedTargetDSN); ok && raw != "" {
+		if err := validateDSN(raw); err != nil {
+			*errs = append(*errs, invalid(EnvRecoveryIsolatedTargetDSN, "%v", err))
+		} else {
+			c.Recovery.IsolatedTargetDSN = raw
+		}
+	}
+	if raw, ok := getenv(EnvRecoveryObserverDSN); ok && raw != "" {
+		if err := validateDSN(raw); err != nil {
+			*errs = append(*errs, invalid(EnvRecoveryObserverDSN, "%v", err))
+		} else {
+			c.Recovery.ObserverDSN = raw
 		}
 	}
 	if raw, ok := getenv(EnvRecoveryPrincipal); ok && raw != "" {
@@ -1588,6 +1638,31 @@ func (c *Config) loadRecovery015(getenv Getenv, errs *[]error) {
 	positiveDuration(EnvRecoveryStatusTimeout, &c.Recovery.StatusTimeout)
 	positiveInt(EnvRecoveryStatusMaxReads, &c.Recovery.StatusMaxReads)
 	positiveInt(EnvRecoveryStatusMaxRows, &c.Recovery.StatusMaxRows)
+}
+
+// ParseRecoveryEntryChains parses a canonical, nonempty comma-separated list
+// of positive chain IDs in strictly ascending order. Requiring canonical
+// ordering makes the exact deployment inventory stable for instance binding.
+func ParseRecoveryEntryChains(raw string) ([]uint64, error) {
+	if strings.TrimSpace(raw) != raw || raw == "" {
+		return nil, errors.New("must be a nonempty comma-separated list of positive chain IDs")
+	}
+	parts := strings.Split(raw, ",")
+	chains := make([]uint64, 0, len(parts))
+	for i, part := range parts {
+		if part == "" || strings.TrimSpace(part) != part {
+			return nil, errors.New("chain IDs must be nonempty canonical decimal integers")
+		}
+		id, err := strconv.ParseUint(part, 10, 64)
+		if err != nil || id == 0 || strconv.FormatUint(id, 10) != part {
+			return nil, fmt.Errorf("%q is not a positive canonical chain ID", part)
+		}
+		if i > 0 && chains[i-1] >= id {
+			return nil, errors.New("chain IDs must be strictly ascending and unique")
+		}
+		chains = append(chains, id)
+	}
+	return chains, nil
 }
 
 // parseBrokerList splits a comma-separated Kafka bootstrap list and validates

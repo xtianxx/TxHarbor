@@ -26,6 +26,9 @@
 //     bare timestamp is refused;
 //   - backup_lag / uncovered_interval may be the explicit value "unknown" but
 //     MUST be present (RecoveryMeasurement).
+//   - coverage.excluded must declare both signer_private_keys and
+//     real_credentials; these declarations do not prove the artifact itself is
+//     free of secret content.
 //
 // TDD-first: this file references the B6/T017 API (Manifest and friends) that
 // does not exist yet, so the contract layer fails to build until T017 lands.
@@ -177,8 +180,10 @@ func TestManifestContractParsesValidDocument(t *testing.T) {
 	if len(m.Coverage.Authoritative) == 0 || len(m.Coverage.Excluded) == 0 {
 		t.Fatalf("Coverage must declare both authoritative objects and exclusions: %+v", m.Coverage)
 	}
-	if !containsString(m.Coverage.Excluded, "signer_private_keys") {
-		t.Fatalf("Coverage.Excluded = %v, must declare key material is never in the backup", m.Coverage.Excluded)
+	for _, required := range []string{CoverageExcludedSignerPrivateKeys, CoverageExcludedRealCredentials} {
+		if !containsString(m.Coverage.Excluded, required) {
+			t.Fatalf("Coverage.Excluded = %v, must declare %s excluded", m.Coverage.Excluded, required)
+		}
 	}
 	if m.RecoveryPoint.Snapshot.Xmin != 769 || m.RecoveryPoint.Snapshot.Xmax != 769 {
 		t.Fatalf("RecoveryPoint.Snapshot = %+v", m.RecoveryPoint.Snapshot)
@@ -203,6 +208,53 @@ func TestManifestContractParsesValidDocument(t *testing.T) {
 	if !m.Verification.Checks.Readable || !m.Verification.Checks.StructureConstraints ||
 		!m.Verification.Checks.BusinessStateProbes || !m.Verification.Checks.VerificationExecutable {
 		t.Fatalf("Verification.Checks = %+v, want all four true", m.Verification.Checks)
+	}
+}
+
+// TestManifestContractRequiresBothSecretExclusions ensures omission of either
+// declaration is rejected independently of digest integrity. Recomputing a
+// digest only binds the modified document; it cannot make an invalid coverage
+// declaration acceptable or prove the artifact contents are secret-free.
+func TestManifestContractRequiresBothSecretExclusions(t *testing.T) {
+	valid := manifestObject(t, nil)
+	if err := valid.Validate(manifestValidation()); err != nil {
+		t.Fatalf("complete exclusion declarations rejected: %v", err)
+	}
+	if !containsString(valid.Coverage.Excluded, CoverageExcludedSignerPrivateKeys) ||
+		!containsString(valid.Coverage.Excluded, CoverageExcludedRealCredentials) {
+		t.Fatalf("complete fixture exclusions = %v", valid.Coverage.Excluded)
+	}
+
+	for _, omitted := range []string{CoverageExcludedSignerPrivateKeys, CoverageExcludedRealCredentials} {
+		t.Run("missing_"+omitted, func(t *testing.T) {
+			m, err := ParseManifest(manifestJSON(t, func(doc map[string]any) {
+				coverage := nested(t, doc, "coverage")
+				excluded := coverage["excluded"].([]any)
+				filtered := make([]any, 0, len(excluded)-1)
+				for _, entry := range excluded {
+					if entry != omitted {
+						filtered = append(filtered, entry)
+					}
+				}
+				coverage["excluded"] = filtered
+			}))
+			if err != nil {
+				t.Fatalf("ParseManifest: %v", err)
+			}
+
+			// The changed body has a valid, freshly recomputed digest. Contract
+			// validation must still reject the missing required declaration.
+			digest, err := m.Digest()
+			if err != nil {
+				t.Fatalf("Digest(tampered manifest): %v", err)
+			}
+			if err := CheckManifestDigest(m, digest); err != nil {
+				t.Fatalf("CheckManifestDigest(recomputed) = %v, want nil", err)
+			}
+			if err := m.Validate(manifestValidation()); !errors.Is(err, ErrManifestInvalid) {
+				t.Fatalf("Validate(missing %s) = %v, want ErrManifestInvalid", omitted, err)
+			}
+		})
 	}
 }
 

@@ -145,6 +145,10 @@ func assembleExistingWithdrawalRecovery(ctx context.Context, cfg *config.Config,
 	if err != nil {
 		return nil, fmt.Errorf("gate assembly: %s", logx.Redact(err.Error()))
 	}
+	trustedTarget, err := recovery.GateTargetBindingFromDSN(cfg.PGDSN)
+	if err != nil {
+		return nil, fmt.Errorf("%s is required to bind the recovery gate target: %s", config.EnvPGDSN, logx.Redact(err.Error()))
+	}
 	scope, err := existingWithdrawalRecoveryScope(cfg.ChainID)
 	if err != nil {
 		return nil, fmt.Errorf("recovery capability scope: %s", logx.Redact(err.Error()))
@@ -158,7 +162,7 @@ func assembleExistingWithdrawalRecovery(ctx context.Context, cfg *config.Config,
 		pool.Close()
 		return nil, fmt.Errorf("control store unavailable: %s", logx.Redact(err.Error()))
 	}
-	gate, err := recovery.NewGate(store, recovery.GateOptions{TTL: cfg.Recovery.GateTTL, EffectClassRuling: ruling})
+	gate, err := recovery.NewGate(store, recovery.GateOptions{TTL: cfg.Recovery.GateTTL, EffectClassRuling: ruling, TrustedTarget: trustedTarget})
 	if err != nil {
 		pool.Close()
 		return nil, fmt.Errorf("gate assembly: %s", logx.Redact(err.Error()))
@@ -182,6 +186,9 @@ func assembleExistingWithdrawalRecovery(ctx context.Context, cfg *config.Config,
 // default (the handler has no Deps to read an override from).
 func existingWithdrawalRecoveryConfigFromEnv(getenv func(string) (string, bool), chainID uint64) (*config.Config, error) {
 	cfg := &config.Config{ChainID: chainID, ProbeTimeout: config.DefaultProbeTimeout}
+	if raw, ok := getenv(config.EnvPGDSN); ok {
+		cfg.PGDSN = strings.TrimSpace(raw)
+	}
 	if raw, ok := getenv(config.EnvRecoveryControlDSN); ok {
 		cfg.Recovery.ControlDSN = strings.TrimSpace(raw)
 	}

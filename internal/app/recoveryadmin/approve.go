@@ -203,7 +203,13 @@ func recoveryAdminDecision(ctx context.Context, args []string, d Deps, approval 
 	if code != 0 {
 		return code
 	}
-	gate, gateErr := recovery.NewGate(env.store, recovery.GateOptions{TTL: ttl, EffectClassRuling: ruling})
+	gate, gateErr := recovery.NewGate(env.store, recovery.GateOptions{
+		TTL: ttl, EffectClassRuling: ruling,
+		TrustedTarget: recovery.GateTargetBinding{
+			TargetGuardKey:        env.targetGuardKey,
+			TargetRoleFingerprint: env.targetRoleFingerprint,
+		},
+	})
 	if gateErr != nil {
 		fmt.Fprintf(stderr, "txharbor recovery-admin %s: %s\n", command, logx.Redact(gateErr.Error()))
 		return 1

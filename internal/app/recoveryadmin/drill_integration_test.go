@@ -37,6 +37,7 @@ func drillCLIArgs(manifestPath, targetDSN, instanceID, outDir string, extra ...s
 }
 
 func TestDrillCLIRealRestoreRecordAndArchive(t *testing.T) {
+	requireNativePGRestore(t)
 	f := newCLIFixture(t)
 	manifestPath, _ := f.verifiedBackup(t)
 	drillEnv := f.createDB(t, "drill_env")
@@ -44,10 +45,31 @@ func TestDrillCLIRealRestoreRecordAndArchive(t *testing.T) {
 	env := f.env("deploy:executor")
 	env[config.EnvPGDSN] = drillEnv
 	env[config.EnvRecoveryInstance] = f.instanceID
+	// Missing privileged observer must fail before restore markers or child
+	// process effects. The real invocation below also proves this configured
+	// observer is passed through to ExecuteRestore.
+	markersBefore := f.markerCount(t, f.manifestBackupID(t, manifestPath))
+	callsBefore := f.toolCalls(t)
+	withoutObserver := make(map[string]string, len(env))
+	for key, value := range env {
+		withoutObserver[key] = value
+	}
+	delete(withoutObserver, config.EnvRecoveryObserverDSN)
+	code, stdout, stderr := runRecoveryAdmin(t, drillCLIArgs(manifestPath, drillEnv, f.instanceID, outDir), withoutObserver)
+	if code != 1 || !strings.Contains(stderr, config.EnvRecoveryObserverDSN+" is required") {
+		t.Fatalf("missing observer must refuse explicitly: exit=%d stdout=%q stderr=%q", code, stdout, stderr)
+	}
+	if got := f.markerCount(t, f.manifestBackupID(t, manifestPath)); got != markersBefore {
+		t.Fatalf("missing observer wrote %d restore markers, want no change from %d", got, markersBefore)
+	}
+	if got := f.toolCalls(t); got != callsBefore {
+		t.Fatalf("missing observer invoked restore tools: calls=%d, before=%d", got, callsBefore)
+	}
+	env[config.EnvRecoveryObserverDSN] = f.dataDSN
 
 	// The gate TTL is required by exact key name (the derived release
 	// observation has no default TTL): nothing may run without it.
-	code, stdout, stderr := runRecoveryAdmin(t, drillCLIArgs(manifestPath, drillEnv, f.instanceID, outDir), env)
+	code, stdout, stderr = runRecoveryAdmin(t, drillCLIArgs(manifestPath, drillEnv, f.instanceID, outDir), env)
 	if code != 1 || !strings.Contains(stderr, config.EnvRecoveryGateTTL) {
 		t.Fatalf("missing gate TTL must refuse by key name: exit=%d stdout=%q stderr=%q", code, stdout, stderr)
 	}
@@ -59,12 +81,12 @@ func TestDrillCLIRealRestoreRecordAndArchive(t *testing.T) {
 
 	// Real drill: real pg_restore into the environment's own data database.
 	code, stdout, stderr = runRecoveryAdmin(t, drillCLIArgs(manifestPath, drillEnv, f.instanceID, outDir), env)
-	if code != 0 {
-		t.Fatalf("drill: exit=%d stdout=%q stderr=%q", code, stdout, stderr)
+	if code != 1 {
+		t.Fatalf("an incomplete full recovery must persist its refusal and return nonzero: exit=%d stdout=%q stderr=%q", code, stdout, stderr)
 	}
 	drillID := cliField(stdout, "drill_id")
-	if drillID == "" || cliField(stdout, "result") != "ok" {
-		t.Fatalf("drill output: %q", stdout)
+	if drillID == "" || cliField(stdout, "result") != "refused_safe" {
+		t.Fatalf("restore without observed verification/release stages must not claim a complete drill: %q", stdout)
 	}
 	if got := cliField(stdout, "db_restore_seconds"); got == "" || got == "not_measured" {
 		t.Fatalf("a real restore must measure db_restore_seconds: %q", stdout)
@@ -92,7 +114,7 @@ func TestDrillCLIRealRestoreRecordAndArchive(t *testing.T) {
 		t.Fatalf("drill rows = %d, want 1", len(runs))
 	}
 	run := runs[0]
-	if run.DrillID != drillID || run.Result != recovery.DrillResultOK || run.Scenario != recovery.DrillScenarioFullRecovery {
+	if run.DrillID != drillID || run.Result != recovery.DrillResultRefusedSafe || run.Scenario != recovery.DrillScenarioFullRecovery {
 		t.Fatalf("recorded run differs: %+v", run)
 	}
 	if run.DBRestoreSeconds == nil || *run.DBRestoreSeconds <= 0 {
@@ -141,7 +163,7 @@ func TestDrillCLIRealRestoreRecordAndArchive(t *testing.T) {
 	if err := json.Unmarshal(archiveBytes, &archiveDoc); err != nil {
 		t.Fatalf("decode archive: %v", err)
 	}
-	if archiveDoc["drill_id"] != drillID || archiveDoc["result"] != "ok" {
+	if archiveDoc["drill_id"] != drillID || archiveDoc["result"] != "refused_safe" {
 		t.Fatalf("archive identity differs: %v", archiveDoc)
 	}
 	if archiveDoc["db_restore_seconds"] == nil || archiveDoc["local_values_only"] != true {
@@ -152,11 +174,11 @@ func TestDrillCLIRealRestoreRecordAndArchive(t *testing.T) {
 	// zero new rows; a changed input conflicts with zero writes.
 	opArgs := drillCLIArgs(manifestPath, drillEnv, f.instanceID, outDir, "--operation-id", "drill-op-1")
 	code, stdout, stderr = runRecoveryAdmin(t, opArgs, env)
-	if code != 0 {
-		t.Fatalf("drill with operation id: exit=%d stdout=%q stderr=%q", code, stdout, stderr)
+	if code != 1 {
+		t.Fatalf("incomplete drill with operation id must return nonzero: exit=%d stdout=%q stderr=%q", code, stdout, stderr)
 	}
 	code, stdout, stderr = runRecoveryAdmin(t, opArgs, env)
-	if code != 0 || !strings.Contains(stdout, "replayed=true") {
+	if code != 1 || !strings.Contains(stdout, "replayed=true") || !strings.Contains(stdout, "result_class=refused_safe") {
 		t.Fatalf("same operation id + input must replay: exit=%d stdout=%q stderr=%q", code, stdout, stderr)
 	}
 	conflict := append(append([]string{}, opArgs...), "--backup-lag-seconds", "5")
@@ -170,8 +192,8 @@ func TestDrillCLIRealRestoreRecordAndArchive(t *testing.T) {
 	// restore of its own.
 	code, stdout, stderr = runRecoveryAdmin(t, drillCLIArgs(manifestPath, drillEnv, f.instanceID, outDir,
 		"--record-only", "--operation-id", "drill-op-2"), env)
-	if code != 0 {
-		t.Fatalf("record-only: exit=%d stdout=%q stderr=%q", code, stdout, stderr)
+	if code != 1 || cliField(stdout, "result") != "refused_safe" {
+		t.Fatalf("record-only must persist incomplete stages and return nonzero: exit=%d stdout=%q stderr=%q", code, stdout, stderr)
 	}
 	if got := cliField(stdout, "db_restore_seconds"); got != "not_measured" {
 		t.Fatalf("record-only db_restore_seconds = %q, want not_measured", got)
@@ -205,6 +227,7 @@ func assertDrillRowCount(t *testing.T, f *cliFixture, want int) {
 // target that is not the environment's own data database and a record-only
 // run without accepted restore evidence both refuse before writing anything.
 func TestDrillCLIRefusesUnverifiedDrillTargets(t *testing.T) {
+	requireNativePGRestore(t)
 	f := newCLIFixture(t)
 	manifestPath, _ := f.verifiedBackup(t)
 	outDir := t.TempDir()
@@ -235,10 +258,51 @@ func TestDrillCLIRefusesUnverifiedDrillTargets(t *testing.T) {
 	}
 }
 
+// A restore probe is not a generic instance-wide permission: record-only must
+// reject a different backup and a probe that has fallen behind the current
+// evidence generation.
+func TestDrillCLIRecordOnlyRejectsMismatchedAndStaleProbe(t *testing.T) {
+	requireNativePGRestore(t)
+	f := newCLIFixture(t)
+	manifestA, _ := f.verifiedBackup(t)
+	drillEnv := f.createDB(t, "drill_record_binding")
+	outDir := t.TempDir()
+	env := f.env("deploy:executor")
+	env[config.EnvPGDSN] = drillEnv
+	env[config.EnvRecoveryInstance] = f.instanceID
+	env[config.EnvRecoveryGateTTL] = "30s"
+
+	code, stdout, stderr := runRecoveryAdmin(t, drillCLIArgs(manifestA, drillEnv, f.instanceID, outDir), env)
+	if code != 1 || cliField(stdout, "result") != "refused_safe" {
+		t.Fatalf("restore should persist incomplete-stage refusal: exit=%d stdout=%q stderr=%q", code, stdout, stderr)
+	}
+	assertDrillRowCount(t, f, 1)
+
+	// A new verified backup advances the instance generation and has no
+	// restore_probe of its own. It must not borrow manifest A's probe.
+	manifestB := f.cliBackup(t, "drill-binding-backup-b")
+	verifyTarget := f.createDB(t, "drill_record_verify_b")
+	code, stdout, stderr = f.cliVerify(t, manifestB, verifyTarget, "drill-binding-verify-b")
+	if code != 0 || !strings.Contains(stdout, "verification=verified") {
+		t.Fatalf("verify backup B: exit=%d stdout=%q stderr=%q", code, stdout, stderr)
+	}
+
+	for name, manifest := range map[string]string{"backup B without probe A": manifestB, "stale probe A": manifestA} {
+		t.Run(name, func(t *testing.T) {
+			code, stdout, stderr := runRecoveryAdmin(t, drillCLIArgs(manifest, drillEnv, f.instanceID, outDir, "--record-only"), env)
+			if code != 1 || !strings.Contains(stderr, "record-only requires an accepted restore_probe evidence row") {
+				t.Fatalf("mismatched/stale restore evidence must refuse: exit=%d stdout=%q stderr=%q", code, stdout, stderr)
+			}
+		})
+	}
+	assertDrillRowCount(t, f, 1)
+}
+
 // TestDrillCLILocalInputAnnotations pins the explicit local-input annotation:
 // operator-provided lag/interval values are recorded as test inputs, never as
 // production measurements, and the RTO target env is judged end-to-end only.
 func TestDrillCLILocalInputAnnotations(t *testing.T) {
+	requireNativePGRestore(t)
 	f := newCLIFixture(t)
 	manifestPath, _ := f.verifiedBackup(t)
 	drillEnv := f.createDB(t, "drill_annot")
@@ -252,8 +316,8 @@ func TestDrillCLILocalInputAnnotations(t *testing.T) {
 
 	code, stdout, stderr := runRecoveryAdmin(t, drillCLIArgs(manifestPath, drillEnv, f.instanceID, outDir,
 		"--backup-lag-seconds", "42.5", "--uncovered-interval-seconds", "7"), env)
-	if code != 0 {
-		t.Fatalf("annotated drill: exit=%d stdout=%q stderr=%q", code, stdout, stderr)
+	if code != 1 || cliField(stdout, "result") != "refused_safe" {
+		t.Fatalf("incomplete annotated drill must persist refused_safe and return nonzero: exit=%d stdout=%q stderr=%q", code, stdout, stderr)
 	}
 	if got := cliField(stdout, "constraints_configured"); got != "false" {
 		t.Fatalf("constraints_configured = %q, want false (frequency/retention unconfigured)", got)
@@ -265,6 +329,9 @@ func TestDrillCLILocalInputAnnotations(t *testing.T) {
 	// not_measured: the db restore scope alone is never a verdict.
 	if !strings.Contains(stdout, "rto status=not_measured target_configured=true") {
 		t.Fatalf("db_restore_seconds alone must never produce an RTO verdict: %q", stdout)
+	}
+	if strings.Contains(stdout, "txharbor:txharbor") {
+		t.Fatalf("drill output leaked a DSN credential: %q", stdout)
 	}
 	runs, err := recovery.DrillRuns(f.ctx, f.store, f.instanceID)
 	if err != nil || len(runs) != 1 {
@@ -280,6 +347,60 @@ func TestDrillCLILocalInputAnnotations(t *testing.T) {
 	}
 	if lag.State != "provided" || lag.Seconds != 42.5 || !strings.Contains(lag.Purpose, "local test input") {
 		t.Fatalf("backup lag annotation differs: %+v", lag)
+	}
+	var interval struct {
+		State   string  `json:"state"`
+		Seconds float64 `json:"seconds"`
+		Purpose string  `json:"purpose"`
+	}
+	if err := json.Unmarshal(runs[0].UncoveredInterval, &interval); err != nil {
+		t.Fatalf("decode uncovered interval: %v", err)
+	}
+	if interval.State != "provided" || interval.Seconds != 7 || !strings.Contains(interval.Purpose, "local test input") {
+		t.Fatalf("uncovered interval annotation differs: %+v", interval)
+	}
+	var testInputs struct {
+		Purpose         string `json:"purpose"`
+		LocalValuesOnly bool   `json:"local_values_only"`
+		RTO             struct {
+			Status        string `json:"status"`
+			Target        int64  `json:"target"`
+			MeasuredKnown bool   `json:"measured_known"`
+		} `json:"rto"`
+		RTOTargetConfigured bool `json:"rto_target_configured"`
+	}
+	if err := json.Unmarshal(runs[0].TestInputs, &testInputs); err != nil {
+		t.Fatalf("decode test inputs: %v", err)
+	}
+	if !strings.Contains(testInputs.Purpose, "not production thresholds") || !testInputs.LocalValuesOnly ||
+		testInputs.RTO.Status != "not_measured" || testInputs.RTO.Target != int64(60*1000000000) ||
+		testInputs.RTO.MeasuredKnown || !testInputs.RTOTargetConfigured {
+		t.Fatalf("recorded test-input/RTO annotation differs: %+v", testInputs)
+	}
+	archivePath := cliField(stdout, "archive")
+	archiveBytes, err := os.ReadFile(archivePath)
+	if err != nil {
+		t.Fatalf("read archive %q: %v", archivePath, err)
+	}
+	var archiveDoc struct {
+		DrillID           string         `json:"drill_id"`
+		Result            string         `json:"result"`
+		BackupLag         map[string]any `json:"backup_lag"`
+		UncoveredInterval map[string]any `json:"uncovered_interval"`
+		LocalValuesOnly   bool           `json:"local_values_only"`
+		RTO               struct {
+			Status        string `json:"status"`
+			MeasuredKnown bool   `json:"measured_known"`
+		} `json:"rto"`
+	}
+	if err := json.Unmarshal(archiveBytes, &archiveDoc); err != nil {
+		t.Fatalf("decode archive: %v", err)
+	}
+	if archiveDoc.DrillID != runs[0].DrillID || archiveDoc.Result != "refused_safe" || !archiveDoc.LocalValuesOnly ||
+		archiveDoc.BackupLag["state"] != "provided" || archiveDoc.BackupLag["seconds"] != 42.5 ||
+		archiveDoc.UncoveredInterval["state"] != "provided" || archiveDoc.UncoveredInterval["seconds"] != float64(7) ||
+		archiveDoc.RTO.Status != "not_measured" || archiveDoc.RTO.MeasuredKnown {
+		t.Fatalf("archive local-input/RTO annotation differs: %+v", archiveDoc)
 	}
 	if _, err := strconv.ParseFloat(cliField(stdout, "db_restore_seconds"), 64); err != nil {
 		t.Fatalf("db_restore_seconds is not numeric: %q", stdout)

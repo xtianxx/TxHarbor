@@ -1,7 +1,8 @@
 # 015 Quickstart 验证矩阵证据（T066）
 
 - Feature: `015-backup-recovery-safe-resumption` ｜ 分支: `015-backup-recovery-safe-resumption` ｜ main 基线: `8d4b9af`
-- 树状态: HEAD `65df393` + 当前未提交脏树（17 M + 9 未跟踪文件；含 B17 drill 独立通道、B18 CI/证据归档、B19 收口与已知失败修复）。本记录的全部本地结果均来自该树；所有条目均未提交。
+- 树状态（以下 §1–§8）：历史快照 HEAD `65df393` + 当时未提交脏树（17 M + 9 未跟踪文件；含 B17 drill 独立通道、B18 CI/证据归档、B19 收口与已知失败修复）。原记录完整保留；全部历史结果仅适用于该树。
+- **当前状态**：2026-09-30 当前 precommit 树补记见 §9，树为基线 HEAD `e7ba8c0` + 全部本地未提交实现；最终提交将识别归档。历史矩阵不代表当前树验收。T017/T019/T020/T027/T057/T058/T066/T068 仍 OPEN（62/70），T000-P OPEN；不得由局部/具名/drill 结果推断未覆盖入口或生产行为通过。
 - 日期: 2026-09-29 ｜ 执行者: 本轮（B17/B18 + fix-27/fix-28 合流验证；T066 记录） ｜ Docker/testcontainers: 可用且实际使用（真实 `postgres:18.6-trixie`、`ghcr.io/foundry-rs/foundry:v1.8.1`、`confluentinc/confluent-local:7.9.10`）；本轮运行无 Docker 缺位、无超时、无取消。
 - 状态口径（三者分离，不得混同）：
   - **本地执行**：本轮实际运行的层（lint / build / unit / contract / 聚焦 race / CI 静态复验 / PG 具名入口 2/2 / drill 13/13）全部通过，运行于上述共享脏树。
@@ -45,7 +46,7 @@
 | S11 | 关闭实例 | `TestRecoveryAdminS11PositiveCloseRealEntry`（PG：真实 `instance-close`，未全放行/缺口未闭 → 拒绝，全放行 → 关闭）；`TestT060DrillInstanceCloseOnlyWhenAllReleasedAndIdempotent`（drill） | PG＋drill | PG **通过**；drill **通过**；`TestT044RepeatedApproveReleaseCloseDoNotFlipState`（PG）本轮未执行 → **NOT RUN** |
 | S12 | 度量记录 | `TestDrillScenarioSet`、`TestPrepareDrillRunSeparateTimingShape`、`TestSafeResumptionSecondsRequiresFullScope`、`TestDrillRunRefusalsWriteNothing`（unit）；`TestT058DrillE2EBackupAdvanceRestoreRefuseThenRelease`（drill：恢复点/DB 恢复/核验/各能力放行/backup_lag/uncovered_interval 分列 + `RecordDrillRun` 归档；局部能力集永不给出端到端时长） | unit＋drill | unit **通过**（场景/记录模型）；drill **通过**（真实记录 + 归档，`/tmp/opencode/drill-evidence/drill-t058-e2e.json`、`drill-t058-event-kafka.json`、`drill-t058-gap-paused.json`）；`TestDrillCLIRealRestoreRecordAndArchive`、`TestDrillCLILocalInputAnnotations`（PG/CLI）本轮未执行 → **NOT RUN** |
 
-正向硬断言：0 重复付款 / 0 错误事件效果在 drill 层以两库全内容指纹断言 **通过**（含 F1–F7 的零重放）；S7/S8/S9 的门禁拒绝（`gap_open`、`capability_dependency_closed`、未批准不放行）在 drill/PG 具名入口 **通过**。但 **serve/HTTP 入口级**断言（S8 前 `POST /withdrawals` 503、S9 前 worker/publisher/consumer 拒绝）需要真实全栈 serve，本轮未执行 → **NOT RUN**。
+历史 drill 载体记录了两库内容指纹比较及特定拒绝/重放场景的结果；这些有限断言不证明普遍的零重复付款或零下游效果，相关全局性结论在此撤回。S7/S8/S9 的列明门禁场景只限当时列出的 drill/PG 具名入口。**serve/HTTP 入口级**断言（S8 前 `POST /withdrawals` 503、S9 前 worker/publisher/consumer 拒绝）当时未执行 → **NOT RUN**。以上历史结果不覆盖当前修复树。
 
 PG/CLI 直连层范围：本轮 integration-PG 仅执行 §1 的 2 个具名入口用例；`internal/app/recoveryadmin`、`internal/recovery` 其余 integration 标签载体（如 `TestBackup*`、`TestRestore*CLI*`、`TestIsolationChecklist*`、`TestT036*`、`TestT037*`、`TestT044*`、`TestT046*`、`TestGate*` 集成版）本轮未执行 → 其层 **NOT RUN**，不得由 drill 或具名入口通过推断。
 
@@ -108,8 +109,21 @@ PG/CLI 直连层范围：本轮 integration-PG 仅执行 §1 的 2 个具名入�
 - docs 3 文件（未提交）：`docs/ops/recovery-runbook.md`（T064）、`docs/evidence/015/README.md`（T065/T068）、`docs/evidence/015/quickstart_matrix_evidence.md`（本文，T066）。
 - 以上全部位于 HEAD `65df393` 之上的未提交树；原始日志在 `/tmp/opencode/`（未入库）；持久证据以测试文件 + 提交为准。
 
-## 8. 结论
+## 8. 历史快照结论
 
-- 本地执行层（lint / build / unit / contract / 聚焦 race / CI 静态复验 + integration-PG 具名入口 2/2 + drill 13/13）全部通过；drill 在真实 PG 18.6 + Anvil foundry v1.8.1 + Kafka confluent-local 上 0 FAIL / 0 SKIP，无缺位、无超时、无取消；全程未直写批准/放行/缺口/隔离状态（反作弊口径不变，放行由门禁派生求值）。
-- 未执行项如实保留：远程 CI（未推送/未触发）、integration-redis/-kafka 全量、e2e 全量、test-race 全量；**NOT RUN 不得读作通过**，不得由已通过层推断。
+- 历史记录：当时树上列明的 lint / build / unit / contract / 聚焦 race / CI 静态复验、PG 具名入口 2/2、drill 13/13 报告为通过；drill 所用真实依赖与当时范围见 §1。此记录只陈述当时运行结果，不验证当前代码；有限指纹/场景断言不支持普遍的零重复付款或零下游效果声明。关于未直写控制状态等反作弊陈述也仅是当时执行者对该次记录的说明，不能据此推出实现不存在其他路径。
+- 历史记录中的未执行项：远程 CI（未推送/未触发）、integration-redis/-kafka 全量、e2e 全量、test-race 全量；**NOT RUN 不得读作通过**，不得由已通过层推断。当前 precommit 树结果仅见 §9，不回写或覆盖此历史记录。
 - 三口径分离不变：本地执行 ≠ 远程 CI ≠ 生产就绪。**T000-P 保持 OPEN**；仅本地范围；不宣称生产就绪；drill/S12 与本地数值一律仅为测试输入。
+
+## 9. 当前 precommit 树补记（2026-09-30；非验收声明）
+
+- **树范围**：基线 HEAD `e7ba8c0` + 全部本地未提交实现；以下结果是该 precommit tree 的观察，不是单独 HEAD `e7ba8c0` 的结果。最终提交将标识归档。原始日志均在 `/tmp/opencode/`，非持久证据。
+- 全仓门禁：`make lint && make build && go test -count=1 ./... && make test-contract && make test-race && git diff --check` — **全部通过**。
+- 全仓集成：`make test-integration` — **最终全仓通过**；日志 `/tmp/opencode/015-integration-all-final-tree.log`（本地非持久）。
+- e2e：`make test-e2e` — **通过**；日志 `/tmp/opencode/015-e2e-final-tree.log`。其 Anvil bound-worker 覆盖一笔真实 broadcast、拒绝期间不重复；不证明拒绝解除后的安全继续。
+- 独立 drill：`go test -tags=drill -count=1 -timeout=20m -v ./...` — exit 0，跨所有包 877 PASS / 11 顶层 SKIP / 0 FAIL；日志 `/tmp/opencode/015-drill-final-tree.log`。本机直接 `pg_restore` ELF 缺失；多个真实 restore/verify/drill 正向场景因此 NOT RUN/SKIP，即使测试命令 exit 0 亦不得宣称覆盖。Kafka offset divergence 场景的 restore 同样 NOT RUN/SKIP。
+- Kafka：`make test-integration-kafka` — **通过**；日志 `/tmp/opencode/015-kafka-final-tree.log`。
+- Redis：`make test-integration-redis` 在最后一次仅修改 `gate.go` 前、相同实现上通过（redis/cache/ratelimit/testutil），日志 `/tmp/opencode/015-redis-final.log`。作为该未受 gate.go 影响层的复用证据记录；不是修改后的最终重跑。
+- recovery PG 专项：`go test -tags=integration -count=1 -timeout=12m -v ./internal/recovery` 在最后一次仅修改 `gate.go` 前 190 PASS / 9 SKIP / 0 FAIL，日志 `/tmp/opencode/015-recovery-pg-current.log`；之后 `make test-integration` 最终全仓通过，但没有 verbose skip 计数。
+- 失败历史：较早的失败运行由 fixture 变化修复，属于历史失败，不是当前最终结果；不得将它们说成当前失败，也不得将最终通过倒推为此前运行通过。
+- 仍未执行/未证明：远程 CI、push、PR、merge、deploy 均 **NOT RUN**；T017/T019/T020/T027/T057/T058/T066/T068 仍 OPEN（62/70），T000-P OPEN。真实直接 `pg_restore` ELF 正向路径缺位；T068 有限证据仅包括 manifest 双排除项、credential-shaped reason 拒绝及子进程 argv/passfile 保护，父 CLI argv、SIGKILL 后 passfile 残留及 ELF 信任未解决/未证明。无生产就绪声明。

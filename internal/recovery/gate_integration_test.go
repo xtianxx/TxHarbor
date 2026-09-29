@@ -46,6 +46,17 @@ import (
 
 const gatePGImage = "postgres:18.6-trixie"
 
+const gateTestTargetDSN = "postgres://gate-user:gate-pass@gate-target.internal:5432/gate-data"
+
+func gateTestTargetBinding(t *testing.T) GateTargetBinding {
+	t.Helper()
+	binding, err := GateTargetBindingFromDSN(gateTestTargetDSN)
+	if err != nil {
+		t.Fatalf("derive trusted gate target binding: %v", err)
+	}
+	return binding
+}
+
 var gateOperationSeq atomic.Int64
 
 func gateOperation(prefix string) string {
@@ -125,6 +136,9 @@ func gateNewGate(t *testing.T, store *controlstore.Store, opts GateOptions) *Gat
 	if opts.TTL == 0 {
 		opts.TTL = time.Minute
 	}
+	if opts.TrustedTarget == (GateTargetBinding{}) {
+		opts.TrustedTarget = gateTestTargetBinding(t)
+	}
 	gate, err := NewGate(store, opts)
 	if err != nil {
 		t.Fatalf("NewGate: %v", err)
@@ -167,8 +181,21 @@ func gateScopeOtherAsset(c Capability) string {
 
 func gateOpenRecoveryInstance(t *testing.T, ctx context.Context, store *controlstore.Store) string {
 	t.Helper()
+	binding := gateTestTargetBinding(t)
+	// The fixture starts with a positively-clean known target so tests exercise
+	// the release rules unless they deliberately mutate target-guard state.
+	if _, err := store.Pool().Exec(ctx, `INSERT INTO recovery_target_guard
+		(target_guard_key, disposition, operation_id, clean_at, rebuild_evidence)
+		VALUES ($1, 'clean', $2, now(), '{"fixture":"clean"}')
+		ON CONFLICT (target_guard_key) DO UPDATE SET disposition='clean', active_writer=FALSE,
+		launch_intent=FALSE, attempt_app_name=NULL, launch_intent_at=NULL,
+		launched_at=NULL, rebuild_required_at=NULL, clean_at=now(), rebuild_evidence='{"fixture":"clean"}'`,
+		binding.TargetGuardKey, gateOperation("clean-target")); err != nil {
+		t.Fatalf("seed clean target guard: %v", err)
+	}
 	result, err := store.OpenInstance(ctx, controlstore.OpenInstanceRequest{
-		Kind: "recovery", OpenedBy: "deploy:executor",
+		Kind: "recovery", OpenedBy: "deploy:executor", EntryChainInventory: []uint64{1},
+		TargetGuardKey: binding.TargetGuardKey, TargetRoleFingerprint: binding.TargetRoleFingerprint,
 	})
 	if err != nil {
 		t.Fatalf("open recovery instance: %v", err)
@@ -467,8 +494,19 @@ func TestGateNormalModePassThroughWithoutInstance(t *testing.T) {
 }
 
 func TestGateBaselineInstanceDoesNotArm(t *testing.T) {
-	ctx, _, pool, store := gateControlStore(t)
-	baseline, err := store.OpenInstance(ctx, controlstore.OpenInstanceRequest{Kind: "baseline", OpenedBy: "deploy:executor"})
+	ctx, dsn, pool, store := gateControlStore(t)
+	target, err := controlstore.ParseDSNTarget(dsn)
+	if err != nil {
+		t.Fatalf("parse fixture target DSN: %v", err)
+	}
+	targetGuardKey, err := controlstore.TargetGuardKey(target)
+	if err != nil {
+		t.Fatalf("derive fixture target guard key: %v", err)
+	}
+	baseline, err := store.OpenInstance(ctx, controlstore.OpenInstanceRequest{
+		Kind: "baseline", OpenedBy: "deploy:executor",
+		TargetGuardKey: targetGuardKey, TargetRoleFingerprint: target.DataTargetFingerprint().RoleFingerprint,
+	})
 	if err != nil {
 		t.Fatalf("open baseline instance: %v", err)
 	}
@@ -496,10 +534,45 @@ func TestGateBaselineInstanceDoesNotArm(t *testing.T) {
 	}
 }
 
+func TestGateBoundTargetMustMatchTrustedDatabaseAndRole(t *testing.T) {
+	f := gateBaseFixture(t)
+	base := gateTestTargetBinding(t)
+	cases := []struct {
+		name string
+		dsn  string
+	}{
+		{name: "different database", dsn: "postgres://gate-user:gate-pass@gate-target.internal:5432/other-data"},
+		{name: "different role", dsn: "postgres://other-user:gate-pass@gate-target.internal:5432/gate-data"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			trusted, err := GateTargetBindingFromDSN(tc.dsn)
+			if err != nil {
+				t.Fatalf("derive mismatching deployment target: %v", err)
+			}
+			if base.TargetGuardKey == trusted.TargetGuardKey && base.TargetRoleFingerprint == trusted.TargetRoleFingerprint {
+				t.Fatal("test target unexpectedly matches persisted instance target")
+			}
+			gate := gateNewGate(t, f.store, GateOptions{TrustedTarget: trusted})
+			decision := f.admit(t, gate, CapabilityQuery)
+			if decision.Allowed || decision.RefusalClass != RefusalInstanceMismatch {
+				t.Fatalf("mismatching trusted target must refuse before release evaluation: %+v", decision)
+			}
+		})
+	}
+	if n := gateAuditCount(t, f.ctx, f.pool, string(RefusalInstanceMismatch)); n != len(cases) {
+		t.Fatalf("target mismatch audit rows = %d, want %d", n, len(cases))
+	}
+}
+
 func TestGateUnboundWhileRecoveryOpenRefuses(t *testing.T) {
 	ctx, _, pool, store := gateControlStore(t)
 	instanceID := gateOpenRecoveryInstance(t, ctx, store)
-	gate := gateNewGate(t, store, GateOptions{})
+	otherTarget, err := GateTargetBindingFromDSN("postgres://gate-user:gate-pass@gate-target.internal:5432/other-data")
+	if err != nil {
+		t.Fatalf("derive another trusted target: %v", err)
+	}
+	gate := gateNewGate(t, store, GateOptions{TrustedTarget: otherTarget})
 
 	decision, err := gate.Admit(ctx, GateRequest{Capability: CapabilityChainScan, ScopeHash: gateScopeFor(CapabilityChainScan)})
 	if err != nil {
@@ -513,6 +586,120 @@ func TestGateUnboundWhileRecoveryOpenRefuses(t *testing.T) {
 	}
 	if n := gateAuditCount(t, ctx, pool, string(RefusalInstanceMismatch)); n != 1 {
 		t.Fatalf("unbound refusal audit rows = %d, want 1", n)
+	}
+}
+
+func gateClosedHistoricalRecovery(t *testing.T, ctx context.Context, store *controlstore.Store, pool *pgxpool.Pool, binding GateTargetBinding) string {
+	t.Helper()
+	if _, err := pool.Exec(ctx, `INSERT INTO recovery_target_guard
+		(target_guard_key, disposition, operation_id, clean_at, rebuild_evidence)
+		VALUES ($1, 'clean', $2, now(), '{"fixture":"clean"}')
+		ON CONFLICT (target_guard_key) DO UPDATE SET disposition='clean', active_writer=FALSE,
+		launch_intent=FALSE, attempt_app_name=NULL, launch_intent_at=NULL,
+		launched_at=NULL, rebuild_required_at=NULL, clean_at=now(), rebuild_evidence='{"fixture":"clean"}'`,
+		binding.TargetGuardKey, gateOperation("historical-clean")); err != nil {
+		t.Fatalf("seed historical target guard: %v", err)
+	}
+	opened, err := store.OpenInstance(ctx, controlstore.OpenInstanceRequest{
+		Kind: "recovery", OpenedBy: "deploy:executor", EntryChainInventory: []uint64{1},
+		TargetGuardKey: binding.TargetGuardKey, TargetRoleFingerprint: binding.TargetRoleFingerprint,
+	})
+	if err != nil {
+		t.Fatalf("open historical recovery instance: %v", err)
+	}
+	if _, err := pool.Exec(ctx, `UPDATE recovery_instance SET state='closed', closed_by='gate-test', closed_at=now() WHERE instance_id=$1`, opened.InstanceID); err != nil {
+		t.Fatalf("close historical recovery instance: %v", err)
+	}
+	return opened.InstanceID
+}
+
+func TestGateUnboundHistoricalDirtyGuardIsScopedToTrustedTarget(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		sameTarget bool
+		wantAllow  bool
+		missing    bool
+		active     bool
+	}{
+		{name: "distinct trusted target passes", wantAllow: true},
+		{name: "same target unresolved guard refuses", sameTarget: true},
+		{name: "same target missing guard refuses", sameTarget: true, missing: true},
+		{name: "same target active writer refuses", sameTarget: true, active: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx, _, pool, store := gateControlStore(t)
+			targetA := gateTestTargetBinding(t)
+			targetB := targetA
+			if !tc.sameTarget {
+				var err error
+				targetB, err = GateTargetBindingFromDSN("postgres://gate-user:gate-pass@gate-target.internal:5432/other-data")
+				if err != nil {
+					t.Fatalf("derive trusted target B: %v", err)
+				}
+			}
+			gateClosedHistoricalRecovery(t, ctx, store, pool, targetA)
+			if tc.missing {
+				if _, err := pool.Exec(ctx, `ALTER TABLE recovery_target_guard DISABLE TRIGGER ALL`); err != nil {
+					t.Fatalf("disable historical target foreign-key trigger: %v", err)
+				}
+				if _, err := pool.Exec(ctx, `DELETE FROM recovery_target_guard WHERE target_guard_key=$1`, targetA.TargetGuardKey); err != nil {
+					t.Fatalf("remove historical target guard: %v", err)
+				}
+				if _, err := pool.Exec(ctx, `ALTER TABLE recovery_target_guard ENABLE TRIGGER ALL`); err != nil {
+					t.Fatalf("restore historical target foreign-key trigger: %v", err)
+				}
+			} else if tc.active {
+				if _, err := pool.Exec(ctx, `UPDATE recovery_target_guard SET disposition='unknown', clean_at=NULL, rebuild_evidence=NULL,
+					active_writer=TRUE, launch_intent=TRUE, attempt_app_name='gate-test-writer', launch_intent_at=now()
+					WHERE target_guard_key=$1`, targetA.TargetGuardKey); err != nil {
+					t.Fatalf("activate historical target guard writer: %v", err)
+				}
+			} else {
+				if _, err := pool.Exec(ctx, `UPDATE recovery_target_guard SET disposition='unknown', clean_at=NULL, rebuild_evidence=NULL WHERE target_guard_key=$1`, targetA.TargetGuardKey); err != nil {
+					t.Fatalf("make historical target guard unresolved: %v", err)
+				}
+			}
+			decision, err := gateNewGate(t, store, GateOptions{TrustedTarget: targetB}).Admit(ctx,
+				GateRequest{Capability: CapabilityQuery, ScopeHash: gateScopeFor(CapabilityQuery)})
+			if err != nil {
+				t.Fatalf("unbound Admit: %v", err)
+			}
+			if decision.Allowed != tc.wantAllow {
+				t.Fatalf("decision = %+v, allowed=%t want %t", decision, decision.Allowed, tc.wantAllow)
+			}
+			if !tc.wantAllow && decision.RefusalClass != RefusalIsolationUnproven {
+				t.Fatalf("same-target dirty guard refusal = %+v, want %s", decision, RefusalIsolationUnproven)
+			}
+		})
+	}
+}
+
+func TestGateUnboundLegacyUnknownHistoricalTargetBlocksAllTargets(t *testing.T) {
+	ctx, _, pool, store := gateControlStore(t)
+	targetA := gateTestTargetBinding(t)
+	gateClosedHistoricalRecovery(t, ctx, store, pool, targetA)
+	if _, err := pool.Exec(ctx, `ALTER TABLE recovery_instance DISABLE TRIGGER recovery_instance_target_guard_immutable_trg`); err != nil {
+		t.Fatalf("disable immutable binding trigger: %v", err)
+	}
+	_, updateErr := pool.Exec(ctx, `UPDATE recovery_instance SET target_guard_key=NULL, target_role_fingerprint=NULL WHERE kind='recovery'`)
+	_, enableErr := pool.Exec(ctx, `ALTER TABLE recovery_instance ENABLE TRIGGER recovery_instance_target_guard_immutable_trg`)
+	if updateErr != nil {
+		t.Fatalf("simulate legacy-null target binding: %v", updateErr)
+	}
+	if enableErr != nil {
+		t.Fatalf("restore immutable binding trigger: %v", enableErr)
+	}
+	targetB, err := GateTargetBindingFromDSN("postgres://gate-user:gate-pass@gate-target.internal:5432/other-data")
+	if err != nil {
+		t.Fatalf("derive trusted target B: %v", err)
+	}
+	decision, err := gateNewGate(t, store, GateOptions{TrustedTarget: targetB}).Admit(ctx,
+		GateRequest{Capability: CapabilityQuery, ScopeHash: gateScopeFor(CapabilityQuery)})
+	if err != nil {
+		t.Fatalf("unbound Admit: %v", err)
+	}
+	if decision.Allowed || decision.RefusalClass != RefusalIsolationUnproven {
+		t.Fatalf("legacy-null unknown target must block normal pass-through globally: %+v", decision)
 	}
 }
 
@@ -590,6 +777,115 @@ func TestGateLegalBaseStateAllowsAndAudits(t *testing.T) {
 	}
 	if result != "ok" || refusal != "" || generation == nil || *generation != 0 {
 		t.Fatalf("allowed audit row = result=%s refusal=%q generation=%v", result, refusal, generation)
+	}
+}
+
+func TestGateRequiresCleanPersistedTargetGuardBeforeReleaseEvaluation(t *testing.T) {
+	f := gateBaseFixture(t)
+	binding := gateTestTargetBinding(t)
+	gate := gateNewGate(t, f.store, GateOptions{})
+	gateAllowedQuery(t, f)
+
+	clean := f.admit(t, gate, CapabilityQuery)
+	if !clean.Allowed {
+		t.Fatalf("clean bound target should reach and pass release evaluation, got %+v", clean)
+	}
+	if _, err := f.pool.Exec(f.ctx, `UPDATE recovery_target_guard
+		SET disposition='unknown', clean_at=NULL, rebuild_evidence=NULL
+		WHERE target_guard_key=$1`, binding.TargetGuardKey); err != nil {
+		t.Fatalf("make target guard unresolved: %v", err)
+	}
+	dirty := f.admit(t, gate, CapabilityQuery)
+	if dirty.Allowed || dirty.RefusalClass != RefusalIsolationUnproven {
+		t.Fatalf("unresolved target guard must refuse before release: %+v", dirty)
+	}
+}
+
+func TestGateAllowsCleanGuardAfterLaunchedAttemptAccepted(t *testing.T) {
+	f := gateBaseFixture(t)
+	gate := gateNewGate(t, f.store, GateOptions{})
+	key := gateTestTargetBinding(t).TargetGuardKey
+	tx, err := f.pool.Begin(f.ctx)
+	if err != nil {
+		t.Fatalf("begin target attempt: %v", err)
+	}
+	defer tx.Rollback(f.ctx)
+	operationID := gateOperation("attempt")
+	if err := controlstore.PrepareTargetGuard(f.ctx, tx, key, operationID); err != nil {
+		t.Fatalf("prepare target guard: %v", err)
+	}
+	if err := controlstore.MarkTargetGuardLaunchIntent(f.ctx, tx, key, "gate-test-app", operationID); err != nil {
+		t.Fatalf("mark target launch intent: %v", err)
+	}
+	if err := controlstore.MarkTargetGuardLaunched(f.ctx, tx, key); err != nil {
+		t.Fatalf("mark target launched: %v", err)
+	}
+	if err := controlstore.MarkTargetGuardWriterDrained(f.ctx, tx, key); err != nil {
+		t.Fatalf("mark target writer drained: %v", err)
+	}
+	if err := controlstore.AcceptTargetGuardClean(f.ctx, tx, key, gateOperation("accepted"), []byte(`{"success":true}`)); err != nil {
+		t.Fatalf("accept target guard clean: %v", err)
+	}
+	if err := tx.Commit(f.ctx); err != nil {
+		t.Fatalf("commit accepted target attempt: %v", err)
+	}
+	gateAllowedQuery(t, f)
+	decision := f.admit(t, gate, CapabilityQuery)
+	if !decision.Allowed {
+		t.Fatalf("accepted clean guard with historical launch intent should pass gate, got %+v", decision)
+	}
+}
+
+func TestGateUnboundDeniesClosedLegacyRecoveryWithNullTargetBinding(t *testing.T) {
+	ctx, _, pool, store := gateControlStore(t)
+	instanceID := gateOpenRecoveryInstance(t, ctx, store)
+	if _, err := pool.Exec(ctx, `UPDATE recovery_instance SET state='closed', closed_by='gate-test', closed_at=now() WHERE instance_id=$1`, instanceID); err != nil {
+		t.Fatalf("close fixture recovery instance: %v", err)
+	}
+	if _, err := pool.Exec(ctx, `ALTER TABLE recovery_instance DISABLE TRIGGER recovery_instance_target_guard_immutable_trg`); err != nil {
+		t.Fatalf("temporarily disable immutable binding trigger: %v", err)
+	}
+	_, updateErr := pool.Exec(ctx, `UPDATE recovery_instance
+		SET target_guard_key=NULL, target_role_fingerprint=NULL WHERE instance_id=$1`, instanceID)
+	_, enableErr := pool.Exec(ctx, `ALTER TABLE recovery_instance ENABLE TRIGGER recovery_instance_target_guard_immutable_trg`)
+	if updateErr != nil {
+		t.Fatalf("simulate legacy-null recovery binding: %v", updateErr)
+	}
+	if enableErr != nil {
+		t.Fatalf("restore immutable binding trigger: %v", enableErr)
+	}
+	decision, err := gateNewGate(t, store, GateOptions{}).Admit(ctx,
+		GateRequest{Capability: CapabilityQuery, ScopeHash: gateScopeFor(CapabilityQuery)})
+	if err != nil {
+		t.Fatalf("unbound Admit: %v", err)
+	}
+	if decision.Allowed || decision.RefusalClass != RefusalIsolationUnproven {
+		t.Fatalf("closed legacy-null recovery binding must deny normal pass-through: %+v", decision)
+	}
+}
+
+func TestGateUnknownAndDirtyTargetGuardsDeny(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		state string
+	}{
+		{name: "unknown", state: "unknown"},
+		{name: "rebuild-required", state: "rebuild_required"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := gateBaseFixture(t)
+			binding := gateTestTargetBinding(t)
+			if _, err := f.pool.Exec(f.ctx, `UPDATE recovery_target_guard
+				SET disposition=$2, clean_at=NULL, rebuild_evidence=NULL,
+				    rebuild_required_at=CASE WHEN $2='rebuild_required' THEN now() ELSE NULL END
+				WHERE target_guard_key=$1`, binding.TargetGuardKey, tc.state); err != nil {
+				t.Fatalf("set target guard state: %v", err)
+			}
+			decision := f.admit(t, gateNewGate(t, f.store, GateOptions{}), CapabilityQuery)
+			if decision.Allowed || decision.RefusalClass != RefusalIsolationUnproven {
+				t.Fatalf("target state %q must deny before release evaluation: %+v", tc.state, decision)
+			}
+		})
 	}
 }
 

@@ -1,0 +1,367 @@
+package recovery
+
+import (
+	"context"
+	"crypto/rand"
+	"encoding/binary"
+	"encoding/hex"
+	"errors"
+	"fmt"
+	"net/url"
+	"strings"
+	"sync"
+	"time"
+	"unicode/utf8"
+
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
+	"github.com/xtianxx/txharbor/internal/recovery/controlstore"
+)
+
+// TargetKey is a stable, credential-free identity for the supported endpoint
+// spelling. It deliberately excludes role and operation information. It does
+// not resolve DNS aliases.
+type TargetKey [32]byte
+
+// CanonicalTargetKey lowercases the host and hashes a versioned,
+// length-prefixed host/port/database tuple. Invalid and unknown identities
+// fail closed.
+func CanonicalTargetKey(target controlstore.DSNTarget) (TargetKey, error) {
+	var zero TargetKey
+	encoded, err := controlstore.TargetGuardKey(target)
+	if err != nil {
+		return zero, err
+	}
+	raw, err := hex.DecodeString(strings.TrimPrefix(encoded, "sha256:"))
+	if err != nil || len(raw) != len(zero) {
+		return zero, errors.New("invalid canonical target key")
+	}
+	copy(zero[:], raw)
+	return zero, nil
+}
+
+// AdvisoryLockKey maps the target digest to PostgreSQL's two-int advisory
+// lock namespace. Collisions only serialize unrelated targets.
+func (k TargetKey) AdvisoryLockKey() (int32, int32) {
+	return int32(binary.BigEndian.Uint32(k[0:4])), int32(binary.BigEndian.Uint32(k[4:8]))
+}
+
+// String is a safe credential-free target key representation.
+func (k TargetKey) String() string { return "sha256:" + hex.EncodeToString(k[:]) }
+
+// TargetLock is a session advisory lock held on one dedicated control-store
+// connection. It is a live coordination primitive only; it is not a durable
+// guard and does not establish target cleanliness.
+type TargetLock struct {
+	conn   advisoryConn
+	key1   int32
+	key2   int32
+	mu     sync.Mutex
+	closed bool
+}
+
+type advisoryConn interface {
+	Exec(context.Context, string, ...any) (pgconn.CommandTag, error)
+	QueryRow(context.Context, string, ...any) pgx.Row
+	Ping(context.Context) error
+	Close(context.Context) error
+}
+
+// AcquireTargetLock establishes a dedicated pgx session and repeatedly
+// attempts the session-level lock until acquired or timeout/context expiry. A
+// positive timeout is mandatory, and pollInterval <= 0 selects 50ms. No pool
+// connection is used because the lock lifetime must equal the owning session
+// lifetime.
+func AcquireTargetLock(ctx context.Context, controlDSN string, key TargetKey, timeout, pollInterval time.Duration) (*TargetLock, error) {
+	if ctx == nil || controlDSN == "" || key == (TargetKey{}) || timeout <= 0 {
+		return nil, errors.New("context, control-store DSN, known target key, and positive acquisition timeout are required")
+	}
+	if pollInterval <= 0 {
+		pollInterval = 50 * time.Millisecond
+	}
+	bounded, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	conn, err := pgx.Connect(bounded, controlDSN)
+	if err != nil {
+		return nil, fmt.Errorf("connect dedicated target-lock session: %w", err)
+	}
+	k1, k2 := key.AdvisoryLockKey()
+	lock := &TargetLock{conn: conn, key1: k1, key2: k2}
+	ticker := time.NewTicker(pollInterval)
+	defer ticker.Stop()
+	for {
+		var acquired bool
+		if err := conn.QueryRow(bounded, `SELECT pg_try_advisory_lock($1, $2)`, k1, k2).Scan(&acquired); err != nil {
+			_ = conn.Close(context.Background())
+			return nil, fmt.Errorf("attempt target advisory lock: %w", err)
+		}
+		if acquired {
+			if err := lock.Health(bounded); err != nil {
+				_ = conn.Close(context.Background())
+				return nil, fmt.Errorf("verify acquired target advisory lock: %w", err)
+			}
+			return lock, nil
+		}
+		select {
+		case <-bounded.Done():
+			_ = conn.Close(context.Background())
+			return nil, fmt.Errorf("bounded target advisory lock acquisition: %w", bounded.Err())
+		case <-ticker.C:
+		}
+	}
+}
+
+// Health verifies both that the dedicated control connection responds and
+// that this exact session still owns the expected advisory lock.
+func (l *TargetLock) Health(ctx context.Context) error {
+	if l == nil || l.conn == nil {
+		return errors.New("target lock is unknown")
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	closed := l.closed
+	if closed {
+		return errors.New("target lock session is closed")
+	}
+	if err := l.conn.Ping(ctx); err != nil {
+		return fmt.Errorf("target lock control session health: %w", err)
+	}
+	var held bool
+	err := l.conn.QueryRow(ctx, `
+SELECT EXISTS (
+  SELECT 1 FROM pg_locks
+  WHERE locktype = 'advisory' AND granted
+    AND pid = pg_backend_pid() AND objsubid = 2
+    AND classid = $1::oid AND objid = $2::oid
+)`, uint32(l.key1), uint32(l.key2)).Scan(&held)
+	if err != nil {
+		return fmt.Errorf("check target advisory lock ownership: %w", err)
+	}
+	if !held {
+		return errors.New("target advisory lock ownership was lost")
+	}
+	return nil
+}
+
+// WithTransaction runs callback in a transaction on the exact dedicated
+// session holding this TargetLock's session advisory lock. Health and Release
+// are serialized behind the callback and commit. Callback code must use only
+// the supplied pgx.Tx (not another connection) and must not manipulate session
+// advisory locks. A callback error is rolled back. A commit error is returned
+// as-is wrapped with context: its outcome may be ambiguous and callers must
+// never infer success from it. A successful return means the commit succeeded;
+// releasing the lock is a separate operation and can fail independently.
+func (l *TargetLock) WithTransaction(ctx context.Context, callback func(context.Context, pgx.Tx) error) error {
+	if l == nil || l.conn == nil {
+		return errors.New("target lock is unknown")
+	}
+	if ctx == nil || callback == nil {
+		return errors.New("transaction context and callback are required")
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.closed {
+		return errors.New("target lock session is closed")
+	}
+	beginner, ok := l.conn.(interface {
+		BeginTx(context.Context, pgx.TxOptions) (pgx.Tx, error)
+	})
+	if !ok {
+		return errors.New("target lock session does not support transactions")
+	}
+	tx, err := beginner.BeginTx(ctx, pgx.TxOptions{})
+	if err != nil {
+		return fmt.Errorf("begin target-lock acceptance transaction: %w", err)
+	}
+	rollback := func(cause error) error {
+		if rollbackErr := tx.Rollback(context.Background()); rollbackErr != nil && !errors.Is(rollbackErr, pgx.ErrTxClosed) {
+			return errors.Join(cause, fmt.Errorf("rollback target-lock acceptance transaction: %w", rollbackErr))
+		}
+		return cause
+	}
+	if err := l.checkHeldInTx(ctx, tx); err != nil {
+		return rollback(err)
+	}
+	if err := callback(ctx, tx); err != nil {
+		return rollback(fmt.Errorf("target-lock acceptance callback: %w", err))
+	}
+	// Session advisory locks survive transaction rollback. Check immediately
+	// before commit so a callback that accidentally released the lock cannot
+	// report an accepted transaction.
+	if err := l.checkHeldInTx(ctx, tx); err != nil {
+		return rollback(err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("commit target-lock acceptance transaction (outcome may be ambiguous): %w", err)
+	}
+	return nil
+}
+
+func (l *TargetLock) checkHeldInTx(ctx context.Context, tx pgx.Tx) error {
+	var held bool
+	err := tx.QueryRow(ctx, `
+SELECT EXISTS (
+  SELECT 1 FROM pg_locks
+  WHERE locktype = 'advisory' AND granted
+    AND pid = pg_backend_pid() AND objsubid = 2
+    AND classid = $1::oid AND objid = $2::oid
+)`, uint32(l.key1), uint32(l.key2)).Scan(&held)
+	if err != nil {
+		return fmt.Errorf("check target advisory lock ownership in transaction: %w", err)
+	}
+	if !held {
+		return errors.New("target advisory lock ownership was lost")
+	}
+	return nil
+}
+
+// Release unlocks and closes the dedicated session. Any uncertainty is
+// returned; connection closure itself causes PostgreSQL to release the lock.
+func (l *TargetLock) Release(ctx context.Context) error {
+	if l == nil || l.conn == nil {
+		return errors.New("target lock is unknown")
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.closed {
+		return nil
+	}
+	l.closed = true
+	var unlocked bool
+	err := l.conn.QueryRow(ctx, `SELECT pg_advisory_unlock($1, $2)`, l.key1, l.key2).Scan(&unlocked)
+	closeErr := l.conn.Close(context.Background())
+	if err != nil {
+		return fmt.Errorf("release target advisory lock: %w", err)
+	}
+	if !unlocked {
+		return errors.New("target advisory lock was not owned at release")
+	}
+	if closeErr != nil {
+		return fmt.Errorf("close target-lock session: %w", closeErr)
+	}
+	return nil
+}
+
+const maxApplicationNameBytes = 63
+
+// ValidateAttemptApplicationName rejects empty, control-containing, invalid
+// UTF-8, and overlong values so PostgreSQL cannot silently truncate the tag.
+func ValidateAttemptApplicationName(name string) error {
+	if name == "" || len(name) > maxApplicationNameBytes || !utf8.ValidString(name) || strings.ContainsAny(name, "\x00\r\n") {
+		return fmt.Errorf("application_name must be valid UTF-8, 1..%d bytes, and contain no NUL/CR/LF", maxApplicationNameBytes)
+	}
+	return nil
+}
+
+// NewAttemptApplicationName returns a cryptographically random, PostgreSQL
+// bounded correlation tag. It is not an authenticated identity.
+func NewAttemptApplicationName() (string, error) {
+	var nonce [16]byte
+	if _, err := rand.Read(nonce[:]); err != nil {
+		return "", fmt.Errorf("create attempt application name: %w", err)
+	}
+	name := "txh015_" + hex.EncodeToString(nonce[:])
+	return name, ValidateAttemptApplicationName(name)
+}
+
+// ConninfoWithAttemptApplicationName ensures the supplied child conninfo
+// carries exactly the bounded attempt tag. Existing options are preserved.
+func ConninfoWithAttemptApplicationName(dsn, name string) (string, error) {
+	if err := ValidateAttemptApplicationName(name); err != nil {
+		return "", err
+	}
+	if _, err := pgx.ParseConfig(dsn); err != nil {
+		return "", fmt.Errorf("parse child PostgreSQL conninfo: %w", err)
+	}
+	if strings.HasPrefix(strings.ToLower(dsn), "postgres://") || strings.HasPrefix(strings.ToLower(dsn), "postgresql://") {
+		u, err := url.Parse(dsn)
+		if err != nil {
+			return "", fmt.Errorf("parse child PostgreSQL URI: %w", err)
+		}
+		query := u.Query()
+		query.Set("application_name", name)
+		u.RawQuery = query.Encode()
+		return u.String(), nil
+	}
+	options, err := parsePGKeywordDSN(dsn)
+	if err != nil {
+		return "", errors.New("parse child PostgreSQL keyword conninfo")
+	}
+	found := false
+	for i := range options {
+		if options[i].key != "application_name" {
+			continue
+		}
+		if found {
+			return "", errors.New("duplicate application_name in child PostgreSQL conninfo")
+		}
+		options[i].value = name
+		found = true
+	}
+	if !found {
+		options = append(options, pgConnOption{key: "application_name", value: name})
+	}
+	return formatPGKeywordDSN(options), nil
+}
+
+// CheckTargetQuiescent performs one fail-closed target observation. It first
+// proves the observer is superuser or a member of pg_read_all_stats, then
+// counts exact application_name matches in pg_stat_activity. A bounded caller
+// should repeat this under its own deadline until true or timeout.
+func CheckTargetQuiescent(ctx context.Context, targetDSN, appName string) (bool, error) {
+	if ctx == nil {
+		return false, errors.New("target observer context is unknown")
+	}
+	if err := ValidateAttemptApplicationName(appName); err != nil {
+		return false, err
+	}
+	if strings.TrimSpace(targetDSN) == "" {
+		return false, errors.New("target observer DSN is unknown")
+	}
+	conn, err := pgx.Connect(ctx, targetDSN)
+	if err != nil {
+		return false, fmt.Errorf("connect target observer: %w", err)
+	}
+	defer conn.Close(context.Background())
+	var visible bool
+	if err := conn.QueryRow(ctx, `SELECT rolsuper OR pg_has_role(current_user, 'pg_read_all_stats', 'USAGE') FROM pg_roles WHERE rolname = current_user`).Scan(&visible); err != nil {
+		return false, fmt.Errorf("check target observer visibility: %w", err)
+	}
+	if !visible {
+		return false, errors.New("target observer lacks pg_read_all_stats visibility")
+	}
+	var matches int64
+	if err := conn.QueryRow(ctx, `SELECT count(*) FROM pg_stat_activity WHERE application_name = $1`, appName).Scan(&matches); err != nil {
+		return false, fmt.Errorf("observe target application sessions: %w", err)
+	}
+	return matches == 0, nil
+}
+
+// WaitTargetQuiescent polls the visibility-checked observer within timeout.
+// Timeout, query/visibility errors, or an unknown attempt tag fail closed.
+func WaitTargetQuiescent(ctx context.Context, targetDSN, appName string, timeout, interval time.Duration) error {
+	if ctx == nil || timeout <= 0 {
+		return errors.New("observer context and positive quiescence timeout are required")
+	}
+	if interval <= 0 {
+		interval = 100 * time.Millisecond
+	}
+	bounded, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		quiet, err := CheckTargetQuiescent(bounded, targetDSN, appName)
+		if err != nil {
+			return err
+		}
+		if quiet {
+			return nil
+		}
+		select {
+		case <-bounded.Done():
+			return fmt.Errorf("target application sessions did not quiesce before deadline: %w", bounded.Err())
+		case <-ticker.C:
+		}
+	}
+}

@@ -146,14 +146,14 @@ var recoveryAdminActions = []recoveryAdminAction{
 	{
 		name:    "verify-backup",
 		summary: "restore a backup into an isolated target and verify it",
-		usage:   "verify-backup --manifest M --target-dsn TARGET [--instance ID] [--operation-id ID]",
+		usage:   "verify-backup --manifest M [--target-dsn ASSERTION] [--instance ID] [--operation-id ID]",
 		flags: []recoveryAdminFlag{
 			{name: "manifest", usage: "manifest path (required)"},
-			{name: "target-dsn", usage: "isolated target DSN (required)"},
+			{name: "target-dsn", usage: "optional equality assertion for the deployment-configured isolated target (not used as a connection target)"},
 			{name: "instance", usage: "recovery instance id that binds the conclusion (optional)"},
 			{name: "operation-id", usage: "idempotency key (optional); same id+input replays with zero side effects, a changed input conflicts with zero writes; omitted = a real rerun (non-replay)"},
 		},
-		required: []string{"manifest", "target-dsn"},
+		required: []string{"manifest"},
 	},
 	{
 		name:    "restore",

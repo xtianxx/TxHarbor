@@ -459,19 +459,55 @@ func CommitEvidenceWrite(ctx context.Context, store *controlstore.Store, req Evi
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 
-	locked, err := controlstore.LockInstance(ctx, tx, req.InstanceID)
-	if err != nil {
+	if _, err := controlstore.LockInstance(ctx, tx, req.InstanceID); err != nil {
 		return EvidenceWriteOutcome{}, fmt.Errorf("lock instance for evidence write: %w", err)
 	}
-	observed := LockedEvidenceToken(locked)
+	outcome, err := CommitEvidenceWriteTx(ctx, tx, req)
+	if err != nil {
+		return EvidenceWriteOutcome{}, err
+	}
+	if outcome.Discarded {
+		// Preserve the standalone API's established behavior: even though the
+		// result is discarded, its protocol audit is committed on its own.
+		if err := tx.Commit(ctx); err != nil {
+			return EvidenceWriteOutcome{}, fmt.Errorf("commit evidence discard audit: %w", err)
+		}
+		return outcome, nil
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return EvidenceWriteOutcome{}, fmt.Errorf("commit evidence write: %w", err)
+	}
+	return outcome, nil
+}
 
+// CommitEvidenceWriteTx applies the evidence-generation protocol in tx without
+// acquiring locks or committing. The caller MUST already hold the
+// recovery_instance row lock. Target-writing callers must additionally hold
+// the shared target-session lock, acquired before the instance row lock.
+// This avoids nested instance-lock deadlocks in restore marker and post-probe
+// acceptance workflows; ordinary evidence writers need no target lock.
+//
+// The outcome is Discarded when the captured token is stale. In that case this
+// helper writes only the discarded evidence_write audit row: callers must not
+// treat the write as guard-clean or persist result rows, and may commit the
+// transaction only if they intentionally want to retain that discard audit.
+// Accepted result rows, generation/hash advancement, and protocol audit are
+// all part of the caller's transaction and therefore share its commit/rollback.
+func CommitEvidenceWriteTx(ctx context.Context, tx pgx.Tx, req EvidenceWriteRequest) (EvidenceWriteOutcome, error) {
+	if tx == nil {
+		return EvidenceWriteOutcome{}, errors.New("transaction-scoped evidence write requires a transaction")
+	}
+	if err := req.validate(); err != nil {
+		return EvidenceWriteOutcome{}, err
+	}
+	observed, err := CaptureEvidenceToken(ctx, tx, req.InstanceID)
+	if err != nil {
+		return EvidenceWriteOutcome{}, fmt.Errorf("read evidence token in evidence write transaction: %w", err)
+	}
 	if mismatch := req.Token.Validate(observed); mismatch != nil {
 		reason := boundedEvidenceDetail("evidence write discarded: " + strings.Join(mismatch.Reasons(), "; "))
 		if err := writeEvidenceTransitionAudit(ctx, tx, req, observed, EvidenceToken{}, controlstore.AuditDiscarded, reason); err != nil {
 			return EvidenceWriteOutcome{}, err
-		}
-		if err := tx.Commit(ctx); err != nil {
-			return EvidenceWriteOutcome{}, fmt.Errorf("commit evidence discard audit: %w", err)
 		}
 		return EvidenceWriteOutcome{
 			Discarded:     true,
@@ -480,10 +516,6 @@ func CommitEvidenceWrite(ctx context.Context, store *controlstore.Store, req Evi
 			DiscardReason: reason,
 		}, nil
 	}
-
-	// A matching token can only be a token captured while the instance was
-	// open; this check is belt-and-braces so a hand-built closed-instance
-	// token can never write evidence.
 	if observed.State != "open" {
 		return EvidenceWriteOutcome{}, fmt.Errorf("%w: %s", controlstore.ErrInstanceNotOpen, observed.InstanceID)
 	}
@@ -498,7 +530,6 @@ func CommitEvidenceWrite(ctx context.Context, store *controlstore.Store, req Evi
 	if err := req.Apply(ctx, tx, accepted); err != nil {
 		return EvidenceWriteOutcome{}, fmt.Errorf("apply %s evidence write: %w", req.Kind, err)
 	}
-
 	tag, err := tx.Exec(ctx, advanceEvidenceGenerationSQL,
 		accepted.InstanceID, accepted.Generation, accepted.Hash, observed.Generation)
 	if err != nil {
@@ -509,12 +540,8 @@ func CommitEvidenceWrite(ctx context.Context, store *controlstore.Store, req Evi
 			"advance evidence generation matched %d rows, expected exactly 1: instance=%s generation=%d",
 			tag.RowsAffected(), accepted.InstanceID, observed.Generation)
 	}
-
 	if err := writeEvidenceTransitionAudit(ctx, tx, req, observed, accepted, controlstore.AuditOK, ""); err != nil {
 		return EvidenceWriteOutcome{}, err
-	}
-	if err := tx.Commit(ctx); err != nil {
-		return EvidenceWriteOutcome{}, fmt.Errorf("commit evidence write: %w", err)
 	}
 	return EvidenceWriteOutcome{Token: accepted}, nil
 }

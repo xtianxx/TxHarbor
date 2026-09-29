@@ -101,7 +101,11 @@ func TestControlIntegrationIdentityPath(t *testing.T) {
 	}
 
 	// 4) participant-register resolves person_id from the mapping.
-	instance, err := store.OpenInstance(ctx, controlstore.OpenInstanceRequest{Kind: "recovery", OpenedBy: "deploy:manager"})
+	target := cliTargetBinding(t, env[config.EnvPGDSN])
+	instance, err := store.OpenInstance(ctx, controlstore.OpenInstanceRequest{
+		Kind: "recovery", OpenedBy: "deploy:manager",
+		TargetGuardKey: target.TargetGuardKey, TargetRoleFingerprint: target.TargetRoleFingerprint,
+	})
 	if err != nil {
 		t.Fatalf("open instance: %v", err)
 	}

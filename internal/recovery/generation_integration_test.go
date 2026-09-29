@@ -42,6 +42,11 @@ import (
 
 const generationPGImage = "postgres:18.6-trixie"
 
+const (
+	generationTargetGuardKey        = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	generationTargetRoleFingerprint = "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+)
+
 func TestMain(m *testing.M) {
 	os.Exit(runGenerationIntegration(m))
 }
@@ -139,8 +144,18 @@ func namedGenerationPool(t *testing.T, dsn, appName string) *pgxpool.Pool {
 
 func openGenerationInstance(t *testing.T, ctx context.Context, store *controlstore.Store) string {
 	t.Helper()
+	if _, err := store.Pool().Exec(ctx, `INSERT INTO recovery_target_guard
+		(target_guard_key, disposition, operation_id, clean_at, rebuild_evidence)
+		VALUES ($1, 'clean', $2, now(), '{"fixture":"clean"}')
+		ON CONFLICT (target_guard_key) DO UPDATE SET disposition='clean', active_writer=FALSE,
+		launch_intent=FALSE, attempt_app_name=NULL, launch_intent_at=NULL,
+		launched_at=NULL, rebuild_required_at=NULL, clean_at=now(), rebuild_evidence='{"fixture":"clean"}'`,
+		generationTargetGuardKey, "generation-clean-target"); err != nil {
+		t.Fatalf("seed clean target guard: %v", err)
+	}
 	result, err := store.OpenInstance(ctx, controlstore.OpenInstanceRequest{
-		Kind: "recovery", OpenedBy: "deploy:executor",
+		Kind: "recovery", OpenedBy: "deploy:executor", EntryChainInventory: []uint64{1},
+		TargetGuardKey: generationTargetGuardKey, TargetRoleFingerprint: generationTargetRoleFingerprint,
 	})
 	if err != nil {
 		t.Fatalf("open instance: %v", err)
@@ -287,6 +302,146 @@ WHERE instance_id = $1 AND action = 'evidence_write'`, instanceID).
 	}
 	if generation, _ := instanceEvidenceState(t, ctx, pool, instanceID); generation != 2 {
 		t.Fatalf("instance generation after second write = %d, want 2", generation)
+	}
+}
+
+// Transaction-scoped callers already own the instance and target-session
+// locks. Verify the marker, guard preparation, result row and generation audit
+// follow the caller's commit/rollback boundary as one unit.
+func TestGenerationTxWriteSharesCallerTransaction(t *testing.T) {
+	ctx, _, pool, store := generationControlStore(t)
+	instanceID := openGenerationInstance(t, ctx, store)
+	token, err := CaptureEvidenceToken(ctx, pool, instanceID)
+	if err != nil {
+		t.Fatalf("capture token: %v", err)
+	}
+	request := EvidenceWriteRequest{
+		InstanceID: instanceID, Token: token, Kind: MutationRestoreStarted,
+		Actor: "deploy:executor", OperationID: "tx-restore-marker",
+		Apply: func(ctx context.Context, tx pgx.Tx, accepted EvidenceToken) error {
+			if err := insertVerificationEvidenceTx(ctx, tx, accepted, "tx-marker"); err != nil {
+				return err
+			}
+			// The generation marker and real target-guard preparation share this
+			// transaction, just as restore's prelaunch marker requires.
+			return controlstore.PrepareTargetGuard(ctx, tx, generationTargetGuardKey, "tx-restore-marker")
+		},
+	}
+
+	// Rollback must undo every accepted component, including caller-owned guard
+	// preparation, without the helper committing underneath the caller.
+	tx, err := pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin rollback transaction: %v", err)
+	}
+	if _, err := controlstore.LockInstance(ctx, tx, instanceID); err != nil {
+		t.Fatalf("lock instance: %v", err)
+	}
+	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtext($1))`, "generation-target-session"); err != nil {
+		t.Fatalf("acquire target-session lock: %v", err)
+	}
+	rolledBack, err := CommitEvidenceWriteTx(ctx, tx, request)
+	if err != nil || rolledBack.Discarded {
+		t.Fatalf("transaction-scoped accepted write: outcome=%+v err=%v", rolledBack, err)
+	}
+	if err := tx.Rollback(ctx); err != nil {
+		t.Fatalf("rollback accepted transaction: %v", err)
+	}
+	if n := countGenerationRows(t, ctx, pool,
+		"SELECT count(*) FROM recovery_evidence WHERE instance_id = $1", instanceID); n != 0 {
+		t.Fatalf("rolled-back evidence marker rows = %d, want 0", n)
+	}
+	var disposition string
+	if err := pool.QueryRow(ctx, "SELECT disposition FROM recovery_target_guard WHERE target_guard_key = $1", generationTargetGuardKey).Scan(&disposition); err != nil {
+		t.Fatalf("read guard after rollback: %v", err)
+	}
+	if disposition != "clean" {
+		t.Fatalf("guard after rollback = %q, want clean", disposition)
+	}
+	if generation, _ := instanceEvidenceState(t, ctx, pool, instanceID); generation != 0 {
+		t.Fatalf("generation after rollback = %d, want 0", generation)
+	}
+
+	// Retry with the same token and commit. Marker/result, generation/hash,
+	// protocol audit and the caller's guard preparation become visible together.
+	tx, err = pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin commit transaction: %v", err)
+	}
+	if _, err := controlstore.LockInstance(ctx, tx, instanceID); err != nil {
+		t.Fatalf("lock instance for commit: %v", err)
+	}
+	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtext($1))`, "generation-target-session"); err != nil {
+		t.Fatalf("acquire target-session lock for commit: %v", err)
+	}
+	committed, err := CommitEvidenceWriteTx(ctx, tx, request)
+	if err != nil || committed.Discarded {
+		_ = tx.Rollback(ctx)
+		t.Fatalf("transaction-scoped accepted write: outcome=%+v err=%v", committed, err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		t.Fatalf("commit accepted transaction: %v", err)
+	}
+	if generation, hash := instanceEvidenceState(t, ctx, pool, instanceID); generation != 1 || hash != committed.Token.Hash {
+		t.Fatalf("committed generation/hash = (%d, %s), want (1, %s)", generation, hash, committed.Token.Hash)
+	}
+	if n := countGenerationRows(t, ctx, pool,
+		"SELECT count(*) FROM recovery_evidence WHERE instance_id = $1 AND artifact_ref = 'tx-marker'", instanceID); n != 1 {
+		t.Fatalf("committed evidence marker rows = %d, want 1", n)
+	}
+	if err := pool.QueryRow(ctx, "SELECT disposition FROM recovery_target_guard WHERE target_guard_key = $1", generationTargetGuardKey).Scan(&disposition); err != nil {
+		t.Fatalf("read guard after commit: %v", err)
+	}
+	if disposition != "unknown" {
+		t.Fatalf("guard after commit = %q, want unknown", disposition)
+	}
+}
+
+func TestGenerationTxWriteStaleTokenOnlyWritesDiscardAudit(t *testing.T) {
+	ctx, _, pool, store := generationControlStore(t)
+	instanceID := openGenerationInstance(t, ctx, store)
+	stale, err := CaptureEvidenceToken(ctx, pool, instanceID)
+	if err != nil {
+		t.Fatalf("capture stale token: %v", err)
+	}
+	if _, err := CommitEvidenceWrite(ctx, store, EvidenceWriteRequest{
+		InstanceID: instanceID, Token: stale, Kind: MutationVerificationBatch,
+		Actor: "deploy:verifier", OperationID: "advance-before-stale-tx",
+		Apply: func(ctx context.Context, tx pgx.Tx, accepted EvidenceToken) error {
+			return insertVerificationEvidenceTx(ctx, tx, accepted, "advance-before-stale-tx")
+		},
+	}); err != nil {
+		t.Fatalf("advance generation: %v", err)
+	}
+
+	tx, err := pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin stale transaction: %v", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	if _, err := controlstore.LockInstance(ctx, tx, instanceID); err != nil {
+		t.Fatalf("lock instance: %v", err)
+	}
+	outcome, err := CommitEvidenceWriteTx(ctx, tx, EvidenceWriteRequest{
+		InstanceID: instanceID, Token: stale, Kind: MutationVerificationBatch,
+		Actor: "deploy:verifier", OperationID: "stale-tx-write",
+		Apply: func(ctx context.Context, tx pgx.Tx, accepted EvidenceToken) error {
+			return insertVerificationEvidenceTx(ctx, tx, accepted, "must-not-exist")
+		},
+	})
+	if err != nil || !outcome.Discarded || outcome.Mismatch == nil {
+		t.Fatalf("stale transaction-scoped write = %+v, err=%v; want discarded", outcome, err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		t.Fatalf("commit discard audit: %v", err)
+	}
+	if n := countGenerationRows(t, ctx, pool,
+		"SELECT count(*) FROM recovery_evidence WHERE instance_id = $1 AND artifact_ref = 'must-not-exist'", instanceID); n != 0 {
+		t.Fatalf("stale result rows = %d, want 0", n)
+	}
+	if n := countGenerationRows(t, ctx, pool,
+		"SELECT count(*) FROM recovery_audit WHERE instance_id = $1 AND action = 'evidence_write' AND operation_id = 'stale-tx-write' AND result = 'discarded'", instanceID); n != 1 {
+		t.Fatalf("stale discard audit rows = %d, want 1", n)
 	}
 }
 

@@ -242,6 +242,7 @@ func raInstanceState(t *testing.T, f *cliFixture) (kind, state string) {
 }
 
 func TestRecoveryAdminVerifyApproveReleaseStatusRealEntry(t *testing.T) {
+	requireNativePGRestore(t)
 	f := newCLIFixture(t)
 	rpcURL := raStartAnvil(t)
 	raSeedV1ChainFacts(t, f, rpcURL)
@@ -590,9 +591,13 @@ func TestRecoveryAdminVerifyApproveReleaseStatusRealEntry(t *testing.T) {
 	// S11 (partial): close refuses over the open gap; supersede refuses a
 	// two-reference same-person basis.
 	// ------------------------------------------------------------------
+	closeEnv := env("deploy:executor")
+	// Close the instance against the authoritative data target bound at open;
+	// the restored database is a separate artifact target, not a rebinding.
+	closeEnv[config.EnvPGDSN] = f.dataDSN
 	code, out, errOut = runRecoveryAdmin(t, []string{
 		"instance-close", "--instance", f.instanceID, "--operation-id", "ra-close-1",
-	}, env("deploy:executor"))
+	}, closeEnv)
 	if code != 1 || !strings.Contains(errOut, "an open evidence gap blocks at least one capability") ||
 		!strings.Contains(errOut, "escalation_required=true") {
 		t.Fatalf("instance-close over an open gap: exit=%d stdout=%q stderr=%q", code, out, errOut)
@@ -605,11 +610,13 @@ func TestRecoveryAdminVerifyApproveReleaseStatusRealEntry(t *testing.T) {
 		t.Fatalf("refused close must keep the instance open, got %q", state)
 	}
 
+	supersedeEnv := env("deploy:executor")
+	supersedeEnv[config.EnvPGDSN] = f.dataDSN
 	code, out, errOut = runRecoveryAdmin(t, []string{
 		"instance-open", "--kind", "recovery", "--supersede", f.instanceID,
 		"--approval-refs", chainScanApproval + "," + queryApproval,
 		"--operation-id", "ra-supersede-1",
-	}, env("deploy:executor"))
+	}, supersedeEnv)
 	if code != 1 || !strings.Contains(errOut, "supersede refused") {
 		t.Fatalf("supersede with two refs of one person: exit=%d stdout=%q stderr=%q", code, out, errOut)
 	}
@@ -803,6 +810,7 @@ func raApprovalClass(t *testing.T, capability recovery.Capability) recovery.Appr
 // non-executor people. No approval, release or close success row is inserted
 // by the test: every state change arrives through the CLI entry functions.
 func TestRecoveryAdminS11PositiveCloseRealEntry(t *testing.T) {
+	requireNativePGRestore(t)
 	f := newCLIFixture(t)
 	rpcURL := raStartAnvil(t)
 	raSeedV1ChainFacts(t, f, rpcURL)
@@ -899,9 +907,11 @@ func TestRecoveryAdminS11PositiveCloseRealEntry(t *testing.T) {
 	// --- S11 precondition: on this run the instance still has open gaps, so
 	// the close must refuse (a positive close is never granted over an open
 	// gap). Every gap is then closed through the real T041 evidence path. ---
+	closeEnv := env("deploy:executor")
+	closeEnv[config.EnvPGDSN] = f.dataDSN
 	code, out, errOut = runRecoveryAdmin(t, []string{
 		"instance-close", "--instance", f.instanceID, "--operation-id", "ra-pos-close-open-gap",
-	}, env("deploy:executor"))
+	}, closeEnv)
 	if code != 1 || !strings.Contains(errOut, "an open evidence gap blocks at least one capability") {
 		t.Fatalf("close over the open gaps must refuse: exit=%d stdout=%q stderr=%q", code, out, errOut)
 	}
@@ -1084,9 +1094,11 @@ func TestRecoveryAdminS11PositiveCloseRealEntry(t *testing.T) {
 
 	// --- S11 positive: close. Every capability is release-valid and no gap is
 	// open, so the instance returns to daily operation. ---
+	closeEnv = env("deploy:executor")
+	closeEnv[config.EnvPGDSN] = f.dataDSN
 	code, out, errOut = runRecoveryAdmin(t, []string{
 		"instance-close", "--instance", f.instanceID, "--operation-id", "ra-pos-close-1",
-	}, env("deploy:executor"))
+	}, closeEnv)
 	if code != 0 || !strings.Contains(out, "closed=true") {
 		t.Fatalf("S11 positive close: exit=%d stdout=%q stderr=%q", code, out, errOut)
 	}

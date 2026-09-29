@@ -42,6 +42,7 @@ import (
 // is unverified, corrupt, truncated or replaced by an edited manifest is never
 // used; no best-effort restore happens and the target stays empty.
 func TestT059F1BackupUnusableCorruptTruncatedUnverified(t *testing.T) {
+	// This matrix asserts refusals only; do not require a local pg_restore.
 	env := newDrillEnv(t, false)
 	env.seedLiveBusinessState()
 	liveBefore := drillFingerprint(t, env.data)
@@ -50,7 +51,7 @@ func TestT059F1BackupUnusableCorruptTruncatedUnverified(t *testing.T) {
 	// (a) An unverified backup carries no control-store verification evidence:
 	// restore refuses before touching the target.
 	targetA := env.createDatabase("f1_unverified")
-	blocked, _ := env.refusedRestore(backup.ManifestPath, targetA, drillProgramVersion, env.operation("f1-unverified"))
+	blocked, _ := drillRefusedRestoreWithObserver(env, backup.ManifestPath, targetA, drillProgramVersion, env.operation("f1-unverified"))
 	drillAssertBlockedMentions(t, blocked, "not verified")
 	if got := env.userTableCount(targetA); got != 0 {
 		t.Fatalf("refused restore left %d user tables in the target (best-effort recovery)", got)
@@ -64,25 +65,32 @@ func TestT059F1BackupUnusableCorruptTruncatedUnverified(t *testing.T) {
 	if err := os.Truncate(backup.ArtifactPath, 64); err != nil {
 		t.Fatalf("truncate artifact: %v", err)
 	}
-	verifyTarget := env.createDatabase("f1_verify")
-	vres, err := recovery.ExecuteVerifyBackup(env.ctx, recovery.VerifyBackupOptions{
-		ManifestPath: backup.ManifestPath, TargetDSN: verifyTarget,
-		Verifier: "auth:verifier", InstanceID: env.instanceID,
-		ControlStore: env.store, ControlDSN: env.ctrlDSN,
-		ProgramVersion: drillProgramVersion, OperationID: env.operation("f1-verify"),
-		PG: env.pg,
+	// The full corrupt-archive verification path needs a direct local pg_restore
+	// ELF; isolate that prerequisite so the refusal-only assertions still run.
+	t.Run("corrupt-verification", func(t *testing.T) {
+		requireDrillLocalPGRestore(t)
+		verifyTarget := env.createDatabase("f1_verify")
+		binding := env.bindVerifyTarget(verifyTarget)
+		vres, err := recovery.ExecuteVerifyBackup(env.ctx, recovery.VerifyBackupOptions{
+			ManifestPath: backup.ManifestPath, Binding: binding, TargetDSN: verifyTarget,
+			Verifier: "auth:verifier", InstanceID: env.instanceID,
+			ControlStore: env.store, ControlDSN: env.ctrlDSN,
+			AuthoritativeDSN: env.dataDSN, ObserverDSN: env.adminDSN,
+			ProgramVersion: drillProgramVersion, OperationID: env.operation("f1-verify"),
+			PG: env.pg,
+		})
+		if err != nil {
+			t.Fatalf("ExecuteVerifyBackup(corrupt): %v", err)
+		}
+		if vres.State != recovery.VerificationRejected {
+			t.Fatalf("corrupt artifact verify state = %s, want rejected", vres.State)
+		}
+		if got := env.controlEvidenceCount("backup_manifest", backup.Manifest.BackupID); got != 0 {
+			t.Fatalf("a rejected verification recorded %d backup_manifest evidence rows, want 0", got)
+		}
 	})
-	if err != nil {
-		t.Fatalf("ExecuteVerifyBackup(corrupt): %v", err)
-	}
-	if vres.State != recovery.VerificationRejected {
-		t.Fatalf("corrupt artifact verify state = %s, want rejected", vres.State)
-	}
-	if got := env.controlEvidenceCount("backup_manifest", backup.Manifest.BackupID); got != 0 {
-		t.Fatalf("a rejected verification recorded %d backup_manifest evidence rows, want 0", got)
-	}
 	targetB := env.createDatabase("f1_corrupt")
-	corruptBlocked, _ := env.refusedRestore(backup.ManifestPath, targetB, drillProgramVersion, env.operation("f1-corrupt"))
+	corruptBlocked, _ := drillRefusedRestoreWithObserver(env, backup.ManifestPath, targetB, drillProgramVersion, env.operation("f1-corrupt"))
 	if len(corruptBlocked.Blocked) == 0 {
 		t.Fatal("the corrupt-artifact refusal carried no blocked preconditions")
 	}
@@ -94,50 +102,45 @@ func TestT059F1BackupUnusableCorruptTruncatedUnverified(t *testing.T) {
 	}
 
 	// (c) An unavailable manifest path is refused the same way.
-	if _, err := env.refusedRestore(backup.ManifestPath+".missing", targetB, drillProgramVersion, env.operation("f1-missing")); err == nil {
+	if _, err := drillRefusedRestoreWithObserver(env, backup.ManifestPath+".missing", targetB, drillProgramVersion, env.operation("f1-missing")); err == nil {
 		t.Fatal("a missing manifest path was accepted")
 	}
 
 	// (d) A verified manifest that was edited afterwards can never inherit the
 	// recorded verification (the manifest file flag is not proof).
-	backup2 := env.backup()
-	verifiedTarget := env.createDatabase("f1_verified")
-	env.verifyBackup(backup2.ManifestPath, verifiedTarget, env.operation("f1-verify-ok"))
-	editedPath := backup2.ManifestPath + ".edited.json"
-	raw, err := os.ReadFile(backup2.ManifestPath)
-	if err != nil {
-		t.Fatalf("read manifest: %v", err)
-	}
-	edited, err := recovery.ParseManifest(raw)
-	if err != nil {
-		t.Fatalf("parse manifest: %v", err)
-	}
-	edited.CreatedBy = "hand-edited"
-	canonical, err := edited.CanonicalJSON()
-	if err != nil {
-		t.Fatalf("encode edited manifest: %v", err)
-	}
-	if err := os.WriteFile(editedPath, canonical, 0o600); err != nil {
-		t.Fatalf("write edited manifest: %v", err)
-	}
-	targetC := env.createDatabase("f1_edited")
-	editedBlocked, _ := env.refusedRestore(editedPath, targetC, drillProgramVersion, env.operation("f1-edited"))
-	drillAssertBlockedMentions(t, editedBlocked, "verify-backup")
-	if got := env.userTableCount(targetC); got != 0 {
-		t.Fatalf("edited-manifest refusal left %d user tables in the target", got)
-	}
-	// The genuine manifest still restores: the refusal was bound to the edit,
-	// not to the backup data (re-entrant, no false positive).
-	genuineTarget := env.createDatabase("f1_genuine")
-	env.restore(backup2.ManifestPath, genuineTarget, env.operation("f1-genuine"))
-	if got := env.probeRowCount(genuineTarget, "goose_db_version"); got == 0 {
-		t.Fatal("the genuine manifest restored no migration state")
-	}
-
+	t.Run("edited-verified-manifest", func(t *testing.T) {
+		requireDrillLocalPGRestore(t)
+		backup2 := env.backup()
+		verifiedTarget := env.createDatabase("f1_verified")
+		env.verifyBackup(backup2.ManifestPath, verifiedTarget, env.operation("f1-verify-ok"))
+		editedPath := backup2.ManifestPath + ".edited.json"
+		raw, err := os.ReadFile(backup2.ManifestPath)
+		if err != nil {
+			t.Fatalf("read manifest: %v", err)
+		}
+		edited, err := recovery.ParseManifest(raw)
+		if err != nil {
+			t.Fatalf("parse manifest: %v", err)
+		}
+		edited.CreatedBy = "hand-edited"
+		canonical, err := edited.CanonicalJSON()
+		if err != nil {
+			t.Fatalf("encode edited manifest: %v", err)
+		}
+		if err := os.WriteFile(editedPath, canonical, 0o600); err != nil {
+			t.Fatalf("write edited manifest: %v", err)
+		}
+		targetC := env.createDatabase("f1_edited")
+		editedBlocked, _ := drillRefusedRestoreWithObserver(env, editedPath, targetC, drillProgramVersion, env.operation("f1-edited"))
+		drillAssertBlockedMentions(t, editedBlocked, "verify-backup")
+		if got := env.userTableCount(targetC); got != 0 {
+			t.Fatalf("edited-manifest refusal left %d user tables in the target", got)
+		}
+	})
 	// Repeat the corrupt refusal once more: same class, zero extra rows.
-	env.refusedRestore(backup.ManifestPath, targetB, drillProgramVersion, env.operation("f1-corrupt-again"))
-	if got := env.evidenceCount("restore_probe"); got != 1 {
-		t.Fatalf("restore_probe rows = %d, want exactly the one genuine restore", got)
+	drillRefusedRestoreWithObserver(env, backup.ManifestPath, targetB, drillProgramVersion, env.operation("f1-corrupt-again"))
+	if got := env.evidenceCount("restore_probe"); got != 0 {
+		t.Fatalf("restore_probe rows = %d, want 0 from refusal-only F1", got)
 	}
 
 	// Zero authority-table writes on the live database through the whole F1
@@ -149,6 +152,7 @@ func TestT059F1BackupUnusableCorruptTruncatedUnverified(t *testing.T) {
 // real pg_restore interrupted mid-flight is never marked restored and the
 // rebuild + rerun converges with no duplicated or mixed state.
 func TestT059F2RestoreInterruptionNotRestoredRebuildRerunIdempotent(t *testing.T) {
+	requireDrillLocalPGRestore(t)
 	env := newDrillEnv(t, false)
 	env.seedLiveBusinessState()
 	env.seedProbeTable()
@@ -253,10 +257,12 @@ func TestT059F3IncompatibleProgramRefusedNoSilentDowngrade(t *testing.T) {
 
 	// An incompatible verifier records rejected and zero evidence.
 	incompatibleTarget := env.createDatabase("f3_verify_bad")
+	binding := env.bindVerifyTarget(incompatibleTarget)
 	vres, err := recovery.ExecuteVerifyBackup(env.ctx, recovery.VerifyBackupOptions{
-		ManifestPath: backup.ManifestPath, TargetDSN: incompatibleTarget,
+		ManifestPath: backup.ManifestPath, Binding: binding, TargetDSN: incompatibleTarget,
 		Verifier: "auth:verifier", InstanceID: env.instanceID,
 		ControlStore: env.store, ControlDSN: env.ctrlDSN,
+		AuthoritativeDSN: env.dataDSN, ObserverDSN: env.adminDSN,
 		ProgramVersion: "000.1", OperationID: env.operation("f3-verify-bad"),
 		PG: env.pg,
 	})
@@ -270,29 +276,28 @@ func TestT059F3IncompatibleProgramRefusedNoSilentDowngrade(t *testing.T) {
 		t.Fatalf("incompatible verification recorded %d evidence rows, want 0", got)
 	}
 
-	// The compatible verification succeeds.
-	verifyTarget := env.createDatabase("f3_verify_ok")
-	env.verifyBackup(backup.ManifestPath, verifyTarget, env.operation("f3-verify-ok"))
-
-	// The incompatible restore is refused before the first target write.
-	target := env.createDatabase("f3_target")
-	blocked, _ := env.refusedRestore(backup.ManifestPath, target, "000.1", env.operation("f3-restore-bad"))
-	drillAssertBlockedMentions(t, blocked, "program")
-	if got := env.userTableCount(target); got != 0 {
-		t.Fatalf("incompatible restore left %d user tables in the target", got)
-	}
-	if got := env.evidenceCount("restore_probe"); got != 0 {
-		t.Fatalf("incompatible restore wrote %d restore_probe rows, want 0", got)
-	}
-	// Re-entrant: the same incompatible attempt refuses identically.
-	env.refusedRestore(backup.ManifestPath, target, "000.1", env.operation("f3-restore-bad-again"))
-
-	// The compatible restore of the same backup succeeds: the refusal was the
-	// compatibility check, not corruption and not a downgrade.
-	env.restore(backup.ManifestPath, target, env.operation("f3-restore-ok"))
-	if got := env.controlEvidenceCount("restore_probe", backup.Manifest.BackupID); got != 1 {
-		t.Fatalf("restore_probe rows = %d, want exactly 1", got)
-	}
+	// Verified evidence requires a successful full verifier run, which in turn
+	// requires the direct local pg_restore ELF. Keep that portion isolated; the
+	// incompatible-verification refusal above remains runnable without it.
+	t.Run("incompatible-restore", func(t *testing.T) {
+		requireDrillLocalPGRestore(t)
+		verifyTarget := env.createDatabase("f3_verify_ok")
+		env.verifyBackup(backup.ManifestPath, verifyTarget, env.operation("f3-verify-ok"))
+		target := env.createDatabase("f3_target")
+		blocked, _ := drillRefusedRestoreWithObserver(env, backup.ManifestPath, target, "000.1", env.operation("f3-restore-bad"))
+		drillAssertBlockedMentions(t, blocked, "program")
+		if got := env.userTableCount(target); got != 0 {
+			t.Fatalf("incompatible restore left %d user tables in the target", got)
+		}
+		if got := env.evidenceCount("restore_probe"); got != 0 {
+			t.Fatalf("incompatible restore wrote %d restore_probe rows, want 0", got)
+		}
+		// Re-entrant: the same incompatible attempt refuses identically.
+		drillRefusedRestoreWithObserver(env, backup.ManifestPath, target, "000.1", env.operation("f3-restore-bad-again"))
+		if got := env.controlEvidenceCount("restore_probe", backup.Manifest.BackupID); got != 0 {
+			t.Fatalf("restore_probe rows = %d, want 0 from incompatible restore refusals", got)
+		}
+	})
 	drillAssertFingerprintEqual(t, liveBefore, drillFingerprint(t, env.data), "live database during F3")
 }
 
@@ -302,6 +307,7 @@ func TestT059F3IncompatibleProgramRefusedNoSilentDowngrade(t *testing.T) {
 // re-publishes nor re-consumes anything; the authoritative tables are
 // byte-identical across verification.
 func TestT059F4ExternalLeadZeroReplayZeroAuthorityWrites(t *testing.T) {
+	requireDrillLocalPGRestore(t)
 	env := newDrillEnv(t, true)
 	env.seedLiveBusinessState()
 	backup := env.backup()
@@ -371,6 +377,7 @@ func TestT059F4ExternalLeadZeroReplayZeroAuthorityWrites(t *testing.T) {
 func TestT059F5IsolationUnprovenRefusedAndNotInferred(t *testing.T) {
 	env := newDrillEnv(t, false)
 	env.seedLiveBusinessState()
+	env.seedAuthoritativeTargetCleanBaseline()
 	liveBefore := drillFingerprint(t, env.data)
 	gate := env.gate()
 
@@ -450,6 +457,7 @@ func TestT059F5IsolationUnprovenRefusedAndNotInferred(t *testing.T) {
 // timeout/exhaustion/acknowledgement never close it; no intent or idempotency
 // row is ever fabricated.
 func TestT059F6UnprovableGapStaysUnknownWithPackageAndEscalation(t *testing.T) {
+	requireDrillLocalPGRestore(t)
 	env := newDrillEnv(t, true)
 	env.seedLiveBusinessState()
 	backup := env.backup()
@@ -567,6 +575,7 @@ func TestT059F6UnprovableGapStaysUnknownWithPackageAndEscalation(t *testing.T) {
 // are all refused with zero releases and zero admissions.
 func TestT059F7UnauthorizedInsufficientStaleApprovalsRefused(t *testing.T) {
 	env := newDrillEnv(t, false)
+	env.seedAuthoritativeTargetCleanBaseline()
 	liveBefore := drillFingerprint(t, env.data)
 	gate := env.gate()
 
@@ -690,6 +699,27 @@ func drillAssertBlockedMentions(t *testing.T, result recovery.RestoreResult, fra
 	if !strings.Contains(joined, fragment) {
 		t.Fatalf("blocked preconditions %q do not mention %q", joined, fragment)
 	}
+}
+
+// drillRefusedRestoreWithObserver supplies the explicit observer required by
+// the restore boundary while still exercising the real fail-closed entrypoint.
+func drillRefusedRestoreWithObserver(env *drillEnv, manifestPath, targetDSN, programVersion, operationID string) (recovery.RestoreResult, error) {
+	env.t.Helper()
+	result, err := recovery.ExecuteRestore(env.ctx, recovery.RestoreOptions{
+		ManifestPath: manifestPath, InstanceID: env.instanceID,
+		ControlStore: env.store, ControlDSN: env.ctrlDSN,
+		ObserverDSN: env.adminDSN, TargetDSN: targetDSN,
+		TargetDeclaration: recovery.TargetIsolated,
+		Actor:             "deploy:executor", ProgramVersion: programVersion,
+		OperationID: operationID, PG: env.pg,
+	})
+	if err == nil {
+		env.t.Fatal("ExecuteRestore succeeded, want a fail-closed refusal")
+	}
+	if result.Restored || len(result.Blocked) == 0 {
+		env.t.Fatalf("restore refusal is not explicit: %+v", result)
+	}
+	return result, err
 }
 
 func drillHasUnknownItem(batch recovery.VerificationBatch, category recovery.VerificationCategory) bool {

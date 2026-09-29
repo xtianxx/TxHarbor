@@ -64,6 +64,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -132,9 +133,12 @@ type bkpFixture struct {
 	ctrl    *pgxpool.Pool
 	store   *controlstore.Store
 
-	instanceID string
-	artDir     string
-	pg         PGCommand
+	instanceID         string
+	restoreTargetDSN   string
+	restoreTargetGuard string
+	restoreTargetRole  string
+	artDir             string
+	pg                 PGCommand
 
 	seq int
 }
@@ -198,15 +202,61 @@ func newBkpFixture(t *testing.T) *bkpFixture {
 	}
 	f.store = store
 
+	// This fixture's configured authoritative target is the migrated data
+	// database. Bind the recovery instance to its immutable endpoint and role.
+	authoritative, err := controlstore.ParseDSNTarget(f.srcDSN)
+	if err != nil {
+		t.Fatalf("parse authoritative target: %v", err)
+	}
+	f.restoreTargetGuard, err = controlstore.TargetGuardKey(authoritative)
+	if err != nil {
+		t.Fatalf("derive authoritative target guard: %v", err)
+	}
+	f.restoreTargetRole = authoritative.DataTargetFingerprint().RoleFingerprint
+	f.restoreTargetDSN = f.srcDSN
+	guardTx, err := f.ctrl.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin test target guard initialization: %v", err)
+	}
+	if err := controlstore.InitializeTargetGuard(ctx, guardTx, f.restoreTargetGuard, "bkp-fixture-target-init"); err != nil {
+		_ = guardTx.Rollback(ctx)
+		t.Fatalf("initialize test target guard: %v", err)
+	}
+	if err := guardTx.Commit(ctx); err != nil {
+		t.Fatalf("commit test target guard initialization: %v", err)
+	}
+
 	// One open recovery instance with an executor and a verifier, registered
-	// through the real write paths.
+	// through the real write paths. The test-only clean baseline below is
+	// explicit controlled evidence; tests never bootstrap a production guard.
 	opened, err := store.OpenInstance(ctx, controlstore.OpenInstanceRequest{
-		Kind: "recovery", OpenedBy: "deploy:executor",
+		Kind: "recovery", OpenedBy: "deploy:executor", EntryChainInventory: []uint64{1},
+		TargetGuardKey: f.restoreTargetGuard, TargetRoleFingerprint: f.restoreTargetRole,
 	})
 	if err != nil {
 		t.Fatalf("open recovery instance: %v", err)
 	}
 	f.instanceID = opened.InstanceID
+	baselineTx, err := f.ctrl.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin test-only authoritative target baseline: %v", err)
+	}
+	baselineEvidence := []byte(fmt.Sprintf(
+		`{"controlled_test_baseline":true,"fixture":"backup-restore","target_guard_key":%q,"target_role_fingerprint":%q}`,
+		f.restoreTargetGuard, f.restoreTargetRole))
+	if err := controlstore.RecordTargetGuardRebuild(ctx, baselineTx, f.instanceID, f.restoreTargetGuard,
+		"deploy:test", "bkp-fixture-target-baseline", baselineEvidence); err != nil {
+		_ = baselineTx.Rollback(ctx)
+		t.Fatalf("record test-only target baseline evidence: %v", err)
+	}
+	if err := controlstore.ResolveTargetGuardClean(ctx, baselineTx, f.restoreTargetGuard,
+		"bkp-fixture-target-baseline", baselineEvidence); err != nil {
+		_ = baselineTx.Rollback(ctx)
+		t.Fatalf("resolve test-only target baseline: %v", err)
+	}
+	if err := baselineTx.Commit(ctx); err != nil {
+		t.Fatalf("commit test-only target baseline: %v", err)
+	}
 	f.mapIdentity(t, "deploy:executor", "person-executor")
 	f.mapIdentity(t, "auth:verifier", "person-verifier")
 	f.register(t, "deploy:executor", "executor")
@@ -259,7 +309,62 @@ func (f *bkpFixture) rebuildTarget(t *testing.T, target bkpTarget) string {
 	if _, err := f.admin.Exec(f.ctx, "CREATE DATABASE "+pgx.Identifier{target.name}.Sanitize()); err != nil {
 		t.Fatalf("recreate target %s: %v", target.name, err)
 	}
+	if target.name == bkpDBNameOf(t, f.adminDSN, f.restoreTargetDSN) {
+		f.resolveTestTargetBaseline(t, "after-rebuild")
+	}
 	return bkpDSNFor(t, f.adminDSN, target.name)
+}
+
+// resolveTestTargetBaseline is test-only controlled evidence after this
+// fixture has physically dropped and recreated its authoritative target.
+func (f *bkpFixture) resolveTestTargetBaseline(t *testing.T, suffix string) {
+	t.Helper()
+	op := "bkp-fixture-target-baseline-" + suffix
+	evidence := []byte(fmt.Sprintf(
+		`{"controlled_test_baseline":true,"fixture":"backup-restore","target":"recreated-authoritative","target_guard_key":%q,"target_role_fingerprint":%q}`,
+		f.restoreTargetGuard, f.restoreTargetRole))
+	tx, err := f.ctrl.Begin(f.ctx)
+	if err != nil {
+		t.Fatalf("begin controlled test target baseline: %v", err)
+	}
+	defer func() { _ = tx.Rollback(f.ctx) }()
+	if err := controlstore.RecordTargetGuardRebuild(f.ctx, tx, f.instanceID, f.restoreTargetGuard,
+		"deploy:test", op, evidence); err != nil {
+		t.Fatalf("record controlled test target rebuild evidence: %v", err)
+	}
+	if err := controlstore.ResolveTargetGuardClean(f.ctx, tx, f.restoreTargetGuard, op, evidence); err != nil {
+		t.Fatalf("resolve controlled test target baseline: %v", err)
+	}
+	if err := tx.Commit(f.ctx); err != nil {
+		t.Fatalf("commit controlled test target baseline: %v", err)
+	}
+}
+
+func TestBkpFixtureVerifyTargetBindingIsDistinctAndTestControlled(t *testing.T) {
+	f := newBkpFixture(t)
+	verifyDSN := f.createDatabase(t, "verify_binding")
+	binding := f.bindTestVerifyTarget(t, verifyDSN)
+	authoritative, err := controlstore.ParseDSNTarget(f.srcDSN)
+	if err != nil {
+		t.Fatal(err)
+	}
+	verified, err := controlstore.ParseDSNTarget(binding.BoundDSN())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.EqualFold(authoritative.Host, verified.Host) || authoritative.Port != verified.Port || authoritative.Database == verified.Database {
+		t.Fatalf("verification target must be a distinct database on the authoritative endpoint: authoritative=%+v verify=%+v", authoritative, verified)
+	}
+	guard, found, err := controlstore.ReadTargetGuard(f.ctx, f.ctrl, binding.TargetGuardKey())
+	if err != nil || !found || guard.State != controlstore.TargetGuardClean {
+		t.Fatalf("isolated verification guard is not clean: guard=%+v found=%t err=%v", guard, found, err)
+	}
+	var baseline struct {
+		ControlledTestBaseline bool `json:"controlled_test_baseline"`
+	}
+	if err := json.Unmarshal(guard.RebuildEvidence, &baseline); err != nil || !baseline.ControlledTestBaseline {
+		t.Fatalf("verify guard clean state lacks explicit test-only baseline evidence: evidence=%s err=%v", guard.RebuildEvidence, err)
+	}
 }
 
 // controlEvidenceCount counts control-store evidence rows for one backup and
@@ -663,14 +768,22 @@ func bkpEqualInt64(a, b []int64) bool {
 // bkpVerifyBackup is the shared happy-path verify call.
 func (f *bkpFixture) verifyBackup(t *testing.T, manifestPath, targetDSN string) VerifyBackupResult {
 	t.Helper()
+	requireLocalPGRestore(t)
+	binding := f.bindTestVerifyTarget(t, targetDSN)
+	// Fixture target DSNs use the container superuser, which can observe the
+	// exact tagged restore session used by quiescence checks.
 	result, err := ExecuteVerifyBackup(f.ctx, VerifyBackupOptions{
-		ManifestPath:   manifestPath,
-		TargetDSN:      targetDSN,
-		Verifier:       "auth:verifier",
-		InstanceID:     f.instanceID,
-		ControlStore:   f.store,
-		ProgramVersion: bkpProgramVersion,
-		PG:             f.pg,
+		ManifestPath:     manifestPath,
+		Binding:          binding,
+		TargetDSN:        targetDSN,
+		Verifier:         "auth:verifier",
+		InstanceID:       f.instanceID,
+		ControlStore:     f.store,
+		ControlDSN:       f.ctrlDSN,
+		AuthoritativeDSN: f.srcDSN,
+		ObserverDSN:      targetDSN,
+		ProgramVersion:   bkpProgramVersion,
+		PG:               f.pg,
 	})
 	if err != nil {
 		t.Fatalf("ExecuteVerifyBackup(%s): %v", filepath.Base(manifestPath), err)
@@ -678,15 +791,52 @@ func (f *bkpFixture) verifyBackup(t *testing.T, manifestPath, targetDSN string) 
 	return result
 }
 
+// bindTestVerifyTarget models the deployment-configured isolated database:
+// it is a distinct database on the authoritative cluster, and collision
+// checks use the current open-instance inventory. Its clean row is only
+// controlled test-baseline evidence, never production proof.
+func (f *bkpFixture) bindTestVerifyTarget(t *testing.T, targetDSN string) IsolatedTarget {
+	t.Helper()
+	open, err := readOpenIsolatedBindings(f.ctx, f.store)
+	if err != nil {
+		t.Fatalf("read current open target bindings: %v", err)
+	}
+	binding, err := BindIsolatedTarget(f.srcDSN, f.ctrlDSN, targetDSN, open)
+	if err != nil {
+		t.Fatalf("bind isolated test verification target: %v", err)
+	}
+	tx, err := f.ctrl.Begin(f.ctx)
+	if err != nil {
+		t.Fatalf("begin isolated test target guard baseline: %v", err)
+	}
+	defer func() { _ = tx.Rollback(f.ctx) }()
+	evidence := []byte(fmt.Sprintf(
+		`{"controlled_test_baseline":true,"fixture":"backup-restore","purpose":"isolated-verification-target","target_guard_key":%q,"target_role_fingerprint":%q}`,
+		binding.TargetGuardKey(), binding.RoleFingerprint()))
+	if err := controlstore.InitializeTargetGuard(f.ctx, tx, binding.TargetGuardKey(), "bkp-fixture-verify-init"); err != nil {
+		t.Fatalf("initialize isolated test target guard: %v", err)
+	}
+	if err := controlstore.ResolveTargetGuardClean(f.ctx, tx, binding.TargetGuardKey(),
+		"bkp-fixture-verify-baseline", evidence); err != nil {
+		t.Fatalf("resolve isolated test target baseline: %v", err)
+	}
+	if err := tx.Commit(f.ctx); err != nil {
+		t.Fatalf("commit isolated test target baseline: %v", err)
+	}
+	return binding
+}
+
 // restore is the shared happy-path restore call.
 func (f *bkpFixture) restore(t *testing.T, manifestPath, targetDSN string, declaration TargetDeclaration, reason string) RestoreResult {
 	t.Helper()
+	requireLocalPGRestore(t)
 	result, err := ExecuteRestore(f.ctx, RestoreOptions{
 		ManifestPath:      manifestPath,
 		InstanceID:        f.instanceID,
 		ControlStore:      f.store,
 		ControlDSN:        f.ctrlDSN,
 		TargetDSN:         targetDSN,
+		ObserverDSN:       targetDSN,
 		TargetDeclaration: declaration,
 		TargetReason:      reason,
 		Actor:             "deploy:executor",
@@ -697,6 +847,13 @@ func (f *bkpFixture) restore(t *testing.T, manifestPath, targetDSN string, decla
 		t.Fatalf("ExecuteRestore(%s): %v", filepath.Base(manifestPath), err)
 	}
 	return result
+}
+
+func requireLocalPGRestore(t *testing.T) {
+	t.Helper()
+	if _, err := exec.LookPath("pg_restore"); err != nil {
+		t.Skip("NOT RUN: supervised restore requires a local pg_restore executable; the injected container PGCommand only lists archives and is not the supervised child")
+	}
 }
 
 // bkpBackup runs the real backup and returns its result.
@@ -728,6 +885,7 @@ func (f *bkpFixture) refusedRestore(t *testing.T, manifestPath, targetDSN string
 		ControlStore:      f.store,
 		ControlDSN:        f.ctrlDSN,
 		TargetDSN:         targetDSN,
+		ObserverDSN:       targetDSN,
 		TargetDeclaration: TargetIsolated,
 		Actor:             "deploy:executor",
 		ProgramVersion:    bkpProgramVersion,
@@ -844,9 +1002,9 @@ func TestBackupVerifyRestoreSnapshotBoundIsolated(t *testing.T) {
 		t.Fatalf("verify target goose set = %v, want manifest set %v", got, want)
 	}
 
-	// restore: isolated target, probe rows, restored evidence.
-	restoreTarget := f.createDatabase(t, "tgt_restore")
-	restored := f.restore(t, backup.ManifestPath, restoreTarget, TargetIsolated, "")
+	// Restore targets the fixture's configured authoritative database.
+	restoreTarget := f.restoreTargetDSN
+	restored := f.restore(t, backup.ManifestPath, restoreTarget, TargetProductionMain, "controlled integration restore")
 	if !restored.Restored {
 		t.Fatalf("restore result = %+v, want Restored=true", restored)
 	}
@@ -1079,13 +1237,10 @@ func TestRestoreInterruptionNotRestoredAndRerunIdempotent(t *testing.T) {
 		t.Fatalf("verify state = %q, want verified", got.State)
 	}
 
-	target := f.createDatabase(t, "tgt_interrupt")
+	target := f.restoreTargetDSN
 	// Park pg_restore on a lock the test holds: the target carries a
 	// conflicting probe table and the locker holds ACCESS EXCLUSIVE.
 	locker := bkpConnect(t, target)
-	if _, err := locker.Exec(f.ctx, `CREATE TABLE `+bkpProbeTable+` (dummy text)`); err != nil {
-		t.Fatalf("create conflicting table: %v", err)
-	}
 	if _, err := locker.Exec(f.ctx, `BEGIN`); err != nil {
 		t.Fatalf("begin locker: %v", err)
 	}
@@ -1105,7 +1260,9 @@ func TestRestoreInterruptionNotRestoredAndRerunIdempotent(t *testing.T) {
 			ControlStore:      f.store,
 			ControlDSN:        f.ctrlDSN,
 			TargetDSN:         target,
-			TargetDeclaration: TargetIsolated,
+			ObserverDSN:       target,
+			TargetDeclaration: TargetProductionMain,
+			TargetReason:      "controlled restore interruption integration",
 			Actor:             "deploy:executor",
 			ProgramVersion:    bkpProgramVersion,
 			PG:                f.pg,
@@ -1143,7 +1300,7 @@ func TestRestoreInterruptionNotRestoredAndRerunIdempotent(t *testing.T) {
 	// Retry = rebuild the target database, then rerun (idempotent; no
 	// duplicated or mixed state).
 	rebuilt := f.rebuildTarget(t, bkpTarget{name: bkpDBNameOf(t, f.adminDSN, target), dsn: target})
-	rerun := f.restore(t, backup.ManifestPath, rebuilt, TargetIsolated, "")
+	rerun := f.restore(t, backup.ManifestPath, rebuilt, TargetProductionMain, "controlled restore retry after target rebuild")
 	if !rerun.Restored {
 		t.Fatalf("rerun after rebuild = %+v, want Restored=true", rerun)
 	}
@@ -1203,6 +1360,7 @@ func TestRestoreTargetGuardsAndIncompatibleManifestRefused(t *testing.T) {
 		ControlStore:      f.store,
 		ControlDSN:        f.ctrlDSN,
 		TargetDSN:         prodTarget,
+		ObserverDSN:       prodTarget,
 		TargetDeclaration: TargetProductionMain,
 		TargetReason:      "",
 		Actor:             "deploy:executor",

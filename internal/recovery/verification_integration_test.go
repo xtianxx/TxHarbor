@@ -383,11 +383,24 @@ func vfyNewFixture(t *testing.T) *vfyFixture {
 	f.store = store
 
 	// One open recovery instance with executor/verifier/approver through the
-	// real write paths.
+	// real write paths. Bind it to the actual data database identity: deriving
+	// these immutable guard values from the authoritative DSN ensures normal
+	// control-store open creates the matching target-guard inventory.
+	dataTarget, err := controlstore.ParseDSNTarget(f.dataDSN)
+	if err != nil {
+		t.Fatalf("parse authoritative data target: %v", err)
+	}
+	targetGuardKey, err := controlstore.TargetGuardKey(dataTarget)
+	if err != nil {
+		t.Fatalf("derive authoritative target guard key: %v", err)
+	}
+	targetRoleFingerprint := dataTarget.DataTargetFingerprint().RoleFingerprint
 	opened, err := recovery.OpenInstance(ctx, store, recovery.OpenInstanceRequest{
-		Kind: "recovery", OpenedBy: "deploy:executor",
-		RestorePoint: []byte(`{"manifest_version":"015.1","backup_id":"vfy-backup"}`),
-		DataTarget:   []byte(`{"database":"vfy_data","role":"vfy_owner"}`),
+		Kind:                  "recovery",
+		OpenedBy:              "deploy:executor",
+		EntryChains:           []uint64{1},
+		TargetGuardKey:        targetGuardKey,
+		TargetRoleFingerprint: targetRoleFingerprint,
 	})
 	if err != nil {
 		t.Fatalf("open recovery instance: %v", err)
@@ -629,7 +642,11 @@ func vfyRequest(f *vfyFixture, anvil *vfyAnvil, data *pgxpool.Pool, deps []sourc
 
 func vfyGate(t *testing.T, f *vfyFixture) *recovery.Gate {
 	t.Helper()
-	gate, err := recovery.NewGate(f.store, recovery.GateOptions{TTL: time.Minute})
+	target, err := recovery.GateTargetBindingFromDSN(f.dataDSN)
+	if err != nil {
+		t.Fatalf("GateTargetBindingFromDSN: %v", err)
+	}
+	gate, err := recovery.NewGate(f.store, recovery.GateOptions{TTL: time.Minute, TrustedTarget: target})
 	if err != nil {
 		t.Fatalf("NewGate: %v", err)
 	}

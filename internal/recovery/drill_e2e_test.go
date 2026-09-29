@@ -52,6 +52,7 @@ import (
 // whole flow leaves both databases without a single duplicated payment or
 // wrong event effect.
 func TestT058DrillE2EBackupAdvanceRestoreRefuseThenRelease(t *testing.T) {
+	requireDrillLocalPGRestore(t)
 	env := newDrillEnv(t, true)
 
 	// --- phase 0: controlled live data (data preparation, not a source) ----
@@ -273,6 +274,7 @@ func TestT058DrillE2EBackupAdvanceRestoreRefuseThenRelease(t *testing.T) {
 // notes, exhausted attempts and a human acknowledgement never close the gap —
 // the affected capability stays paused and the drill records a safe refusal.
 func TestT058DrillGapCannotBeClosedStaysPaused(t *testing.T) {
+	requireDrillLocalPGRestore(t)
 	env := newDrillEnv(t, true)
 	env.seedLiveBusinessState()
 	backup := env.backup()
@@ -871,6 +873,7 @@ func drillKafkaEndOffset(t *testing.T, kafka *drillKafkaBroker) int64 {
 // committed offset, V6 reports the divergence (never a silent re-consumption),
 // and the verification flow neither produces nor consumes on the broker.
 func TestT058DrillEventLayerKafkaBrokerOffsetDivergence(t *testing.T) {
+	requireDrillLocalPGRestore(t)
 	kafka := drillStartKafkaOrSkip(t)
 	const group = "drill-consumer-group"
 	const records = 6

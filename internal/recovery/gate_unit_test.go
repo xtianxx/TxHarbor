@@ -25,6 +25,20 @@ func TestGateTTLConfigKeyMatchesConfig(t *testing.T) {
 	}
 }
 
+func TestGateFingerprintRequiresPersistedSHA256Identity(t *testing.T) {
+	for _, value := range []string{
+		"", "sha256:", "sha256:" + strings.Repeat("A", 64),
+		"sha256:" + strings.Repeat("0", 63), "sha256:" + strings.Repeat("0", 63) + "g",
+	} {
+		if gateFingerprint(value) {
+			t.Errorf("gateFingerprint(%q) = true, want false", value)
+		}
+	}
+	if !gateFingerprint("sha256:" + strings.Repeat("a", 64)) {
+		t.Fatal("full lowercase sha256 fingerprint should be accepted")
+	}
+}
+
 // TestRefusalClassClosedSet pins the 15-class closed set of data-model §3.3 /
 // recovery_audit.refusal_class (schema order) and the Known predicate.
 func TestRefusalClassClosedSet(t *testing.T) {
@@ -125,6 +139,23 @@ func TestNewGateRefusesMissingStoreAndTTL(t *testing.T) {
 	}
 	if _, err := NewGate(store, GateOptions{TTL: time.Minute}); err != nil {
 		t.Fatalf("NewGate with a positive TTL: %v", err)
+	}
+}
+
+func TestGateTargetBindingFromDSN(t *testing.T) {
+	const password = "secret-target-password"
+	binding, err := GateTargetBindingFromDSN("postgres://gate-user:" + password + "@db.internal:5432/recovery-data")
+	if err != nil {
+		t.Fatalf("GateTargetBindingFromDSN: %v", err)
+	}
+	if !gateFingerprint(binding.TargetGuardKey) || !gateFingerprint(binding.TargetRoleFingerprint) {
+		t.Fatalf("binding must contain full fingerprints, got %+v", binding)
+	}
+	if strings.Contains(binding.TargetGuardKey+binding.TargetRoleFingerprint, password) {
+		t.Fatal("binding must not retain DSN credentials")
+	}
+	if _, err := GateTargetBindingFromDSN("not a dsn " + password); err == nil || strings.Contains(err.Error(), password) {
+		t.Fatalf("invalid DSN error must be present and credential-safe, got %v", err)
 	}
 }
 

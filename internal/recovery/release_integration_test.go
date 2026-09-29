@@ -513,7 +513,14 @@ func TestT044EvidenceChangeInvalidatesApprovalsAndRequiresReapproval(t *testing.
 // ---------------------------------------------------------------------------
 
 func TestT044RepeatedApproveReleaseCloseDoNotFlipState(t *testing.T) {
-	s := t044NewService(t, GateOptions{})
+	s := t044NewBoundService(t, GateOptions{})
+	// This bound fixture uses its control-store DSN as the authoritative data
+	// target. Do not inherit gateNewGate's unrelated default trusted target.
+	trustedTarget, err := GateTargetBindingFromDSN(s.f.dsn)
+	if err != nil {
+		t.Fatalf("derive trusted target from fixture authoritative data DSN: %v", err)
+	}
+	s.gate = gateNewGate(t, s.f.store, GateOptions{TrustedTarget: trustedTarget})
 	s.releaseAllCapabilities(t)
 
 	// Repeated approve with the same operation_id: one row, replay flagged.
@@ -580,11 +587,16 @@ func TestT044RepeatedApproveReleaseCloseDoNotFlipState(t *testing.T) {
 	if got := s.admit(t, CapabilityEventPublishing); !got.Allowed {
 		t.Fatalf("released capability must stay admitted after replays, got %+v", got)
 	}
+	// The old fixture scopes are asset/kind-narrow. A close requires the
+	// complete chain-level scopes actually consumed by the deployed entries.
+	t044ReleaseAllEntryScopes(t, s)
 
 	// Close once (all seven released), then 10 repeated closes: zero flips.
 	closeOp := gateOperation("t044-idem-close")
+	guardKey, roleFingerprint := t044BoundTarget(t, s)
 	result, err := CloseInstance(s.f.ctx, s.f.store, s.gate, CloseInstanceRequest{
 		InstanceID: s.f.instanceID, Actor: "deploy:executor", Reason: "t044 close", OperationID: closeOp,
+		TrustedEntryChains: []uint64{1}, TargetGuardKey: guardKey, TargetRoleFingerprint: roleFingerprint,
 	})
 	if err != nil || !result.Closed {
 		t.Fatalf("close over all-released capabilities = (%+v, %v), want closed", result, err)
@@ -596,6 +608,7 @@ func TestT044RepeatedApproveReleaseCloseDoNotFlipState(t *testing.T) {
 	for i := 0; i < 10; i++ {
 		if _, err := CloseInstance(s.f.ctx, s.f.store, s.gate, CloseInstanceRequest{
 			InstanceID: s.f.instanceID, Actor: "deploy:executor", Reason: "repeated close", OperationID: closeOp,
+			TrustedEntryChains: []uint64{1}, TargetGuardKey: guardKey, TargetRoleFingerprint: roleFingerprint,
 		}); err == nil {
 			t.Fatalf("repeated close #%d succeeded; a closed instance must never re-close or flip", i+1)
 		}

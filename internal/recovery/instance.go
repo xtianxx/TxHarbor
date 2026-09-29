@@ -50,6 +50,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 
 	"github.com/google/uuid"
@@ -100,6 +101,13 @@ type OpenInstanceRequest struct {
 	// (the control store validates data_target as fingerprints only).
 	RestorePoint []byte
 	DataTarget   []byte
+	// EntryChains is supplied by authenticated deployment assembly from
+	// TXHARBOR_RECOVERY_ENTRY_CHAINS, never from operator command input.
+	EntryChains []uint64
+	// TargetGuardKey and TargetRoleFingerprint are derived from the deployment's
+	// configured TXHARBOR_PG_DSN, never from operator request data.
+	TargetGuardKey        string
+	TargetRoleFingerprint string
 }
 
 // OpenInstanceResult carries the new instance identity.
@@ -130,12 +138,20 @@ func OpenInstance(ctx context.Context, store *controlstore.Store, req OpenInstan
 	if err != nil {
 		return OpenInstanceResult{}, fmt.Errorf("%w: opened_by: %v", ErrInstanceOpenInput, err)
 	}
+	if kind == "recovery" {
+		if err := controlstore.ValidateEntryChainInventory(req.EntryChains); err != nil {
+			return OpenInstanceResult{}, fmt.Errorf("%w: %v", ErrInstanceOpenInput, err)
+		}
+	}
 	result, err := store.OpenInstance(ctx, controlstore.OpenInstanceRequest{
-		Kind:         kind,
-		OpenedBy:     openedBy,
-		Reason:       req.Reason,
-		RestorePoint: req.RestorePoint,
-		DataTarget:   req.DataTarget,
+		Kind:                  kind,
+		OpenedBy:              openedBy,
+		Reason:                req.Reason,
+		RestorePoint:          req.RestorePoint,
+		DataTarget:            req.DataTarget,
+		EntryChainInventory:   req.EntryChains,
+		TargetGuardKey:        req.TargetGuardKey,
+		TargetRoleFingerprint: req.TargetRoleFingerprint,
 	})
 	if err != nil {
 		return OpenInstanceResult{}, err
@@ -154,6 +170,13 @@ type CloseInstanceRequest struct {
 	Reason string
 	// OperationID is the command idempotency key carried into the audit rows.
 	OperationID string
+	// TrustedEntryChains comes from deployment assembly and must exactly match
+	// the immutable instance-open snapshot. The code can verify this binding,
+	// not whether deployment configuration is complete: completeness is a
+	// deployment trust assumption, never something inferred from release rows.
+	TrustedEntryChains    []uint64
+	TargetGuardKey        string
+	TargetRoleFingerprint string
 }
 
 // CloseInstanceResult reports one close attempt. On a blocked attempt Closed
@@ -184,6 +207,9 @@ func CloseInstance(ctx context.Context, store *controlstore.Store, gate *Gate, r
 	if gate == nil {
 		return CloseInstanceResult{}, errors.New("close recovery instance requires the derived release evaluation gate")
 	}
+	if err := controlstore.ValidateEntryChainInventory(req.TrustedEntryChains); err != nil {
+		return CloseInstanceResult{}, fmt.Errorf("close recovery instance requires trusted deployment entry chains: %w", err)
+	}
 	instanceID, err := lifecycleInstanceID(req.InstanceID)
 	if err != nil {
 		return CloseInstanceResult{}, err
@@ -206,6 +232,19 @@ func CloseInstance(ctx context.Context, store *controlstore.Store, gate *Gate, r
 	result := CloseInstanceResult{InstanceID: locked.InstanceID}
 	if locked.State != "open" {
 		return result, fmt.Errorf("%w: %s", controlstore.ErrInstanceNotOpen, locked.InstanceID)
+	}
+	if err := controlstore.RequireInstanceTargetBinding(ctx, tx, locked, req.TargetGuardKey, req.TargetRoleFingerprint); err != nil {
+		return CloseInstanceResult{InstanceID: locked.InstanceID}, err
+	}
+	// Closing is an executor action. Re-derive role membership and the active
+	// identity mapping under the same control-store transaction as the close;
+	// CLI checks are useful feedback, not the authorization boundary.
+	ids := newGateIdentities(ctx, tx, locked.InstanceID, locked.OpenedBy)
+	if err := ids.ensureParticipants(); err != nil {
+		return result, err
+	}
+	if err := requireInstanceExecutor(ids, actor); err != nil {
+		return result, err
 	}
 
 	// baseline is documentation-only deployment state: it never armed the
@@ -262,11 +301,8 @@ func CloseInstance(ctx context.Context, store *controlstore.Store, gate *Gate, r
 		return result, fmt.Errorf("%w: %s", ErrInstanceCloseBlocked, result.Blocked[0])
 	}
 
-	// The full derived evaluation, inside the instance row lock, for every one
-	// of the seven capabilities. Each capability may have release decisions at
-	// more than one scope hash; the first scope whose release is currently
-	// valid releases the capability, and only the single derived evaluation
-	// decides.
+	// Close evaluates the complete deployment-controlled chain-level entry
+	// scope set, never whichever narrow scope happened to be released.
 	gate.invalidateCache(locked)
 	type capabilityOutcome struct {
 		allowed      bool
@@ -277,39 +313,39 @@ func CloseInstance(ctx context.Context, store *controlstore.Store, gate *Gate, r
 	}
 	outcomes := make(map[Capability]capabilityOutcome, len(KnownCapabilities()))
 	var blockers []string
+	chains := locked.EntryChainInventory
+	inventoryUsable := locked.EntryChainBound && locked.EntryChainVersion == 1 && controlstore.ValidateEntryChainInventory(chains) == nil
+	if !inventoryUsable {
+		blockers = append(blockers, "trusted instance entry-chain inventory is missing or legacy-null; cannot prove complete deployment coverage")
+	} else if !slices.Equal(chains, req.TrustedEntryChains) {
+		blockers = append(blockers, "trusted current deployment entry-chain inventory differs from the instance-open snapshot; close is refused")
+	}
 	for _, capability := range KnownCapabilities() {
-		scopes, err := instanceReleaseScopes(ctx, tx, locked.InstanceID, string(capability))
-		if err != nil {
-			return result, err
-		}
 		outcome := capabilityOutcome{
 			refusalClass: string(RefusalNoRelease),
-			reason:       "no release decision exists for this capability at any scope",
+			reason:       "no release decision exists for this capability at every required entry scope",
 		}
-		for _, scope := range scopes {
-			ev := gate.evaluateLocked(ctx, tx, locked, GateRequest{
-				InstanceID:  locked.InstanceID,
-				Capability:  capability,
-				ScopeHash:   scope,
-				Actor:       actor,
-				OperationID: req.OperationID,
-			})
-			if ev.allowed {
-				outcome = capabilityOutcome{allowed: true, scope: scope, releaseID: ev.releaseID}
-				break
+		allAllowed := inventoryUsable
+		for _, chain := range chains {
+			scope, scopeErr := CapabilityScope(chain, capability)
+			if scopeErr != nil {
+				return result, scopeErr
 			}
-			if ev.refusal != nil {
-				outcome = capabilityOutcome{
-					refusalClass: string(ev.refusal.class),
-					reason:       ev.refusal.reason,
+			ev := gate.evaluateLocked(ctx, tx, locked, GateRequest{InstanceID: locked.InstanceID, Capability: capability, ScopeHash: scope, Actor: actor, OperationID: req.OperationID})
+			if !ev.allowed {
+				allAllowed = false
+				if ev.refusal != nil {
+					outcome = capabilityOutcome{refusalClass: string(ev.refusal.class), reason: ev.refusal.reason}
 				}
+				blockers = append(blockers, fmt.Sprintf("capability %s at required entry scope %s is not release-valid (%s): %s", capability, scope, outcome.refusalClass, outcome.reason))
+			} else {
+				outcome = capabilityOutcome{allowed: true, scope: scope, releaseID: ev.releaseID}
 			}
+		}
+		if !allAllowed {
+			outcome.allowed = false
 		}
 		outcomes[capability] = outcome
-		if !outcome.allowed {
-			blockers = append(blockers, fmt.Sprintf("capability %s is not release-valid (%s): %s",
-				capability, outcome.refusalClass, outcome.reason))
-		}
 	}
 
 	// T027 dual condition: when this instance released a funds/delivery
@@ -326,47 +362,40 @@ func CloseInstance(ctx context.Context, store *controlstore.Store, gate *Gate, r
 	dualChecked := false
 	if len(blockers) == 0 {
 		dualChecked = true
-		ids := newGateIdentities(ctx, tx, locked.InstanceID, locked.OpenedBy)
-		if err := ids.ensureParticipants(); err != nil {
-			return result, err
-		}
 		for _, capability := range KnownCapabilities() {
 			outcome := outcomes[capability]
 			if !outcome.allowed {
 				continue
 			}
-			releasedScope, err := ParseCapabilityScope(outcome.scope, capability)
-			if err != nil {
-				return result, fmt.Errorf("close guarded scope of capability %s: %w", capability, err)
-			}
-			class, err := gate.requiredApprovalClass(releasedScope)
-			if err != nil {
-				return result, err
-			}
-			if class != ApprovalClassDualNonExecutor {
-				continue
-			}
-			decision, err := store.CurrentReleaseDecision(ctx, tx, controlstore.DecisionKey{
-				InstanceID: locked.InstanceID,
-				Capability: string(capability),
-				ScopeHash:  outcome.scope,
-			})
-			if err != nil {
-				return result, fmt.Errorf("read current release of capability %s: %w", capability, err)
-			}
-			persons, err := instanceApprovalPersons(ctx, store, ids, locked, decision.ApprovalRefs)
-			if err != nil {
-				return result, fmt.Errorf("re-derive the approval basis of capability %s: %w", capability, err)
-			}
-			if len(persons) < 2 {
-				reason := fmt.Sprintf(
-					"capability %s was released during this instance; close requires dual two-person approval of its current release and only %d distinct non-executor person(s) are valid",
-					capability, len(persons))
-				outcomes[capability] = capabilityOutcome{
-					refusalClass: string(RefusalApprovalMissing),
-					reason:       reason,
+			for _, chain := range chains {
+				scopeHash, err := CapabilityScope(chain, capability)
+				if err != nil {
+					return result, err
 				}
-				blockers = append(blockers, reason)
+				releasedScope, err := ParseCapabilityScope(scopeHash, capability)
+				if err != nil {
+					return result, fmt.Errorf("close guarded scope of capability %s: %w", capability, err)
+				}
+				class, err := gate.requiredApprovalClass(releasedScope)
+				if err != nil {
+					return result, err
+				}
+				if class != ApprovalClassDualNonExecutor {
+					continue
+				}
+				decision, err := store.CurrentReleaseDecision(ctx, tx, controlstore.DecisionKey{InstanceID: locked.InstanceID, Capability: string(capability), ScopeHash: scopeHash})
+				if err != nil {
+					return result, fmt.Errorf("read current release of capability %s: %w", capability, err)
+				}
+				persons, err := instanceApprovalPersons(ctx, store, ids, locked, decision.ApprovalRefs)
+				if err != nil {
+					return result, fmt.Errorf("re-derive the approval basis of capability %s: %w", capability, err)
+				}
+				if len(persons) < 2 {
+					reason := fmt.Sprintf("capability %s at %s was released during this instance; close requires dual two-person approval of its current release and only %d distinct non-executor person(s) are valid", capability, scopeHash, len(persons))
+					outcomes[capability] = capabilityOutcome{refusalClass: string(RefusalApprovalMissing), reason: reason}
+					blockers = append(blockers, reason)
+				}
 			}
 		}
 	}
@@ -458,6 +487,10 @@ type SupersedeInstanceRequest struct {
 	ApprovalRefs []string
 	// OperationID is the command idempotency key carried into the audit rows.
 	OperationID string
+	// TrustedEntryChains is supplied by authenticated deployment assembly.
+	TrustedEntryChains    []uint64
+	TargetGuardKey        string
+	TargetRoleFingerprint string
 }
 
 // SupersedeInstanceResult carries both instance identities.
@@ -485,6 +518,9 @@ func SupersedeInstance(ctx context.Context, store *controlstore.Store, req Super
 	if err != nil {
 		return SupersedeInstanceResult{}, fmt.Errorf("%w: opened_by: %v", ErrInstanceSupersedeInput, err)
 	}
+	if err := controlstore.ValidateEntryChainInventory(req.TrustedEntryChains); err != nil {
+		return SupersedeInstanceResult{}, fmt.Errorf("%w: trusted deployment entry chains: %v", ErrInstanceSupersedeInput, err)
+	}
 	refs := dedupeApprovalRefs(req.ApprovalRefs)
 	if len(refs) < 2 {
 		return SupersedeInstanceResult{}, fmt.Errorf("%w: explicit supersede requires two approval references by two distinct non-executor people", ErrInstanceApprovalRequired)
@@ -506,8 +542,17 @@ func SupersedeInstance(ctx context.Context, store *controlstore.Store, req Super
 	if locked.State != "open" {
 		return SupersedeInstanceResult{}, fmt.Errorf("%w: %s", controlstore.ErrInstanceNotOpen, locked.InstanceID)
 	}
+	if err := controlstore.RequireInstanceTargetBinding(ctx, tx, locked, req.TargetGuardKey, req.TargetRoleFingerprint); err != nil {
+		return SupersedeInstanceResult{}, err
+	}
 	if locked.Kind != "recovery" {
 		return SupersedeInstanceResult{}, fmt.Errorf("%w: supersede replaces a recovery instance, %s has kind=%s", ErrInstanceSupersedeInput, locked.InstanceID, locked.Kind)
+	}
+	if !locked.EntryChainBound || locked.EntryChainVersion != 1 || controlstore.ValidateEntryChainInventory(locked.EntryChainInventory) != nil {
+		return SupersedeInstanceResult{}, fmt.Errorf("%w: supersede requires a bound immutable deployment entry-chain inventory", ErrInstanceSupersedeInput)
+	}
+	if !slices.Equal(locked.EntryChainInventory, req.TrustedEntryChains) {
+		return SupersedeInstanceResult{}, fmt.Errorf("%w: current deployment entry-chain inventory differs from the instance-open snapshot", ErrInstanceSupersedeInput)
 	}
 
 	ids := newGateIdentities(ctx, tx, locked.InstanceID, locked.OpenedBy)
@@ -539,13 +584,17 @@ func SupersedeInstance(ctx context.Context, store *controlstore.Store, req Super
 	if err := closeInstanceRow(ctx, tx, locked, openedBy); err != nil {
 		return SupersedeInstanceResult{}, err
 	}
+	entryInventoryJSON, err := json.Marshal(req.TrustedEntryChains)
+	if err != nil {
+		return SupersedeInstanceResult{}, fmt.Errorf("encode trusted entry-chain inventory: %w", err)
+	}
 	var newInstanceID string
 	if err := tx.QueryRow(ctx, `
 INSERT INTO recovery_instance
-    (instance_id, kind, state, supersedes_instance_id, evidence_generation, evidence_hash, opened_by, reason)
-VALUES (gen_random_uuid(), 'recovery', 'open', $1, 0, $2, $3, $4)
+    (instance_id, kind, state, supersedes_instance_id, evidence_generation, evidence_hash, opened_by, reason, data_target, entry_chain_inventory, entry_chain_inventory_version, target_guard_key, target_role_fingerprint)
+VALUES (gen_random_uuid(), 'recovery', 'open', $1, 0, $2, $3, $4, $5, $6, 1, $7, $8)
 RETURNING instance_id::text`,
-		locked.InstanceID, controlstore.EmptyEvidenceHash, openedBy, req.Reason).Scan(&newInstanceID); err != nil {
+		locked.InstanceID, controlstore.EmptyEvidenceHash, openedBy, req.Reason, locked.DataTarget, entryInventoryJSON, req.TargetGuardKey, req.TargetRoleFingerprint).Scan(&newInstanceID); err != nil {
 		return SupersedeInstanceResult{}, fmt.Errorf("open the superseding recovery instance: %w", err)
 	}
 
@@ -588,6 +637,18 @@ func newGateIdentities(ctx context.Context, tx pgx.Tx, instanceID, openedBy stri
 		openedBy:   openedBy,
 		mappings:   make(map[string]gateMapping),
 	}
+}
+
+func requireInstanceExecutor(ids *gateIdentities, principal string) error {
+	if !ids.executorPrincipals[principal] {
+		return fmt.Errorf("instance-close principal %s is not bound with the executor role", principal)
+	}
+	if _, active, err := ids.mappingFor(principal); err != nil {
+		return err
+	} else if !active {
+		return fmt.Errorf("instance-close principal %s has no active identity mapping", principal)
+	}
+	return nil
 }
 
 // instanceReleaseScopes lists the distinct scope hashes that ever carried a

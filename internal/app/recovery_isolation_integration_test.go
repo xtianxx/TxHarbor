@@ -192,8 +192,27 @@ func recovNewScene(t *testing.T, needRPC bool) *recovScene {
 // default-deny expectation of this file is anchored to.
 func (s *recovScene) openRecoveryInstance(t *testing.T) {
 	t.Helper()
+	target, err := recovery.GateTargetBindingFromDSN(s.dataDSN)
+	if err != nil {
+		t.Fatalf("derive recovery target binding from configured data DSN: %v", err)
+	}
+	tx, err := s.store.Pool().Begin(s.ctx)
+	if err != nil {
+		t.Fatalf("begin target-guard fixture transaction: %v", err)
+	}
+	defer tx.Rollback(s.ctx)
+	if err := controlstore.InitializeTargetGuard(s.ctx, tx, target.TargetGuardKey, "integration-target-bootstrap"); err != nil {
+		t.Fatalf("initialize target guard: %v", err)
+	}
+	if err := controlstore.ResolveTargetGuardClean(s.ctx, tx, target.TargetGuardKey, "integration-target-bootstrap", []byte(`{"fixture":"isolated test database"}`)); err != nil {
+		t.Fatalf("mark fixture target guard clean: %v", err)
+	}
+	if err := tx.Commit(s.ctx); err != nil {
+		t.Fatalf("commit target-guard fixture: %v", err)
+	}
 	res, err := s.store.OpenInstance(s.ctx, controlstore.OpenInstanceRequest{
 		Kind: "recovery", OpenedBy: recovPrincipal,
+		TargetGuardKey: target.TargetGuardKey, TargetRoleFingerprint: target.TargetRoleFingerprint,
 	})
 	if err != nil {
 		t.Fatalf("open recovery instance: %v", err)
@@ -810,9 +829,39 @@ func TestRecoveryIsolationRealServeEntryPointsDefaultDeny(t *testing.T) {
 	// class each entry must surface is the deterministic gate outcome of its
 	// capability and binding.
 	t.Run("gate_layer_defaults_for_real_entry_capabilities", func(t *testing.T) {
-		gate, err := recovery.NewGate(scene.store, recovery.GateOptions{TTL: 30 * time.Second})
+		trustedTarget, err := recovery.GateTargetBindingFromDSN(scene.dataDSN)
+		if err != nil {
+			t.Fatalf("derive gate target binding: %v", err)
+		}
+		gate, err := recovery.NewGate(scene.store, recovery.GateOptions{TTL: 30 * time.Second, TrustedTarget: trustedTarget})
 		if err != nil {
 			t.Fatalf("NewGate: %v", err)
+		}
+		// A separately configured but valid deployment target must not inherit
+		// trust from the open instance's persisted target binding.
+		wrongDSN, err := deriveAppDSN(scene.dataDSN, "txharbor_other_target")
+		if err != nil {
+			t.Fatalf("derive mismatched deployment target DSN: %v", err)
+		}
+		wrongTarget, err := recovery.GateTargetBindingFromDSN(wrongDSN)
+		if err != nil {
+			t.Fatalf("derive mismatched deployment target binding: %v", err)
+		}
+		mismatchedGate, err := recovery.NewGate(scene.store, recovery.GateOptions{TTL: 30 * time.Second, TrustedTarget: wrongTarget})
+		if err != nil {
+			t.Fatalf("NewGate with mismatched target: %v", err)
+		}
+		queryScope, err := recoveryScopeFor(31337, recovery.CapabilityQuery)
+		if err != nil {
+			t.Fatalf("derive query capability scope: %v", err)
+		}
+		mismatched, err := mismatchedGate.Admit(scene.ctx, recovery.GateRequest{
+			InstanceID: scene.instanceID, Capability: recovery.CapabilityQuery,
+			ScopeHash: queryScope, Actor: recovPrincipal,
+			OperationID: "app-target-mismatch", Action: "test:target-mismatch",
+		})
+		if err != nil || mismatched.Allowed || mismatched.RefusalClass != recovery.RefusalInstanceMismatch {
+			t.Fatalf("admission with mismatched trusted deployment target = (%+v, %v), want instance_mismatch", mismatched, err)
 		}
 		otherInstance := uuid.NewString()
 		cases := []struct {

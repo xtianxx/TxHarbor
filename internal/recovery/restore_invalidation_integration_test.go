@@ -91,27 +91,9 @@ WHERE instance_id = $1 AND action = $2 AND result = 'ok'
 	return n
 }
 
-// rsiBarrierPGCommand wraps the real container-backed PGCommand: the first
-// tool call signals the test and waits before running the real tool. This is
-// the controlled barrier that fixes the "before the first target write" point.
-type rsiBarrierPGCommand struct {
-	inner   PGCommand
-	entered chan struct{}
-	release chan struct{}
-	once    sync.Once
-}
-
-func (c *rsiBarrierPGCommand) Run(ctx context.Context, name string, args []string,
-	stdin io.Reader, stdout, stderr io.Writer) error {
-	c.once.Do(func() {
-		close(c.entered)
-		<-c.release
-	})
-	return c.inner.Run(ctx, name, args, stdin, stdout, stderr)
-}
-
 // rsiCountingPGCommand wraps the real container-backed PGCommand and counts
-// tool calls (target-touch evidence), never substituting for the real tool.
+// tool calls (archive-list/probe activity), never substituting for the
+// supervised pg_restore child.
 type rsiCountingPGCommand struct {
 	inner PGCommand
 	calls atomic.Int64
@@ -135,7 +117,9 @@ func rsiRestore(f *bkpFixture, backup BackupResult, target string, pg PGCommand)
 		ControlStore:      f.store,
 		ControlDSN:        f.ctrlDSN,
 		TargetDSN:         target,
-		TargetDeclaration: TargetIsolated,
+		ObserverDSN:       target,
+		TargetDeclaration: TargetProductionMain,
+		TargetReason:      "controlled restore integration target",
 		Actor:             "deploy:executor",
 		ProgramVersion:    bkpProgramVersion,
 		PG:                pg,
@@ -160,22 +144,27 @@ func TestRestorePreWriteMarkerInvalidatesBeforeFirstTargetWrite(t *testing.T) {
 	}
 	generationBefore, hashBefore := gateInstanceToken(t, f.ctx, f.ctrl, f.instanceID)
 
-	target := f.createDatabase(t, "tgt_rsi_marker")
-	barrier := &rsiBarrierPGCommand{inner: f.pg, entered: make(chan struct{}), release: make(chan struct{})}
+	target := f.restoreTargetDSN
+	targetTablesBefore := f.userTableCount(t, target)
+	locker := bkpConnect(t, target)
+	if _, err := locker.Exec(f.ctx, `BEGIN`); err != nil {
+		t.Fatalf("begin target locker: %v", err)
+	}
+	if _, err := locker.Exec(f.ctx, `LOCK TABLE `+bkpProbeTable+` IN ACCESS EXCLUSIVE MODE`); err != nil {
+		t.Fatalf("lock authoritative target probe table: %v", err)
+	}
 	done := make(chan rsiOutcome, 1)
 	go func() {
-		result, err := rsiRestore(f, backup, target, barrier)
+		result, err := rsiRestore(f, backup, target, f.pg)
 		done <- rsiOutcome{result: result, err: err}
 	}()
-	select {
-	case <-barrier.entered:
-	case <-time.After(30 * time.Second):
-		t.Fatal("the restore never reached its first tool call")
-	}
+	targetDB := bkpDBNameOf(t, f.adminDSN, target)
+	f.waitForLockWaiter(t, targetDB, 30*time.Second)
 
-	// The first target write has not happened yet.
-	if got := f.userTableCount(t, target); got != 0 {
-		t.Fatalf("the target was written before the marker barrier: %d user tables", got)
+	// pg_restore is parked before its first target write; the marker has
+	// committed, but the authoritative database is still unchanged.
+	if got := f.userTableCount(t, target); got != targetTablesBefore {
+		t.Fatalf("target changed before the locked restore write: %d -> %d user tables", targetTablesBefore, got)
 	}
 
 	// The marker committed: exactly one generation advance, audited with the
@@ -222,7 +211,10 @@ WHERE instance_id = $1 AND action = 'evidence_write' AND result = 'ok'
 		t.Fatalf("old release must be stale before the first target write, got %+v", d)
 	}
 
-	close(barrier.release)
+	if _, err := locker.Exec(f.ctx, `ROLLBACK`); err != nil {
+		t.Fatalf("release target locker: %v", err)
+	}
+	_ = locker.Close(f.ctx)
 	var restored rsiOutcome
 	select {
 	case restored = <-done:
@@ -269,14 +261,11 @@ func TestRestoreInterruptionAfterFirstWriteKeepsOldPermissionStale(t *testing.T)
 	}
 	generationBefore, _ := gateInstanceToken(t, f.ctx, f.ctrl, f.instanceID)
 
-	target := f.createDatabase(t, "tgt_rsi_interrupt")
+	target := f.restoreTargetDSN
 	targetDB := bkpDBNameOf(t, f.adminDSN, target)
 	// Park the real pg_restore on its first write: the target carries a
 	// conflicting probe table whose ACCESS EXCLUSIVE lock the test holds.
 	locker := bkpConnect(t, target)
-	if _, err := locker.Exec(f.ctx, `CREATE TABLE `+bkpProbeTable+` (dummy text)`); err != nil {
-		t.Fatalf("create conflicting table: %v", err)
-	}
 	if _, err := locker.Exec(f.ctx, `BEGIN`); err != nil {
 		t.Fatalf("begin locker: %v", err)
 	}
@@ -343,7 +332,7 @@ func TestRestoreInterruptionAfterFirstWriteKeepsOldPermissionStale(t *testing.T)
 	// starts a fresh marker and its own acceptance; exactly one restore_probe
 	// row exists afterwards.
 	rebuilt := f.rebuildTarget(t, bkpTarget{name: targetDB, dsn: target})
-	rerun := f.restore(t, backup.ManifestPath, rebuilt, TargetIsolated, "")
+	rerun := f.restore(t, backup.ManifestPath, rebuilt, TargetProductionMain, "controlled restore retry after target rebuild")
 	if !rerun.Restored {
 		t.Fatalf("rerun after rebuild = %+v, want Restored=true", rerun)
 	}
@@ -417,7 +406,7 @@ func TestRestoreStartInterleavingDoesNotRewindAdmittedAction(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewStore for the restore: %v", err)
 	}
-	target := f.createDatabase(t, "tgt_rsi_interleave")
+	target := f.restoreTargetDSN
 	pg := &rsiCountingPGCommand{inner: f.pg}
 	done := make(chan rsiOutcome, 1)
 	go func() {
@@ -427,7 +416,9 @@ func TestRestoreStartInterleavingDoesNotRewindAdmittedAction(t *testing.T) {
 			ControlStore:      restoreStore,
 			ControlDSN:        f.ctrlDSN,
 			TargetDSN:         target,
-			TargetDeclaration: TargetIsolated,
+			ObserverDSN:       target,
+			TargetDeclaration: TargetProductionMain,
+			TargetReason:      "controlled restore interleaving integration",
 			Actor:             "deploy:executor",
 			ProgramVersion:    bkpProgramVersion,
 			PG:                pg,
@@ -485,7 +476,11 @@ func TestRestoreRefusedBeforeStartWritesNoMarkerAndKeepsReleaseUsable(t *testing
 	gf.seedIsolationSet(t, CapabilityQuery)
 	approvalID := gf.approve(t, CapabilityQuery, "auth:approver", "person-approver", ApprovalClassSingleNonExecutor)
 	gf.release(t, CapabilityQuery, []string{approvalID})
-	gate := gateNewGate(t, f.store, GateOptions{})
+	trustedTarget, err := GateTargetBindingFromDSN(f.srcDSN)
+	if err != nil {
+		t.Fatalf("derive trusted authoritative data target: %v", err)
+	}
+	gate := gateNewGate(t, f.store, GateOptions{TrustedTarget: trustedTarget})
 	if d := gf.admit(t, gate, CapabilityQuery); !d.Allowed {
 		t.Fatalf("fixture release must allow before the refused restore, got %+v", d)
 	}
