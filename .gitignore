@@ -8,6 +8,7 @@
 
 # opencode local session state (run-continuation JSONs). Machine-local, ever-growing, never commit.
 .omo/
+.slim/deepwork/
 
 # Go build and test artifacts.
 *.test

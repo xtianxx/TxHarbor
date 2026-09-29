@@ -206,6 +206,7 @@ internal/
 | F9 探针枚举 | backup-manifest §3、data-model §7、T019/T020 | `business_state_probes` 对照 FR-002 九类权威对象；抽样声明边界；不能证明标 unknown |
 | F16 术语 | data-model §4.2、resumption-gate §2、quickstart | `released`=派生放行；`approved`=批准记录（spec FR-022 的 approved 即 released） |
 | F20 两阶段判权 | data-model §3、T012 | recovery allow AND 动作处原门禁；禁替代 |
+| Target restore serialization (Gate 1 revision; pending Oracle rereview) | [ADR-003](adr/ADR-003-target-restore-serialization.md), T019/T020 | T020's protected deployment target must be distinct from trusted authoritative DB and all open-instance targets; unknown/missing/possibly aliased identities refuse. Instance-open persists immutable role-independent target key plus role-sensitive fingerprint; missing binding/guard is never clean, and gate/close fail closed. Restore must match its instance binding. Post-launch failure remains `rebuild_required` until controlled recorded rebuild. Linux supervised `pg_restore`, non-truncated `application_name` (tag is not identity proof), bounded `pg_stat_activity` with PG18 observer `pg_read_all_stats` or superuser visibility; SIGKILL leaves guard blocking pending external isolation. Restore evidence + guard transition are atomic; verify manifest publishes before atomic evidence + guard acceptance. |
 
 ## 待测参数 · 部署前裁决 · 阻塞项
 
