@@ -1,6 +1,8 @@
 # ADR-002: Backup Carrier and Recovery Point
 
-**Date**: 2026-09-28 | **Spec**: [spec.md](../spec.md) (FR-001–FR-008, FR-030/031/036) | **Status**: Accepted (plan scope) | **Related**: [contracts/backup-manifest.md](../contracts/backup-manifest.md), [research.md](../research.md) §2, [data-model.md](../data-model.md) §2/§7
+**Date**: 2026-09-28 | **Spec**: [spec.md](../spec.md) (FR-001–FR-008, FR-030/031/036) | **Status**: Accepted (plan scope) | **Plan**: [plan.md](../plan.md) | **Quickstart**: [quickstart.md](../quickstart.md) | **Related**: [contracts/backup-manifest.md](../contracts/backup-manifest.md), [research.md](../research.md) §2, [data-model.md](../data-model.md) §2/§7
+
+**Gate**: T000-P 保持 OPEN；本 ADR 为 plan-scope，不宣称生产就绪；生产 RPO/RTO/备份频率/保留期未裁决、不编造数值；风险接受/核销/补偿/自动补造意图明确缺席。
 
 ## Context
 

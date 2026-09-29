@@ -1,6 +1,8 @@
 # ADR-001: Recovery Control Store and Resumption Carrier
 
-**Date**: 2026-09-28 | **Spec**: [spec.md](../spec.md) (FR-009–FR-013, FR-022–FR-024) | **Status**: Accepted (plan scope) | **Related**: [research.md](../research.md) §3/§4, [data-model.md](../data-model.md) §1/§3
+**Date**: 2026-09-28 | **Spec**: [spec.md](../spec.md) (FR-009–FR-013, FR-022–FR-024) | **Status**: Accepted (plan scope) | **Plan**: [plan.md](../plan.md) | **Quickstart**: [quickstart.md](../quickstart.md) | **Related**: [contracts/resumption-gate.md](../contracts/resumption-gate.md), [research.md](../research.md) §3/§4, [data-model.md](../data-model.md) §1/§3
+
+**Gate**: T000-P 保持 OPEN；本 ADR 为 plan-scope，不宣称生产就绪；风险接受后强制复服/损失核销/人工补偿付款/自动补造意图明确缺席；生产 RPO/RTO/频率/保留未裁决（本地值仅测试输入）。
 
 ## Context
 

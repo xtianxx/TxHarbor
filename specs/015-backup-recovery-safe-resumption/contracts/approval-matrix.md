@@ -1,8 +1,10 @@
 # Contract: Approval Matrix — Roles, Identity Binding, Approvals (015)
 
-**Spec**: [spec.md](../spec.md) (FR-023, FR-024; 2026-09-28 裁决) | **Design**: [data-model.md](../data-model.md) §1.2/§1.3/§1.8/§3.1 | **Reuse**: 014 `contracts/auth-matrix.md` Management 模式（本地特权路径 + 主体绑定 + `operation_id` + 审计）；011 `withdrawalexec.go` `execOperatorOp`
+**Spec**: [spec.md](../spec.md) (FR-023, FR-024; 2026-09-28 裁决) | **Design**: [data-model.md](../data-model.md) §1.2/§1.3/§1.8/§3.1 | **Plan**: [plan.md](../plan.md) | **Quickstart**: [quickstart.md](../quickstart.md) | **Reuse**: 014 `contracts/auth-matrix.md` Management 模式（本地特权路径 + 主体绑定 + `operation_id` + 审计）；011 `withdrawalexec.go` `execOperatorOp`
 
 适用边界：**仅 015 灾备后复服**。不改变日常运行，不改变 014 已批权限，不新增紧急绕过/管理员强制复服入口。
+
+**Gate**: T000-P 保持 OPEN；风险接受后强制复服/损失核销/人工补偿付款/自动补造意图不在本阶段交付（§5）；生产 RPO/RTO/频率/保留未裁决，本地批准/scope 数值仅测试输入。
 
 ## 1. 动作 × 权限 × 审批档（闭集）
 

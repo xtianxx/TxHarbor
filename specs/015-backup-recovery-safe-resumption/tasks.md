@@ -351,10 +351,10 @@
 - **验证层次**: drill 独立通道（`make test-drill`）。
 - **提交节点**: 本批退出时本地 commit（不 push）；US6 checkpoint 可验收。
 
-- [ ] T058 [P] [US6] 编写端到端演练测试 `internal/recovery/drill_e2e_test.go`（tags: drill；独立通道）：真实流程「生成备份→外部推进（链上确认付款/签名广播/下游消费）→恢复旧数据→核验发现缺口并拒绝不安全复服→有证据按审批恢复指定能力」；分列记录恢复点/DB 恢复时间/核验时间/各能力放行时间/backup_lag/uncovered_interval；**含「缺口无法补齐→保持暂停」验收场景**（不得为过测全复服）；0 重复付款、0 错误事件效果；禁止直写批准/放行/缺口绕过命令（quickstart §4 反作弊纪律）
-- [ ] T059 [P] [US6] 编写 7 类失败注入矩阵测试 `internal/recovery/drill_failure_test.go`（tags: drill）：F1 备份不可用/损坏/截断/未验证；F2 恢复中断/部分完成；F3 版本/schema 不兼容；F4 外部事实领先；F5 旧实例未隔离/无法证明；F6 核验发现无法证明的缺口；F7 越权/证据不足/过期批准——每类收敛到明确 fail-closed、可观察、可审计、可重入，0 错误开放、0 重复外部副作用；缺口类保持 unknown/pending 并记录证据包/责任归属/升级，超时/重试耗尽/人工知悉不得视为闭合（FR-032；SC-006；quickstart §2）
-- [ ] T060 [P] [US6] 编写演练幂等测试 `internal/recovery/drill_idempotence_test.go`（tags: drill）：restore/verify/approve/release/close 重复执行（含中断后重入）≥10 次，外部副作用与状态翻转 0 次；撤销必须显式、有授权、审计；已开放与未开放项可分别观察（FR-024；SC-007）
-- [ ] T061 [US6] 定稿 drill 通道与文档对照：`.github/workflows/drill.yml`（独立 schedule/dispatch、可并行、不阻塞普通 PR）+ `Makefile` `test-drill` + `specs/015-backup-recovery-safe-resumption/quickstart.md` §3 分层表核对；演练产物存档路径与 NOT RUN 纪律（Docker 缺位不得记 pass）写入 workflow 注释（FR-033；SC-008；依赖 T058–T060）
+- [x] T058 [P] [US6] 编写端到端演练测试 `internal/recovery/drill_e2e_test.go`（tags: drill；独立通道）：真实流程「生成备份→外部推进（链上确认付款/签名广播/下游消费）→恢复旧数据→核验发现缺口并拒绝不安全复服→有证据按审批恢复指定能力」；分列记录恢复点/DB 恢复时间/核验时间/各能力放行时间/backup_lag/uncovered_interval；**含「缺口无法补齐→保持暂停」验收场景**（不得为过测全复服）；0 重复付款、0 错误事件效果；禁止直写批准/放行/缺口绕过命令（quickstart §4 反作弊纪律）
+- [x] T059 [P] [US6] 编写 7 类失败注入矩阵测试 `internal/recovery/drill_failure_test.go`（tags: drill）：F1 备份不可用/损坏/截断/未验证；F2 恢复中断/部分完成；F3 版本/schema 不兼容；F4 外部事实领先；F5 旧实例未隔离/无法证明；F6 核验发现无法证明的缺口；F7 越权/证据不足/过期批准——每类收敛到明确 fail-closed、可观察、可审计、可重入，0 错误开放、0 重复外部副作用；缺口类保持 unknown/pending 并记录证据包/责任归属/升级，超时/重试耗尽/人工知悉不得视为闭合（FR-032；SC-006；quickstart §2）
+- [x] T060 [P] [US6] 编写演练幂等测试 `internal/recovery/drill_idempotence_test.go`（tags: drill）：restore/verify/approve/release/close 重复执行（含中断后重入）≥10 次，外部副作用与状态翻转 0 次；撤销必须显式、有授权、审计；已开放与未开放项可分别观察（FR-024；SC-007）
+- [x] T061 [US6] 定稿 drill 通道与文档对照：`.github/workflows/drill.yml`（独立 schedule/dispatch、可并行、不阻塞普通 PR）+ `Makefile` `test-drill` + `specs/015-backup-recovery-safe-resumption/quickstart.md` §3 分层表核对；演练产物存档路径与 NOT RUN 纪律（Docker 缺位不得记 pass）写入 workflow 注释（FR-033；SC-008；依赖 T058–T060）
 
 **Checkpoint（Phase 8 · US6）**: `make test-drill` 独立通道 S1–S12+F1–F7 全绿（含保持暂停场景）；普通 PR 通道不受影响；本地 commit（不 push）。
 
@@ -372,10 +372,10 @@
 - **验证层次**: CI 配置检查 + 文档核对（无 Docker / 无长测）。
 - **提交节点**: 本批退出时本地 commit（不 push）。
 
-- [ ] T062 [P] CI 分层补齐：`.github/workflows/ci.yml:123` pg 分类臂增列 `internal/recovery/*`（含 `internal/recovery/sources/*`），加分类遗漏反向守卫（未分类内部路径显性红）；确认 `drill` 标签测试不在普通 PR 任何 job；`Makefile` `test-contract` 路径增补 `./internal/recovery`（FR-033；SC-008）。（行号注记 F17：`:123` 为 HEAD 10e78f9 的 `is_integration_pg_path()` 路径集所在行；实现期 MUST 按实际文件复核/更新，不得机械沿用）
-- [ ] T063 [P] 状态面诚实性审计 pass 于 `internal/app/serve.go` + `internal/app/degradation.go`：恢复期对外诚实报告（哪些能力可用/被隔离/暂停/核验未知）；查询与健康信号不得把未核验或回退后数据显示为正常一致；健康探针不替代资金门禁判权；`restored/verified/released` 三态不互相冒充（FR-022/026）；有界只读复核（F13）：状态/复核查询受范围+次数/时间/资源预算约束，预算耗尽→拒绝＋审计、不改变任何状态，超时/耗尽≠缺口闭合
-- [ ] T064 [P] 运维文档 `docs/ops/recovery-runbook.md`：配置键示例（标注本地值仅测试输入、生产阈值未裁决）、真实命令调用路径（S1–S12 对应 `recovery-admin` 命令）、隔离证明（控制库独立 DSN/不属于数据备份集/门禁 fail-closed）、失败处置（F1–F7 收敛动作与升级路径）、RTO 超时处理（记录不达标/告警/升级，不永久禁后续安全复服）（FR-031/033/036；C1）。**本轮 analyze 增补**：①（F3）`reconcile-admin`（claim/dispose/reverify/scan 等写路径）、`events-admin`（replay/unblock/retention-prune）与外部定时调度为程序边界：015 无运行时门禁接线，隔离靠停服/下线/权限移除＋审计＋`no_pre_release_effects` 证据；仅 checklist 签署不构成运行时隔离证明；无法证明→相关能力保持关闭；②（F6）控制库回退纪律：禁盲恢复；仅经停机隔离（执行者执行＋非执行者核验隔离项）→显式重建/supersede＋审计；写明执行者失去旧权限的确认方式（旧 DSN/凭据吊销或新库新凭据，记录时间与主体）、建新实例的可信依据（部署受控配置＋恢复点证据＋重新隔离清单）与旧实例不可继续工作的条件（instance_id 只增、绑定不匹配、旧库标 retired）；不得在已回退库内写 supersede 即称可检；③（F14/DG-3）同实例储层同失超出逻辑回滚域：明示不提供实例级独立性，备份落盘/异地策略待裁决（不阻塞实现）；④（F19）身份映射维护边界与变更审计：映射变更→相关批准失效重批，保守 dual 不抵消错映射；生产名单待部署，本地路径见 T010/T046；⑤（F13）有界只读复核 bounds（T051/T063）写入 runbook；⑥（在途交错）“同一次调用在 OpenInstance 前获准、在其后执行”不属于跨调用复用：runbook 须说明该在途动作如何被隔离流程等待、阻断或记录，以及何时才允许确认 `no_pre_release_effects`；不得仅以“下次求值拒绝”证明该交错已覆盖
-- [ ] T065 [P] 证据索引 `docs/evidence/015/README.md`：演练/核验/复服/隔离证据归口与命名、NOT RUN 记录要求、测试输入标注要求、反作弊纪律（禁直写批准/放行/缺口；禁替身放行；真实 dump/restore/链/中间件）；与 `docs/evidence/014/` 模式对齐
+- [x] T062 [P] CI 分层补齐：`.github/workflows/ci.yml:123` pg 分类臂增列 `internal/recovery/*`（含 `internal/recovery/sources/*`），加分类遗漏反向守卫（未分类内部路径显性红）；确认 `drill` 标签测试不在普通 PR 任何 job；`Makefile` `test-contract` 路径增补 `./internal/recovery`（FR-033；SC-008）。（行号注记 F17：`:123` 为 HEAD 10e78f9 的 `is_integration_pg_path()` 路径集所在行；实现期 MUST 按实际文件复核/更新，不得机械沿用）
+- [x] T063 [P] 状态面诚实性审计 pass 于 `internal/app/serve.go` + `internal/app/degradation.go`：恢复期对外诚实报告（哪些能力可用/被隔离/暂停/核验未知）；查询与健康信号不得把未核验或回退后数据显示为正常一致；健康探针不替代资金门禁判权；`restored/verified/released` 三态不互相冒充（FR-022/026）；有界只读复核（F13）：状态/复核查询受范围+次数/时间/资源预算约束，预算耗尽→拒绝＋审计、不改变任何状态，超时/耗尽≠缺口闭合
+- [x] T064 [P] 运维文档 `docs/ops/recovery-runbook.md`：配置键示例（标注本地值仅测试输入、生产阈值未裁决）、真实命令调用路径（S1–S12 对应 `recovery-admin` 命令）、隔离证明（控制库独立 DSN/不属于数据备份集/门禁 fail-closed）、失败处置（F1–F7 收敛动作与升级路径）、RTO 超时处理（记录不达标/告警/升级，不永久禁后续安全复服）（FR-031/033/036；C1）。**本轮 analyze 增补**：①（F3）`reconcile-admin`（claim/dispose/reverify/scan 等写路径）、`events-admin`（replay/unblock/retention-prune）与外部定时调度为程序边界：015 无运行时门禁接线，隔离靠停服/下线/权限移除＋审计＋`no_pre_release_effects` 证据；仅 checklist 签署不构成运行时隔离证明；无法证明→相关能力保持关闭；②（F6）控制库回退纪律：禁盲恢复；仅经停机隔离（执行者执行＋非执行者核验隔离项）→显式重建/supersede＋审计；写明执行者失去旧权限的确认方式（旧 DSN/凭据吊销或新库新凭据，记录时间与主体）、建新实例的可信依据（部署受控配置＋恢复点证据＋重新隔离清单）与旧实例不可继续工作的条件（instance_id 只增、绑定不匹配、旧库标 retired）；不得在已回退库内写 supersede 即称可检；③（F14/DG-3）同实例储层同失超出逻辑回滚域：明示不提供实例级独立性，备份落盘/异地策略待裁决（不阻塞实现）；④（F19）身份映射维护边界与变更审计：映射变更→相关批准失效重批，保守 dual 不抵消错映射；生产名单待部署，本地路径见 T010/T046；⑤（F13）有界只读复核 bounds（T051/T063）写入 runbook；⑥（在途交错）“同一次调用在 OpenInstance 前获准、在其后执行”不属于跨调用复用：runbook 须说明该在途动作如何被隔离流程等待、阻断或记录，以及何时才允许确认 `no_pre_release_effects`；不得仅以“下次求值拒绝”证明该交错已覆盖
+- [x] T065 [P] 证据索引 `docs/evidence/015/README.md`：演练/核验/复服/隔离证据归口与命名、NOT RUN 记录要求、测试输入标注要求、反作弊纪律（禁直写批准/放行/缺口；禁替身放行；真实 dump/restore/链/中间件）；与 `docs/evidence/014/` 模式对齐
 
 ### 批次 B19 · 收口验证与声明（链 7 + 全链）
 
@@ -385,9 +385,9 @@
 - **验证层次**: 综合（unit/contract/普通 PR integration + drill 分开记录；未运行项记 NOT RUN）。
 - **提交节点**: 本批退出时本地 commit（不 push）。
 
-- [ ] T066 执行 quickstart 验证矩阵并记录到 `docs/evidence/015/quickstart_matrix_evidence.md`：S1–S12 正向与 F1–F7 失败注入，按层记录（unit/contract 普通 PR；PG integration 按路径；drill 独立通道）；Docker 缺位 → NOT RUN 且不得记 pass；未执行项不得记通过；结果仅本地范围、非生产阈值（FR-033；SC-005/008）
-- [ ] T067 [P] 文档收口：`specs/015-backup-recovery-safe-resumption/plan.md`、`research.md`、`data-model.md`、`contracts/*`、`adr/*` 交叉链接与口径复核；T000-P OPEN 复述；风险接受/核销/补偿付款/自动补造意图明确缺席；生产 RPO/RTO/频率/保留未裁决复述（FR-035）
-- [ ] T068 [P] 私钥/凭据边界全量复核 `internal/recovery/**` + `internal/app/recoveryadmin/**`：备份/证据/日志/审计禁含私钥、签名密钥、真实凭据、DSN 明文；签名密钥继续留在 Signer 边界、恢复环境不为恢复获取可直接持有的私钥；复用 `internal/logx.Redact`；复核结论写入 `docs/evidence/015/README.md` 证据索引（FR-007；INV-9）
+- [x] T066 执行 quickstart 验证矩阵并记录到 `docs/evidence/015/quickstart_matrix_evidence.md`：S1–S12 正向与 F1–F7 失败注入，按层记录（unit/contract 普通 PR；PG integration 按路径；drill 独立通道）；Docker 缺位 → NOT RUN 且不得记 pass；未执行项不得记通过；结果仅本地范围、非生产阈值（FR-033；SC-005/008）
+- [x] T067 [P] 文档收口：`specs/015-backup-recovery-safe-resumption/plan.md`、`research.md`、`data-model.md`、`contracts/*`、`adr/*` 交叉链接与口径复核；T000-P OPEN 复述；风险接受/核销/补偿付款/自动补造意图明确缺席；生产 RPO/RTO/频率/保留未裁决复述（FR-035）
+- [x] T068 [P] 私钥/凭据边界全量复核 `internal/recovery/**` + `internal/app/recoveryadmin/**`：备份/证据/日志/审计禁含私钥、签名密钥、真实凭据、DSN 明文；签名密钥继续留在 Signer 边界、恢复环境不为恢复获取可直接持有的私钥；复用 `internal/logx.Redact`；复核结论写入 `docs/evidence/015/README.md` 证据索引（FR-007；INV-9）
 
 **Checkpoint（Phase 9）**: 分层验证记录齐全（NOT RUN 如实）、文档与证据索引收口、无生产就绪声明；可交付本地范围。
 

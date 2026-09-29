@@ -462,6 +462,11 @@ func Serve(ctx context.Context, d Deps) int {
 		pool.Close()
 		return fail("startup failed (recovery gate): %s", logx.Redact(err.Error()))
 	}
+	// T063: the non-critical status surface reports the recovery posture
+	// honestly. It holds deployment binding facts only and performs no
+	// control-store read and no state claim; the derived per-capability review
+	// stays with the bounded `recovery-admin status` (F13).
+	degradation.recovery = newRecoveryStatusPosture(recoveryWiring)
 
 	// 007 withdrawal routes mount on the same probe listener: the parent mux
 	// takes precedence over the health handler's "/" subtree, and health/metrics
@@ -514,7 +519,11 @@ func Serve(ctx context.Context, d Deps) int {
 	// Non-critical status surface: dependency availability and event delivery
 	// posture, annotated honestly (never a readiness or funding signal).
 	mux.Handle("GET /status/degradation", &degradationStatusHandler{state: degradation, pool: pool})
-	mux.Handle("/", health.NewServer(agg, m.Handler()).Handler())
+	// T063: probe responses carry the recovery-mode annotation while recovery
+	// mode is configured, so readiness is never read as an attestation of
+	// recovered data (it stays a reachability/version signal; status codes are
+	// unchanged and no capability state is claimed).
+	mux.Handle("/", recoveryHealthAnnotation(recoveryWiring, health.NewServer(agg, m.Handler()).Handler()))
 
 	srv := &http.Server{
 		Handler:           mux,
@@ -913,6 +922,27 @@ func writeRecoveryRefusal(w http.ResponseWriter, capability recovery.Capability,
 		RefusalClass: string(class),
 		Reason:       dec.Reason,
 		InstanceID:   dec.InstanceID,
+	})
+}
+
+// recoveryHealthAnnotation marks probe responses while recovery mode is
+// configured (T063/FR-026): readiness and liveness stay reachability/version
+// signals and are never presented as an attestation of restored, verified or
+// released data. It changes no status code and claims no capability state; a
+// nil wiring (normal mode) returns next unchanged.
+func recoveryHealthAnnotation(wiring *serveRecoveryWiring, next http.Handler) http.Handler {
+	if wiring == nil {
+		return next
+	}
+	mode := recoveryStatusModeConfigured
+	if strings.TrimSpace(wiring.instance) != "" {
+		mode = recoveryStatusModeBound
+	}
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("X-TXHarbor-Recovery-Mode", mode)
+		w.Header().Set("X-TXHarbor-Recovery-Attestation",
+			"probe reachability only; never attests restored/verified/released data or the fund gates")
+		next.ServeHTTP(w, r)
 	})
 }
 

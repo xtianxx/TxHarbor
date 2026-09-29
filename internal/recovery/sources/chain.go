@@ -135,15 +135,14 @@ type chainSourceBase struct {
 	txl        *txlifecycle.Store
 }
 
-// observationInstant is the timestamp recorded on every observation. Whole-
-// second precision is deliberate: the orchestrator captures its evaluation
-// instant immediately before reading the sources (T038), so a live read
-// timestamped with sub-second precision would postdate that instant by
-// microseconds and trip the evaluator's strict "future timestamp" rule. Whole
-// seconds keep a live read inside its own evaluation instant while a
-// configured freshness tolerance still ages the evidence.
+// observationInstant is the timestamp recorded on every observation: the
+// adapter's own read instant in UTC. The orchestrator captures its evaluation
+// instant only after the sources have been read (T038), so a live read can
+// never postdate its own evaluation instant; the evaluator's strict "future
+// timestamp" rule then only refuses a source whose own clock/timestamp runs
+// ahead of the evaluation (FR-018).
 func (b *chainSourceBase) observationInstant() time.Time {
-	return b.now().UTC().Truncate(time.Second)
+	return b.now().UTC()
 }
 
 // observationInput is one assembled adapter observation.

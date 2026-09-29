@@ -12,6 +12,7 @@
 #   | event contract semantics (contracts/**)    | contract (incl. reference-consumer compat) |
 #   | internal/cache/**, internal/ratelimit/**   | unit(+race) + integration-redis + e2e core |
 #   | upstream integration points + app wiring   | unit + integration-pg + e2e core           |
+#   | internal/recovery/** (B18 T062)            | unit + contract + integration-pg           |
 #   | publisher/consumer runtime                 | unit + integration-pg + integration-kafka  |
 #   | docs/specs only                            | lint + build + unit + contract             |
 #
@@ -19,12 +20,18 @@
 # flows wire those layers (the T067 HTTP failure path exercises the rate-limit
 # policy end to end).
 #
-# Reverse coverage guard (T039): the `changes` job enumerates every package
-# directory that carries `//go:build integration` tests — the exact set
-# `make test-integration` executes — and hard-fails when any of them is
-# missing from the integration-PG path set. A missed internal path is an
-# explicit red, never silently "unclassified" (which the filter would
-# misread as "not affected").
+# Reverse coverage guard (T039/T062): the `changes` job enumerates every test
+# file that carries a middleware-layer build tag (`integration`,
+# `integration_redis`, `integration_kafka`, `e2e`) — the exact sets the
+# corresponding layers execute — and hard-fails when any of them is missing
+# from that layer's path set. A missed internal path is an explicit red,
+# never silently "unclassified" (which the filter would misread as "not
+# affected").
+#
+# Drill isolation guard (T062/FR-033/SC-008): the `changes` job also fails
+# when this workflow carries any drill-channel invocation, or when the drill
+# workflow (once present) declares a pull_request trigger — the full
+# disaster-recovery drill must never run in (or block) an ordinary PR.
 #
 # Fault Injection and Performance never run here: they live in
 # `.github/workflows/fault-perf.yml` (scheduled/manual/release gate) and MUST
@@ -115,12 +122,32 @@ jobs:
               run_all=true
             fi
           fi
-          # Single source of truth for the integration-PG path set, shared by
-          # the changed-file classification and the reverse coverage guard
-          # below (T039) so the two can never drift apart.
+          # One path-set function per middleware layer (T039/T062): the
+          # changed-file classification and the reverse coverage guard below
+          # both call the same functions so the two can never drift apart.
+          # A shell case glob crosses '/', so `internal/recovery/*` covers its
+          # subpackages (controlstore, sources) as well.
           is_integration_pg_path() {
             case "$1" in
-              internal/events/*|migrations/*|internal/indexer/*|internal/withdrawal/*|internal/execution/*|internal/reconciliation/*|internal/app/*|internal/db/*|internal/health/*|internal/testutil/*|internal/eth/*|internal/nonce/*|internal/signer/*|internal/txlifecycle/*|internal/jointwire/*|internal/logx/*|internal/config/*|internal/metrics/*|cmd/*|go.mod|go.sum|Makefile|compose.yaml|.github/workflows/*) return 0 ;;
+              internal/events/*|migrations/*|internal/indexer/*|internal/withdrawal/*|internal/execution/*|internal/reconciliation/*|internal/recovery/*|internal/app/*|internal/db/*|internal/health/*|internal/testutil/*|internal/eth/*|internal/nonce/*|internal/signer/*|internal/txlifecycle/*|internal/jointwire/*|internal/logx/*|internal/config/*|internal/metrics/*|cmd/*|go.mod|go.sum|Makefile|compose.yaml|.github/workflows/*) return 0 ;;
+              *) return 1 ;;
+            esac
+          }
+          is_integration_redis_path() {
+            case "$1" in
+              internal/cache/*|internal/ratelimit/*|internal/app/*|internal/config/*|internal/metrics/*|internal/testutil/*|go.mod|go.sum|Makefile|compose.yaml|.github/workflows/*) return 0 ;;
+              *) return 1 ;;
+            esac
+          }
+          is_integration_kafka_path() {
+            case "$1" in
+              internal/events/publisher*.go|internal/events/consumer*.go|internal/events/outbox.go|internal/events/recovery_boundary*.go|internal/app/eventpublisher*.go|internal/app/eventconsumer*.go|internal/app/eventsadmin*.go|internal/health/*|internal/config/*|internal/metrics/*|internal/testutil/*|go.mod|go.sum|Makefile|compose.yaml|.github/workflows/*) return 0 ;;
+              *) return 1 ;;
+            esac
+          }
+          is_e2e_path() {
+            case "$1" in
+              internal/indexer/*|internal/withdrawal/*|internal/execution/*|internal/app/*|internal/cache/*|internal/ratelimit/*|go.mod|go.sum|Makefile|compose.yaml|.github/workflows/*) return 0 ;;
               *) return 1 ;;
             esac
           }
@@ -133,48 +160,68 @@ jobs:
               [ -n "$f" ] || continue
               # Integration-PG: events runtime, every migration, upstream
               # integration points (indexer / withdrawal / execution /
-              # reconciliation), app wiring, shared test/config/metrics
-              # infrastructure.
+              # reconciliation / recovery), app wiring, shared
+              # test/config/metrics infrastructure.
               if is_integration_pg_path "$f"; then pg=true; fi
               # Integration-Redis: cache/rate-limit carriers and their wiring.
-              case "$f" in
-                internal/cache/*|internal/ratelimit/*|internal/app/*|internal/config/*|internal/metrics/*|internal/testutil/*|go.mod|go.sum|Makefile|compose.yaml|.github/workflows/*) redis=true ;;
-              esac
-              # Integration-Kafka: publisher/consumer runtime and broker-facing
-              # health/test infrastructure.
-              case "$f" in
-                internal/events/publisher*.go|internal/events/consumer*.go|internal/events/outbox.go|internal/app/eventpublisher*.go|internal/app/eventconsumer*.go|internal/app/eventsadmin*.go|internal/health/*|internal/config/*|internal/metrics/*|internal/testutil/*|go.mod|go.sum|Makefile|compose.yaml|.github/workflows/*) kafka=true ;;
-              esac
+              if is_integration_redis_path "$f"; then redis=true; fi
+              # Integration-Kafka: publisher/consumer runtime, the event
+              # recovery boundary and broker-facing health/test infrastructure.
+              if is_integration_kafka_path "$f"; then kafka=true; fi
               # E2E core flows: upstream integration points and app wiring.
-              case "$f" in
-                internal/indexer/*|internal/withdrawal/*|internal/execution/*|internal/app/*|internal/cache/*|internal/ratelimit/*|go.mod|go.sum|Makefile|compose.yaml|.github/workflows/*) e2e=true ;;
-              esac
+              if is_e2e_path "$f"; then e2e=true; fi
             done <<< "$changed"
           fi
-          # Reverse coverage guard (T039): enumerate every package directory
-          # that carries `//go:build integration` tests and assert the pg path
-          # set above matches it. A directory missing from the set fails this
-          # job loudly; a check that cannot enumerate MUST NOT read as green.
-          integration_dirs="$(grep -rl --include='*_test.go' --exclude-dir=.git --exclude-dir=.omo --exclude-dir=.evidence -E '^//go:build integration$' . 2>/dev/null | sed 's|/[^/]*$||' | sort -u || true)"
-          if [ -z "$integration_dirs" ]; then
-            echo "::error::reverse coverage guard: no '//go:build integration' test files found — cannot verify the pg path set is complete (an empty enumeration must not read as covered)."
-            exit 1
-          fi
-          integration_dir_count=0
-          uncovered=""
-          while IFS= read -r dir; do
-            [ -n "$dir" ] || continue
-            dir="${dir#./}"
-            integration_dir_count=$((integration_dir_count + 1))
-            if ! is_integration_pg_path "${dir}/guard_probe.go"; then
-              uncovered="${uncovered}${uncovered:+, }${dir}"
+          # Reverse coverage guard (T039/T062): enumerate every test file that
+          # carries a middleware-layer build tag and assert the matching path
+          # set covers it. A file missing from its set fails this job loudly;
+          # a check that cannot enumerate MUST NOT read as green.
+          guard_layer_coverage() {
+            # $1 = build tag; $2 = path-set matcher; $3 = layer label.
+            files="$(grep -rl --include='*_test.go' --exclude-dir=.git --exclude-dir=.omo --exclude-dir=.evidence -E "^//go:build ${1}$" . 2>/dev/null | sed 's|^\./||' | sort -u || true)"
+            if [ -z "$files" ]; then
+              echo "::error::reverse coverage guard: no '//go:build ${1}' test files found — cannot verify the ${3} path set is complete (an empty enumeration must not read as covered)."
+              return 1
             fi
-          done <<< "$integration_dirs"
-          if [ -n "$uncovered" ]; then
-            echo "::error::reverse coverage guard: integration-pg path set misses package(s) with '//go:build integration' tests: ${uncovered}. Add them to is_integration_pg_path in this workflow — a missed internal path must not default to unclassified."
+            covered=0
+            uncovered=""
+            while IFS= read -r file; do
+              [ -n "$file" ] || continue
+              covered=$((covered + 1))
+              if ! "${2}" "$file"; then
+                uncovered="${uncovered}${uncovered:+, }${file}"
+              fi
+            done <<< "$files"
+            if [ -n "$uncovered" ]; then
+              echo "::error::reverse coverage guard: ${3} path set misses tagged test file(s): ${uncovered}. Add their path to the matching path set in this workflow — a missed internal path must not default to unclassified."
+              return 1
+            fi
+            echo "reverse coverage guard: ${3} — all ${covered} '//go:build ${1}' test files match the path set"
+            return 0
+          }
+          guard_layer_coverage integration is_integration_pg_path integration-pg
+          guard_layer_coverage integration_redis is_integration_redis_path integration-redis
+          guard_layer_coverage integration_kafka is_integration_kafka_path integration-kafka
+          guard_layer_coverage e2e is_e2e_path e2e
+
+          # Drill isolation guard (T062/FR-033/SC-008): the full disaster-
+          # recovery drill is an independent channel and MUST NOT run in any
+          # ordinary PR job. Assert this workflow carries no drill invocation,
+          # and that the drill workflow (once present) declares no
+          # pull_request trigger.
+          if grep -nE '([-]tags[[:space:]]+drill|test[-]drill)' .github/workflows/ci.yml >/dev/null 2>&1; then
+            echo "::error::drill isolation guard: ci.yml references the drill channel — the drill tests and the drill target MUST NOT run in any ordinary PR job."
             exit 1
           fi
-          echo "reverse coverage guard: all ${integration_dir_count} package dirs with '//go:build integration' tests match the pg path set"
+          if [ -f .github/workflows/drill.yml ]; then
+            if grep -nE '^[[:space:]]*pull_request[[:space:]]*:' .github/workflows/drill.yml >/dev/null 2>&1; then
+              echo "::error::drill isolation guard: .github/workflows/drill.yml declares a pull_request trigger — the drill channel stays schedule/dispatch only and must never block an ordinary PR."
+              exit 1
+            fi
+            echo "drill isolation guard: ci.yml carries no drill invocation; drill.yml has no pull_request trigger"
+          else
+            echo "drill isolation guard: ci.yml carries no drill invocation; .github/workflows/drill.yml is not present (B17 pending) — the guard re-checks the trigger when it lands"
+          fi
           {
             echo "pg=$pg"
             echo "redis=$redis"
@@ -191,7 +238,7 @@ jobs:
             echo "| integration-kafka | $kafka |"
             echo "| e2e core | $e2e |"
             echo ""
-            echo "Reverse coverage guard (T039): ${integration_dir_count} package dirs with '//go:build integration' tests, all matched by the pg path set."
+            echo "Reverse coverage guard (T039/T062): every middleware-layer tagged test file matched its layer path set (counts in the classify log). Drill isolation guard: ci.yml carries no drill invocation; drill.yml (when present) declares no pull_request trigger."
           } >> "$GITHUB_STEP_SUMMARY"
 
   lint:

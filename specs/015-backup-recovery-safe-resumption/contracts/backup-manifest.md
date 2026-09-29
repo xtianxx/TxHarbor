@@ -1,8 +1,10 @@
 # Contract: Backup Manifest and Recovery Point (015)
 
-**Spec**: [spec.md](../spec.md) (FR-001–FR-008, FR-036) | **Design**: [data-model.md](../data-model.md) §2/§7 | **ADR**: [ADR-002](../adr/ADR-002-backup-carrier-and-recovery-point.md)
+**Spec**: [spec.md](../spec.md) (FR-001–FR-008, FR-036) | **Design**: [data-model.md](../data-model.md) §2/§7 | **Plan**: [plan.md](../plan.md) | **Quickstart**: [quickstart.md](../quickstart.md) | **ADR**: [ADR-002](../adr/ADR-002-backup-carrier-and-recovery-point.md)
 
 备份 = `pg_dump --format=custom` 产物 + 外部 manifest。**manifest 是唯一备份身份与选择依据**；文件名/目录/mtime/人工记忆不构成选择规则。
+
+**Gate**: T000-P 保持 OPEN；生产 RPO/RTO/备份频率/保留期未裁决（§4 的 `retention_class`/约束为部署配置，本地值仅测试输入）；风险接受后强制复服/损失核销/人工补偿付款/自动补造意图不在本阶段交付；本契约不批准任何资金数据损失额度。
 
 ## 1. Manifest 字段（规范化 JSON，哈希落库）
 

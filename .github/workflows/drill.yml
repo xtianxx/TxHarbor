@@ -2,22 +2,38 @@
 # verification.md §4).
 #
 # The full disaster-recovery drill (S1-S12 + the F1-F7 failure matrix; real
-# PG/Anvil and, for the event scenarios, Redis/Kafka) is long and Docker-backed.
+# PG/Anvil and, for the event-layer scenario, Kafka) is long and Docker-backed.
 # It never runs on ordinary pull requests and never blocks them; it runs on a
 # schedule or manual dispatch. A failure here does not block PRs, but it DOES
 # block the corresponding recovery claim: without a green run of this workflow
 # there is no evidence to claim the drill (no evidence -> no claim).
 #
-# An unrun drill must never read as a pass: while no `drill`-tagged test exists,
-# `make test-drill` reports NOT RUN and exits non-zero (the require_tagged_tests
-# guard), which surfaces here as a failed job — the layer is "not run", not
-# "green".
+# An unrun drill must never read as a pass (NOT RUN discipline, FR-033):
+#
+#   - no `drill`-tagged test in the tree: `make test-drill` reports NOT RUN and
+#     exits non-zero (the Makefile require_tagged_tests guard);
+#   - tests present but no Docker daemon: the drill TestMain reports NOT RUN and
+#     fails the package under CI=true (GitHub Actions sets it) or
+#     TXHARBOR_REQUIRE_DOCKER=1, so this job fails instead of passing; a local
+#     run without Docker exits 0 with an explicit NOT RUN message and is never
+#     a pass;
+#   - tests present and Docker healthy but no Kafka broker provisionable: the
+#     event-layer scenario reports NOT RUN (skip) with an archived record; a
+#     run that skipped it does not cover the event layer;
+#   - an interrupted/partial run (job canceled, timeout) leaves the job red and
+#     produces no claimable evidence.
 #
 # Docker is required: testcontainers provisions its own pinned images
-# (postgres:18.6-trixie, foundry v1.8.1, redis:8.2.10-alpine,
-# confluentinc/confluent-local:7.9.10 from the test sources/compose.yaml);
-# nothing floats and no external service is contacted. Drill evidence is
-# exported as a run artifact so a claim can cite a durable run record.
+# (postgres:18.6-trixie, foundry v1.8.1 and, once the event-layer scenario
+# runs, confluentinc/confluent-local:7.9.10); nothing floats and no external
+# service is contacted.
+#
+# Evidence archive: the drill tests write their S12-structured run records to
+# $TXHARBOR_DRILL_EVIDENCE_DIR (set below to ${{ runner.temp }}/drill-evidence,
+# never a repository path) and the directory is uploaded as the run artifact
+# `drill-evidence-<run_id>` so a claim can cite a durable run record. Local
+# inputs only: the records carry explicit non-claims; production RPO/RTO/
+# cadence/retention remain undecided deployment questions (T000-P OPEN).
 name: Recovery Drill
 
 on:

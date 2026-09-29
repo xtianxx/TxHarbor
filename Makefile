@@ -60,11 +60,17 @@ test-perf:
 	go test -tags perf -count=1 -timeout 60m ./...
 
 # Full disaster-recovery drill layer (quickstart S1-S12 + failure matrix F1-F7;
-# real PG/Anvil and, for the event scenarios, Redis/Kafka). Independent channel
-# only (scheduled/manual/release gate, see .github/workflows/drill.yml): it
-# never runs on ordinary pull requests and never blocks them (quickstart.md §3;
-# verification.md §4). Without a drill-tagged test the guard reports NOT RUN and
-# exits non-zero — an unrun drill is never a pass.
+# real PG/Anvil and, for the event scenarios, Kafka). Independent channel only
+# (scheduled/manual/release gate, see .github/workflows/drill.yml): it never
+# runs on ordinary pull requests and never blocks them (quickstart.md §3;
+# verification.md §4).
+#
+# NOT RUN discipline: without a drill-tagged test the guard reports NOT RUN and
+# exits non-zero; with a missing Docker daemon the drill package reports NOT RUN
+# (fails under CI=true / TXHARBOR_REQUIRE_DOCKER=1); a Kafka-less environment
+# reports the event-layer scenario as NOT RUN. None of these is a pass.
+# Drill records archive to $TXHARBOR_DRILL_EVIDENCE_DIR when set (drill.yml
+# uploads that directory as the run artifact); otherwise the test temp dir.
 test-drill:
 	$(call require_tagged_tests,drill,test-drill)
 	go test -tags drill -count=1 -timeout 120m ./...

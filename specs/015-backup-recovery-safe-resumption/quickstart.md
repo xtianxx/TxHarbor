@@ -1,10 +1,10 @@
 # Quickstart: 015 Backup Recovery Validation Guide (Phase 1)
 
-**Branch**: `015-backup-recovery-safe-resumption` | **Spec**: [spec.md](spec.md) | **Design**: [plan.md](plan.md), [data-model.md](data-model.md), [contracts/](contracts/) | **Research**: [research.md](research.md)
+**Branch**: `015-backup-recovery-safe-resumption` | **Spec**: [spec.md](spec.md) | **Design**: [plan.md](plan.md), [data-model.md](data-model.md), [contracts/](contracts/) | **Research**: [research.md](research.md) | **ADR**: [ADR-001](adr/ADR-001-recovery-control-store.md), [ADR-002](adr/ADR-002-backup-carrier-and-recovery-point.md)
 
 Backend-only validation. No product code exists yet; run the named suites/commands only after implementation. 命令行为 plan 级接口面（精确 flag 由实现期 tasks 定稿），但每条都指向已存在的真实入口（[contracts/resumption-gate.md](contracts/resumption-gate.md) §1）。
 
-**Gate**: T000-P stays OPEN — this guide is not a release and claims no production readiness; all numbers here are local test inputs. Risk-accept forced resumption / loss write-off / compensation payments / automatic intent re-creation are explicitly absent (no scenario below).
+**Gate**: T000-P stays OPEN — this guide is not a release and claims no production readiness; all numbers here are local test inputs, and production RPO/RTO/backup frequency/retention stay unadjudicated until pre-deployment (FR-035/FR-036). Risk-accept forced resumption / loss write-off / compensation payments / automatic intent re-creation are explicitly absent (no scenario below).
 
 ## Prerequisites
 
@@ -58,7 +58,7 @@ Backend-only validation. No product code exists yet; run the named suites/comman
 | 完整灾备演练 | `make test-drill`（`drill` tag；新目标） | **独立通道**（schedule/dispatch，不阻塞普通 PR） | S1–S12 全流程 + F1–F7 + 真实 Anvil/PG/（事件层）Kafka；长测 |
 | 事件层集成 | `integration_redis` / `integration_kafka` | 既有 `ci.yml` 分类 | 回退检测/幂等吸收的中间件层用例 |
 
-- `drill` 通道可独立并行，永不进入普通 PR；演练产物（日志/度量/证据引用）按 `docs/evidence/015/` 或 `.evidence/` 存档。
+- `drill` 通道可独立并行，永不进入普通 PR；演练产物（日志/度量/证据引用）按 `docs/evidence/015/` 或 `.evidence/` 存档。自动化演练（`make test-drill`/`drill.yml`）将 S12 结构化记录写入 `TXHARBOR_DRILL_EVIDENCE_DIR`（workflow 中为 runner 临时目录，随 run artifact 上传；未设置时仅写测试临时目录，不落仓库）；`recovery-admin drill` 的归档仍默认 `docs/evidence/015/drill/`。Docker 缺位时 drill 包为 NOT RUN（本地 exit 0、CI=true 下失败），事件层 Kafka 不可用时相关场景单独 NOT RUN——两种情况都不得记为 pass 或覆盖。
 - 程序边界（F3）：`reconcile-admin`/`events-admin`（replay/unblock/retention-prune）与外部定时调度**不在运行时门禁接线内**；隔离验收以停服/下线/权限移除证据＋门禁审计＋`no_pre_release_effects` 为准；仅 checklist 签署不构成运行时隔离证明。
 
 ## §4 反作弊纪律（违反即无效证据）

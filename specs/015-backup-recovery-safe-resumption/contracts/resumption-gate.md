@@ -1,8 +1,10 @@
 # Contract: Resumption Gate — Capabilities, Real Entry Points, Isolation (015)
 
-**Spec**: [spec.md](../spec.md) (FR-009–FR-013, FR-021–FR-026, FR-032/033) | **Design**: [data-model.md](../data-model.md) §3/§4/§7 | **ADR-001**: [adr/ADR-001-recovery-control-store.md](../adr/ADR-001-recovery-control-store.md)
+**Spec**: [spec.md](../spec.md) (FR-009–FR-013, FR-021–FR-026, FR-032/033) | **Design**: [data-model.md](../data-model.md) §3/§4/§7 | **Plan**: [plan.md](../plan.md) | **Quickstart**: [quickstart.md](../quickstart.md) | **ADR-001**: [adr/ADR-001-recovery-control-store.md](../adr/ADR-001-recovery-control-store.md)
 
 恢复环境默认隔离；能力逐项放行；**不存在"一个开关恢复全部"**。本契约为 7 类能力的真实接线与放行判定；不含实现，但每条都指向已存在的真实入口。
+
+**Gate**: T000-P 保持 OPEN；本契约不交付风险接受后强制复服/损失核销/人工补偿付款/自动补造意图，不批准资金数据损失额度，不新增紧急绕过入口；生产 RPO/RTO/频率/保留未裁决（FR-035；本地值仅测试输入）。
 
 ## 1. 能力 × 真实入口 × 放行检查点（接线清单）
 

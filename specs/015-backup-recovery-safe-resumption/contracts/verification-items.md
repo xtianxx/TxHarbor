@@ -1,8 +1,10 @@
 # Contract: Verification Items, Evidence Gaps and External Boundaries (015)
 
-**Spec**: [spec.md](../spec.md) (FR-014–FR-020, FR-027–FR-029, FR-034) | **Design**: [data-model.md](../data-model.md) §1.5/§1.6/§8 | **Reuse**: 006 恢复区间重放、013 隔离重放/进度、014 差异/证据/权限/审计（只读或经其自身授权入口）
+**Spec**: [spec.md](../spec.md) (FR-014–FR-020, FR-027–FR-029, FR-034) | **Design**: [data-model.md](../data-model.md) §1.5/§1.6/§8 | **Plan**: [plan.md](../plan.md) | **Quickstart**: [quickstart.md](../quickstart.md) | **Reuse**: 006 恢复区间重放、013 隔离重放/进度、014 差异/证据/权限/审计（只读或经其自身授权入口）
 
 核验只读、只记录、只阻塞；**核验不触发付款、签名、广播、重放或真实下游投递**（FR-020）。结论一律 `consistent / divergent / unknown / stale`；**unknown 不得当通过**。
+
+**Gate**: T000-P 保持 OPEN；风险接受后强制复服/损失核销/人工补偿付款/自动补造意图不在本阶段交付；生产 RPO/RTO/频率/保留未裁决，本地容忍/预算值仅测试输入。
 
 ## 1. 核验目录与结论规则
 
@@ -43,6 +45,6 @@
 
 - 至少一次投递：重复事件由 `consumer_inbox`/`consumer_versions` 幂等吸收；offset/inbox 回退**可检测**（PG 进度 vs broker offset），但**不得因缺失自动触发有副作用的重处理**；可能的外部重复效果必须可检测、可报告。
 - 缺失的历史幂等记录不得静默补写为"已处理"，也不得据此判定可重执行；重新处理只能经既有 quarantine replay 等授权路径。
-- 下游去重身份 = 既有事件稳定身份（`event_id` + source 三元组）；本阶段**不承诺跨系统恰好一次**，只提供本项目范围内的检测/处置边界。
+- 下游去重身份 = 既有事件稳定身份（`event_id` + source 三元组；013 [contracts/events.md](../../013-reliable-event-infrastructure/contracts/events.md) 定义 `event_id` 为自然键的确定性 UUIDv5，消费幂等键为 `(consumer_name, event_id)`，见 013 [contracts/consumer.md](../../013-reliable-event-infrastructure/contracts/consumer.md)）；broker offset 是投递位置/消费进度（供回退检测），**不是业务身份**，业务效果去重由下游独立判定；本阶段**不承诺跨系统恰好一次**，只提供本项目范围内的检测/处置边界。
 - 未接入真实上游/下游回执时：**不得宣称外部账本一致或"外部效果已恢复"**；结论限定在本项目可验证范围（状态、游标、inbox/version、offset 关系、链上事实）。
 - 真实效果边界：`cache.Invalidator` = 非权威缓存删除（Redis 失效不构成资金事实）；参考消费者 `ref_consumer_ledger` = 证据材料、明确非账本；真实下游交付（如生产 Kafka 主题的对外消费者）属"真实下游投递"，其恢复走 dual 审批范围。

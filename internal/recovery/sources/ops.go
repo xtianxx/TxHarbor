@@ -180,13 +180,14 @@ type opsSourceBase struct {
 	now        func() time.Time
 }
 
-// observationInstant is the timestamp recorded on every V5-V9 observation.
-// Whole-second precision is deliberate (same rule as the V1-V4 base): the
-// orchestrator captures its evaluation instant immediately before reading the
-// sources, so sub-second precision could postdate it and trip the evaluator's
-// strict "future timestamp" rule.
+// observationInstant is the timestamp recorded on every V5-V9 observation:
+// the adapter's own read instant in UTC (same rule as the V1-V4 base). The
+// orchestrator captures its evaluation instant only after the sources have
+// been read, so a live observation can never postdate it; the strict "future
+// timestamp" rule of the evaluator still refuses a source whose own timestamp
+// runs ahead of the evaluation.
 func (b *opsSourceBase) observationInstant() time.Time {
-	return b.now().UTC().Truncate(time.Second)
+	return b.now().UTC()
 }
 
 // opsObservationInput is one assembled V5-V9 adapter observation.

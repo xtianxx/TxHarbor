@@ -693,12 +693,13 @@ type verificationPendingItem struct {
 //
 // Order of operations (data-model.md §5): the evidence token is captured
 // before the sources are read; the sources are read outside any transaction;
-// the result is committed through CommitEvidenceWrite, which takes the
-// instance row lock, re-validates the token (a mismatch discards the attempt
-// with only the protocol's discard audit row) and advances the evidence
-// generation by exactly one for the accepted batch. A refused batch (bound,
-// malformed observation, closed instance) persists nothing but its refusal
-// audit row.
+// the evaluation instant is captured after the reads, so a live observation
+// can never postdate it; the result is committed through CommitEvidenceWrite,
+// which takes the instance row lock, re-validates the token (a mismatch
+// discards the attempt with only the protocol's discard audit row) and
+// advances the evidence generation by exactly one for the accepted batch. A
+// refused batch (bound, malformed observation, closed instance) persists
+// nothing but its refusal audit row.
 func (v *Verification) Verify(ctx context.Context, req VerificationRequest) (VerificationBatch, error) {
 	if v == nil || v.store == nil {
 		return VerificationBatch{}, errors.New("verification requires a controlstore.Store built by controlstore.NewStore")
@@ -775,8 +776,7 @@ func (v *Verification) Verify(ctx context.Context, req VerificationRequest) (Ver
 		return VerificationBatch{}, fmt.Errorf("%w: %s", controlstore.ErrInstanceNotOpen, token.InstanceID)
 	}
 
-	evaluatedAt := v.now()
-	prepared, err := v.collect(ctx, instanceID, req, requestScope, evaluatedAt)
+	prepared, err := v.collect(ctx, instanceID, req, requestScope)
 	if err != nil {
 		// Read failures and refusals leave no result rows: one refusal audit
 		// row and an error; the caller narrows the scope and steps again.
@@ -884,7 +884,7 @@ func (v *Verification) Verify(ctx context.Context, req VerificationRequest) (Ver
 // directly, and it never calls an effectful method (the source interface has
 // none). instanceID is the canonical recovery instance id recorded on every
 // pending item, so the prepared items are insertable without a later patch-up.
-func (v *Verification) collect(ctx context.Context, instanceID string, req VerificationRequest, requestScope []byte, evaluatedAt time.Time) ([]verificationPendingItem, error) {
+func (v *Verification) collect(ctx context.Context, instanceID string, req VerificationRequest, requestScope []byte) ([]verificationPendingItem, error) {
 	type objectKey struct {
 		category  VerificationCategory
 		objectKey string
@@ -947,6 +947,17 @@ func (v *Verification) collect(ctx context.Context, instanceID string, req Verif
 		// single conclusion. Refuse instead.
 		return nil, fmt.Errorf("%w: the sources observed no objects; an empty batch is not a verification", ErrVerificationObservation)
 	}
+
+	// The evaluation instant is captured only after the read-only sources
+	// have been consulted: a live adapter timestamps its observation when it
+	// reads, so an instant taken before the reads could already be older than
+	// an observation whose read crossed a clock second — and the strict
+	// no-future rule of EvaluateConclusion would refuse a read that plainly
+	// happened. Evaluating at the instant that follows the reads keeps every
+	// live observation inside its own evaluation instant, while a source
+	// whose own timestamp still runs ahead of that instant is refused as
+	// before (FR-018: nothing is inferred or back-dated away).
+	evaluatedAt := v.now()
 
 	prepared := make([]verificationPendingItem, 0, len(order))
 	for _, key := range order {

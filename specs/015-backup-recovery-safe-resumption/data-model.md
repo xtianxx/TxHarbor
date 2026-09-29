@@ -1,8 +1,10 @@
 # Data Model: 015 Backup Recovery and Safe Service Resumption (Phase 1)
 
-**Branch**: `015-backup-recovery-safe-resumption` | **Date**: 2026-09-28 | **Spec**: [spec.md](spec.md) | **Plan**: [plan.md](plan.md) | **Research**: [research.md](research.md) | **Contracts**: [contracts/](contracts/)
+**Branch**: `015-backup-recovery-safe-resumption` | **Date**: 2026-09-28 | **Spec**: [spec.md](spec.md) | **Plan**: [plan.md](plan.md) | **Research**: [research.md](research.md) | **Contracts**: [contracts/](contracts/) | **Quickstart**: [quickstart.md](quickstart.md) | **ADR**: [ADR-001](adr/ADR-001-recovery-control-store.md), [ADR-002](adr/ADR-002-backup-carrier-and-recovery-point.md)
 
 Design only; no implementation, no migration, no product code in this round.
+
+**Gate status**: **T000-P stays OPEN** — no release and no production-readiness claim; local numbers are test inputs only. **Risk-accept forced resumption, loss write-off, manual compensation payments and automatic intent re-creation are explicitly absent** (no entity, no field, no task). Production RPO/RTO/backup frequency/retention stay **unadjudicated until pre-deployment** (FR-035/FR-036), and nothing here approves any funding-data loss allowance or bypasses an existing fund gate.
 
 **存储分层（关键设计决定）**:
 
