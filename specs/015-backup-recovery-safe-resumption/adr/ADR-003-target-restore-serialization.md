@@ -1,6 +1,6 @@
 # ADR-003: Serialize Restore Writers per PostgreSQL Target
 
-**Date**: 2026-09-29 (revised 2026-09-29) | **Spec**: [spec.md](../spec.md) (FR-008) | **Status**: Proposed; Oracle Gate 1 NO-GO, revised for rereview (no implementation authorization) | **Related**: [ADR-001](ADR-001-recovery-control-store.md), [data-model.md](../data-model.md) §1/§4.4/§6/§7, [plan.md](../plan.md), [T019/T020](../tasks.md)
+**Date**: 2026-09-29 (revised 2026-09-29) | **Spec**: [spec.md](../spec.md) (FR-008) | **Status**: Accepted for bounded implementation after Oracle Gate 1 (3/3); not production-ready, all prerequisites fail-closed | **Related**: [ADR-001](ADR-001-recovery-control-store.md), [data-model.md](../data-model.md) §1/§4.4/§6/§7, [plan.md](../plan.md), [T019/T020](../tasks.md)
 
 ## Context
 
