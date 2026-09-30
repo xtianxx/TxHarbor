@@ -561,6 +561,9 @@ func parseArtifacts(raw json.RawMessage) ([]ManifestArtifact, error) {
 		if err != nil {
 			return nil, err
 		}
+		if !regexpMatch(digestPattern, sha) {
+			return nil, fmt.Errorf("%w: %s.sha256 must be sha256:<64 lowercase hex characters>", ErrManifestInvalid, path)
+		}
 		artifacts = append(artifacts, ManifestArtifact{Path: artifactPath, Bytes: bytes, SHA256: sha})
 	}
 	return artifacts, nil
@@ -667,16 +670,8 @@ func (m *Manifest) Validate(v ManifestValidation) error {
 		return fmt.Errorf("%w: carrier.pg_dump_version %q major %d does not match the target PostgreSQL major %d",
 			ErrManifestInvalid, m.Carrier.PGDumpVersion, dumpMajor, v.PGServerMajor)
 	}
-	if len(m.Coverage.Authoritative) == 0 || len(m.Coverage.Excluded) == 0 {
-		return fmt.Errorf("%w: coverage must declare both the authoritative objects and the exclusions", ErrManifestInvalid)
-	}
-	if !slices.Contains(m.Coverage.Excluded, CoverageExcludedSignerPrivateKeys) {
-		return fmt.Errorf("%w: coverage.excluded must declare that %s never enter a backup",
-			ErrManifestInvalid, CoverageExcludedSignerPrivateKeys)
-	}
-	if !slices.Contains(m.Coverage.Excluded, CoverageExcludedRealCredentials) {
-		return fmt.Errorf("%w: coverage.excluded must declare that %s never enter a backup",
-			ErrManifestInvalid, CoverageExcludedRealCredentials)
+	if err := validateCoverage(m.Coverage); err != nil {
+		return err
 	}
 	if err := ValidateRPOProof(RPOProofSnapshotTuple, m.RecoveryPoint); err != nil {
 		return err
@@ -701,6 +696,9 @@ func (m *Manifest) Validate(v ManifestValidation) error {
 	for i, artifact := range m.Artifacts {
 		if strings.TrimSpace(artifact.Path) == "" || artifact.Bytes <= 0 || strings.TrimSpace(artifact.SHA256) == "" {
 			return fmt.Errorf("%w: artifacts[%d] must carry path/bytes/sha256", ErrManifestInvalid, i)
+		}
+		if !regexpMatch(digestPattern, artifact.SHA256) {
+			return fmt.Errorf("%w: artifacts[%d].sha256 must be sha256:<64 lowercase hex characters>", ErrManifestInvalid, i)
 		}
 	}
 	switch m.Verification.State {
@@ -728,6 +726,49 @@ func (m *Manifest) Validate(v ManifestValidation) error {
 		return err
 	}
 	return nil
+}
+
+// validateCoverage makes the manifest's declaration complete rather than
+// merely non-empty. Authoritative labels intentionally remain the canonical
+// data-model object names; the FR-002 nine categories are represented by the
+// complete object inventory, not by introducing a second incompatible label
+// vocabulary.
+func validateCoverage(coverage ManifestCoverage) error {
+	if !sameUniqueStrings(coverage.Authoritative, canonicalAuthoritativeObjects) {
+		return fmt.Errorf("%w: coverage.authoritative must declare the complete canonical data-DB object set", ErrManifestInvalid)
+	}
+	for _, required := range canonicalExcludedObjects {
+		if !slices.Contains(coverage.Excluded, required) {
+			return fmt.Errorf("%w: coverage.excluded must declare %s", ErrManifestInvalid, required)
+		}
+	}
+	if hasDuplicateStrings(coverage.Excluded) {
+		return fmt.Errorf("%w: coverage.excluded must not contain duplicate declarations", ErrManifestInvalid)
+	}
+	return nil
+}
+
+func sameUniqueStrings(actual, expected []string) bool {
+	if len(actual) != len(expected) || hasDuplicateStrings(actual) {
+		return false
+	}
+	for _, value := range expected {
+		if !slices.Contains(actual, value) {
+			return false
+		}
+	}
+	return true
+}
+
+func hasDuplicateStrings(values []string) bool {
+	seen := make(map[string]struct{}, len(values))
+	for _, value := range values {
+		if _, exists := seen[value]; exists {
+			return true
+		}
+		seen[value] = struct{}{}
+	}
+	return false
 }
 
 func allChecksTrue(c ManifestChecks) bool {
@@ -759,7 +800,8 @@ func (m *Manifest) CheckUsable(use ManifestUse, v ManifestValidation) error {
 
 // CanonicalJSON renders the manifest as its canonical JSON document: the
 // typed field order is stable, so key order and whitespace of the input never
-// influence the digest.
+// influence the digest. Array order is preserved because it is part of the
+// 015.1 wire encoding (in particular, consumers may use the first artifact).
 func (m *Manifest) CanonicalJSON() ([]byte, error) {
 	if m == nil {
 		return nil, fmt.Errorf("%w: nil manifest", ErrManifestInvalid)

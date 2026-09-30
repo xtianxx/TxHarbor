@@ -60,14 +60,25 @@ const manifestValidJSON = `{
   "coverage": {
     "authoritative": [
       "chain_blocks",
+      "indexer_checkpoint",
       "erc20_transfer_logs",
+      "deposit_checkpoint",
+      "deposit_observation_transitions",
+      "confirmation_policy_history",
       "withdrawal_requests",
       "payment_intents",
       "signing_requests",
+      "tx_send_attempts",
+      "tx_receipts",
       "nonce_bindings",
+      "nonce_observations",
       "outbox_events",
+      "event_obligation",
       "consumer_inbox",
-      "recon_task"
+      "consumer_progress",
+      "recon_task",
+      "recon_audit",
+      "withdrawal_request_audit"
     ],
     "excluded": [
       "redis_non_authoritative",
@@ -374,9 +385,10 @@ func TestManifestContractDigestStabilityAndMismatch(t *testing.T) {
 	m1 := manifestObject(t, nil)
 	// The same semantic document with a different byte layout (map marshaling
 	// sorts keys alphabetically and drops the fixture's formatting).
-	m2 := manifestObject(t, func(doc map[string]any) {
-		doc["note"] = "local drill input, not a production threshold"
-	})
+	m2, err := ParseManifest([]byte(manifestValidJSON))
+	if err != nil {
+		t.Fatalf("ParseManifest(formatted fixture): %v", err)
+	}
 
 	c1, err := m1.CanonicalJSON()
 	if err != nil {
@@ -400,6 +412,12 @@ func TestManifestContractDigestStabilityAndMismatch(t *testing.T) {
 	if d1 != d2 || !strings.HasPrefix(d1, "sha256:") {
 		t.Fatalf("Digest = %q / %q, want one stable sha256 digest", d1, d2)
 	}
+	// Pinned using the 64140fb implementation's json.Marshal(manifest)
+	// encoding algorithm, not by recomputing an expectation from this method.
+	const baseline0151Digest = "sha256:91c554ceff4351fadae4d80c0d96bf80fa27c8ab5997f7488e8931af3974fe10"
+	if d1 != baseline0151Digest {
+		t.Fatalf("Digest(valid 015.1 fixture) = %q, want baseline encoding digest %q", d1, baseline0151Digest)
+	}
 	if err := CheckManifestDigest(m1, d1); err != nil {
 		t.Fatalf("CheckManifestDigest(match) = %v, want nil", err)
 	}
@@ -415,6 +433,68 @@ func TestManifestContractDigestStabilityAndMismatch(t *testing.T) {
 	}
 	if err := CheckManifestDigest(m1, ""); !errors.Is(err, ErrManifestDigestMismatch) {
 		t.Fatalf("CheckManifestDigest(empty) = %v, want ErrManifestDigestMismatch", err)
+	}
+}
+
+// TestManifestContractCanonicalJSONPreservesArrayOrder pins the 015.1 wire
+// encoding: arrays remain in caller order rather than being treated as sets.
+// Artifact order is especially significant because restore consumers can use
+// the first declared archive.
+func TestManifestContractCanonicalJSONPreservesArrayOrder(t *testing.T) {
+	base := manifestObject(t, nil)
+	base.Artifacts = append(base.Artifacts,
+		ManifestArtifact{Path: "secondary.pgcustom", Bytes: 1024, SHA256: base.Artifacts[0].SHA256},
+	)
+
+	digest := func(m *Manifest) string {
+		t.Helper()
+		got, err := m.Digest()
+		if err != nil {
+			t.Fatalf("Digest: %v", err)
+		}
+		return got
+	}
+
+	selectedFirstDigest := digest(base)
+	reorderedArtifacts := *base
+	reorderedArtifacts.Artifacts = []ManifestArtifact{base.Artifacts[1], base.Artifacts[0]}
+	if got := digest(&reorderedArtifacts); got == selectedFirstDigest {
+		t.Fatal("reordering artifacts preserved digest; first-artifact selection must be bound")
+	}
+
+	coverageOrder := *base
+	coverageOrder.Coverage = base.Coverage
+	coverageOrder.Coverage.Authoritative = append([]string(nil), base.Coverage.Authoritative...)
+	coverageOrder.Coverage.Authoritative[0], coverageOrder.Coverage.Authoritative[1] =
+		coverageOrder.Coverage.Authoritative[1], coverageOrder.Coverage.Authoritative[0]
+	if got := digest(&coverageOrder); got == selectedFirstDigest {
+		t.Fatal("reordering coverage.authoritative preserved the 015.1 digest")
+	}
+
+	exclusionOrder := *base
+	exclusionOrder.Coverage = base.Coverage
+	exclusionOrder.Coverage.Excluded = append([]string(nil), base.Coverage.Excluded...)
+	exclusionOrder.Coverage.Excluded[0], exclusionOrder.Coverage.Excluded[1] =
+		exclusionOrder.Coverage.Excluded[1], exclusionOrder.Coverage.Excluded[0]
+	if got := digest(&exclusionOrder); got == selectedFirstDigest {
+		t.Fatal("reordering coverage.excluded preserved the 015.1 digest")
+	}
+
+	snapshotOrder := *base
+	snapshotOrder.RecoveryPoint = base.RecoveryPoint
+	snapshotOrder.RecoveryPoint.Snapshot.Xip = []int64{7, 8}
+	snapshotReordered := snapshotOrder
+	snapshotReordered.RecoveryPoint.Snapshot.Xip = []int64{8, 7}
+	if digest(&snapshotReordered) == digest(&snapshotOrder) {
+		t.Fatal("reordering recovery_point.snapshot.xip preserved the 015.1 digest")
+	}
+
+	schemaOrder := *base
+	schemaOrder.Schema.GooseDBVersion = append([]int64(nil), base.Schema.GooseDBVersion...)
+	schemaOrder.Schema.GooseDBVersion[0], schemaOrder.Schema.GooseDBVersion[1] =
+		schemaOrder.Schema.GooseDBVersion[1], schemaOrder.Schema.GooseDBVersion[0]
+	if got := digest(&schemaOrder); got == selectedFirstDigest {
+		t.Fatal("reordering schema.goose_db_version preserved the 015.1 digest")
 	}
 }
 
@@ -673,7 +753,8 @@ func TestManifestContractSelectionDeterministic(t *testing.T) {
 		nested(t, doc, "recovery_point")["wal_lsn"] = "0/00000F00"
 		doc["backup_id"] = "bbbbbbbb-0000-0000-0000-000000000000"
 		doc["artifacts"] = []any{map[string]any{
-			"path": "zz-latest-looking.dump", "bytes": 10, "sha256": "sha256:aa",
+			"path": "zz-latest-looking.dump", "bytes": 10,
+			"sha256": "sha256:4f1e2d3c4b5a69788796a5b4c3d2e1f04f1e2d3c4b5a69788796a5b4c3d2e1f0",
 		}}
 	})
 	winner, err = SelectBackup([]*Manifest{renamed, older}, valid)

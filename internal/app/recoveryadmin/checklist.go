@@ -79,6 +79,18 @@ func recoveryAdminChecklistSet(ctx context.Context, args []string, d Deps) int {
 		fmt.Fprintln(stderr, "txharbor recovery-admin checklist-set: --checkpoint-summary must be valid JSON (it is stored as JSONB)")
 		return 2
 	}
+	if err := recovery.ValidateChecklistText("evidence_ref", strings.TrimSpace(*evidenceRef)); err != nil {
+		fmt.Fprintln(stderr, "txharbor recovery-admin checklist-set: refused: evidence_ref contains credential-shaped material")
+		return 1
+	}
+	if err := recovery.ValidateChecklistSummary([]byte(summary)); err != nil {
+		fmt.Fprintln(stderr, "txharbor recovery-admin checklist-set: refused: checkpoint_summary contains credential-shaped material")
+		return 1
+	}
+	if err := recovery.ValidateChecklistText("reason", strings.TrimSpace(*reason)); err != nil {
+		fmt.Fprintln(stderr, "txharbor recovery-admin checklist-set: refused: reason contains credential-shaped material")
+		return 1
+	}
 	operation, err := recoveryOpOperationID(*operationID)
 	if err != nil {
 		fmt.Fprintf(stderr, "txharbor recovery-admin checklist-set: %s\n", logx.Redact(err.Error()))
@@ -188,6 +200,10 @@ func recoveryAdminChecklistVerify(ctx context.Context, args []string, d Deps) in
 	if *reject && strings.TrimSpace(*reason) == "" {
 		fmt.Fprintln(stderr, "txharbor recovery-admin checklist-verify: --reject requires --reason")
 		return 2
+	}
+	if err := recovery.ValidateChecklistText("reason", strings.TrimSpace(*reason)); err != nil {
+		fmt.Fprintln(stderr, "txharbor recovery-admin checklist-verify: refused: reason contains credential-shaped material")
+		return 1
 	}
 	operation, err := recoveryOpOperationID(*operationID)
 	if err != nil {

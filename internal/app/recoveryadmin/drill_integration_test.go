@@ -40,7 +40,7 @@ func TestDrillCLIRealRestoreRecordAndArchive(t *testing.T) {
 	requireNativePGRestore(t)
 	f := newCLIFixture(t)
 	manifestPath, _ := f.verifiedBackup(t)
-	drillEnv := f.createDB(t, "drill_env")
+	drillEnv := f.restoreDSN
 	outDir := t.TempDir()
 	env := f.env("deploy:executor")
 	env[config.EnvPGDSN] = drillEnv
@@ -65,7 +65,7 @@ func TestDrillCLIRealRestoreRecordAndArchive(t *testing.T) {
 	if got := f.toolCalls(t); got != callsBefore {
 		t.Fatalf("missing observer invoked restore tools: calls=%d, before=%d", got, callsBefore)
 	}
-	env[config.EnvRecoveryObserverDSN] = f.dataDSN
+	env[config.EnvRecoveryObserverDSN] = drillEnv
 
 	// The gate TTL is required by exact key name (the derived release
 	// observation has no default TTL): nothing may run without it.
@@ -243,8 +243,9 @@ func TestDrillCLIRefusesUnverifiedDrillTargets(t *testing.T) {
 
 	// record-only without accepted restore evidence (none exists yet) is
 	// refused: a re-initialized empty database is never a drill.
-	env[config.EnvPGDSN] = other
-	code, _, stderr = runRecoveryAdmin(t, drillCLIArgs(manifestPath, other, f.instanceID, outDir, "--record-only"), env)
+	env[config.EnvPGDSN] = f.restoreDSN
+	env[config.EnvRecoveryObserverDSN] = f.restoreDSN
+	code, _, stderr = runRecoveryAdmin(t, drillCLIArgs(manifestPath, f.restoreDSN, f.instanceID, outDir, "--record-only"), env)
 	if code != 1 || !strings.Contains(stderr, "record-only requires an accepted restore_probe evidence row") {
 		t.Fatalf("record-only without restore evidence must refuse: exit=%d stderr=%q", code, stderr)
 	}
@@ -265,10 +266,11 @@ func TestDrillCLIRecordOnlyRejectsMismatchedAndStaleProbe(t *testing.T) {
 	requireNativePGRestore(t)
 	f := newCLIFixture(t)
 	manifestA, _ := f.verifiedBackup(t)
-	drillEnv := f.createDB(t, "drill_record_binding")
+	drillEnv := f.restoreDSN
 	outDir := t.TempDir()
 	env := f.env("deploy:executor")
 	env[config.EnvPGDSN] = drillEnv
+	env[config.EnvRecoveryObserverDSN] = drillEnv
 	env[config.EnvRecoveryInstance] = f.instanceID
 	env[config.EnvRecoveryGateTTL] = "30s"
 
@@ -305,10 +307,11 @@ func TestDrillCLILocalInputAnnotations(t *testing.T) {
 	requireNativePGRestore(t)
 	f := newCLIFixture(t)
 	manifestPath, _ := f.verifiedBackup(t)
-	drillEnv := f.createDB(t, "drill_annot")
+	drillEnv := f.restoreDSN
 	outDir := t.TempDir()
 	env := f.env("deploy:executor")
 	env[config.EnvPGDSN] = drillEnv
+	env[config.EnvRecoveryObserverDSN] = drillEnv
 	env[config.EnvRecoveryInstance] = f.instanceID
 	env[config.EnvRecoveryGateTTL] = "30s"
 	env[config.EnvRecoveryRPOTarget] = "1h"

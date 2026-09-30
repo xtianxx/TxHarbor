@@ -1,0 +1,86 @@
+{
+  "drill_tree_fingerprint": "sha256:d761a4fa68d40e1eff40937ec466bdf2953664621b15d2aedabe8a942b6b552a",
+  "drill_tree_note": "dirty pre-fix81 tree; subsequent changes limited to two integration test files and docs/tasks; not equal to final local commit",
+  "final_source_fingerprint": "sha256:43e15d6a13224f600f15b786aa016ab995c3d90eda3f8ec0705be75ef6569514",
+  "fingerprint_mapping": "The final source fingerprint differs from the drill-tested d761a4fa... fingerprint only in probe_negative_integration_test.go and restore_invalidation_integration_test.go; docs/tasks are excluded from source fingerprint. Runtime and drill inputs unchanged. Fingerprints are not Git commit IDs.",
+  "post_fix81_checks": {
+    "affected_unit": "PASS",
+    "script_parser_and_bash_syntax": "PASS",
+    "full_static_validation_after_fix81": "PENDING"
+  },
+  "host_environment_rerun": {
+    "exit_status": 0,
+    "result": "5 PASS / 0 SKIP / 0 FAIL",
+    "scope": "environment-only rerun; no source edits",
+    "source": "/tmp/opencode/015-resumed-final/host-environment-rerun.log",
+    "tests": [
+      "TestServeDurablePauseKeepsServiceAliveAndPaused",
+      "TestReadyzFlipsAndRecoversWithRealDependencies",
+      "TestNonceMigrationHistoryUntouched",
+      "TestSignerMigrationHistoryUntouched",
+      "TestWithdrawalMigrationHistoryUntouched"
+    ]
+  },
+  "pg_integration": {
+    "all_test_event_counts": {
+      "fail": 8,
+      "pass": 3765,
+      "skip": 2
+    },
+    "exit_status": 1,
+    "failures": [
+      {
+        "package": "github.com/xtianxx/txharbor/internal/app",
+        "test": "TestServeDurablePauseKeepsServiceAliveAndPaused"
+      },
+      {
+        "package": "github.com/xtianxx/txharbor/internal/health",
+        "test": "TestReadyzFlipsAndRecoversWithRealDependencies"
+      },
+      {
+        "package": "github.com/xtianxx/txharbor/internal/nonce",
+        "test": "TestNonceMigrationHistoryUntouched"
+      },
+      {
+        "package": "github.com/xtianxx/txharbor/internal/signer",
+        "test": "TestSignerMigrationHistoryUntouched"
+      },
+      {
+        "package": "github.com/xtianxx/txharbor/internal/recovery",
+        "test": "TestVerifyBackupRejectsMissingAuthoritativeObject"
+      },
+      {
+        "package": "github.com/xtianxx/txharbor/internal/recovery",
+        "test": "TestRestorePreWriteMarkerInvalidatesBeforeFirstTargetWrite"
+      },
+      {
+        "package": "github.com/xtianxx/txharbor/internal/recovery",
+        "test": "TestRestoreInterruptionAfterFirstWriteKeepsOldPermissionStale"
+      },
+      {
+        "package": "github.com/xtianxx/txharbor/internal/withdrawal",
+        "test": "TestWithdrawalMigrationHistoryUntouched"
+      }
+    ],
+    "skips": [
+      {
+        "package": "github.com/xtianxx/txharbor/internal/txlifecycle",
+        "test": "TestCrashHelper"
+      },
+      {
+        "package": "github.com/xtianxx/txharbor/internal/withdrawal",
+        "test": "TestWithdrawalIntakeStorageDown"
+      }
+    ],
+    "source": "/tmp/opencode/015-resumed-final/pg-integration.jsonl",
+    "top_level_counts": {
+      "fail": 8,
+      "pass": 1755,
+      "skip": 2
+    }
+  },
+  "validation_status": {
+    "pg_integration_exit": 1,
+    "static_unit_contract_race_exit": 0
+  }
+}

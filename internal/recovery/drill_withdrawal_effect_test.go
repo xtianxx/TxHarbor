@@ -98,7 +98,8 @@ func TestT058WithdrawalEffectRestoreRetry(t *testing.T) {
 	// state from the accepted request row.
 	verifyDSN := env.createDatabase("withdrawal-effect-verify")
 	env.verifyBackup(backup.ManifestPath, verifyDSN, env.operation("withdrawal-effect-verify"))
-	recoveredDSN := env.createDatabase("withdrawal-effect-recovered")
+	env.seedAuthoritativeTargetCleanBaseline()
+	recoveredDSN := env.recoveryTarget()
 	recovered := env.openPool(recoveredDSN)
 	env.restore(backup.ManifestPath, recoveredDSN, env.operation("withdrawal-effect-restore"))
 	var restoredStatus string

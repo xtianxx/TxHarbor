@@ -10,6 +10,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strconv"
 	"strings"
 	"sync"
@@ -141,8 +142,8 @@ func TestTargetWriterLockLossAndPostIntentFailureBlockSuccessor(t *testing.T) {
 		t.Fatal("lock loss was accepted")
 	}
 	guard, found, err := controlstore.ReadTargetGuard(f.ctx, f.ctrl, key.String())
-	if err != nil || !found || guard.State == controlstore.TargetGuardClean {
-		t.Fatalf("lock-loss attempt unexpectedly clean: guard=%+v found=%v err=%v", guard, found, err)
+	if err != nil || !found || guard.State != controlstore.TargetGuardUnknown || !guard.ActiveWriter || !guard.LaunchIntent {
+		t.Fatalf("lock-loss attempt did not remain unknown/active: guard=%+v found=%v err=%v", guard, found, err)
 	}
 
 	// A later ordinary attempt is refused until an explicitly controlled
@@ -273,11 +274,8 @@ func TestTargetWriterLockLossDuringProbeRefusesAcceptance(t *testing.T) {
 		t.Fatal("acceptance callback ran after lock loss")
 	}
 	guard, found, err := controlstore.ReadTargetGuard(f.ctx, f.ctrl, key.String())
-	if err != nil || !found || guard.State == controlstore.TargetGuardClean {
-		t.Fatalf("probe lock-loss attempt unexpectedly left a clean guard: %+v found=%v err=%v", guard, found, err)
-	}
-	if guard.State == controlstore.TargetGuardRebuildRequired && guard.ActiveWriter {
-		t.Fatalf("lock-loss cleanup violated guard schema invariant: %+v", guard)
+	if err != nil || !found || guard.State != controlstore.TargetGuardUnknown || !guard.ActiveWriter || !guard.LaunchIntent {
+		t.Fatalf("probe lock-loss attempt did not remain unknown/active: %+v found=%v err=%v", guard, found, err)
 	}
 }
 
@@ -347,11 +345,17 @@ func TestTargetWriterStaleCleanupCannotReplaceLaterCleanAttempt(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if markTargetAttemptRebuildRequiredIfDrained(f.store, key.String(), "writer-A-stale", staleApp) {
-		t.Fatal("stale attempt A cleanup unexpectedly modified B")
+	lock, err := AcquireTargetLock(f.ctx, f.ctrlDSN, key, time.Second, time.Millisecond)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer lock.Release(context.Background())
+	lockHealth := func(ctx context.Context) error { return lock.Health(ctx) }
+	if err := finalizeFailedTargetAttempt(lock, lockHealth, dsn, key.String(), "writer-A-stale", staleApp, time.Second, 10*time.Millisecond); err == nil {
+		t.Fatal("real stale-attempt finalizer unexpectedly accepted attempt A")
 	}
 	after, found, err := controlstore.ReadTargetGuard(f.ctx, f.ctrl, key.String())
-	if err != nil || !found || after.State != controlstore.TargetGuardClean || after.OperationID != before.OperationID || after.AttemptAppName != before.AttemptAppName {
+	if err != nil || !found || !reflect.DeepEqual(after, before) {
 		t.Fatalf("stale attempt A cleanup changed valid attempt B clean: before=%+v after=%+v found=%v err=%v", before, after, found, err)
 	}
 }

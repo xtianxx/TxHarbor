@@ -97,6 +97,7 @@ const (
 	// fixture names the values so an accidental future CLI coupling fails
 	// loudly instead of silently reading an unconfigured state.
 	drillDataTargetFingerprint = "drill-data-target"
+	drillObserverApplication   = "txharbor-drill-observer"
 )
 
 // TestMain owns the drill package's Docker NOT RUN discipline. Locally without
@@ -366,6 +367,11 @@ type drillEnv struct {
 	dataDSN string
 	data    *pgxpool.Pool
 
+	// recoveryTargetDSN is declared before OpenInstance and remains the bound
+	// restore destination for this fixture. It is distinct from both source
+	// data and the per-verification disposable database.
+	recoveryTargetDSN string
+
 	ctrlDSN string
 	ctrl    *pgxpool.Pool
 	store   *controlstore.Store
@@ -438,18 +444,19 @@ func newDrillEnv(t *testing.T, withAnvil bool) *drillEnv {
 	}
 	e.store = store
 
-	// Bind the recovery instance to the authoritative fixture data database.
-	// The target key and role fingerprint are derived from its actual DSN; the
-	// control-store open path creates the corresponding guard inventory.
-	dataTarget, err := controlstore.ParseDSNTarget(e.dataDSN)
+	// Declare the isolated recovery destination before opening the instance.
+	// The live source remains authoritative backup input, but is never the
+	// instance's restore destination.
+	e.recoveryTargetDSN = e.createDatabase("recovery_target")
+	recoveryTarget, err := controlstore.ParseDSNTarget(e.recoveryTargetDSN)
 	if err != nil {
-		t.Fatalf("parse authoritative data target: %v", err)
+		t.Fatalf("parse predeclared recovery target: %v", err)
 	}
-	targetGuardKey, err := controlstore.TargetGuardKey(dataTarget)
+	targetGuardKey, err := controlstore.TargetGuardKey(recoveryTarget)
 	if err != nil {
-		t.Fatalf("derive authoritative target guard key: %v", err)
+		t.Fatalf("derive recovery target guard key: %v", err)
 	}
-	targetRoleFingerprint := dataTarget.DataTargetFingerprint().RoleFingerprint
+	targetRoleFingerprint := recoveryTarget.DataTargetFingerprint().RoleFingerprint
 
 	// One open recovery instance through the real entry point.
 	opened, err := recovery.OpenInstance(ctx, store, recovery.OpenInstanceRequest{
@@ -515,6 +522,14 @@ func (e *drillEnv) createDatabase(label string) string {
 	return drillDSNFor(e.t, e.adminDSN, name)
 }
 
+func (e *drillEnv) recoveryTarget() string {
+	e.t.Helper()
+	if e.recoveryTargetDSN == "" {
+		e.t.Fatal("fixture recovery target was not declared")
+	}
+	return e.recoveryTargetDSN
+}
+
 func (e *drillEnv) openPool(dsn string) *pgxpool.Pool {
 	e.t.Helper()
 	pool, err := db.OpenPool(context.Background(), dsn, 5*time.Second)
@@ -523,6 +538,27 @@ func (e *drillEnv) openPool(dsn string) *pgxpool.Pool {
 	}
 	e.t.Cleanup(pool.Close)
 	return pool
+}
+
+// observerDSNFor retains the fixture's privileged connection identity while
+// pointing it at the exact database being verified or recovered. Observer
+// identity must match the target identity; the container's admin DSN normally
+// points at the unrelated bootstrap database.
+func (e *drillEnv) observerDSNFor(targetDSN string) string {
+	e.t.Helper()
+	adminURL, err := url.Parse(e.adminDSN)
+	if err != nil {
+		e.t.Fatalf("parse privileged observer dsn: %v", err)
+	}
+	targetURL, err := url.Parse(targetDSN)
+	if err != nil {
+		e.t.Fatalf("parse target dsn for privileged observer: %v", err)
+	}
+	adminURL.Path = targetURL.Path
+	query := adminURL.Query()
+	query.Set("application_name", drillObserverApplication)
+	adminURL.RawQuery = query.Encode()
+	return adminURL.String()
 }
 
 // ---------------------------------------------------------------------------
@@ -788,8 +824,8 @@ func (e *drillEnv) verifyBackup(manifestPath, targetDSN, operationID string) rec
 		InstanceID:       e.instanceID,
 		ControlStore:     e.store,
 		ControlDSN:       e.ctrlDSN,
-		AuthoritativeDSN: e.dataDSN,
-		ObserverDSN:      e.adminDSN,
+		AuthoritativeDSN: e.recoveryTarget(),
+		ObserverDSN:      e.observerDSNFor(targetDSN),
 		ProgramVersion:   drillProgramVersion,
 		OperationID:      operationID,
 		PG:               e.pg,
@@ -803,11 +839,9 @@ func (e *drillEnv) verifyBackup(manifestPath, targetDSN, operationID string) rec
 	return result
 }
 
-// bindVerifyTarget models the deployment-configured isolated verification
-// database. Its binding is derived from the actual fixture DSNs and open
-// instance inventory. The clean row is explicitly controlled test-only
-// baseline evidence required for this positive verification assertion; it is
-// not evidence about a production target.
+// bindVerifyTarget models an isolated verification database created by this
+// fixture. Its clean baseline is accepted only after querying the actual target
+// and server connection inventory; it is never JSON-only state seeding.
 func (e *drillEnv) bindVerifyTarget(targetDSN string) recovery.IsolatedTarget {
 	e.t.Helper()
 	var openBinding recovery.IsolatedInstanceBinding
@@ -822,31 +856,14 @@ func (e *drillEnv) bindVerifyTarget(targetDSN string) recovery.IsolatedTarget {
 	if err != nil {
 		e.t.Fatalf("bind isolated verification target: %v", err)
 	}
-	tx, err := e.ctrl.Begin(e.ctx)
-	if err != nil {
-		e.t.Fatalf("begin isolated verification target baseline: %v", err)
-	}
-	defer func() { _ = tx.Rollback(e.ctx) }()
-	evidence := []byte(fmt.Sprintf(
-		`{"controlled_test_baseline":true,"fixture":"recovery-drill","purpose":"isolated-verification-target","target_guard_key":%q,"target_role_fingerprint":%q}`,
-		binding.TargetGuardKey(), binding.RoleFingerprint()))
-	if err := controlstore.InitializeTargetGuard(e.ctx, tx, binding.TargetGuardKey(), e.operation("verify-target-init")); err != nil {
-		e.t.Fatalf("initialize isolated verification target guard: %v", err)
-	}
-	if err := controlstore.ResolveTargetGuardClean(e.ctx, tx, binding.TargetGuardKey(), e.operation("verify-target-baseline"), evidence); err != nil {
-		e.t.Fatalf("resolve controlled isolated verification target baseline: %v", err)
-	}
-	if err := tx.Commit(e.ctx); err != nil {
-		e.t.Fatalf("commit isolated verification target baseline: %v", err)
-	}
+	e.resolvePristineCreatedTarget(binding.TargetGuardKey(), targetDSN, "isolated-verification-target")
 	return binding
 }
 
-// seedAuthoritativeTargetCleanBaseline is test-only controlled baseline
-// evidence for gate scenarios that assert a valid release path. OpenInstance
-// has already created the authoritative guard inventory through the normal
-// store path; this resolves that inventory only for these isolated drill
-// fixtures and makes no claim about production target cleanliness.
+// seedAuthoritativeTargetCleanBaseline is retained as a compatibility name
+// for the gate scenarios. It does not seed: it verifies the fixture-created
+// recovery target is still genuinely pristine before resolving its initial
+// unknown guard inventory.
 func (e *drillEnv) seedAuthoritativeTargetCleanBaseline() {
 	e.t.Helper()
 	var targetGuardKey string
@@ -855,32 +872,124 @@ func (e *drillEnv) seedAuthoritativeTargetCleanBaseline() {
 	).Scan(&targetGuardKey); err != nil {
 		e.t.Fatalf("read authoritative target guard key: %v", err)
 	}
-	tx, err := e.ctrl.Begin(e.ctx)
+	e.resolvePristineCreatedTarget(targetGuardKey, e.recoveryTarget(), "authoritative-recovery-target")
+}
+
+// resolvePristineCreatedTarget is only for the initial CREATE DATABASE branch.
+// It gathers server facts first, then takes the same role-independent target
+// advisory lock used by guard transitions and resolves the observed unknown
+// inventory in the owning transaction. Dirty/rebuild-required targets must use
+// the one-shot witness protocol in drill_target_witness_test.go instead.
+func (e *drillEnv) resolvePristineCreatedTarget(key, targetDSN, purpose string) string {
+	e.t.Helper()
+	name := e.dbNameOf(targetDSN)
+	targetInfo, err := controlstore.ParseDSNTarget(targetDSN)
 	if err != nil {
-		e.t.Fatalf("begin authoritative target baseline: %v", err)
+		e.t.Fatalf("parse pristine target for lock: %v", err)
 	}
-	defer func() { _ = tx.Rollback(e.ctx) }()
-	evidence := []byte(fmt.Sprintf(
-		`{"controlled_test_baseline":true,"fixture":"recovery-drill","purpose":"gate-release-test-only","target_guard_key":%q}`,
-		targetGuardKey))
-	if err := controlstore.ResolveTargetGuardClean(e.ctx, tx, targetGuardKey,
-		e.operation("authoritative-target-baseline"), evidence); err != nil {
-		e.t.Fatalf("resolve test-only authoritative target baseline: %v", err)
+	targetKey, err := recovery.CanonicalTargetKey(targetInfo)
+	if err != nil {
+		e.t.Fatalf("canonicalize pristine target lock: %v", err)
 	}
-	if err := tx.Commit(e.ctx); err != nil {
-		e.t.Fatalf("commit authoritative target baseline: %v", err)
+	lock, err := recovery.AcquireTargetLock(e.ctx, e.ctrlDSN, targetKey, 5*time.Second, 10*time.Millisecond)
+	if err != nil {
+		e.t.Fatalf("acquire pristine target lock: %v", err)
 	}
+	defer func() {
+		if err := lock.Release(context.Background()); err != nil {
+			e.t.Errorf("release pristine target lock: %v", err)
+		}
+	}()
+	conn, err := pgx.Connect(e.ctx, targetDSN)
+	if err != nil {
+		e.t.Fatalf("connect newly created target for baseline observation: %v", err)
+	}
+	var database string
+	var userObjects int
+	if err := conn.QueryRow(e.ctx, `SELECT current_database()`).Scan(&database); err != nil {
+		_ = conn.Close(e.ctx)
+		e.t.Fatalf("observe target database identity: %v", err)
+	}
+	if database != name {
+		_ = conn.Close(e.ctx)
+		e.t.Fatalf("observed target database %q, expected fixture target %q", database, name)
+	}
+	if err := conn.QueryRow(e.ctx, `SELECT count(*) FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname NOT IN ('pg_catalog','information_schema') AND n.nspname NOT LIKE 'pg_toast%' AND c.relkind IN ('r','p','v','m','S','f')`).Scan(&userObjects); err != nil {
+		_ = conn.Close(e.ctx)
+		e.t.Fatalf("observe target user objects: %v", err)
+	}
+	if userObjects != 0 {
+		_ = conn.Close(e.ctx)
+		e.t.Fatalf("initial target baseline is not pristine: %d user objects", userObjects)
+	}
+	if err := conn.Close(e.ctx); err != nil {
+		e.t.Fatalf("close pristine-target observer: %v", err)
+	}
+	var otherConnections int
+	if err := e.admin.QueryRow(e.ctx, `SELECT count(*) FROM pg_stat_activity WHERE datname=$1 AND pid<>pg_backend_pid()`, name).Scan(&otherConnections); err != nil {
+		e.t.Fatalf("observe target connection inventory: %v", err)
+	}
+	if otherConnections != 0 {
+		e.t.Fatalf("initial target has unexpected connections: %d", otherConnections)
+	}
+	var role string
+	parsed, err := url.Parse(targetDSN)
+	if err != nil {
+		e.t.Fatalf("parse observed target DSN: %v", err)
+	}
+	role = parsed.User.Username()
+	var observedAt time.Time
+	if err := e.admin.QueryRow(e.ctx, `SELECT clock_timestamp()`).Scan(&observedAt); err != nil {
+		e.t.Fatalf("observe database-server baseline time: %v", err)
+	}
+	evidence, err := json.Marshal(map[string]any{
+		"fixture": "recovery-drill", "purpose": purpose, "observation": "initial-create-database",
+		"target_database": database, "target_guard_key": key, "target_role": role,
+		"user_objects": userObjects, "other_connections": otherConnections,
+		"observed_at": observedAt.UTC().Format(time.RFC3339Nano),
+	})
+	if err != nil {
+		e.t.Fatalf("encode observed pristine-target facts: %v", err)
+	}
+	operationID := e.operation("observed-pristine-baseline")
+	if err := lock.WithTransaction(e.ctx, func(txCtx context.Context, tx pgx.Tx) error {
+		guard, found, err := controlstore.ReadTargetGuard(txCtx, tx, key)
+		if err != nil {
+			return err
+		}
+		if !found {
+			// A freshly-created isolated verifier database has no prior inventory.
+			// Explicitly create unknown state only on this pristine-create path.
+			if err := controlstore.InitializeTargetGuard(txCtx, tx, key, e.operation("observed-target-inventory")); err != nil {
+				return err
+			}
+			guard, found, err = controlstore.ReadTargetGuard(txCtx, tx, key)
+		}
+		if err != nil || !found || guard.State != controlstore.TargetGuardUnknown || guard.ActiveWriter {
+			return fmt.Errorf("initial target guard is not unknown/inactive under owning lock: found=%t guard=%+v err=%v", found, guard, err)
+		}
+		return controlstore.ResolveTargetGuardClean(txCtx, tx, key, operationID, evidence)
+	}); err != nil {
+		e.t.Fatalf("resolve observed pristine target baseline in lock-owner transaction: %v", err)
+	}
+	return operationID
 }
 
 // restore runs the real restore executor (real pg_restore through the pinned
 // container) into the explicit isolated target.
 func (e *drillEnv) restore(manifestPath, targetDSN, operationID string) recovery.RestoreResult {
 	e.t.Helper()
-	result, err := recovery.ExecuteRestore(e.ctx, recovery.RestoreOptions{
+	return e.restoreWithContext(e.ctx, manifestPath, targetDSN, operationID)
+}
+
+func (e *drillEnv) restoreWithContext(ctx context.Context, manifestPath, targetDSN, operationID string) recovery.RestoreResult {
+	e.t.Helper()
+	result, err := recovery.ExecuteRestore(ctx, recovery.RestoreOptions{
 		ManifestPath:      manifestPath,
 		InstanceID:        e.instanceID,
 		ControlStore:      e.store,
 		ControlDSN:        e.ctrlDSN,
+		ObserverDSN:       e.observerDSNFor(targetDSN),
 		TargetDSN:         targetDSN,
 		TargetDeclaration: recovery.TargetIsolated,
 		TargetReason:      "drill: isolated recovery environment",
@@ -909,6 +1018,7 @@ func (e *drillEnv) refusedRestore(manifestPath, targetDSN, programVersion, opera
 		InstanceID:        e.instanceID,
 		ControlStore:      e.store,
 		ControlDSN:        e.ctrlDSN,
+		ObserverDSN:       e.observerDSNFor(targetDSN),
 		TargetDSN:         targetDSN,
 		TargetDeclaration: recovery.TargetIsolated,
 		Actor:             "deploy:executor",
@@ -1021,19 +1131,12 @@ func (e *drillEnv) dbNameOf(dsn string) string {
 	return strings.TrimPrefix(parsed.Path, "/")
 }
 
-// rebuildDatabase drops (FORCE) and recreates one target database empty: the
-// documented retry after an interrupted restore (F2).
+// rebuildDatabase remains only as a guardrail for legacy drill callers. A
+// destructive rebuild must go through the one-shot witnessed protocol.
 func (e *drillEnv) rebuildDatabase(dsn string) string {
 	e.t.Helper()
-	name := e.dbNameOf(dsn)
-	if _, err := e.admin.Exec(e.ctx,
-		"DROP DATABASE IF EXISTS "+pgx.Identifier{name}.Sanitize()+" WITH (FORCE)"); err != nil {
-		e.t.Fatalf("drop database %s: %v", name, err)
-	}
-	if _, err := e.admin.Exec(e.ctx, "CREATE DATABASE "+pgx.Identifier{name}.Sanitize()); err != nil {
-		e.t.Fatalf("recreate database %s: %v", name, err)
-	}
-	return dsn
+	e.t.Fatal("unwitnessed target rebuild is forbidden; use rebuildTargetWithWitness")
+	return ""
 }
 
 // userTableCount counts ordinary user tables in the public schema: a refused
@@ -1132,9 +1235,9 @@ func (e *drillEnv) scope(capability recovery.Capability) string {
 
 func (e *drillEnv) gate() *recovery.Gate {
 	e.t.Helper()
-	trustedTarget, err := recovery.GateTargetBindingFromDSN(e.dataDSN)
+	trustedTarget, err := recovery.GateTargetBindingFromDSN(e.recoveryTarget())
 	if err != nil {
-		e.t.Fatalf("GateTargetBindingFromDSN: %v", err)
+		e.t.Fatalf("GateTargetBindingFromDSN(recovery target): %v", err)
 	}
 	gate, err := recovery.NewGate(e.store, recovery.GateOptions{TTL: time.Minute, TrustedTarget: trustedTarget})
 	if err != nil {
@@ -1286,22 +1389,30 @@ func (e *drillEnv) decisionRowCount(table string, capability recovery.Capability
 // fabricate a negative measurement.
 func (e *drillEnv) dbNow(dsn string) time.Time {
 	e.t.Helper()
-	conn, err := pgx.Connect(e.ctx, dsn)
+	now, err := e.dbNowObserved(dsn)
 	if err != nil {
-		e.t.Fatalf("connect %s: %v", dsn, err)
-	}
-	defer func() { _ = conn.Close(e.ctx) }()
-	var now time.Time
-	if err := conn.QueryRow(e.ctx, `SELECT now()`).Scan(&now); err != nil {
 		e.t.Fatalf("read database clock: %v", err)
 	}
 	return now
 }
 
-// restoreStartedAt reads the latest accepted restore-start marker (the real
-// restore's timing origin, written by the restore entry point on the control
-// store's clock).
-func (e *drillEnv) restoreStartedAt() time.Time {
+func (e *drillEnv) dbNowObserved(dsn string) (time.Time, error) {
+	e.t.Helper()
+	conn, err := pgx.Connect(e.ctx, dsn)
+	if err != nil {
+		return time.Time{}, fmt.Errorf("connect database clock observer: %w", err)
+	}
+	defer func() { _ = conn.Close(e.ctx) }()
+	var now time.Time
+	if err := conn.QueryRow(e.ctx, `SELECT clock_timestamp()`).Scan(&now); err != nil {
+		return time.Time{}, fmt.Errorf("query database clock: %w", err)
+	}
+	return now, nil
+}
+
+// restoreStartedAtObserved reads the persisted timing origin from the control
+// store clock. Callers preserve a missing observation as unknown.
+func (e *drillEnv) restoreStartedAtObserved() (time.Time, error) {
 	e.t.Helper()
 	var at time.Time
 	if err := e.ctrl.QueryRow(e.ctx,
@@ -1309,21 +1420,9 @@ func (e *drillEnv) restoreStartedAt() time.Time {
 		  WHERE instance_id = $1 AND action = $2 AND result = 'ok'
 		  ORDER BY audit_id DESC LIMIT 1`,
 		e.instanceID, recovery.ActionRestoreStarted).Scan(&at); err != nil {
-		e.t.Fatalf("read restore start marker: %v", err)
+		return time.Time{}, fmt.Errorf("read restore start marker: %w", err)
 	}
-	return at
-}
-
-// releaseSecondsOf reads the persisted release row's created_at and returns
-// its distance from the real restore-start marker — a recorded fact pair on
-// one database clock, never a host wall-clock guess.
-func (e *drillEnv) releaseSecondsOf(releaseID string, restoreStarted time.Time) float64 {
-	e.t.Helper()
-	seconds := e.releaseCreatedAt(releaseID).Sub(restoreStarted).Seconds()
-	if seconds < 0 {
-		e.t.Fatalf("release %s predates the restore start marker (%.3fs); refusing a negative safe-resumption measurement", releaseID, seconds)
-	}
-	return seconds
+	return at, nil
 }
 
 // countWhere runs a read-only count query on one pool.

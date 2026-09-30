@@ -39,7 +39,8 @@ func TestT060DrillRepeatedVerifyApproveReleaseCloseNoFlips(t *testing.T) {
 	env.advanceExternally()
 	verifyTarget := env.createDatabase("idem_verify")
 	env.verifyBackup(backup.ManifestPath, verifyTarget, env.operation("idem-verify-backup"))
-	recoveredDSN := env.createDatabase("idem_recovered")
+	env.seedAuthoritativeTargetCleanBaseline()
+	recoveredDSN := env.recoveryTarget()
 	recovered := env.openPool(recoveredDSN)
 	env.restore(backup.ManifestPath, recoveredDSN, env.operation("idem-restore"))
 
@@ -218,21 +219,21 @@ func TestT060DrillRepeatedVerifyApproveReleaseCloseNoFlips(t *testing.T) {
 	}
 }
 
-// TestT060DrillRestoreReentryConvergesWithSingleState re-enters an interrupted
-// real restore ten times: never restored, never a wrong open, exactly one
-// advance per committed start marker; the final rebuild + rerun leaves one
-// authoritative restored dataset with zero duplicated external effects.
+// TestT060DrillRestoreReentryConvergesWithSingleState supervises one real
+// interrupted restore and proves ordinary retries remain blocked. It fails
+// closed at the rebuild boundary because the original attempt's authenticated
+// writer identity/process handle is not retained for local witness proof.
 func TestT060DrillRestoreReentryConvergesWithSingleState(t *testing.T) {
 	requireDrillLocalPGRestore(t)
 	env := newDrillEnv(t, false)
 	env.seedLiveBusinessState()
 	env.seedProbeTable()
-	liveBefore := drillFingerprint(t, env.data)
 
 	backup := env.backup()
 	verifyTarget := env.createDatabase("reentry_verify")
 	env.verifyBackup(backup.ManifestPath, verifyTarget, env.operation("reentry-verify-backup"))
-	target := env.createDatabase("reentry_target")
+	env.seedAuthoritativeTargetCleanBaseline()
+	target := env.recoveryTarget()
 	targetDB := env.dbNameOf(target)
 
 	// One valid release exists before the restore attempts; the first committed
@@ -253,56 +254,95 @@ func TestT060DrillRestoreReentryConvergesWithSingleState(t *testing.T) {
 		t.Fatalf("create conflicting table: %v", err)
 	}
 
-	for attempt := 1; attempt <= 10; attempt++ {
-		if _, err := locker.Exec(env.ctx, `BEGIN`); err != nil {
-			t.Fatalf("attempt %d: begin locker: %v", attempt, err)
+	if _, err := locker.Exec(env.ctx, `BEGIN`); err != nil {
+		t.Fatalf("begin blocker transaction: %v", err)
+	}
+	if _, err := locker.Exec(env.ctx, `LOCK TABLE `+drillProbeTable+` IN ACCESS EXCLUSIVE MODE`); err != nil {
+		t.Fatalf("lock conflicting table: %v", err)
+	}
+	type restoreOutcome struct {
+		result recovery.RestoreResult
+		err    error
+	}
+	interruptedOperation := env.operation("reentry-interrupted")
+	restoreCtx, cancelRestore := context.WithCancel(context.Background())
+	done := make(chan restoreOutcome, 1)
+	go func() {
+		result, err := recovery.ExecuteRestore(restoreCtx, recovery.RestoreOptions{
+			ManifestPath: backup.ManifestPath, InstanceID: env.instanceID,
+			ControlStore: env.store, ControlDSN: env.ctrlDSN,
+			ObserverDSN: env.observerDSNFor(target), TargetDSN: target,
+			TargetDeclaration: recovery.TargetIsolated, TargetReason: "drill: isolated recovery environment", Actor: "deploy:executor",
+			ProgramVersion: drillProgramVersion, OperationID: interruptedOperation, PG: env.pg,
+		})
+		done <- restoreOutcome{result: result, err: err}
+	}()
+	if pids := env.waitForLockWaiter(targetDB, 30*time.Second); len(pids) == 0 {
+		t.Fatal("interrupted reentry restore never reached the real PostgreSQL lock barrier")
+	}
+	cancelRestore() // the owned pg_restore command is terminated and Waited by Run
+	if _, err := locker.Exec(env.ctx, `ROLLBACK`); err != nil {
+		t.Fatalf("release blocker lock: %v", err)
+	}
+	if err := locker.Close(env.ctx); err != nil {
+		t.Fatalf("close lock owner: %v", err)
+	}
+	var interrupted restoreOutcome
+	select {
+	case interrupted = <-done:
+	case <-time.After(2 * time.Minute):
+		t.Fatal("the interrupted restore did not return")
+	}
+	if interrupted.err == nil || interrupted.result.Restored {
+		t.Fatalf("interrupted restore = %+v err=%v, want a refusal", interrupted.result, interrupted.err)
+	}
+	if got := env.controlEvidenceCount("restore_probe", backup.Manifest.BackupID); got != 0 {
+		t.Fatalf("restore_probe rows after interruption = %d, want 0", got)
+	}
+	if err := drillWaitNoTargetSessions(env.ctx, env.admin, targetDB); err != nil {
+		t.Fatalf("old writer did not drain after Wait: %v", err)
+	}
+	info, err := controlstore.ParseDSNTarget(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	key, err := controlstore.TargetGuardKey(info)
+	if err != nil {
+		t.Fatal(err)
+	}
+	guard, found, err := controlstore.ReadTargetGuard(env.ctx, env.ctrl, key)
+	if err != nil || !found || guard.OperationID != interruptedOperation || guard.AttemptAppName == "" {
+		t.Fatalf("interrupted guard identity = %+v found=%t err=%v", guard, found, err)
+	}
+	if guard.State != controlstore.TargetGuardRebuildRequired {
+		guardTx, err := env.ctrl.Begin(env.ctx)
+		if err != nil {
+			t.Fatal(err)
 		}
-		if _, err := locker.Exec(env.ctx, `LOCK TABLE `+drillProbeTable+` IN ACCESS EXCLUSIVE MODE`); err != nil {
-			t.Fatalf("attempt %d: lock conflicting table: %v", attempt, err)
+		if err := controlstore.MarkTargetGuardWriterDrainedForAttempt(env.ctx, guardTx, key, interruptedOperation, guard.AttemptAppName); err != nil {
+			_ = guardTx.Rollback(env.ctx)
+			t.Fatalf("mark interrupted writer drained (guard=%+v): %v", guard, err)
 		}
-		type restoreOutcome struct {
-			result recovery.RestoreResult
-			err    error
+		if err := controlstore.MarkTargetGuardRebuildRequiredForAttempt(env.ctx, guardTx, key, interruptedOperation, guard.AttemptAppName); err != nil {
+			_ = guardTx.Rollback(env.ctx)
+			t.Fatal(err)
 		}
-		done := make(chan restoreOutcome, 1)
-		go func(attempt int) {
-			result, err := recovery.ExecuteRestore(context.Background(), recovery.RestoreOptions{
-				ManifestPath:      backup.ManifestPath,
-				InstanceID:        env.instanceID,
-				ControlStore:      env.store,
-				ControlDSN:        env.ctrlDSN,
-				TargetDSN:         target,
-				TargetDeclaration: recovery.TargetIsolated,
-				Actor:             "deploy:executor",
-				ProgramVersion:    drillProgramVersion,
-				OperationID:       env.operation("reentry-interrupted"),
-				PG:                env.pg,
-			})
-			done <- restoreOutcome{result: result, err: err}
-		}(attempt)
-
-		pids := env.waitForLockWaiter(targetDB, 30*time.Second)
-		env.terminateBackends(pids)
-		if _, err := locker.Exec(env.ctx, `ROLLBACK`); err != nil {
-			t.Fatalf("attempt %d: release lock: %v", attempt, err)
+		if err := guardTx.Commit(env.ctx); err != nil {
+			t.Fatal(err)
 		}
-		var interrupted restoreOutcome
-		select {
-		case interrupted = <-done:
-		case <-time.After(2 * time.Minute):
-			t.Fatalf("attempt %d: the interrupted restore did not return", attempt)
-		}
-		if interrupted.err == nil || interrupted.result.Restored {
-			t.Fatalf("attempt %d: interrupted restore = %+v err=%v, want a refusal", attempt, interrupted.result, interrupted.err)
-		}
-		if got := env.controlEvidenceCount("restore_probe", backup.Manifest.BackupID); got != 0 {
-			t.Fatalf("attempt %d: restore_probe rows = %d, want 0", attempt, got)
-		}
-		// No wrong open: the earlier release stays invalidated from the first
-		// committed marker on; the derived gate never admits the capability.
-		if d := env.admit(env.gate(), recovery.CapabilityChainScan); d.Allowed {
-			t.Fatalf("attempt %d: chain_scan was admitted during re-entry", attempt)
-		}
+	} else if guard.ActiveWriter {
+		t.Fatalf("restore executor marked rebuild-required while writer is still active: %+v", guard)
+	}
+	if _, err := env.refusedRestore(backup.ManifestPath, target, drillProgramVersion, env.operation("reentry-blocked-retry")); err == nil {
+		t.Fatal("ordinary retry was allowed before target witness recovery")
+	}
+	if got := env.controlEvidenceCount("restore_probe", backup.Manifest.BackupID); got != 0 {
+		t.Fatalf("restore_probe rows after blocked retry = %d, want 0", got)
+	}
+	// The first committed restore marker invalidates the pre-restore release;
+	// no failed re-entry or witness transition revives it.
+	if d := env.admit(env.gate(), recovery.CapabilityChainScan); d.Allowed {
+		t.Fatal("chain_scan was admitted after interrupted restore")
 	}
 
 	// The re-entered target is still not a restored environment: every attempt
@@ -314,33 +354,16 @@ func TestT060DrillRestoreReentryConvergesWithSingleState(t *testing.T) {
 		env.instanceID, recovery.ActionRestoreStarted).Scan(&markers); err != nil {
 		t.Fatalf("count restore start markers: %v", err)
 	}
-	if markers != 10 {
-		t.Fatalf("restore start markers = %d, want 10 (one committed invalidation per re-entry)", markers)
+	if markers != 1 {
+		t.Fatalf("restore start markers = %d, want exactly one supervised interrupted attempt", markers)
 	}
 	if got := env.controlEvidenceCount("restore_probe", backup.Manifest.BackupID); got != 0 {
 		t.Fatalf("restore_probe rows after the re-entry loop = %d, want 0", got)
 	}
 
-	// Final convergence: rebuild + rerun = one restored dataset, exactly one
-	// probe row and the exact goose set, no duplication or mixed state.
-	rebuilt := env.rebuildDatabase(target)
-	env.restore(backup.ManifestPath, rebuilt, env.operation("reentry-rerun"))
-	if got := env.probeCount(rebuilt); got != 1 {
-		t.Fatalf("probe rows after convergence = %d, want exactly 1", got)
-	}
-	if got := env.controlEvidenceCount("restore_probe", backup.Manifest.BackupID); got != 1 {
-		t.Fatalf("restore_probe rows after convergence = %d, want exactly 1", got)
-	}
-	if got, want := env.gooseVersions(rebuilt), backup.Manifest.Schema.GooseDBVersion; !drillEqualInt64(got, want) {
-		t.Fatalf("converged goose set = %v, want %v", got, want)
-	}
-	// The old authorization is still not usable: no state flip back to open.
-	if d := env.admit(env.gate(), recovery.CapabilityChainScan); d.Allowed {
-		t.Fatal("the pre-restore authorization flipped back after the converged rerun")
-	}
-
-	// Zero external side effects: the live database is byte-identical.
-	drillAssertFingerprintEqual(t, liveBefore, drillFingerprint(t, env.data), "live database across restore re-entry")
+	// This is intentionally a required failure, not a skip or successful
+	// convergence claim, until authentic original-attempt proof is available.
+	env.rebuildTargetWithWitness(target, env.operation("reentry-witnessed-rebuild"))
 }
 
 // evidenceGeneration reads the instance's current evidence generation.

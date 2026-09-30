@@ -31,6 +31,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"strings"
 	"testing"
 	"time"
@@ -67,8 +68,14 @@ func TestT058DrillE2EBackupAdvanceRestoreRefuseThenRelease(t *testing.T) {
 	recoveryPointAt := drillManifestWallClock(t, backup)
 	// The lag is measured on the source database's own clock (the manifest
 	// recovery point is written there) so a host/container clock offset can
-	// never fabricate a value.
-	backupLagSeconds := env.dbNow(env.dataDSN).Sub(recoveryPointAt).Seconds()
+	// never fabricate a value. If that clock cannot be observed, preserve an
+	// explicit unknown rather than substituting the host clock.
+	backupLagJSON := drillUnknownTiming("source database clock unavailable at backup completion", "source database clock at backup completion minus manifest recovery point")
+	if sourceNow, clockErr := env.dbNowObserved(env.dataDSN); clockErr == nil {
+		backupLagJSON = drillMeasuredLag(sourceNow.Sub(recoveryPointAt).Seconds(), "source database clock at backup completion minus manifest recovery point wall clock")
+	} else {
+		t.Logf("S12 backup lag is unknown: %v", clockErr)
+	}
 
 	// --- phase 2: external progress after the recovery point --------------
 	advance := env.advanceExternally()
@@ -83,14 +90,18 @@ func TestT058DrillE2EBackupAdvanceRestoreRefuseThenRelease(t *testing.T) {
 	if got := env.controlEvidenceCount("backup_manifest", backup.Manifest.BackupID); got != 1 {
 		t.Fatalf("backup_manifest evidence rows = %d, want 1 (verified conclusion is control-store bound)", got)
 	}
+	// Resolve only the newly-created empty target, based on its real local
+	// inventory. This is the initial-create branch, not recovery from a dirty
+	// or interrupted writer attempt.
+	env.seedAuthoritativeTargetCleanBaseline()
 
 	// --- phase 4: real restore of the old data ----------------------------
-	recoveredDSN := env.createDatabase("recovered")
+	recoveredDSN := env.recoveryTarget()
 	recovered := env.openPool(recoveredDSN)
 	restoreStarted := time.Now()
 	env.restore(backup.ManifestPath, recoveredDSN, env.operation("restore"))
 	dbRestoreSeconds := time.Since(restoreStarted).Seconds()
-	restoreStartMarker := env.restoreStartedAt()
+	restoreStartMarker, restoreStartErr := env.restoreStartedAtObserved()
 	if got := env.controlEvidenceCount("restore_probe", backup.Manifest.BackupID); got != 1 {
 		t.Fatalf("restore_probe evidence rows = %d, want 1 (a real restore happened)", got)
 	}
@@ -183,6 +194,15 @@ func TestT058DrillE2EBackupAdvanceRestoreRefuseThenRelease(t *testing.T) {
 		t.Fatalf("query admission refused (%s: %s) although its evidence, approval and release are in place",
 			d.RefusalClass, d.Reason)
 	}
+	// recovery_point is a source-database timestamp; compare it only with a
+	// later observation from that same source database. The control-store
+	// release timestamp has a different server clock and is not subtracted here.
+	uncoveredIntervalJSON := drillUnknownTiming("source database clock unavailable at first allowed release", "source database clock observed after first allowed release minus manifest recovery point")
+	if sourceNow, clockErr := env.dbNowObserved(env.dataDSN); clockErr == nil {
+		uncoveredIntervalJSON = drillMeasuredLag(sourceNow.Sub(recoveryPointAt).Seconds(), "source database clock observed after first allowed release minus manifest recovery point wall clock")
+	} else {
+		t.Logf("S12 uncovered interval is unknown: %v", clockErr)
+	}
 	// Anything without its own evidence/approval/release stays refused.
 	if d := env.admit(gate, recovery.CapabilityDepositConfirmation); d.Allowed {
 		t.Fatal("deposit_confirmation was admitted without a release decision")
@@ -198,31 +218,47 @@ func TestT058DrillE2EBackupAdvanceRestoreRefuseThenRelease(t *testing.T) {
 	// Only the capability whose admission the derived gate actually allowed is
 	// a measured release; the refused release decisions above are recorded as
 	// refusals, never as resumption measurements.
-	firstReleaseAt := env.releaseCreatedAt(queryRelease.ReleaseID)
-	capabilityReleases := map[recovery.Capability]float64{
-		recovery.CapabilityQuery: env.releaseSecondsOf(queryRelease.ReleaseID, restoreStartMarker),
+	capabilityReleases := make(map[recovery.Capability]float64)
+	queryReleaseTiming := drillUnknownTimingPayload("restore-start or release timestamp could not be read from the control-store clock", "persisted restore-start marker to persisted release-created timestamp on the control-store clock")
+	if restoreStartErr == nil {
+		if releaseAt, releaseErr := env.releaseCreatedAtObserved(queryRelease.ReleaseID); releaseErr == nil {
+			seconds := releaseAt.Sub(restoreStartMarker).Seconds()
+			queryReleaseTiming = drillTimingPayload(seconds, "persisted restore-start marker to persisted release-created timestamp on the control-store clock")
+			if queryReleaseTiming["state"] == "measured" {
+				capabilityReleases[recovery.CapabilityQuery] = seconds
+			}
+		} else {
+			queryReleaseTiming = drillUnknownTimingPayload(releaseErr.Error(), "persisted restore-start marker to persisted release-created timestamp on the control-store clock")
+		}
+	} else {
+		queryReleaseTiming = drillUnknownTimingPayload(restoreStartErr.Error(), "persisted restore-start marker to persisted release-created timestamp on the control-store clock")
+	}
+	capabilityReleaseSeconds := make(map[string]any)
+	if seconds, measured := capabilityReleases[recovery.CapabilityQuery]; measured {
+		capabilityReleaseSeconds[string(recovery.CapabilityQuery)] = seconds
 	}
 	runID := uuid.NewString()
 	evidencePath := drillWriteEvidence(t, "t058-e2e", map[string]any{
-		"drill_id":               runID,
-		"scenario":               string(recovery.DrillScenarioFullRecovery),
-		"purpose":                "local drill inputs only; not production thresholds; T000-P stays OPEN",
-		"backup_id":              backup.Manifest.BackupID,
-		"recovery_point":         json.RawMessage(drillRecoveryPointJSON(t, backup)),
-		"external_advance":       advance,
-		"db_restore_seconds":     dbRestoreSeconds,
-		"verification_seconds":   verificationSeconds,
-		"verification_completed": verificationCompletedAt.Format(time.RFC3339Nano),
-		"capability_release_seconds": map[string]any{
-			string(recovery.CapabilityQuery): capabilityReleases[recovery.CapabilityQuery],
+		"drill_id":                   runID,
+		"scenario":                   string(recovery.DrillScenarioFullRecovery),
+		"purpose":                    "local drill inputs only; not production thresholds; T000-P stays OPEN",
+		"backup_id":                  backup.Manifest.BackupID,
+		"recovery_point":             json.RawMessage(drillRecoveryPointJSON(t, backup)),
+		"external_advance":           advance,
+		"db_restore_seconds":         dbRestoreSeconds,
+		"verification_seconds":       verificationSeconds,
+		"verification_completed":     verificationCompletedAt.Format(time.RFC3339Nano),
+		"capability_release_seconds": capabilityReleaseSeconds,
+		"capability_release_timing": map[string]any{
+			string(recovery.CapabilityQuery): queryReleaseTiming,
 		},
 		"release_refusals": map[string]string{
 			string(recovery.CapabilityChainScan):                  string(chainBlocked.RefusalClass),
 			string(recovery.CapabilityExistingWithdrawalRecovery): string(existingBlocked.RefusalClass),
 			string(recovery.CapabilityNewWithdrawalCreation):      string(newCreation.RefusalClass),
 		},
-		"backup_lag":         json.RawMessage(drillMeasuredLag(backupLagSeconds, "source-database clock at backup completion minus the manifest recovery point wall clock")),
-		"uncovered_interval": json.RawMessage(drillMeasuredLag(firstReleaseAt.Sub(recoveryPointAt).Seconds(), "manifest recovery point wall clock until the first evidence-backed capability release")),
+		"backup_lag":         json.RawMessage(backupLagJSON),
+		"uncovered_interval": json.RawMessage(uncoveredIntervalJSON),
 		"gaps":               drillGapSummary(t, env),
 		"non_claims": []string{
 			"local drill inputs only; not production thresholds",
@@ -238,8 +274,8 @@ func TestT058DrillE2EBackupAdvanceRestoreRefuseThenRelease(t *testing.T) {
 		DBRestoreSeconds:         &dbRestoreSeconds,
 		VerificationSeconds:      &verificationSeconds,
 		CapabilityReleaseSeconds: capabilityReleases,
-		BackupLag:                drillMeasuredLag(backupLagSeconds, "source-database clock at backup completion minus the manifest recovery point wall clock"),
-		UncoveredInterval:        drillMeasuredLag(firstReleaseAt.Sub(recoveryPointAt).Seconds(), "manifest recovery point wall clock until the first evidence-backed capability release"),
+		BackupLag:                backupLagJSON,
+		UncoveredInterval:        uncoveredIntervalJSON,
 		ConstraintsConfigured:    false,
 		TestInputs:               []byte(`{"purpose":"local drill inputs only; not production thresholds","unconfigured_constraints":["rpo_target","rto_target","backup_frequency","retention"]}`),
 		GapCounts:                drillGapCountsJSON(t, env),
@@ -282,8 +318,9 @@ func TestT058DrillGapCannotBeClosedStaysPaused(t *testing.T) {
 
 	verifyTargetDSN := env.createDatabase("verify2")
 	env.verifyBackup(backup.ManifestPath, verifyTargetDSN, env.operation("verify-backup-2"))
+	env.seedAuthoritativeTargetCleanBaseline()
 
-	recoveredDSN := env.createDatabase("recovered2")
+	recoveredDSN := env.recoveryTarget()
 	recovered := env.openPool(recoveredDSN)
 	env.restore(backup.ManifestPath, recoveredDSN, env.operation("restore-2"))
 	batch := env.verify(recovered, env.operation("verify-2"))
@@ -460,16 +497,33 @@ func drillRecoveryPointJSON(t *testing.T, backup recovery.BackupResult) []byte {
 }
 
 func drillMeasuredLag(seconds float64, method string) []byte {
-	raw, err := json.Marshal(map[string]any{
-		"state":   "measured",
-		"seconds": seconds,
-		"method":  method,
-		"purpose": "local drill measurement only; not a production RPO claim",
-	})
+	raw, err := json.Marshal(drillTimingPayload(seconds, method))
 	if err != nil {
 		panic(err)
 	}
 	return raw
+}
+
+func drillUnknownTiming(reason, method string) []byte {
+	raw, err := json.Marshal(drillUnknownTimingPayload(reason, method))
+	if err != nil {
+		panic(err)
+	}
+	return raw
+}
+
+func drillTimingPayload(seconds float64, method string) map[string]any {
+	if seconds < 0 || math.IsNaN(seconds) || math.IsInf(seconds, 0) {
+		return map[string]any{
+			"state": "unknown", "reason": "observed interval is negative or non-finite; value was not clamped or made absolute",
+			"observed_seconds": seconds, "method": method,
+		}
+	}
+	return map[string]any{"state": "measured", "seconds": seconds, "method": method}
+}
+
+func drillUnknownTimingPayload(reason, method string) map[string]any {
+	return map[string]any{"state": "unknown", "reason": reason, "method": method}
 }
 
 func drillAssertAllCategoriesObserved(t *testing.T, batch recovery.VerificationBatch) {
@@ -625,14 +679,14 @@ func drillAssertPendingEventState(t *testing.T, pool *pgxpool.Pool, wantOffset i
 	}
 }
 
-func (e *drillEnv) releaseCreatedAt(releaseID string) time.Time {
+func (e *drillEnv) releaseCreatedAtObserved(releaseID string) (time.Time, error) {
 	e.t.Helper()
 	var at time.Time
 	if err := e.ctrl.QueryRow(e.ctx,
 		`SELECT created_at FROM recovery_release WHERE release_id = $1`, releaseID).Scan(&at); err != nil {
-		e.t.Fatalf("read release %s created_at: %v", releaseID, err)
+		return time.Time{}, fmt.Errorf("read release %s created_at: %w", releaseID, err)
 	}
-	return at
+	return at, nil
 }
 
 // drillGapSummary reads the gap counts by state and the affected-capability
@@ -887,7 +941,7 @@ func TestT058DrillEventLayerKafkaBrokerOffsetDivergence(t *testing.T) {
 
 	verifyTarget := env.createDatabase("kafka_verify")
 	env.verifyBackup(backup.ManifestPath, verifyTarget, env.operation("kafka-verify-backup"))
-	recoveredDSN := env.createDatabase("kafka_recovered")
+	recoveredDSN := env.recoveryTarget()
 	recovered := env.openPool(recoveredDSN)
 	env.restore(backup.ManifestPath, recoveredDSN, env.operation("kafka-restore"))
 	recoveredBefore := drillFingerprint(t, recovered)

@@ -10,7 +10,7 @@
 //   - the affected FR-002 coverage category is recorded unknown/failed and
 //     only that category loses its proven state; the other eight categories
 //     and the readable dimension stay as the contract expects;
-//   - no verified/restored success evidence is produced (0-row assertions);
+//   - no accepted backup/restore success evidence is produced (0-row assertions);
 //   - the restore entry refuses with an explicit blocked state and leaves the
 //     target untouched (no best-effort restore, no pre-write marker);
 //   - the CLI-level "no success beyond the evidence" assertion lives in
@@ -25,6 +25,8 @@ package recovery
 import (
 	"strings"
 	"testing"
+
+	"github.com/xtianxx/txharbor/internal/recovery/controlstore"
 )
 
 // probeMissingObject is the representative object renamed away from the
@@ -47,8 +49,10 @@ func TestVerifyBackupRejectsMissingAuthoritativeObject(t *testing.T) {
 	}
 	backup := f.backup(t, nil)
 
-	// Real isolated verify: a real pg_restore plus the four checks, concluded
-	// rejected (never verified) because a required probe cannot complete.
+	// Real isolated verify: a real pg_restore plus the four checks. The failed
+	// post-restore probe is unaccepted, so this is unverified rather than a
+	// rejected conclusion (which would claim a conclusion the checks did not
+	// establish).
 	requireLocalPGRestore(t)
 	verifyTarget := f.createDatabase(t, "tgt_probe_negative")
 	binding := f.bindTestVerifyTarget(t, verifyTarget)
@@ -65,44 +69,50 @@ func TestVerifyBackupRejectsMissingAuthoritativeObject(t *testing.T) {
 		ProgramVersion:   bkpProgramVersion,
 		PG:               f.pg,
 	})
-	if err != nil {
-		t.Fatalf("ExecuteVerifyBackup returned an unexpected error: %v", err)
+	if err == nil {
+		t.Fatalf("ExecuteVerifyBackup returned success for a missing authoritative object: %+v", result)
 	}
-	if result.State != VerificationRejected {
-		t.Fatalf("verify state = %q, want %q (checks=%+v)", result.State, VerificationRejected, result.Checks)
+	if !strings.Contains(err.Error(), "isolated verification was not accepted") {
+		t.Fatalf("missing-object verification failed for an unexpected reason: %v", err)
 	}
-	// The readable dimension is retained; the object-dependent dimensions fail.
-	if !result.Checks.Readable {
-		t.Fatalf("readable dimension must be retained, got %+v", result.Checks)
+	if result.State != VerificationUnverified {
+		t.Fatalf("verify state = %q, want %q (checks=%+v)", result.State, VerificationUnverified, result.Checks)
 	}
-	if result.Checks.StructureConstraints || result.Checks.BusinessStateProbes || result.Checks.VerificationExecutable {
-		t.Fatalf("object-dependent dimensions must fail, got %+v", result.Checks)
+	if result.Checks.Readable || result.Checks.StructureConstraints ||
+		result.Checks.BusinessStateProbes || result.Checks.VerificationExecutable {
+		t.Fatalf("unaccepted post-restore probe must not claim any successful check, got %+v", result.Checks)
 	}
 
-	// No success evidence of any kind, and the manifest write-back is a
-	// rejected conclusion (no certified manifest to reuse).
+	// No accepted evidence of any kind, and the manifest write-back remains
+	// unverified (no certified manifest to reuse).
 	if n := f.controlEvidenceCount(t, "backup_manifest", backup.Manifest.BackupID); n != 0 {
 		t.Fatalf("backup_manifest evidence rows = %d, want 0", n)
 	}
 	if n := f.controlEvidenceCount(t, "restore_probe", backup.Manifest.BackupID); n != 0 {
 		t.Fatalf("restore_probe evidence rows = %d, want 0", n)
 	}
+	guard, found, guardErr := controlstore.ReadTargetGuard(f.ctx, f.ctrl, binding.TargetGuardKey())
+	if guardErr != nil || !found || guard.State != controlstore.TargetGuardRebuildRequired || guard.ActiveWriter {
+		t.Fatalf("failed missing-object verification must leave its target dirty: found=%t guard=%+v err=%v", found, guard, guardErr)
+	}
 	written := bkpReadManifest(t, backup.ManifestPath)
-	if written.Verification.State != VerificationRejected {
-		t.Fatalf("manifest write-back state = %q, want %q", written.Verification.State, VerificationRejected)
+	if written.Verification.State != VerificationUnverified {
+		t.Fatalf("manifest write-back state = %q, want %q", written.Verification.State, VerificationUnverified)
 	}
 
-	// Per-dimension detail: exactly the affected FR-002 category is unknown;
-	// the other eight categories stay proven in both probe views. (The
-	// rejected verify-backup already ran the real pg_restore, so the target
-	// carries the restored-but-incomplete data set.)
+	// Per-dimension detail: the failed real probe identifies the missing
+	// authoritative object and affected FR-002 category. The target carries the
+	// restored-but-incomplete data set; this detail is not an accepted proof.
 	outcome := probeRestoredTarget(f.ctx, f.pg, backup.ManifestPath, written, verifyTarget)
 	if !outcome.Checks.Readable || outcome.Checks.StructureConstraints ||
 		outcome.Checks.BusinessStateProbes || outcome.Checks.VerificationExecutable {
-		t.Fatalf("probe outcome checks = %+v, want readable-only", outcome.Checks)
+		t.Fatalf("probe coverage detail checks = %+v, want readable-only detail", outcome.Checks)
 	}
 	assertProbeCoverage(t, "business_state_coverage", outcome.Business, true)
 	assertProbeCoverage(t, "verification_coverage", outcome.Verification, false)
+	if !coverageNamesMissingObject(outcome.Business, probeMissingObject, probeMissingObjectCategory) {
+		t.Fatalf("probe evidence did not identify missing authoritative object %q in category %q: %+v", probeMissingObject, probeMissingObjectCategory, outcome.Business)
+	}
 
 	// Real restore entry: refused with an explicit blocked state; a fresh
 	// target is untouched, no restored evidence and no pre-write marker.
@@ -120,6 +130,15 @@ func TestVerifyBackupRejectsMissingAuthoritativeObject(t *testing.T) {
 	if n := rsiMarkerAuditCount(t, f, backup.Manifest.BackupID); n != 0 {
 		t.Fatalf("a restore that never started wrote %d pre-write marker rows, want 0", n)
 	}
+}
+
+func coverageNamesMissingObject(items []probeItem, object, category string) bool {
+	for _, item := range items {
+		if item.Category == category && item.State != "proven" && strings.Contains(item.Reason, object) {
+			return true
+		}
+	}
+	return false
 }
 
 // assertProbeCoverage asserts one probe coverage view: the affected category is

@@ -5,6 +5,7 @@ package recovery
 import (
 	"encoding/json"
 	"errors"
+	"strings"
 	"testing"
 
 	"github.com/xtianxx/txharbor/internal/recovery/controlstore"
@@ -14,6 +15,14 @@ import (
 // generic gate fixture intentionally exercises legacy bindings, which are not
 // appropriate for these lifecycle-closure cases.
 func t044NewBoundService(t *testing.T, opts GateOptions) *t044Service {
+	return t044NewBoundServiceKind(t, opts, "recovery", []uint64{1})
+}
+
+func t044NewBoundServiceForChains(t *testing.T, opts GateOptions, chains []uint64) *t044Service {
+	return t044NewBoundServiceKind(t, opts, "recovery", chains)
+}
+
+func t044NewBoundServiceKind(t *testing.T, opts GateOptions, kind string, chains []uint64) *t044Service {
 	t.Helper()
 	ctx, dsn, pool, store := gateControlStore(t)
 	target, err := controlstore.ParseDSNTarget(dsn)
@@ -29,7 +38,7 @@ func t044NewBoundService(t *testing.T, opts GateOptions) *t044Service {
 		t.Fatalf("encode fixture target fingerprint: %v", err)
 	}
 	opened, err := store.OpenInstance(ctx, controlstore.OpenInstanceRequest{
-		Kind: "recovery", OpenedBy: "deploy:executor", EntryChainInventory: []uint64{1},
+		Kind: kind, OpenedBy: "deploy:executor", EntryChainInventory: chains,
 		DataTarget: dataTarget, TargetGuardKey: guardKey,
 		TargetRoleFingerprint: target.DataTargetFingerprint().RoleFingerprint,
 	})
@@ -87,34 +96,43 @@ func t044BoundTarget(t *testing.T, s *t044Service) (string, string) {
 }
 
 func t044ReleaseAllEntryScopes(t *testing.T, s *t044Service) {
+	t044ReleaseAllEntryScopesForChains(t, s, []uint64{1})
+}
+
+func t044ReleaseAllEntryScopesForChains(t *testing.T, s *t044Service, chains []uint64) {
 	t.Helper()
 	order := []Capability{CapabilityChainScan, CapabilityDepositConfirmation, CapabilityExistingWithdrawalRecovery, CapabilityNewWithdrawalCreation, CapabilityEventPublishing, CapabilityEventConsuming, CapabilityQuery}
 	for _, capability := range order {
-		scopeHash, err := CapabilityScope(1, capability)
-		if err != nil {
-			t.Fatal(err)
-		}
-		scope, err := ParseCapabilityScope(scopeHash, capability)
-		if err != nil {
-			t.Fatal(err)
-		}
-		class, err := s.gate.requiredApprovalClass(scope)
-		if err != nil {
-			t.Fatal(err)
-		}
-		for i, principal := range []string{"auth:approver", "auth:approver-2"} {
-			if i == 1 && class != ApprovalClassDualNonExecutor {
-				break
+		s.seedIsolation(t, capability)
+	}
+	for _, capability := range order {
+		for _, chain := range chains {
+			scopeHash, err := CapabilityScope(chain, capability)
+			if err != nil {
+				t.Fatal(err)
 			}
-			if i == 1 {
-				s.ensureSecondApprover(t)
+			scope, err := ParseCapabilityScope(scopeHash, capability)
+			if err != nil {
+				t.Fatal(err)
 			}
-			if _, err := Approve(s.f.ctx, s.f.store, ApprovalRequest{InstanceID: s.f.instanceID, Capability: capability, ScopeHash: scopeHash, Principal: principal, Reason: "complete entry-scope approval", OperationID: gateOperation("entry-approve")}); err != nil {
-				t.Fatalf("approve %s at entry scope: %v", capability, err)
+			class, err := s.gate.requiredApprovalClass(scope)
+			if err != nil {
+				t.Fatal(err)
 			}
-		}
-		if _, err := Release(s.f.ctx, s.f.store, s.gate, ReleaseRequest{InstanceID: s.f.instanceID, Capability: capability, ScopeHash: scopeHash, Principal: "deploy:executor", Reason: "complete entry-scope release", OperationID: gateOperation("entry-release")}); err != nil {
-			t.Fatalf("release %s at entry scope: %v", capability, err)
+			for i, principal := range []string{"auth:approver", "auth:approver-2"} {
+				if i == 1 && class != ApprovalClassDualNonExecutor {
+					break
+				}
+				if i == 1 {
+					s.ensureSecondApprover(t)
+				}
+				if _, err := Approve(s.f.ctx, s.f.store, ApprovalRequest{InstanceID: s.f.instanceID, Capability: capability, ScopeHash: scopeHash, Principal: principal, Reason: "complete entry-scope approval", OperationID: gateOperation("entry-approve")}); err != nil {
+					t.Fatalf("approve %s on chain %d at entry scope: %v", capability, chain, err)
+				}
+			}
+			if _, err := Release(s.f.ctx, s.f.store, s.gate, ReleaseRequest{InstanceID: s.f.instanceID, Capability: capability, ScopeHash: scopeHash, Principal: "deploy:executor", Reason: "complete entry-scope release", OperationID: gateOperation("entry-release")}); err != nil {
+				t.Fatalf("release %s on chain %d at entry scope: %v", capability, chain, err)
+			}
 		}
 	}
 }
@@ -172,6 +190,105 @@ func TestInstanceCloseRequiresEveryTrustedDeploymentChain(t *testing.T) {
 	})
 	if !errors.Is(err, ErrInstanceCloseBlocked) || result.Closed {
 		t.Fatalf("close with missing deployment chain scopes = (%+v, %v), want blocked", result, err)
+	}
+}
+
+// A close must cover every scope in the immutable, deployment-supplied chain
+// inventory, including dual approval on every effectful chain scope. The
+// fixture inventory is test input; this proves binding/coverage, not that a
+// production inventory is complete.
+func TestInstanceCloseSucceedsAfterAllCapabilitiesReleasedOnEveryBoundChain(t *testing.T) {
+	chains := []uint64{1, 10}
+	s := t044NewBoundServiceForChains(t, GateOptions{}, chains)
+	t044ReleaseAllEntryScopesForChains(t, s, chains)
+	guardKey, roleFingerprint := t044BoundTarget(t, s)
+	result, err := CloseInstance(s.f.ctx, s.f.store, s.gate, CloseInstanceRequest{
+		InstanceID: s.f.instanceID, Actor: "deploy:executor", OperationID: gateOperation("all-two-chain-scopes-close"),
+		TrustedEntryChains: chains, TargetGuardKey: guardKey, TargetRoleFingerprint: roleFingerprint,
+	})
+	if err != nil || !result.Closed || result.RiskAcceptanceDelivered {
+		t.Fatalf("close after all 14 current capability scopes released = (%+v, %v), want closed without risk acceptance", result, err)
+	}
+	if got := countGenerationRows(t, s.f.ctx, s.f.pool,
+		`SELECT count(*) FROM recovery_release WHERE instance_id = $1 AND decision = 'release'`, s.f.instanceID); got < len(KnownCapabilities())*len(chains) {
+		t.Fatalf("recorded release scopes = %d, want at least %d (seven capabilities x two chains)", got, len(KnownCapabilities())*len(chains))
+	}
+}
+
+// Prior dual releases do not make a revoked basis acceptable at close. Once
+// the approval is renewed and the capability is released again, the current
+// release carries the current two-person basis and close can proceed.
+func TestInstanceCloseRequiresCurrentDualBasisAfterApprovalRevokeAndRenewal(t *testing.T) {
+	s := t044NewBoundService(t, GateOptions{})
+	t044ReleaseAllEntryScopes(t, s)
+	capability := CapabilityExistingWithdrawalRecovery
+	scopeHash, err := CapabilityScope(1, capability)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := RevokeApproval(s.f.ctx, s.f.store, ApprovalRequest{
+		InstanceID: s.f.instanceID, Capability: capability, ScopeHash: scopeHash,
+		Principal: "auth:approver", Reason: "exercise current dual basis", OperationID: gateOperation("close-history-approval-revoke"),
+	}); err != nil {
+		t.Fatalf("revoke first current approval: %v", err)
+	}
+	guardKey, roleFingerprint := t044BoundTarget(t, s)
+	result, err := CloseInstance(s.f.ctx, s.f.store, s.gate, CloseInstanceRequest{
+		InstanceID: s.f.instanceID, Actor: "deploy:executor", OperationID: gateOperation("close-history-blocked"),
+		TrustedEntryChains: []uint64{1}, TargetGuardKey: guardKey, TargetRoleFingerprint: roleFingerprint,
+	})
+	if !errors.Is(err, ErrInstanceCloseBlocked) || result.Closed {
+		t.Fatalf("close with revoked historical dual basis = (%+v, %v), want blocked", result, err)
+	}
+	if _, err := Approve(s.f.ctx, s.f.store, ApprovalRequest{
+		InstanceID: s.f.instanceID, Capability: capability, ScopeHash: scopeHash,
+		Principal: "auth:approver", Reason: "renew current dual basis", OperationID: gateOperation("close-history-approval-renew"),
+	}); err != nil {
+		t.Fatalf("renew first current approval: %v", err)
+	}
+	if _, err := Release(s.f.ctx, s.f.store, s.gate, ReleaseRequest{
+		InstanceID: s.f.instanceID, Capability: capability, ScopeHash: scopeHash,
+		Principal: "deploy:executor", Reason: "release with renewed dual basis", OperationID: gateOperation("close-history-release-renew"),
+	}); err != nil {
+		t.Fatalf("release with renewed dual basis: %v", err)
+	}
+	result, err = CloseInstance(s.f.ctx, s.f.store, s.gate, CloseInstanceRequest{
+		InstanceID: s.f.instanceID, Actor: "deploy:executor", OperationID: gateOperation("close-history-renewed"),
+		TrustedEntryChains: []uint64{1}, TargetGuardKey: guardKey, TargetRoleFingerprint: roleFingerprint,
+	})
+	if err != nil || !result.Closed {
+		t.Fatalf("close after renewed current-generation dual release = (%+v, %v), want closed", result, err)
+	}
+}
+
+func TestBaselineInstanceCloseIsDocumentationOnly(t *testing.T) {
+	s := t044NewBoundServiceKind(t, GateOptions{}, "baseline", nil)
+	guardKey, roleFingerprint := t044BoundTarget(t, s)
+	result, err := CloseInstance(s.f.ctx, s.f.store, s.gate, CloseInstanceRequest{
+		InstanceID: s.f.instanceID, Actor: "deploy:executor", OperationID: gateOperation("baseline-close"),
+		TrustedEntryChains: []uint64{1}, TargetGuardKey: guardKey, TargetRoleFingerprint: roleFingerprint,
+	})
+	if err != nil || !result.Closed || !result.Baseline || result.RiskAcceptanceDelivered {
+		t.Fatalf("baseline close without release decisions = (%+v, %v), want documentation-only close", result, err)
+	}
+}
+
+func TestInstanceCloseCoreRejectsTargetBindingMismatch(t *testing.T) {
+	s := t044NewBoundService(t, GateOptions{})
+	guardKey, _ := t044BoundTarget(t, s)
+	result, err := CloseInstance(s.f.ctx, s.f.store, s.gate, CloseInstanceRequest{
+		InstanceID: s.f.instanceID, Actor: "deploy:executor", OperationID: gateOperation("target-mismatch-close"),
+		TrustedEntryChains: []uint64{1}, TargetGuardKey: guardKey, TargetRoleFingerprint: "sha256:" + strings.Repeat("0", 64),
+	})
+	if err == nil || result.Closed {
+		t.Fatalf("close with mismatched target role fingerprint = (%+v, %v), want refusal", result, err)
+	}
+	var state string
+	if err := s.f.pool.QueryRow(s.f.ctx, `SELECT state FROM recovery_instance WHERE instance_id = $1`, s.f.instanceID).Scan(&state); err != nil {
+		t.Fatalf("read instance state after target mismatch: %v", err)
+	}
+	if state != "open" {
+		t.Fatalf("instance state after target mismatch = %q, want open", state)
 	}
 }
 

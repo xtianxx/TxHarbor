@@ -1,0 +1,47 @@
+{
+  "task_status": {
+    "accepted": ["T017", "T027"],
+    "current_count": "64/70",
+    "open": ["T019", "T020", "T057", "T058", "T066", "T068", "T000-P"],
+    "historical_snapshot": "62/70 plus 11 top-level SKIP, unchanged"
+  },
+  "drill": {
+    "required": {"pass": 19, "fail": 3, "skip": 0},
+    "top_level": {"pass": 913, "fail": 3, "skip": 0},
+    "result": "FAIL",
+    "tested_source_fingerprint": "sha256:d761a4fa68d40e1eff40937ec466bdf2953664621b15d2aedabe8a942b6b552a"
+  },
+  "full_pg_integration": {
+    "exit_status": 1,
+    "top_level": {"pass": 1755, "fail": 8, "skip": 2},
+    "test_events": {"pass": 3765, "fail": 8, "skip": 2},
+    "result": "FAIL",
+    "note": "The later focused fix81 PASS does not convert the full-suite result to PASS. Five isolated environment-only reruns passed separately."
+  },
+  "fix81_focused_pg": {
+    "postgres": "18.6 pinned",
+    "exit_status": 0,
+    "pass": 3,
+    "fail": 0,
+    "skip": 0,
+    "log": "/tmp/opencode/015-resumed-final/pg-integration-focused-final.log",
+    "log_sha256": "db8c800a42f4e9073b92f4b6f01961e64e959d49420e7e4b5f8eeada7ba7f7a8",
+    "tests": [
+      "TestVerifyBackupRejectsMissingAuthoritativeObject",
+      "TestRestorePreWriteMarkerInvalidatesBeforeFirstTargetWrite",
+      "TestRestoreInterruptionAfterFirstWriteKeepsOldPermissionStale"
+    ],
+    "scope": "Only probe_negative_integration_test.go and restore_invalidation_integration_test.go changed; runtime and drill inputs unchanged."
+  },
+  "other_validation": {
+    "static_unit_contract_race": "PASS, exit 0",
+    "affected_unit_and_script_parser_bash_syntax": "PASS",
+    "remote_ci": "NOT RUN"
+  },
+  "source_fingerprint_mapping": {
+    "final_source": "sha256:43e15d6a13224f600f15b786aa016ab995c3d90eda3f8ec0705be75ef6569514",
+    "drill_tested_source": "sha256:d761a4fa68d40e1eff40937ec466bdf2953664621b15d2aedabe8a942b6b552a",
+    "difference": "Only the two integration-test files noted above; docs/tasks excluded from source fingerprint.",
+    "commit_identity": "Resolve via git log for docs/evidence/015/64140fb-followup-acceptance.md or parent final report; fingerprints are not commit IDs."
+  }
+}

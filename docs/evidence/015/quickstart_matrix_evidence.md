@@ -2,7 +2,7 @@
 
 - Feature: `015-backup-recovery-safe-resumption` ｜ 分支: `015-backup-recovery-safe-resumption` ｜ main 基线: `8d4b9af`
 - 树状态（以下 §1–§8）：历史快照 HEAD `65df393` + 当时未提交脏树（17 M + 9 未跟踪文件；含 B17 drill 独立通道、B18 CI/证据归档、B19 收口与已知失败修复）。原记录完整保留；全部历史结果仅适用于该树。
-- **当前状态**：2026-09-30 当前 precommit 树补记见 §9，树为基线 HEAD `e7ba8c0` + 全部本地未提交实现；最终提交将识别归档。历史矩阵不代表当前树验收。T017/T019/T020/T027/T057/T058/T066/T068 仍 OPEN（62/70），T000-P OPEN；不得由局部/具名/drill 结果推断未覆盖入口或生产行为通过。
+- **状态口径**：§1–§9 为历史记录；§9 是旧的 `e7ba8c0` precommit 快照（62/70），不代表当前 follow-up。当前基线 `64140fb` 之后的补记见 §10：仅 T017/T027 已标记满足，当前 64/70；T019/T020/T057/T058/T066/T068 与 T000-P 仍 OPEN。历史计数不回写，也不得由局部 PASS 推断未覆盖入口或生产行为通过。
 - 日期: 2026-09-29 ｜ 执行者: 本轮（B17/B18 + fix-27/fix-28 合流验证；T066 记录） ｜ Docker/testcontainers: 可用且实际使用（真实 `postgres:18.6-trixie`、`ghcr.io/foundry-rs/foundry:v1.8.1`、`confluentinc/confluent-local:7.9.10`）；本轮运行无 Docker 缺位、无超时、无取消。
 - 状态口径（三者分离，不得混同）：
   - **本地执行**：本轮实际运行的层（lint / build / unit / contract / 聚焦 race / CI 静态复验 / PG 具名入口 2/2 / drill 13/13）全部通过，运行于上述共享脏树。
@@ -115,7 +115,7 @@ PG/CLI 直连层范围：本轮 integration-PG 仅执行 §1 的 2 个具名入�
 - 历史记录中的未执行项：远程 CI（未推送/未触发）、integration-redis/-kafka 全量、e2e 全量、test-race 全量；**NOT RUN 不得读作通过**，不得由已通过层推断。当前 precommit 树结果仅见 §9，不回写或覆盖此历史记录。
 - 三口径分离不变：本地执行 ≠ 远程 CI ≠ 生产就绪。**T000-P 保持 OPEN**；仅本地范围；不宣称生产就绪；drill/S12 与本地数值一律仅为测试输入。
 
-## 9. 当前 precommit 树补记（2026-09-30；非验收声明）
+## 9. 历史 precommit 树快照（64140fb follow-up 旧口径；e7ba8c0；62/70；非当前验收）
 
 - **树范围**：基线 HEAD `e7ba8c0` + 全部本地未提交实现；以下结果是该 precommit tree 的观察，不是单独 HEAD `e7ba8c0` 的结果。最终提交将标识归档。原始日志均在 `/tmp/opencode/`，非持久证据。
 - 全仓门禁：`make lint && make build && go test -count=1 ./... && make test-contract && make test-race && git diff --check` — **全部通过**。
@@ -127,3 +127,40 @@ PG/CLI 直连层范围：本轮 integration-PG 仅执行 §1 的 2 个具名入�
 - recovery PG 专项：`go test -tags=integration -count=1 -timeout=12m -v ./internal/recovery` 在最后一次仅修改 `gate.go` 前 190 PASS / 9 SKIP / 0 FAIL，日志 `/tmp/opencode/015-recovery-pg-current.log`；之后 `make test-integration` 最终全仓通过，但没有 verbose skip 计数。
 - 失败历史：较早的失败运行由 fixture 变化修复，属于历史失败，不是当前最终结果；不得将它们说成当前失败，也不得将最终通过倒推为此前运行通过。
 - 仍未执行/未证明：远程 CI、push、PR、merge、deploy 均 **NOT RUN**；T017/T019/T020/T027/T057/T058/T066/T068 仍 OPEN（62/70），T000-P OPEN。真实直接 `pg_restore` ELF 正向路径缺位；T068 有限证据仅包括 manifest 双排除项、credential-shaped reason 拒绝及子进程 argv/passfile 保护，父 CLI argv、SIGKILL 后 passfile 残留及 ELF 信任未解决/未证明。无生产就绪声明。
+
+## 10. `64140fb` follow-up final drill supplement（2026-09-30；not overall acceptance）
+
+- 本节和 [follow-up acceptance ledger](64140fb-followup-acceptance.md) 记录基线 `64140fb` 之后本地 dirty tree 的补充，不改写 §1–§9 历史矩阵或历史 **62/70、11 top-level SKIP**。T017/T027 功能验收由 owner 判定满足，当前 64/70；T019/T020/T057/T058/T066/T068 OPEN，T000-P OPEN。此文档 lane 不更改 tasks checkbox。
+- Final drill `make test-drill`: required 22 = **19 PASS / 3 FAIL / 0 SKIP**; top-level = **913 PASS / 3 FAIL / 0 SKIP**; all test events = **2049 PASS / 3 FAIL**; exit 2. Failures: `TestT058DrillEventLayerKafkaBrokerOffsetDivergence` (Kafka broker offset target guard not clean), `TestT059F2RestoreInterruptionNotRestoredRebuildRerunIdempotent` and `TestT060DrillRestoreReentryConvergesWithSingleState` (original identity/process proof not established). No destructive acceptance.
+- Independent owned-process commit-before-READY / same-role kill-reap / reconnect-rejection PASS, and two actual acceptance-barrier observer/login-loss negative cases PASS. These establish narrow cancellation boundaries, not full rebuild lifecycle. Query-only approval is tested; actual post-approval fund/consumer effects remain unproven. Do not claim zero repeat payments or erroneous effects globally.
+- Host missing-client negative exits 2 and names 13 required top-level plus 3 nested F1/F3 NOT RUN; overlapping names are counted once. Missing tree fingerprint also causes refusal; real tool skips are independently decisive. The earlier 913 PASS/3 FAIL/0 SKIP attempt with malformed metadata is invalid structured-metadata evidence and is not replaced by a retry PASS.
+- Tested-tree fingerprint `sha256:d761a4fa68d40e1eff40937ec466bdf2953664621b15d2aedabe8a942b6b552a`; source stable before/after. This fingerprints a dirty tree, not final commit. Valid metadata, tree validation and reduced terminal event artifacts are in `followup-final/`; raw logs remain under `/tmp/opencode/` and are not committed.
+- Final full PG integration run `/tmp/opencode/015-resumed-final/pg-integration.jsonl`: exit 1; top-level **1755 PASS/8 FAIL/2 SKIP**, all test events **3765 PASS/8 FAIL/2 SKIP**. Failures: app `TestServeDurablePauseKeepsServiceAliveAndPaused`, health `TestReadyzFlipsAndRecoversWithRealDependencies`, nonce/signer/withdrawal `*MigrationHistoryUntouched` (environment-dependent; host rerun 5/5 PASS), recovery `TestVerifyBackupRejectsMissingAuthoritativeObject` (observed `unverified`, expected `rejected`), and two restore invalidation cases which were denied earlier by unknown/active isolation guard rather than reaching expected stale-state assertions. Full suite remains FAIL. Skips: txlifecycle `TestCrashHelper` (not helper) and withdrawal `TestWithdrawalIntakeStorageDown` (owned fault injection); neither is a required recovery/drill scenario.
+- Package outcomes: full `internal/app/recoveryadmin` including real native CLI S11 close, verify/approve/release/status, interruption pair and record-only negative PASS; controlstore PASS. The original full `internal/recovery` run had three failures; the subsequent fix81 focused rerun passed all three affected tests. These focused passes do not change the full PG suite failure.
+- `static-unit-contract-race.log` plus `validation-status.json`: static/unit/contract/race exit 0; full PG exit 1. Isolated host-only rerun `/tmp/opencode/015-resumed-final/host-environment-rerun.log` exit 0, 5 PASS/0 SKIP/0 FAIL, no source edits. Artifact summaries, terminal events (action/package/test only), raw-log SHA-256 values and exact failure list are indexed in the ledger and `followup-final/`.
+- **S/F semantic result matrix (local evidence only; “partial” is not pass):**
+
+| Scenarios | Status | Evidence boundary |
+|---|---|---|
+| S1 backup | PARTIAL | Main drill and available CLI evidence pass; not enough for entire S1 acceptance. |
+| S2 verify backup | PARTIAL | Real artifact positive evidence exists; missing-authoritative-object PG case failed (`unverified`, expected `rejected`). |
+| S3 open recovery instance | PASS (scoped) | Named control-store/drill opening and fail-closed contract assertions passed. |
+| S4 restore | FAIL | F2/T060 drill required failures and two PG invalidation assertions failed before expected stale-state check. |
+| S5 isolation | PARTIAL | Owned-process and observer negatives pass, but F2/T060 original identity/process proof was not established. |
+| S6 fact verification | PARTIAL | Named CLI verification passes; Kafka offset target-guard drill fails. |
+| S7 gap blocking | PASS (scoped) | Named gap-paused drill and refusal assertions pass; not a whole-system guarantee. |
+| S8 independent capability release | PASS (query-only scope) | Named verify/approve/release/status path passes; no claim for post-approval funds/effects. |
+| S9 graded progression | PARTIAL | Named approval/release tests pass; full external-effect progression not established. |
+| S10 truthful status | PASS (scoped) | Named status and recoveryadmin real-entry evidence passes; does not offset suite failures. |
+| S11 close instance | PASS (scoped) | Real native CLI positive close and lifecycle core pass; does not constitute full PG suite acceptance. |
+| S12 metrics/archive | PARTIAL | Structured drill artifacts exist, but drill overall fails and destructive acceptance was not reached. |
+| F1 unusable backup | PARTIAL | Corrupt/unverified matrix passes; missing authoritative object PG expectation fails. |
+| F2 interruption/partial restore | FAIL | Required drill identity/process proof fails; PG stale-state cases are blocked by unresolved active/unknown isolation guard. |
+| F3 incompatibility | PASS (scoped) | Named compatibility rejection cases pass; limited to listed inputs. |
+| F4 external facts lead | FAIL | Kafka committed-offset target guard not clean; no global zero-replay/effect claim. |
+| F5 old instance isolation | PARTIAL | Narrow process/reconnect/observer negatives pass; full original-identity witness is not established. |
+| F6 unprovable gap | PASS (scoped) | Named gap-paused/unknown and audit assertions pass. |
+| F7 unauthorized/stale approvals | PASS (scoped) | Named authorization/approval and control-store assertions pass. |
+
+- Fix81 focused recovery integration: **3 PASS/0 FAIL/0 SKIP** on pinned PG18.6; details and sanitized summary in [the ledger](64140fb-followup-acceptance.md) and `followup-final/fix81-focused-pg-summary.json`. This narrow rerun does not alter the full-suite **1755 PASS/8 FAIL/2 SKIP, exit 1** result.
+- Current owner task count **64/70** (only T017/T027 marked accepted; original task text unchanged); six follow-up tasks remain OPEN. Historical **62/70 + 11 top-level SKIP** are preserved. Final source fingerprint is `sha256:43e15d6a13224f600f15b786aa016ab995c3d90eda3f8ec0705be75ef6569514`; it differs from the pre-fix81 drill source fingerprint above only in the two integration-test files, with docs/tasks excluded. Runtime/drill inputs unchanged; affected unit and script-parser/bash-syntax checks PASS. Resolve commit identity via evidence-path `git log` or parent final report, not by equating it to a fingerprint. Parent confirmed this fingerprint and will repeat the exact-source check before commit. Remote CI/push/deploy NOT RUN; T000-P OPEN.

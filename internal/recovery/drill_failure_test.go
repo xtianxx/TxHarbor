@@ -36,6 +36,7 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"github.com/xtianxx/txharbor/internal/recovery"
+	"github.com/xtianxx/txharbor/internal/recovery/controlstore"
 )
 
 // TestT059F1BackupUnusableCorruptTruncatedUnverified covers F1: a backup that
@@ -148,21 +149,22 @@ func TestT059F1BackupUnusableCorruptTruncatedUnverified(t *testing.T) {
 	drillAssertFingerprintEqual(t, liveBefore, drillFingerprint(t, env.data), "live database during F1")
 }
 
-// TestT059F2RestoreInterruptionNotRestoredRebuildRerunIdempotent covers F2: a
-// real pg_restore interrupted mid-flight is never marked restored and the
-// rebuild + rerun converges with no duplicated or mixed state.
+// TestT059F2RestoreInterruptionNotRestoredRebuildRerunIdempotent covers the
+// real interrupted-restore and ordinary-retry refusal portions of F2. It
+// deliberately fails at the rebuild boundary until the original attempt can
+// supply an authenticated writer identity and retained process handle.
 func TestT059F2RestoreInterruptionNotRestoredRebuildRerunIdempotent(t *testing.T) {
 	requireDrillLocalPGRestore(t)
 	env := newDrillEnv(t, false)
 	env.seedLiveBusinessState()
 	env.seedProbeTable()
-	liveBefore := drillFingerprint(t, env.data)
 
 	backup := env.backup()
 	verifyTarget := env.createDatabase("f2_verify")
 	env.verifyBackup(backup.ManifestPath, verifyTarget, env.operation("f2-verify"))
+	env.seedAuthoritativeTargetCleanBaseline()
 
-	target := env.createDatabase("f2_target")
+	target := env.recoveryTarget()
 	targetDB := env.dbNameOf(target)
 
 	// Park the real pg_restore on a lock the test holds (the target carries a
@@ -186,24 +188,34 @@ func TestT059F2RestoreInterruptionNotRestoredRebuildRerunIdempotent(t *testing.T
 		err    error
 	}
 	done := make(chan restoreOutcome, 1)
+	restoreCtx, cancelRestore := context.WithCancel(context.Background())
+	defer cancelRestore()
+	interruptedOperation := env.operation("f2-interrupted")
 	go func() {
-		result, err := recovery.ExecuteRestore(context.Background(), recovery.RestoreOptions{
+		result, err := recovery.ExecuteRestore(restoreCtx, recovery.RestoreOptions{
 			ManifestPath:      backup.ManifestPath,
 			InstanceID:        env.instanceID,
 			ControlStore:      env.store,
 			ControlDSN:        env.ctrlDSN,
+			ObserverDSN:       env.observerDSNFor(target),
 			TargetDSN:         target,
 			TargetDeclaration: recovery.TargetIsolated,
 			Actor:             "deploy:executor",
 			ProgramVersion:    drillProgramVersion,
-			OperationID:       env.operation("f2-interrupted"),
+			OperationID:       interruptedOperation,
 			PG:                env.pg,
 		})
 		done <- restoreOutcome{result: result, err: err}
 	}()
 
-	pids := env.waitForLockWaiter(targetDB, 30*time.Second)
-	env.terminateBackends(pids)
+	// Observe that the fixture-owned real restore child reached the blocking
+	// target operation, then cancel its parent context. The pg_restore command
+	// process is terminated and waited by drillPGCommand.Run; no server PID is
+	// retained or used as process identity.
+	if pids := env.waitForLockWaiter(targetDB, 30*time.Second); len(pids) == 0 {
+		t.Fatal("interrupted F2 restore never reached the real PostgreSQL lock barrier")
+	}
+	cancelRestore()
 	if _, err := locker.Exec(env.ctx, `ROLLBACK`); err != nil {
 		t.Fatalf("release blocker lock: %v", err)
 	}
@@ -226,23 +238,51 @@ func TestT059F2RestoreInterruptionNotRestoredRebuildRerunIdempotent(t *testing.T
 	if got := env.controlEvidenceCount("restore_probe", backup.Manifest.BackupID); got != 0 {
 		t.Fatalf("restore_probe rows after the interruption = %d, want 0", got)
 	}
+	if _, err := env.refusedRestore(backup.ManifestPath, target, drillProgramVersion, env.operation("f2-unwitnessed-retry")); err == nil {
+		t.Fatal("ordinary retry was allowed before target witness recovery")
+	}
+	if got := env.controlEvidenceCount("restore_probe", backup.Manifest.BackupID); got != 0 {
+		t.Fatalf("restore_probe rows after blocked retry = %d, want 0", got)
+	}
+	if err := drillWaitNoTargetSessions(env.ctx, env.admin, targetDB); err != nil {
+		t.Fatalf("old restore attempt did not drain after owned process Wait: %v", err)
+	}
+	guardInfo, err := controlstore.ParseDSNTarget(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	guardKey, err := controlstore.TargetGuardKey(guardInfo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	guard, found, err := controlstore.ReadTargetGuard(env.ctx, env.ctrl, guardKey)
+	if err != nil || !found || guard.OperationID != interruptedOperation || guard.AttemptAppName == "" {
+		t.Fatalf("interrupted attempt guard identity = %+v found=%t err=%v", guard, found, err)
+	}
+	if guard.State != controlstore.TargetGuardRebuildRequired {
+		guardTx, err := env.ctrl.Begin(env.ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := controlstore.MarkTargetGuardWriterDrainedForAttempt(env.ctx, guardTx, guardKey, interruptedOperation, guard.AttemptAppName); err != nil {
+			_ = guardTx.Rollback(env.ctx)
+			t.Fatalf("record owned restore process drain (guard=%+v): %v", guard, err)
+		}
+		if err := controlstore.MarkTargetGuardRebuildRequiredForAttempt(env.ctx, guardTx, guardKey, interruptedOperation, guard.AttemptAppName); err != nil {
+			_ = guardTx.Rollback(env.ctx)
+			t.Fatalf("record interrupted target rebuild requirement: %v", err)
+		}
+		if err := guardTx.Commit(env.ctx); err != nil {
+			t.Fatalf("commit drained interrupted target state: %v", err)
+		}
+	} else if guard.ActiveWriter {
+		t.Fatalf("restore executor marked rebuild-required while writer is still active: %+v", guard)
+	}
 
-	// Retry = rebuild the target database, then rerun: exactly one probe row,
-	// the exact goose set, no duplicated or mixed state.
-	rebuilt := env.rebuildDatabase(target)
-	env.restore(backup.ManifestPath, rebuilt, env.operation("f2-rerun"))
-	if got := env.probeCount(rebuilt); got != 1 {
-		t.Fatalf("probe rows after the rerun = %d, want exactly 1", got)
-	}
-	want := backup.Manifest.Schema.GooseDBVersion
-	if got := env.gooseVersions(rebuilt); !drillEqualInt64(got, want) {
-		t.Fatalf("rerun goose set = %v, want %v", got, want)
-	}
-	if got := env.controlEvidenceCount("restore_probe", backup.Manifest.BackupID); got != 1 {
-		t.Fatalf("restore_probe rows after the successful rerun = %d, want 1", got)
-	}
-
-	drillAssertFingerprintEqual(t, liveBefore, drillFingerprint(t, env.data), "live database during F2")
+	// Do not infer that process drain alone authorizes a destructive rebuild.
+	// rebuildTargetWithWitness must fail closed until it can bind authentic
+	// original-attempt identity evidence; it must not write clean guard state.
+	env.rebuildTargetWithWitness(target, env.operation("f2-witnessed-rebuild"))
 }
 
 // TestT059F3IncompatibleProgramRefusedNoSilentDowngrade covers F3: a
@@ -316,7 +356,8 @@ func TestT059F4ExternalLeadZeroReplayZeroAuthorityWrites(t *testing.T) {
 
 	verifyTarget := env.createDatabase("f4_verify")
 	env.verifyBackup(backup.ManifestPath, verifyTarget, env.operation("f4-verify-backup"))
-	recoveredDSN := env.createDatabase("f4_recovered")
+	env.seedAuthoritativeTargetCleanBaseline()
+	recoveredDSN := env.recoveryTarget()
 	recovered := env.openPool(recoveredDSN)
 	env.restore(backup.ManifestPath, recoveredDSN, env.operation("f4-restore"))
 	recoveredBefore := drillFingerprint(t, recovered)
@@ -465,7 +506,8 @@ func TestT059F6UnprovableGapStaysUnknownWithPackageAndEscalation(t *testing.T) {
 
 	verifyTarget := env.createDatabase("f6_verify")
 	env.verifyBackup(backup.ManifestPath, verifyTarget, env.operation("f6-verify-backup"))
-	recoveredDSN := env.createDatabase("f6_recovered")
+	env.seedAuthoritativeTargetCleanBaseline()
+	recoveredDSN := env.recoveryTarget()
 	recovered := env.openPool(recoveredDSN)
 	env.restore(backup.ManifestPath, recoveredDSN, env.operation("f6-restore"))
 	liveBefore := drillFingerprint(t, env.data)
@@ -708,7 +750,7 @@ func drillRefusedRestoreWithObserver(env *drillEnv, manifestPath, targetDSN, pro
 	result, err := recovery.ExecuteRestore(env.ctx, recovery.RestoreOptions{
 		ManifestPath: manifestPath, InstanceID: env.instanceID,
 		ControlStore: env.store, ControlDSN: env.ctrlDSN,
-		ObserverDSN: env.adminDSN, TargetDSN: targetDSN,
+		ObserverDSN: env.observerDSNFor(targetDSN), TargetDSN: targetDSN,
 		TargetDeclaration: recovery.TargetIsolated,
 		Actor:             "deploy:executor", ProgramVersion: programVersion,
 		OperationID: operationID, PG: env.pg,

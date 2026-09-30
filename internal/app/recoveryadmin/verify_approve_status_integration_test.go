@@ -264,7 +264,7 @@ func TestRecoveryAdminVerifyApproveReleaseStatusRealEntry(t *testing.T) {
 	// the real entry wrote restore_probe evidence, not because a row was
 	// inserted.
 	manifestPath, backupID := f.verifiedBackup(t)
-	restoredDSN := f.createDB(t, "restored")
+	restoredDSN := f.restoreDSN
 	code, restoredOut, restoredErr := f.cliRestore(t, manifestPath, restoredDSN, "ra-restore-1")
 	if code != 0 || !strings.Contains(restoredOut, "restored=true") {
 		t.Fatalf("CLI restore: exit=%d stdout=%q stderr=%q", code, restoredOut, restoredErr)
@@ -594,7 +594,7 @@ func TestRecoveryAdminVerifyApproveReleaseStatusRealEntry(t *testing.T) {
 	closeEnv := env("deploy:executor")
 	// Close the instance against the authoritative data target bound at open;
 	// the restored database is a separate artifact target, not a rebinding.
-	closeEnv[config.EnvPGDSN] = f.dataDSN
+	closeEnv[config.EnvPGDSN] = f.restoreDSN
 	code, out, errOut = runRecoveryAdmin(t, []string{
 		"instance-close", "--instance", f.instanceID, "--operation-id", "ra-close-1",
 	}, closeEnv)
@@ -611,7 +611,7 @@ func TestRecoveryAdminVerifyApproveReleaseStatusRealEntry(t *testing.T) {
 	}
 
 	supersedeEnv := env("deploy:executor")
-	supersedeEnv[config.EnvPGDSN] = f.dataDSN
+	supersedeEnv[config.EnvPGDSN] = f.restoreDSN
 	code, out, errOut = runRecoveryAdmin(t, []string{
 		"instance-open", "--kind", "recovery", "--supersede", f.instanceID,
 		"--approval-refs", chainScanApproval + "," + queryApproval,
@@ -827,7 +827,7 @@ func TestRecoveryAdminS11PositiveCloseRealEntry(t *testing.T) {
 	raRunAllChecklist(t, f, checklistEnv)
 
 	manifestPath, backupID := f.verifiedBackup(t)
-	restoredDSN := f.createDB(t, "restored")
+	restoredDSN := f.restoreDSN
 	code, restoredOut, restoredErr := f.cliRestore(t, manifestPath, restoredDSN, "ra-pos-restore-1")
 	if code != 0 || !strings.Contains(restoredOut, "restored=true") {
 		t.Fatalf("CLI restore: exit=%d stdout=%q stderr=%q", code, restoredOut, restoredErr)
@@ -908,7 +908,7 @@ func TestRecoveryAdminS11PositiveCloseRealEntry(t *testing.T) {
 	// the close must refuse (a positive close is never granted over an open
 	// gap). Every gap is then closed through the real T041 evidence path. ---
 	closeEnv := env("deploy:executor")
-	closeEnv[config.EnvPGDSN] = f.dataDSN
+	closeEnv[config.EnvPGDSN] = f.restoreDSN
 	code, out, errOut = runRecoveryAdmin(t, []string{
 		"instance-close", "--instance", f.instanceID, "--operation-id", "ra-pos-close-open-gap",
 	}, closeEnv)
@@ -1095,7 +1095,7 @@ func TestRecoveryAdminS11PositiveCloseRealEntry(t *testing.T) {
 	// --- S11 positive: close. Every capability is release-valid and no gap is
 	// open, so the instance returns to daily operation. ---
 	closeEnv = env("deploy:executor")
-	closeEnv[config.EnvPGDSN] = f.dataDSN
+	closeEnv[config.EnvPGDSN] = f.restoreDSN
 	code, out, errOut = runRecoveryAdmin(t, []string{
 		"instance-close", "--instance", f.instanceID, "--operation-id", "ra-pos-close-1",
 	}, closeEnv)

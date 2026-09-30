@@ -522,6 +522,9 @@ func TestT044RepeatedApproveReleaseCloseDoNotFlipState(t *testing.T) {
 	}
 	s.gate = gateNewGate(t, s.f.store, GateOptions{TrustedTarget: trustedTarget})
 	s.releaseAllCapabilities(t)
+	// Collect and verify the no-pre-release-effects fixture evidence needed by
+	// the chain-level entry scopes before the first action is admitted below.
+	t044ReleaseAllEntryScopes(t, s)
 
 	// Repeated approve with the same operation_id: one row, replay flagged.
 	op := gateOperation("t044-idem-approve")
@@ -587,10 +590,6 @@ func TestT044RepeatedApproveReleaseCloseDoNotFlipState(t *testing.T) {
 	if got := s.admit(t, CapabilityEventPublishing); !got.Allowed {
 		t.Fatalf("released capability must stay admitted after replays, got %+v", got)
 	}
-	// The old fixture scopes are asset/kind-narrow. A close requires the
-	// complete chain-level scopes actually consumed by the deployed entries.
-	t044ReleaseAllEntryScopes(t, s)
-
 	// Close once (all seven released), then 10 repeated closes: zero flips.
 	closeOp := gateOperation("t044-idem-close")
 	guardKey, roleFingerprint := t044BoundTarget(t, s)

@@ -138,7 +138,11 @@ func TestRestorePreWriteMarkerInvalidatesBeforeFirstTargetWrite(t *testing.T) {
 	gf.seedIsolationSet(t, CapabilityQuery)
 	approvalID := gf.approve(t, CapabilityQuery, "auth:approver", "person-approver", ApprovalClassSingleNonExecutor)
 	gf.release(t, CapabilityQuery, []string{approvalID})
-	gate := gateNewGate(t, f.store, GateOptions{})
+	trustedTarget, err := GateTargetBindingFromDSN(f.srcDSN)
+	if err != nil {
+		t.Fatalf("derive trusted authoritative data target: %v", err)
+	}
+	gate := gateNewGate(t, f.store, GateOptions{TrustedTarget: trustedTarget})
 	if d := gf.admit(t, gate, CapabilityQuery); !d.Allowed {
 		t.Fatalf("fixture release must allow before the restore, got %+v", d)
 	}
@@ -205,10 +209,12 @@ WHERE instance_id = $1 AND action = 'evidence_write' AND result = 'ok'
 			protocolKind, capturedGeneration, acceptedGeneration, MutationRestoreStarted, generationBefore, generationAtMarker)
 	}
 
-	// Before the first target write, the old release is already unusable for
-	// admission (the answer to the duplicate-restore timing question).
-	if d := gf.admit(t, gate, CapabilityQuery); d.Allowed || d.RefusalClass != RefusalReleaseInvalidatedGeneration {
-		t.Fatalf("old release must be stale before the first target write, got %+v", d)
+	// The active target guard is the public gate's earlier refusal; do not
+	// misreport it as a stale-release decision. Independently, the persisted
+	// evidence token above proves the old release/approval generation is no
+	// longer current before pg_restore can perform its first target write.
+	if d := gf.admit(t, gate, CapabilityQuery); d.Allowed || d.RefusalClass != RefusalIsolationUnproven {
+		t.Fatalf("active restore target must be blocked by isolation guard before the first write, got %+v", d)
 	}
 
 	if _, err := locker.Exec(f.ctx, `ROLLBACK`); err != nil {
@@ -255,11 +261,15 @@ func TestRestoreInterruptionAfterFirstWriteKeepsOldPermissionStale(t *testing.T)
 	gf.seedIsolationSet(t, CapabilityQuery)
 	approvalID := gf.approve(t, CapabilityQuery, "auth:approver", "person-approver", ApprovalClassSingleNonExecutor)
 	gf.release(t, CapabilityQuery, []string{approvalID})
-	gate := gateNewGate(t, f.store, GateOptions{})
+	trustedTarget, err := GateTargetBindingFromDSN(f.srcDSN)
+	if err != nil {
+		t.Fatalf("derive trusted authoritative data target: %v", err)
+	}
+	gate := gateNewGate(t, f.store, GateOptions{TrustedTarget: trustedTarget})
 	if d := gf.admit(t, gate, CapabilityQuery); !d.Allowed {
 		t.Fatalf("fixture release must allow before the restore, got %+v", d)
 	}
-	generationBefore, _ := gateInstanceToken(t, f.ctx, f.ctrl, f.instanceID)
+	generationBefore, hashBefore := gateInstanceToken(t, f.ctx, f.ctrl, f.instanceID)
 
 	target := f.restoreTargetDSN
 	targetDB := bkpDBNameOf(t, f.adminDSN, target)
@@ -282,13 +292,13 @@ func TestRestoreInterruptionAfterFirstWriteKeepsOldPermissionStale(t *testing.T)
 
 	// The marker is committed while the first write is parked: the capability
 	// is closed before any target write can complete.
-	generationParked, _ := gateInstanceToken(t, f.ctx, f.ctrl, f.instanceID)
-	if generationParked != generationBefore+1 {
-		t.Fatalf("generation while pg_restore is parked = %d, want the marker generation %d",
-			generationParked, generationBefore+1)
+	generationParked, hashParked := gateInstanceToken(t, f.ctx, f.ctrl, f.instanceID)
+	if generationParked != generationBefore+1 || hashParked == hashBefore {
+		t.Fatalf("persisted restore marker token = (%d, %s), want generation %d and a changed hash from %s",
+			generationParked, hashParked, generationBefore+1, hashBefore)
 	}
-	if d := gf.admit(t, gate, CapabilityQuery); d.Allowed || d.RefusalClass != RefusalReleaseInvalidatedGeneration {
-		t.Fatalf("capability must be closed during the restore, got %+v", d)
+	if d := gf.admit(t, gate, CapabilityQuery); d.Allowed || d.RefusalClass != RefusalIsolationUnproven {
+		t.Fatalf("active restore target must be blocked by isolation guard, got %+v", d)
 	}
 
 	// Interrupt the real pg_restore mid-flight.
@@ -317,21 +327,17 @@ func TestRestoreInterruptionAfterFirstWriteKeepsOldPermissionStale(t *testing.T)
 	if n := f.controlEvidenceCount(t, "restore_probe", backup.Manifest.BackupID); n != 0 {
 		t.Fatalf("restore_probe evidence rows after interruption = %d, want 0", n)
 	}
-	// The old permission is not restored by the failure.
-	if d := gf.admit(t, gate, CapabilityQuery); d.Allowed || d.RefusalClass != RefusalReleaseInvalidatedGeneration {
-		t.Fatalf("old release must stay stale after the interruption, got %+v", d)
-	}
-	// The old approval died with the pre-restore generation: a release
-	// recorded at the marker generation referencing it is stale.
-	gf.release(t, CapabilityQuery, []string{approvalID})
-	if d := gf.admit(t, gate, CapabilityQuery); d.Allowed || d.RefusalClass != RefusalApprovalStale {
-		t.Fatalf("old approval must be stale after the interruption, got %+v", d)
+	// The dirty target guard remains the public gate's earlier refusal after
+	// interruption. The persisted token above remains advanced; the release's
+	// stale status is checked after the target is rebuilt and healthy below.
+	if d := gf.admit(t, gate, CapabilityQuery); d.Allowed || d.RefusalClass != RefusalIsolationUnproven {
+		t.Fatalf("interrupted dirty target must be blocked by isolation guard, got %+v", d)
 	}
 
 	// Retry = rebuild the target database, then rerun (idempotent): the rerun
 	// starts a fresh marker and its own acceptance; exactly one restore_probe
 	// row exists afterwards.
-	rebuilt := f.rebuildTarget(t, bkpTarget{name: targetDB, dsn: target})
+	rebuilt := f.rebuildInterruptedRestoreTarget(t, bkpTarget{name: targetDB, dsn: target}, backup.Manifest.BackupID)
 	rerun := f.restore(t, backup.ManifestPath, rebuilt, TargetProductionMain, "controlled restore retry after target rebuild")
 	if !rerun.Restored {
 		t.Fatalf("rerun after rebuild = %+v, want Restored=true", rerun)
@@ -346,6 +352,13 @@ func TestRestoreInterruptionAfterFirstWriteKeepsOldPermissionStale(t *testing.T)
 	// current generation reopens the capability (no reuse of the old one).
 	if d := gf.admit(t, gate, CapabilityQuery); d.Allowed || d.RefusalClass != RefusalReleaseInvalidatedGeneration {
 		t.Fatalf("old release must stay stale after the rerun, got %+v", d)
+	}
+	// Now that the rebuild/rerun has returned the target to a healthy state,
+	// expose the approval-generation check independently of the old release's
+	// stale generation.
+	gf.release(t, CapabilityQuery, []string{approvalID})
+	if d := gf.admit(t, gate, CapabilityQuery); d.Allowed || d.RefusalClass != RefusalApprovalStale {
+		t.Fatalf("old approval must remain stale after healthy rebuild and rerun, got %+v", d)
 	}
 	freshApproval := gf.approve(t, CapabilityQuery, "auth:approver", "person-approver", ApprovalClassSingleNonExecutor)
 	gf.release(t, CapabilityQuery, []string{freshApproval})
@@ -372,7 +385,11 @@ func TestRestoreStartInterleavingDoesNotRewindAdmittedAction(t *testing.T) {
 	entered := make(chan struct{})
 	releaseAdmission := make(chan struct{})
 	var enteredOnce sync.Once
-	gate, err := NewGate(f.store, GateOptions{TTL: time.Minute, FundGates: func(context.Context, GateRequest) error {
+	trustedTarget, err := GateTargetBindingFromDSN(f.srcDSN)
+	if err != nil {
+		t.Fatalf("derive trusted authoritative data target: %v", err)
+	}
+	gate, err := NewGate(f.store, GateOptions{TTL: time.Minute, TrustedTarget: trustedTarget, FundGates: func(context.Context, GateRequest) error {
 		enteredOnce.Do(func() { close(entered) })
 		<-releaseAdmission
 		return nil

@@ -291,13 +291,15 @@ func runTargetWriter(ctx context.Context, opts TargetWriterOptions) (result Targ
 		return result, errors.New("could not record target launch intent")
 	}
 	intentDurable := true // commit outcome may be ambiguous from this point on
-	writerProvenDrained := false
+	failureCleanupEligible := false
+	var lockHealth func(context.Context) error
 	defer func() {
-		if retErr != nil && intentDurable && writerProvenDrained {
-			// Cleanup is attempt-fenced and only transitions an unknown attempt
-			// after the process group and tagged target sessions are proven
-			// drained. Clean acceptance and a later attempt are never invalidated.
-			_ = markTargetAttemptRebuildRequiredIfDrained(opts.Store, key.String(), opts.OperationID, appName)
+		if retErr != nil && intentDurable && failureCleanupEligible {
+			// Only the original healthy lock owner may finalize a failed attempt.
+			// The independent context lets observations run after caller cancellation.
+			if err := finalizeFailedTargetAttempt(lock, lockHealth, opts.ObserverDSN, key.String(), opts.OperationID, appName, opts.QuiescenceTimeout, opts.QuiescenceInterval); err != nil {
+				retErr = errors.Join(retErr, errors.New("failed target attempt guard finalization is uncertain"))
+			}
 		}
 	}()
 	if opts.prelaunchCommit != nil {
@@ -324,11 +326,12 @@ func runTargetWriter(ctx context.Context, opts TargetWriterOptions) (result Targ
 	if healthTimeout <= 0 {
 		healthTimeout = time.Second
 	}
-	lockHealth := func(checkCtx context.Context) error {
+	lockHealth = func(checkCtx context.Context) error {
 		return runBoundedLockHealth(checkCtx, rawLockHealth, healthTimeout)
 	}
 	command, runErr := opts.Runner.RunPGCommandWithEnv(ctx, executable, args, opts.Archive, io.Discard, io.Discard, os.Environ(), lockHealth)
 	result.Command = command
+	failureCleanupEligible = targetAttemptFailureCleanupEligible(command)
 	if command.Started {
 		if err := markTargetLaunched(opts.Store, key.String(), opts.OperationID, appName); err != nil {
 			return result, errors.New("target launch observation could not be committed")
@@ -340,7 +343,6 @@ func runTargetWriter(ctx context.Context, opts TargetWriterOptions) (result Targ
 	if err := waitTargetQuiescentWithLock(ctx, opts.ObserverDSN, appName, lockHealth, opts.QuiescenceTimeout, opts.QuiescenceInterval); err != nil {
 		return result, errors.New("target writer sessions did not become provably quiescent")
 	}
-	writerProvenDrained = true
 	if err := lockHealth(ctx); err != nil {
 		return result, errors.New("target writer lock health is uncertain after drain")
 	}
@@ -450,6 +452,11 @@ func runTargetWriter(ctx context.Context, opts TargetWriterOptions) (result Targ
 		}
 	}
 	return result, nil
+}
+
+func targetAttemptFailureCleanupEligible(command PGCommandResult) bool {
+	return command.Started && command.ProcessGroupDrained &&
+		(command.Outcome == PGCommandSucceeded || command.Outcome == PGCommandFailed || command.Outcome == PGCommandCanceled)
 }
 
 func verifyIsolatedBindingTx(ctx context.Context, tx pgx.Tx, opts TargetWriterOptions) error {
@@ -670,21 +677,28 @@ func markTargetWriterDrainedInTx(ctx context.Context, tx pgx.Tx, key, operationI
 	return controlstore.MarkTargetGuardWriterDrainedForAttempt(ctx, tx, key, operationID, appName)
 }
 
-func markTargetAttemptRebuildRequiredIfDrained(store *controlstore.Store, key, operationID, appName string) bool {
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+func finalizeFailedTargetAttempt(lock *TargetLock, lockHealth func(context.Context) error, observerDSN string, key, operationID, appName string, timeout, interval time.Duration) error {
+	if lock == nil || lockHealth == nil {
+		return errors.New("target lock owner is unknown")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	tx, err := store.Pool().Begin(ctx)
-	if err != nil {
-		return false
+	if err := lockHealth(ctx); err != nil {
+		return fmt.Errorf("target lock health check failed: %w", err)
 	}
-	defer func() { _ = tx.Rollback(ctx) }()
-	if controlstore.MarkTargetGuardWriterDrainedForAttempt(ctx, tx, key, operationID, appName) != nil {
-		return false
+	if err := waitTargetQuiescentWithLock(ctx, observerDSN, appName, lockHealth, timeout, interval); err != nil {
+		return fmt.Errorf("tagged target-session quiescence was not proven: %w", err)
 	}
-	if controlstore.MarkTargetGuardRebuildRequiredForAttempt(ctx, tx, key, operationID, appName) != nil {
-		return false
+	if err := lockHealth(ctx); err != nil {
+		return fmt.Errorf("target lock health check after quiescence failed: %w", err)
 	}
-	return tx.Commit(ctx) == nil
+	err := lock.WithTransaction(ctx, func(txCtx context.Context, tx pgx.Tx) error {
+		if err := controlstore.MarkTargetGuardWriterDrainedForAttempt(txCtx, tx, key, operationID, appName); err != nil {
+			return err
+		}
+		return controlstore.MarkTargetGuardRebuildRequiredForAttempt(txCtx, tx, key, operationID, appName)
+	})
+	return err
 }
 
 func waitTargetQuiescentWithLock(ctx context.Context, observerDSN, appName string, lockHealth func(context.Context) error, timeout, interval time.Duration) error {

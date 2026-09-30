@@ -1299,7 +1299,7 @@ func TestRestoreInterruptionNotRestoredAndRerunIdempotent(t *testing.T) {
 
 	// Retry = rebuild the target database, then rerun (idempotent; no
 	// duplicated or mixed state).
-	rebuilt := f.rebuildTarget(t, bkpTarget{name: bkpDBNameOf(t, f.adminDSN, target), dsn: target})
+	rebuilt := f.rebuildInterruptedRestoreTarget(t, bkpTarget{name: bkpDBNameOf(t, f.adminDSN, target), dsn: target}, m.BackupID)
 	rerun := f.restore(t, backup.ManifestPath, rebuilt, TargetProductionMain, "controlled restore retry after target rebuild")
 	if !rerun.Restored {
 		t.Fatalf("rerun after rebuild = %+v, want Restored=true", rerun)
@@ -1323,6 +1323,124 @@ func TestRestoreInterruptionNotRestoredAndRerunIdempotent(t *testing.T) {
 	if got := f.controlEvidenceCount(t, "restore_probe", m.BackupID); got != 1 {
 		t.Fatalf("restore_probe evidence rows after successful rerun = %d, want 1", got)
 	}
+}
+
+// rebuildInterruptedRestoreTarget only resolves the authoritative target guard
+// after the supervised restore has returned, the exact interrupted attempt is
+// inactive/rebuild-required, the executor's restore-start audit is present,
+// all target sessions have drained, and a no-FORCE drop/create is observed
+// under the target's shared advisory lock.
+func (f *bkpFixture) rebuildInterruptedRestoreTarget(t *testing.T, target bkpTarget, backupID string) string {
+	t.Helper()
+	if target.name == "" || target.dsn == "" || target.name != bkpDBNameOf(t, f.adminDSN, f.restoreTargetDSN) {
+		t.Fatal("interrupted restore rebuild must name the exact bound authoritative target")
+	}
+	key, err := CanonicalTargetKey(mustBkpDSNTarget(t, target.dsn))
+	if err != nil {
+		t.Fatalf("derive interrupted target lock key: %v", err)
+	}
+	lock, err := AcquireTargetLock(f.ctx, f.ctrlDSN, key, 10*time.Second, 25*time.Millisecond)
+	if err != nil {
+		t.Fatalf("acquire interrupted target rebuild lock: %v", err)
+	}
+	defer func() {
+		if err := lock.Release(context.Background()); err != nil {
+			t.Errorf("release interrupted target rebuild lock: %v", err)
+		}
+	}()
+
+	// Drop the fixture's persistent source pool so the session inventory is
+	// target-wide rather than mistaken for cleanliness while a session remains.
+	if f.src != nil {
+		f.src.Close()
+		f.src = nil
+	}
+	guard, found, err := controlstore.ReadTargetGuard(f.ctx, f.ctrl, f.restoreTargetGuard)
+	if err != nil || !found || guard.State != controlstore.TargetGuardRebuildRequired || guard.ActiveWriter ||
+		!guard.LaunchIntent || guard.LaunchedAt == nil || guard.OperationID == "" || guard.AttemptAppName == "" {
+		t.Fatalf("interrupted restore attempt is not drained/rebuild-required: found=%t guard=%+v err=%v", found, guard, err)
+	}
+	var executorMarkerCount int
+	if err := f.ctrl.QueryRow(f.ctx, `SELECT count(*) FROM recovery_audit
+WHERE instance_id=$1 AND actor='deploy:executor' AND action=$2 AND result='ok'
+  AND target->>'backup_id'=$3`, f.instanceID, ActionRestoreStarted, backupID).Scan(&executorMarkerCount); err != nil {
+		t.Fatalf("verify interrupted restore executor audit: %v", err)
+	}
+	if executorMarkerCount != 1 {
+		t.Fatalf("interrupted restore executor marker audits = %d, want exactly one", executorMarkerCount)
+	}
+
+	var emptyBaseline bool
+	if err := lock.WithTransaction(f.ctx, func(ctx context.Context, tx pgx.Tx) error {
+		current, found, err := controlstore.ReadTargetGuard(ctx, tx, f.restoreTargetGuard)
+		if err != nil || !found || current.State != controlstore.TargetGuardRebuildRequired || current.ActiveWriter ||
+			current.OperationID != guard.OperationID || current.AttemptAppName != guard.AttemptAppName || current.LaunchedAt == nil {
+			return fmt.Errorf("interrupted target attempt changed before rebuild: found=%t guard=%+v err=%v", found, current, err)
+		}
+		var sessions int
+		if err := f.admin.QueryRow(ctx, `SELECT count(*) FROM pg_stat_activity WHERE datname=$1`, target.name).Scan(&sessions); err != nil {
+			return fmt.Errorf("observe target sessions before rebuild: %w", err)
+		}
+		if sessions != 0 {
+			return fmt.Errorf("target still has %d sessions; refusing destructive rebuild", sessions)
+		}
+		if _, err := f.admin.Exec(ctx, "DROP DATABASE "+pgx.Identifier{target.name}.Sanitize()); err != nil {
+			return fmt.Errorf("drop drained target %s without FORCE: %w", target.name, err)
+		}
+		if _, err := f.admin.Exec(ctx, "CREATE DATABASE "+pgx.Identifier{target.name}.Sanitize()); err != nil {
+			return fmt.Errorf("recreate target %s: %w", target.name, err)
+		}
+		var exists bool
+		if err := f.admin.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM pg_database WHERE datname=$1)`, target.name).Scan(&exists); err != nil || !exists {
+			return fmt.Errorf("observe recreated target baseline: exists=%t err=%v", exists, err)
+		}
+		fresh, err := pgx.Connect(ctx, bkpDSNFor(t, f.adminDSN, target.name))
+		if err != nil {
+			return fmt.Errorf("connect to recreated target baseline: %w", err)
+		}
+		var userTables int
+		err = fresh.QueryRow(ctx, `SELECT count(*) FROM pg_class
+WHERE relkind='r' AND relnamespace='public'::regnamespace AND relname NOT LIKE 'pg_%'`).Scan(&userTables)
+		closeErr := fresh.Close(ctx)
+		if err != nil || closeErr != nil || userTables != 0 {
+			return fmt.Errorf("recreated target is not an observed empty baseline: user_tables=%d query_err=%v close_err=%v", userTables, err, closeErr)
+		}
+		var postSessions int
+		if err := f.admin.QueryRow(ctx, `SELECT count(*) FROM pg_stat_activity WHERE datname=$1`, target.name).Scan(&postSessions); err != nil || postSessions != 0 {
+			return fmt.Errorf("recreated target is not empty of sessions: count=%d err=%v", postSessions, err)
+		}
+		emptyBaseline = true
+		operationID := "bkp-fixture-interrupted-rebuild-" + backupID
+		evidence, err := json.Marshal(map[string]any{
+			"controlled_test_baseline": true, "fixture": "backup-restore", "observation": "drop-create-empty",
+			"target_database": target.name, "target_guard_key": f.restoreTargetGuard,
+			"target_role_fingerprint": f.restoreTargetRole, "old_attempt": guard.OperationID,
+			"old_attempt_app_name": guard.AttemptAppName, "old_attempt_state": guard.State,
+			"executor_restore_started_audit_rows": executorMarkerCount,
+		})
+		if err != nil {
+			return err
+		}
+		if err := controlstore.RecordTargetGuardRebuild(ctx, tx, f.instanceID, f.restoreTargetGuard, "deploy:executor", operationID, evidence); err != nil {
+			return fmt.Errorf("record observed interrupted target rebuild: %w", err)
+		}
+		return controlstore.ResolveTargetGuardClean(ctx, tx, f.restoreTargetGuard, operationID, evidence)
+	}); err != nil {
+		t.Fatalf("controlled interrupted target rebuild: %v", err)
+	}
+	if !emptyBaseline {
+		t.Fatal("controlled rebuild did not prove the empty target baseline")
+	}
+	return bkpDSNFor(t, f.adminDSN, target.name)
+}
+
+func mustBkpDSNTarget(t *testing.T, dsn string) controlstore.DSNTarget {
+	t.Helper()
+	target, err := controlstore.ParseDSNTarget(dsn)
+	if err != nil {
+		t.Fatalf("parse target DSN: %v", err)
+	}
+	return target
 }
 
 // ---------------------------------------------------------------------------

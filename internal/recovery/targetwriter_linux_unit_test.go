@@ -81,3 +81,21 @@ func TestAttemptTagReplacesExistingKeywordApplicationName(t *testing.T) {
 		t.Fatalf("application_name = %q, want %q", cfg.RuntimeParams["application_name"], appName)
 	}
 }
+
+func TestAmbiguousDrainedProcessIsNotEligibleForFailureFinalization(t *testing.T) {
+	for _, outcome := range []PGCommandOutcome{PGCommandAmbiguous, PGCommandLockLost} {
+		command := PGCommandResult{Outcome: outcome, Started: true, ProcessGroupDrained: true}
+		if targetAttemptFailureCleanupEligible(command) {
+			t.Fatalf("%s process result incorrectly qualified for failure finalization", outcome)
+		}
+	}
+	for _, outcome := range []PGCommandOutcome{PGCommandSucceeded, PGCommandFailed, PGCommandCanceled} {
+		command := PGCommandResult{Outcome: outcome, Started: true, ProcessGroupDrained: true}
+		if !targetAttemptFailureCleanupEligible(command) {
+			t.Fatalf("%s fully drained process should qualify for failure finalization", outcome)
+		}
+	}
+	if targetAttemptFailureCleanupEligible(PGCommandResult{Outcome: PGCommandFailed, Started: true}) {
+		t.Fatal("process result without proven process-group drain qualified for failure finalization")
+	}
+}

@@ -158,6 +158,9 @@ func RevokeRelease(ctx context.Context, store *controlstore.Store, gate *Gate, r
 // only) and the append inside the instance row lock the gate and every
 // decision writer share.
 func decideRelease(ctx context.Context, store *controlstore.Store, gate *Gate, req ReleaseRequest, decision string) (ReleaseOutcome, error) {
+	if err := controlstore.ValidateCredentialText("reason", req.Reason); err != nil {
+		return ReleaseOutcome{Decision: decision}, fmt.Errorf("%w: %v", ErrReleaseRequest, err)
+	}
 	if store == nil {
 		return ReleaseOutcome{Decision: decision},
 			fmt.Errorf("%w: a controlstore.Store built by controlstore.NewStore is required", ErrReleaseRequest)

@@ -181,6 +181,9 @@ func RevokeApproval(ctx context.Context, store *controlstore.Store, req Approval
 // evidence write is either seen here or invalidates the row afterwards —
 // there is no window in which an unauthorized row can be recorded.
 func decideApproval(ctx context.Context, store *controlstore.Store, req ApprovalRequest, decision string) (ApprovalOutcome, error) {
+	if err := controlstore.ValidateCredentialText("reason", req.Reason); err != nil {
+		return ApprovalOutcome{Decision: decision}, fmt.Errorf("%w: %v", ErrApprovalRequest, err)
+	}
 	if store == nil {
 		return ApprovalOutcome{Decision: decision},
 			fmt.Errorf("%w: a controlstore.Store built by controlstore.NewStore is required", ErrApprovalRequest)

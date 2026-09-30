@@ -595,6 +595,9 @@ func ValidateEntryChainInventory(chains []uint64) error {
 // ErrInstanceAlreadyOpen (zero instance writes, one best-effort refusal audit
 // naming the already-open instance).
 func (s *Store) OpenInstance(ctx context.Context, req OpenInstanceRequest) (OpenInstanceResult, error) {
+	if err := validateCredentialText("reason", req.Reason); err != nil {
+		return OpenInstanceResult{}, err
+	}
 	kind := strings.TrimSpace(req.Kind)
 	if kind != "recovery" && kind != "baseline" {
 		return OpenInstanceResult{}, fmt.Errorf("instance kind must be recovery or baseline, got %q", req.Kind)
@@ -1322,8 +1325,14 @@ func WriteAudit(ctx context.Context, q Queryer, rec AuditRecord) error {
 	if err != nil {
 		return err
 	}
+	if err := validateCredentialJSON("audit target", target); err != nil {
+		return err
+	}
 	detail, err := normalizeJSON("detail", rec.Detail)
 	if err != nil {
+		return err
+	}
+	if err := validateCredentialJSON("audit detail", detail); err != nil {
 		return err
 	}
 	var refusalClass any
@@ -1540,6 +1549,9 @@ func canonicalUUIDList(raw []string) ([]string, error) {
 }
 
 func (r ReleaseDecisionRequest) canonical() (ReleaseDecisionRequest, error) {
+	if err := validateCredentialText("reason", r.Reason); err != nil {
+		return ReleaseDecisionRequest{}, err
+	}
 	id, err := normalizeUUID(r.InstanceID, "instance_id")
 	if err != nil {
 		return ReleaseDecisionRequest{}, err
@@ -1580,6 +1592,9 @@ func (r ReleaseDecisionRequest) canonical() (ReleaseDecisionRequest, error) {
 }
 
 func (r ApprovalDecisionRequest) canonical() (ApprovalDecisionRequest, error) {
+	if err := validateCredentialText("reason", r.Reason); err != nil {
+		return ApprovalDecisionRequest{}, err
+	}
 	id, err := normalizeUUID(r.InstanceID, "instance_id")
 	if err != nil {
 		return ApprovalDecisionRequest{}, err

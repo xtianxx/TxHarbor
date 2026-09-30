@@ -4,6 +4,7 @@ package controlstore
 
 import (
 	"context"
+	"encoding/json"
 	"io"
 	"strings"
 	"testing"
@@ -420,5 +421,73 @@ func TestTargetGuardAttemptTransitionsFenceStaleAttempts(t *testing.T) {
 	guard, found, err := ReadTargetGuard(ctx, pool, key)
 	if err != nil || !found || guard.State != TargetGuardClean || guard.OperationID != "attempt-B" || guard.AttemptAppName != appB {
 		t.Fatalf("B clean acceptance failed: found=%t guard=%+v err=%v", found, guard, err)
+	}
+}
+
+func TestTargetGuardControlledRebuildCleanIsConsistentForInstanceUse(t *testing.T) {
+	ctx, pool, store, _ := migratedControlStore(t)
+	key := testTargetGuardKey
+	evidence := []byte(`{"verified":true,"source":"controlled-rebuild"}`)
+
+	tx, err := pool.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := InitializeTargetGuard(ctx, tx, key, "rebuild-init"); err != nil {
+		_ = tx.Rollback(ctx)
+		t.Fatal(err)
+	}
+	if err := MarkTargetGuardLaunchIntent(ctx, tx, key, "txharbor_attempt_rebuild", "rebuild-init"); err != nil {
+		_ = tx.Rollback(ctx)
+		t.Fatal(err)
+	}
+	if err := MarkTargetGuardWriterDrained(ctx, tx, key); err != nil {
+		_ = tx.Rollback(ctx)
+		t.Fatal(err)
+	}
+	if err := MarkTargetGuardRebuildRequired(ctx, tx, key); err != nil {
+		_ = tx.Rollback(ctx)
+		t.Fatal(err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	tx, err = pool.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := RecordTargetGuardRebuild(ctx, tx, "", key, "operator:test", "controlled-rebuild", evidence); err != nil {
+		_ = tx.Rollback(ctx)
+		t.Fatal(err)
+	}
+	if err := ResolveTargetGuardClean(ctx, tx, key, "controlled-rebuild", evidence); err != nil {
+		_ = tx.Rollback(ctx)
+		t.Fatal(err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	guard, found, err := ReadTargetGuard(ctx, pool, key)
+	var storedEvidence map[string]any
+	if err == nil && found {
+		err = json.Unmarshal(guard.RebuildEvidence, &storedEvidence)
+	}
+	if err != nil || !found || guard.State != TargetGuardClean || guard.RebuildRequiredAt != nil || storedEvidence["verified"] != true || storedEvidence["source"] != "controlled-rebuild" {
+		t.Fatalf("controlled rebuild did not leave a consistent clean guard: found=%t guard=%+v err=%v", found, guard, err)
+	}
+	if countRows(t, ctx, pool, `SELECT count(*) FROM recovery_audit WHERE action=$1 AND operation_id=$2`, ActionTargetGuardRebuild, "controlled-rebuild") != 1 {
+		t.Fatal("controlled rebuild audit record was not preserved")
+	}
+	instance, err := store.OpenInstance(ctx, OpenInstanceRequest{
+		Kind: "recovery", OpenedBy: "deploy:executor", TargetGuardKey: key,
+		TargetRoleFingerprint: testTargetRoleFingerprint,
+	})
+	if err != nil {
+		t.Fatalf("open instance with controlled-clean guard: %v", err)
+	}
+	if err := RequireCleanTargetGuard(ctx, pool, instance.InstanceID, key, testTargetRoleFingerprint); err != nil {
+		t.Fatalf("controlled-clean guard refused for instance use: %v", err)
 	}
 }

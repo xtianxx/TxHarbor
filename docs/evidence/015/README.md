@@ -3,7 +3,7 @@
 - Feature: `015-backup-recovery-safe-resumption` ｜ 分支: `015-backup-recovery-safe-resumption` ｜ main 基线: `8d4b9af`
 - 设计: [spec.md](../../../specs/015-backup-recovery-safe-resumption/spec.md) · [plan.md](../../../specs/015-backup-recovery-safe-resumption/plan.md) · [quickstart.md](../../../specs/015-backup-recovery-safe-resumption/quickstart.md) · [contracts/](../../../specs/015-backup-recovery-safe-resumption/contracts/) · [docs/ops/recovery-runbook.md](../../ops/recovery-runbook.md)
 - **Gate: T000-P 保持 OPEN**。本目录不是发布，不宣称生产就绪；所有本地数值仅为测试输入，生产 RPO/RTO/频率/保留未裁决（FR-036）。
-- **快照口径**：下文原有长记录是 HEAD `65df393` + 当时未提交脏树的历史记录，完整保留且不代表当前验收。文末另列 2026-09-30 当前 precommit 树证据：基线 HEAD `e7ba8c0` + 全部本地未提交实现；最终提交将标识归档内容。T017/T019/T020/T027/T057/T058/T066/T068 仍 OPEN（62/70）；T000-P OPEN。不得推断生产就绪。
+- **快照口径**：历史 §5a/§5b 与 quickstart matrix §1–§9 保留，不代表当前验收。Follow-up ledger 记录本地证据：仅 T017/T027 由 owner 标记满足，当前 **64/70**；T019/T020/T057/T058/T066/T068 与 T000-P 保持 OPEN。历史 62/70 与 11 顶层 SKIP 原样保留。Drill 必需项 19/22 PASS、3 FAIL；全量 PG 集成 exit 1（1755 PASS/8 FAIL/2 SKIP）。后续 fix81 三项聚焦 PG 测试 PASS，不改变全量 PG 失败结论。Drill 树指纹 `sha256:d761a4fa68d40e1eff40937ec466bdf2953664621b15d2aedabe8a942b6b552a` 与当前源指纹 `sha256:43e15d6a13224f600f15b786aa016ab995c3d90eda3f8ec0705be75ef6569514` 的差异仅为两份 integration 测试文件（不含 docs/tasks）；指纹不是提交 ID。
 
 ## 1. 归口与命名
 
@@ -91,3 +91,10 @@
 ## 7. 非声明
 
 T000-P 保持 OPEN；本目录不宣称生产就绪、不宣称外部账本一致、不承诺跨系统恰好一次；不批准任何资金数据损失额度；不授权绕过既有资金门禁；风险接受后强制复服、损失核销、人工补偿付款、自动补造意图不在本阶段交付。
+
+## 8. `64140fb` follow-up acceptance ledger（2026-09-30）
+
+- [Follow-up ledger](64140fb-followup-acceptance.md) holds seven findings, eight original acceptance mappings, semantic S/F results, final drill and PG evidence; it is not a production declaration. T017/T027 are accepted functionally (64/70); six follow-up tasks remain OPEN. Historical 62/70 + 11 top-level SKIP are unchanged.
+- Final drill: 必需用例 19 PASS/3 FAIL/0 SKIP；顶层 913 PASS/3 FAIL/0 SKIP。Kafka offset guard 与 F2/T060 原始身份/进程证明失败，未执行破坏性验收。全量 PG 集成为 **1755 PASS/8 FAIL/2 SKIP**、exit 1；5 项隔离环境复跑 PASS 不改变全量失败结论。fix81 后三项聚焦 PG 测试 PASS（0 FAIL/0 SKIP），不代表全量 PG 通过。
+- 静态/unit/contract/race 检查 exit 0；PG 全量 exit 1。受影响 unit 与 script-parser/bash-syntax 检查 PASS。汇总和安全裁剪后的事件记录见本目录。最终源指纹不等于提交 ID；提交身份以证据文件的 `git log` 或归口方最终报告为准，归口方提交前复核源指纹。远程 CI 未运行。
+- T019/T020/T057/T058/T066/T068 remain OPEN. T000-P OPEN; no production readiness claim.

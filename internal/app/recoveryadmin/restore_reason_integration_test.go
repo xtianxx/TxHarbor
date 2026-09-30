@@ -24,10 +24,13 @@ func TestRestoreCLIRejectsCredentialShapedReasonWithoutDisclosure(t *testing.T) 
 	markersBefore := f.markerCount(t, backupID)
 	probesBefore := f.evidenceCount(t, "restore_probe", backupID)
 	callsBefore := f.toolCalls(t)
+	restoreEnv := f.env("deploy:executor")
+	restoreEnv[config.EnvPGDSN] = f.restoreDSN
+	restoreEnv[config.EnvRecoveryObserverDSN] = f.restoreDSN
 	for i, reason := range reasons {
-		args := append(cliRestoreArgs(manifestPath, f.dataDSN, f.instanceID, ""),
+		args := append(cliRestoreArgs(manifestPath, f.restoreDSN, f.instanceID, ""),
 			"--declaration", "production_main", "--reason", reason)
-		code, stdout, stderr := runRecoveryAdmin(t, args, f.env("deploy:executor"))
+		code, stdout, stderr := runRecoveryAdmin(t, args, restoreEnv)
 		if code == 0 || !strings.Contains(stderr, "target reason contains credential-shaped material") {
 			t.Fatalf("reason %d was not refused generically: exit=%d stdout=%q stderr=%q", i, code, stdout, stderr)
 		}
@@ -68,7 +71,7 @@ func TestRestoreCLIRejectsMissingObserverAndUntrustedTargetsBeforeEffects(t *tes
 
 	// Preserve endpoint identity while changing only the login role. The
 	// endpoint guard key alone is insufficient authority for a restore.
-	wrongRoleURL, err := url.Parse(f.dataDSN)
+	wrongRoleURL, err := url.Parse(f.restoreDSN)
 	if err != nil {
 		t.Fatalf("parse fixture target DSN: %v", err)
 	}
@@ -76,7 +79,10 @@ func TestRestoreCLIRejectsMissingObserverAndUntrustedTargetsBeforeEffects(t *tes
 	wrongRole := wrongRoleURL.String()
 	wrongRoleArgs := append(cliRestoreArgs(manifestPath, wrongRole, f.instanceID, ""),
 		"--declaration", "production_main", "--reason", "configured recovery")
-	code, stdout, stderr = runRecoveryAdmin(t, wrongRoleArgs, f.env("deploy:executor"))
+	trustedEnv := f.env("deploy:executor")
+	trustedEnv[config.EnvPGDSN] = f.restoreDSN
+	trustedEnv[config.EnvRecoveryObserverDSN] = f.restoreDSN
+	code, stdout, stderr = runRecoveryAdmin(t, wrongRoleArgs, trustedEnv)
 	if code != 1 || !strings.Contains(stderr, "does not match deployment-configured authoritative endpoint and role") {
 		t.Fatalf("same-key wrong-role target was not refused: exit=%d stdout=%q stderr=%q", code, stdout, stderr)
 	}
@@ -85,7 +91,7 @@ func TestRestoreCLIRejectsMissingObserverAndUntrustedTargetsBeforeEffects(t *tes
 	// isolated. The refusal must happen before the invalidation marker and
 	// before invoking pg_restore.
 	code, stdout, stderr = runRecoveryAdmin(t,
-		cliRestoreArgs(manifestPath, f.dataDSN, f.instanceID, ""), f.env("deploy:executor"))
+		cliRestoreArgs(manifestPath, f.restoreDSN, f.instanceID, ""), trustedEnv)
 	if code != 1 || !strings.Contains(stderr, "isolated declaration refused") {
 		t.Fatalf("authoritative target accepted as isolated: exit=%d stdout=%q stderr=%q", code, stdout, stderr)
 	}

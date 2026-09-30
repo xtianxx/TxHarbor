@@ -231,6 +231,9 @@ func (c *Checklist) Set(ctx context.Context, req ChecklistEvidenceRequest) (Chec
 		checklistWriteRefusal(ctx, c.store.Pool(), id, actor, item, reason, "", req.OperationID)
 		return ChecklistItem{}, fmt.Errorf("%w: %s", ErrChecklistTransition, reason)
 	}
+	if err := validateChecklistText("evidence_ref", ref); err != nil {
+		return ChecklistItem{}, err
+	}
 	summary, err := checklistSummary(req.CheckpointSummary)
 	if err != nil {
 		return ChecklistItem{}, err
@@ -362,6 +365,9 @@ func (c *Checklist) Verify(ctx context.Context, req ChecklistVerifyRequest) (Che
 		return ChecklistItem{}, fmt.Errorf("%w: actor is required", ErrChecklistActor)
 	}
 	reason := strings.TrimSpace(req.Reason)
+	if err := validateChecklistText("reason", reason); err != nil {
+		return ChecklistItem{}, err
+	}
 	if req.Reject && reason == "" {
 		return ChecklistItem{}, fmt.Errorf("%w: a rejection verdict requires a reason", ErrChecklistTransition)
 	}
@@ -584,13 +590,42 @@ func checklistWriteRefusal(ctx context.Context, q controlstore.Queryer, instance
 // checklistSummary validates the optional checkpoint summary. It is stored
 // for operators and is never a verification basis.
 func checklistSummary(raw []byte) ([]byte, error) {
-	if len(raw) == 0 {
-		return nil, nil
-	}
-	if !json.Valid(raw) {
-		return nil, fmt.Errorf("%w: checkpoint_summary must be valid JSON", ErrChecklistTransition)
+	if err := ValidateChecklistSummary(raw); err != nil {
+		return nil, err
 	}
 	return raw, nil
+}
+
+// ValidateChecklistSummary checks optional JSON context for credential-shaped
+// fields and text. It is never an isolation proof.
+func ValidateChecklistSummary(raw []byte) error {
+	if len(raw) == 0 {
+		return nil
+	}
+	if !json.Valid(raw) {
+		return fmt.Errorf("%w: checkpoint_summary must be valid JSON", ErrChecklistTransition)
+	}
+	if err := controlstore.ValidateCredentialJSON("checkpoint_summary", raw); err != nil {
+		return errors.New("checkpoint_summary contains credential-shaped material")
+	}
+	return nil
+}
+
+// ValidateChecklistText rejects recognized credential-shaped text before it
+// can be persisted, audited, or printed. Detection is pattern-based and does
+// not attempt to recognize arbitrary secret values.
+func ValidateChecklistText(field, value string) error {
+	if err := validateChecklistText(field, value); err != nil {
+		return err
+	}
+	return nil
+}
+
+func validateChecklistText(field, value string) error {
+	if err := controlstore.ValidateCredentialText(field, value); err != nil {
+		return fmt.Errorf("%s contains credential-shaped material", field)
+	}
+	return nil
 }
 
 func checklistJSONOrNil(raw []byte) any {

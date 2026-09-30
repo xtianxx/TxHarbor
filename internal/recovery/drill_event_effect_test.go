@@ -230,7 +230,8 @@ func TestT058DrillEventEffectRecovery(t *testing.T) {
 	// replay/effect in this divergent state.
 	verifyDSN := env.createDatabase("event_effect_verify_backup")
 	env.verifyBackup(backup.ManifestPath, verifyDSN, env.operation("event-effect-verify-backup"))
-	recoveredDSN := env.createDatabase("event_effect_recovered")
+	env.seedAuthoritativeTargetCleanBaseline()
+	recoveredDSN := env.recoveryTarget()
 	recovered := env.openPool(recoveredDSN)
 	env.restore(backup.ManifestPath, recoveredDSN, env.operation("event-effect-restore"))
 	endBefore := drillKafkaEndOffset(t, kafka)

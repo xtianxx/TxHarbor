@@ -2,7 +2,7 @@
 
 **Branch**: `015-backup-recovery-safe-resumption` | **Spec**: [spec.md](spec.md) | **Design**: [plan.md](plan.md), [data-model.md](data-model.md), [contracts/](contracts/) | **Research**: [research.md](research.md) | **ADR**: [ADR-001](adr/ADR-001-recovery-control-store.md), [ADR-002](adr/ADR-002-backup-carrier-and-recovery-point.md)
 
-Backend-only validation. No product code exists yet; run the named suites/commands only after implementation. 命令行为 plan 级接口面（精确 flag 由实现期 tasks 定稿），但每条都指向已存在的真实入口（[contracts/resumption-gate.md](contracts/resumption-gate.md) §1）。
+Backend-only validation guide. Run the named suites/commands against the implemented tree. 命令行为 plan 级接口面（精确 flag 由实现期 tasks 定稿），但每条都指向真实入口（[contracts/resumption-gate.md](contracts/resumption-gate.md) §1）。
 
 **Gate**: T000-P stays OPEN — this guide is not a release and claims no production readiness; all numbers here are local test inputs, and production RPO/RTO/backup frequency/retention stay unadjudicated until pre-deployment (FR-035/FR-036). Risk-accept forced resumption / loss write-off / compensation payments / automatic intent re-creation are explicitly absent (no scenario below).
 
@@ -58,7 +58,8 @@ Backend-only validation. No product code exists yet; run the named suites/comman
 | 完整灾备演练 | `make test-drill`（`drill` tag；新目标） | **独立通道**（schedule/dispatch，不阻塞普通 PR） | S1–S12 全流程 + F1–F7 + 真实 Anvil/PG/（事件层）Kafka；长测 |
 | 事件层集成 | `integration_redis` / `integration_kafka` | 既有 `ci.yml` 分类 | 回退检测/幂等吸收的中间件层用例 |
 
-- `drill` 通道可独立并行，永不进入普通 PR；演练产物（日志/度量/证据引用）按 `docs/evidence/015/` 或 `.evidence/` 存档。自动化演练（`make test-drill`/`drill.yml`）将 S12 结构化记录写入 `TXHARBOR_DRILL_EVIDENCE_DIR`（workflow 中为 runner 临时目录，随 run artifact 上传；未设置时仅写测试临时目录，不落仓库）；`recovery-admin drill` 的归档仍默认 `docs/evidence/015/drill/`。Docker 缺位时 drill 包为 NOT RUN（本地 exit 0、CI=true 下失败），事件层 Kafka 不可用时相关场景单独 NOT RUN——两种情况都不得记为 pass 或覆盖。
+- `drill` 通道可独立并行，永不进入普通 PR；独立 schedule/dispatch 与手动运行不因 PR 改变。演练产物（日志/度量/证据引用）按 `docs/evidence/015/` 或 `.evidence/` 存档。自动化演练（显式运行 `make test-drill` / `drill.yml`）将 S12 结构化记录写入 `TXHARBOR_DRILL_EVIDENCE_DIR`（workflow 中为 runner 临时目录，随 run artifact 上传；未设置时仅写测试临时目录，不落仓库）；`recovery-admin drill` 的归档仍默认 `docs/evidence/015/drill/`。缺少必需工具或 required scenario 时，显式 `make test-drill` 必须以非零退出并报告具名 NOT RUN；不得因宿主机缺 Docker/PG 工具而将该命令记为成功。与该次 drill 无关的 optional scenarios 可单独 SKIP，但不得抵消任何 required 缺项。Kafka 不可用时相关 required 场景按其规则报告 NOT RUN 并使独立 drill 失败；均不得记为 pass 或覆盖。当前本地证据 wrapper 可将 `TXHARBOR_DRILL_EVIDENCE_DIR` 指向 `/tmp/opencode/` 下目录，避免将临时归档误入仓库。
+- **结果/证据纪律**：drill wrapper/checker 必须传播 `go test` 的非零状态，并分别汇报 required、top-level、all-test-event 计数；required case 的 SKIP 不能变绿。若提供 tree fingerprint，则记录并验证 source-before/source-after 一致；缺 fingerprint 或工具缺失时须拒绝并列出具名 NOT RUN。结构化 metadata 无效的尝试不是可采信运行，不能用重试 PASS 覆盖失败；归档只保留必要结构化结果，原始输出不得含 DSN/秘密。
 - 程序边界（F3）：`reconcile-admin`/`events-admin`（replay/unblock/retention-prune）与外部定时调度**不在运行时门禁接线内**；隔离验收以停服/下线/权限移除证据＋门禁审计＋`no_pre_release_effects` 为准；仅 checklist 签署不构成运行时隔离证明。
 
 ## §4 反作弊纪律（违反即无效证据）

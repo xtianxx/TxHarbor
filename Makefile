@@ -65,15 +65,29 @@ test-perf:
 # runs on ordinary pull requests and never blocks them (quickstart.md §3;
 # verification.md §4).
 #
-# NOT RUN discipline: without a drill-tagged test the guard reports NOT RUN and
-# exits non-zero; with a missing Docker daemon the drill package reports NOT RUN
-# (fails under CI=true / TXHARBOR_REQUIRE_DOCKER=1); a Kafka-less environment
-# reports the event-layer scenario as NOT RUN. None of these is a pass.
-# Drill records archive to $TXHARBOR_DRILL_EVIDENCE_DIR when set (drill.yml
-# uploads that directory as the run artifact); otherwise the test temp dir.
+# NOT RUN discipline: in addition to requiring drill-tagged tests, the JSON
+# checker requires every named S1-S12/F1-F7/effect/reentry scenario (and the
+# restore-dependent F1/F3 subtests) to PASS. Missing or skipped cases fail this
+# target, while unrelated optional skips remain allowed.
+# Raw Go events and a per-run coverage report archive to the configured evidence
+# directory. Each invocation gets a unique subdirectory; prior runs are untouched.
 test-drill:
 	$(call require_tagged_tests,drill,test-drill)
-	go test -tags drill -count=1 -timeout 120m ./...
+	@set +e; \
+	if [ -n "$${TXHARBOR_DRILL_EVIDENCE_DIR:-}" ]; then \
+		mkdir -p "$$TXHARBOR_DRILL_EVIDENCE_DIR" || exit 1; \
+		run_dir="$$(mktemp -d "$$TXHARBOR_DRILL_EVIDENCE_DIR/run.XXXXXX")" || exit 1; \
+		keep=1; \
+	else \
+		run_dir="$$(mktemp -d)" || exit 1; keep=0; \
+	fi; \
+	trap '[ "$$keep" -eq 1 ] || rm -rf -- "$$run_dir"' EXIT; \
+	events="$$run_dir/go-test.json"; report="$$run_dir/coverage.json"; \
+	started="$$(date -u +%Y-%m-%dT%H:%M:%SZ)"; run_id="$$(basename "$$run_dir")"; \
+	go test -json -tags drill -count=1 -timeout 120m ./... > "$$events"; go_status=$$?; \
+	if [ $$go_status -ne 0 ]; then cat "$$events"; fi; \
+	go run scripts/drillcoverage/check.go "$$events" "$$report" "$$go_status" ./... "$$run_id" "$$started"; check_status=$$?; \
+	if [ $$go_status -ne 0 ]; then exit $$go_status; fi; exit $$check_status
 
 # Explicit database wipe: removes the named volume (data is kept otherwise).
 db-reset:

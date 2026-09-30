@@ -12,24 +12,29 @@
 #
 #   - no `drill`-tagged test in the tree: `make test-drill` reports NOT RUN and
 #     exits non-zero (the Makefile require_tagged_tests guard);
-#   - tests present but no Docker daemon: the drill TestMain reports NOT RUN and
-#     fails the package under CI=true (GitHub Actions sets it) or
-#     TXHARBOR_REQUIRE_DOCKER=1, so this job fails instead of passing; a local
-#     run without Docker exits 0 with an explicit NOT RUN message and is never
-#     a pass;
-#   - tests present and Docker healthy but no Kafka broker provisionable: the
-#     event-layer scenario reports NOT RUN (skip) with an archived record; a
-#     run that skipped it does not cover the event layer;
+#   - tests present but a required scenario cannot run (including missing
+#     Docker/Kafka dependencies): the go test JSON coverage checker makes the
+#     target fail and names the scenario as NOT RUN, even if its parent test
+#     reports PASS after a nested skip;
+#   - skips in unrelated optional tests remain allowed;
 #   - an interrupted/partial run (job canceled, timeout) leaves the job red and
 #     produces no claimable evidence.
 #
+# The independent drill runs inside the pinned official PostgreSQL image so
+# the Go test process itself discovers and executes the native pg_dump/pg_restore
+# ELF binaries (not a docker-exec shim). The wrapper mounts the checkout and Go
+# module cache read-only, a writable build/temp scratch directory, and the host
+# Docker socket/CLI. It uses Go's pure-Go implementations (the minimal pinned
+# image has no C compiler), then verifies PostgreSQL tool versions/ELF format
+# and Docker connectivity before invoking the enforcing `make test-drill`.
 # Docker is required: testcontainers provisions its own pinned images
 # (postgres:18.6-trixie, foundry v1.8.1 and, once the event-layer scenario
 # runs, confluentinc/confluent-local:7.9.10); nothing floats and no external
 # service is contacted.
 #
 # Evidence archive: the drill tests write their S12-structured run records to
-# $TXHARBOR_DRILL_EVIDENCE_DIR (set below to ${{ runner.temp }}/drill-evidence,
+# $TXHARBOR_DRILL_EVIDENCE_DIR (set below to ${{ runner.temp }}/drill-evidence
+# on the host and bind-mounted at /drill-evidence in the runner container,
 # never a repository path) and the directory is uploaded as the run artifact
 # `drill-evidence-<run_id>` so a claim can cite a durable run record. Local
 # inputs only: the records carry explicit non-claims; production RPO/RTO/
@@ -73,11 +78,11 @@ jobs:
         run: |
           set -euo pipefail
           echo "::add-mask::${TXHARBOR_PG_DSN}"
-      - name: full recovery drill layer
+      - name: full recovery drill layer (pinned native-tool runner)
         env:
           TXHARBOR_DRILL_EVIDENCE_DIR: ${{ runner.temp }}/drill-evidence
           TXHARBOR_COMMIT: ${{ github.sha }}
-        run: make test-drill
+        run: scripts/drillcoverage/run-in-container.sh
         timeout-minutes: 200
       - name: upload drill evidence
         if: always()

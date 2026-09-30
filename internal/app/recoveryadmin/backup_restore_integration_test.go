@@ -26,9 +26,9 @@
 //     marker (old releases/approvals stay stale) and does not reuse failed
 //     evidence: the same id replays the recorded refusal, a fresh id reruns
 //     for real after the target is rebuilt;
-//   - the G2 negative CLI assertion: a backup whose authoritative object set
-//     is incomplete is verified as rejected and restored as refused, and the
-//     CLI prints no success beyond the evidence (no over-evidence success).
+//   - the G2 negative CLI assertion: a missing authoritative object is actually
+//     absent from the restored target, verification leaves its guard dirty and
+//     writes no accepted evidence, and restore is refused without overclaiming.
 //
 // Fixture note: the approval/release/isolation write paths of T048-T051 are not
 // delivered in this batch; this file only needs the T021/T022 preconditions
@@ -48,6 +48,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -106,6 +107,7 @@ type cliFixture struct {
 	baseDSN    string
 	admin      *pgxpool.Pool
 	dataDSN    string
+	restoreDSN string
 	data       *pgxpool.Pool
 	controlDSN string
 	control    *pgxpool.Pool
@@ -125,9 +127,30 @@ func requireNativePGRestore(t *testing.T) {
 	if err != nil {
 		t.Skip("NOT RUN: native direct pg_restore unavailable")
 	}
+	resolved, err := filepath.EvalSymlinks(path)
+	if err != nil {
+		t.Skipf("NOT RUN: native direct pg_restore unavailable: resolve executable: %v", err)
+	}
+	binary, err := os.Open(resolved)
+	if err != nil {
+		t.Skipf("NOT RUN: native direct pg_restore unavailable: open executable: %v", err)
+	}
+	magic := make([]byte, 4)
+	_, readErr := io.ReadFull(binary, magic)
+	closeErr := binary.Close()
+	if readErr != nil || closeErr != nil || string(magic) != "\x7fELF" {
+		t.Skip("NOT RUN: native direct pg_restore unavailable: executable is not a native ELF binary")
+	}
 	version, err := exec.Command(path, "--version").CombinedOutput()
-	if err != nil || !strings.HasPrefix(strings.TrimSpace(string(version)), "pg_restore (PostgreSQL ") {
-		t.Skip("NOT RUN: native direct pg_restore unavailable")
+	if err != nil {
+		t.Skipf("NOT RUN: native direct pg_restore unavailable: version command failed: %v", err)
+	}
+	// PostgreSQL 18 formats this as "pg_restore (PostgreSQL) 18.6 ...";
+	// validate both the exact program label and a numeric 18.x version rather
+	// than relying on a loose prefix that accepts wrappers or unrelated output.
+	versionText := strings.TrimSpace(string(version))
+	if !strings.HasPrefix(versionText, "pg_restore (PostgreSQL) 18.") {
+		t.Skipf("NOT RUN: native direct PostgreSQL 18 pg_restore unavailable: version=%q", versionText)
 	}
 }
 
@@ -188,7 +211,11 @@ func newCLIFixture(t *testing.T) *cliFixture {
 
 	// One open recovery instance with an executor and a verifier, through the
 	// real control-store write paths.
-	targetBinding := cliTargetBinding(t, f.dataDSN)
+	// The recovery instance is bound to one dedicated restore target. Backup
+	// source data remains separate; restore authority must not be retargeted to
+	// arbitrary per-test databases.
+	f.restoreDSN = f.createDB(t, "restore_target")
+	targetBinding := cliTargetBinding(t, f.restoreDSN)
 	opened, err := store.OpenInstance(ctx, controlstore.OpenInstanceRequest{
 		Kind: "recovery", OpenedBy: "deploy:executor", EntryChainInventory: []uint64{31337},
 		TargetGuardKey:        targetBinding.TargetGuardKey,
@@ -228,14 +255,27 @@ func cliResolveFixtureTargetGuard(t *testing.T, f *cliFixture, key string) {
 		t.Fatalf("begin fixture target-guard resolution: %v", err)
 	}
 	defer tx.Rollback(ctx)
+	guard, found, err := controlstore.ReadTargetGuard(ctx, tx, key)
+	if err != nil {
+		t.Fatalf("read fixture target guard: %v", err)
+	}
+	if found && guard.State == controlstore.TargetGuardClean && !guard.ActiveWriter {
+		return
+	}
+	operationID := "cli-fixture-clean-" + key[:16]
+	if !found {
+		if err := controlstore.InitializeTargetGuard(ctx, tx, key, operationID); err != nil {
+			t.Fatalf("initialize fixture target guard: %v", err)
+		}
+	}
 	evidence := []byte(`{"fixture":"isolated PostgreSQL instance; no target writer was launched","disposition":"clean"}`)
-	const operationID = "cli-fixture-target-clean"
 	if err := controlstore.RecordTargetGuardRebuild(ctx, tx, f.instanceID, key,
 		"deploy:test-fixture", operationID, evidence); err != nil {
 		t.Fatalf("record fixture target-guard evidence: %v", err)
 	}
 	if err := controlstore.ResolveTargetGuardClean(ctx, tx, key, operationID, evidence); err != nil {
-		t.Fatalf("resolve fixture target guard clean: %v", err)
+		guard, found, readErr := controlstore.ReadTargetGuard(ctx, tx, key)
+		t.Fatalf("resolve fixture target guard clean: %v (found=%t guard=%+v read_err=%v)", err, found, guard, readErr)
 	}
 	if err := tx.Commit(ctx); err != nil {
 		t.Fatalf("commit fixture target-guard resolution: %v", err)
@@ -293,19 +333,110 @@ func (f *cliFixture) createDB(t *testing.T, label string) string {
 	return migrateWithDatabase(t, f.baseDSN, name)
 }
 
-// rebuildDB drops the database WITH (FORCE) and recreates it empty (the
-// documented retry after an interruption).
-func (f *cliFixture) rebuildDB(t *testing.T, dsn string) string {
+// rebuildInterruptedTarget proves the failed attempt is inactive, then
+// rebuilds the exact bound target without FORCE while holding its shared
+// target lock. The clean transition and rebuild audit are committed on the
+// lock-owning session, not seeded through the generic fixture baseline.
+func (f *cliFixture) rebuildInterruptedTarget(t *testing.T, dsn, interruptedOperation string) string {
 	t.Helper()
 	name := cliDBNameOf(t, dsn)
-	if _, err := f.admin.Exec(f.ctx,
-		"DROP DATABASE IF EXISTS "+pgx.Identifier{name}.Sanitize()+" WITH (FORCE)"); err != nil {
+	target, err := controlstore.ParseDSNTarget(dsn)
+	if err != nil {
+		t.Fatalf("parse interrupted restore target: %v", err)
+	}
+	guardKey, err := controlstore.TargetGuardKey(target)
+	if err != nil {
+		t.Fatalf("derive interrupted restore target guard: %v", err)
+	}
+	lockKey, err := recovery.CanonicalTargetKey(target)
+	if err != nil {
+		t.Fatalf("derive interrupted restore target lock: %v", err)
+	}
+	lock, err := recovery.AcquireTargetLock(f.ctx, f.controlDSN, lockKey, 10*time.Second, 20*time.Millisecond)
+	if err != nil {
+		t.Fatalf("acquire shared interrupted-target lock: %v", err)
+	}
+	defer func() {
+		if err := lock.Release(context.Background()); err != nil {
+			t.Errorf("release interrupted-target lock: %v", err)
+		}
+	}()
+	if err := lock.Health(f.ctx); err != nil {
+		t.Fatalf("verify shared interrupted-target lock: %v", err)
+	}
+
+	var prior controlstore.TargetGuard
+	var priorFound bool
+	if err := lock.WithTransaction(f.ctx, func(ctx context.Context, tx pgx.Tx) error {
+		var err error
+		prior, priorFound, err = controlstore.ReadTargetGuard(ctx, tx, guardKey)
+		return err
+	}); err != nil {
+		t.Fatalf("read prior interrupted-target guard on lock owner: %v", err)
+	}
+	if !priorFound || prior.State != controlstore.TargetGuardRebuildRequired || prior.ActiveWriter ||
+		prior.OperationID != interruptedOperation {
+		t.Fatalf("refuse rebuild without the exact inactive interrupted attempt: found=%t guard=%+v want_operation=%q",
+			priorFound, prior, interruptedOperation)
+	}
+	f.waitForNoTargetSessions(t, name, 30*time.Second)
+	if _, err := f.admin.Exec(f.ctx, "DROP DATABASE "+pgx.Identifier{name}.Sanitize()); err != nil {
 		t.Fatalf("drop %s: %v", name, err)
 	}
 	if _, err := f.admin.Exec(f.ctx, "CREATE DATABASE "+pgx.Identifier{name}.Sanitize()); err != nil {
 		t.Fatalf("recreate %s: %v", name, err)
 	}
+	if tables := f.userTableCount(t, dsn); tables != 0 {
+		t.Fatalf("rebuilt target is not empty: found %d user tables", tables)
+	}
+	if rows := f.probeRowCount(t, dsn); rows != 0 {
+		t.Fatalf("rebuilt target contains %d probe rows", rows)
+	}
+
+	const rebuildOperation = "cli-interrupted-target-rebuild"
+	evidence := []byte(fmt.Sprintf(
+		`{"fixture":"controlled rebuild after owned CLI cancellation","target_database":%q,"prior_operation_id":%q,"prior_guard_state":%q,"prior_active_writer":false,"target_sessions_empty":true,"database_dropped_without_force":true,"database_recreated_empty":true,"process_supervisor_returned":true}`,
+		name, prior.OperationID, prior.State))
+	if err := lock.WithTransaction(f.ctx, func(ctx context.Context, tx pgx.Tx) error {
+		current, found, err := controlstore.ReadTargetGuard(ctx, tx, guardKey)
+		if err != nil {
+			return err
+		}
+		if !found || current.State != controlstore.TargetGuardRebuildRequired || current.ActiveWriter ||
+			current.OperationID != interruptedOperation {
+			return fmt.Errorf("target guard changed during controlled rebuild: found=%t guard=%+v", found, current)
+		}
+		if err := controlstore.RecordTargetGuardRebuild(ctx, tx, f.instanceID, guardKey,
+			"deploy:test-fixture", rebuildOperation, evidence); err != nil {
+			return fmt.Errorf("record observed target rebuild: %w", err)
+		}
+		if err := controlstore.ResolveTargetGuardClean(ctx, tx, guardKey, rebuildOperation, evidence); err != nil {
+			return fmt.Errorf("resolve observed target guard clean: %w", err)
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("commit lock-owner interrupted-target rebuild audit: %v", err)
+	}
 	return dsn
+}
+
+func (f *cliFixture) waitForNoTargetSessions(t *testing.T, dbName string, timeout time.Duration) {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for {
+		var sessions int
+		if err := f.admin.QueryRow(f.ctx,
+			`SELECT count(*) FROM pg_stat_activity WHERE datname = $1 AND pid <> pg_backend_pid()`, dbName).Scan(&sessions); err != nil {
+			t.Fatalf("count sessions in target %s: %v", dbName, err)
+		}
+		if sessions == 0 {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("target %s still has %d session(s) after %s", dbName, sessions, timeout)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
 }
 
 func cliDBNameOf(t *testing.T, dsn string) string {
@@ -408,6 +539,20 @@ func (f *cliFixture) userTableCount(t *testing.T, dsn string) int {
 		t.Fatalf("count user tables: %v", err)
 	}
 	return n
+}
+
+func (f *cliFixture) relationExists(t *testing.T, dsn, relation string) bool {
+	t.Helper()
+	conn, err := pgx.Connect(f.ctx, dsn)
+	if err != nil {
+		t.Fatalf("connect %s: %v", cliDBNameOf(t, dsn), err)
+	}
+	defer func() { _ = conn.Close(f.ctx) }()
+	var exists bool
+	if err := conn.QueryRow(f.ctx, `SELECT to_regclass($1) IS NOT NULL`, "public."+relation).Scan(&exists); err != nil {
+		t.Fatalf("look up relation %s: %v", relation, err)
+	}
+	return exists
 }
 
 func (f *cliFixture) probeRowCount(t *testing.T, dsn string) int {
@@ -516,6 +661,19 @@ func (f *cliFixture) cliVerify(t *testing.T, manifestPath, targetDSN, operationI
 
 func (f *cliFixture) cliVerifyWithConfiguredTarget(t *testing.T, manifestPath, assertedDSN, configuredDSN, operationID string) (int, string, string) {
 	t.Helper()
+	// Verification restores into its isolated target before inspecting it. Seed
+	// the target's independently controlled clean baseline through the real
+	// target-guard paths; the authoritative instance guard alone is not evidence
+	// that this separate database is clean.
+	target, err := controlstore.ParseDSNTarget(configuredDSN)
+	if err != nil {
+		t.Fatalf("parse configured verification target: %v", err)
+	}
+	targetKey, err := controlstore.TargetGuardKey(target)
+	if err != nil {
+		t.Fatalf("derive configured verification target guard: %v", err)
+	}
+	cliResolveFixtureTargetGuard(t, f, targetKey)
 	args := []string{"verify-backup", "--manifest", manifestPath, "--instance", f.instanceID}
 	if strings.TrimSpace(assertedDSN) != "" {
 		args = append(args, "--target-dsn", assertedDSN)
@@ -524,6 +682,7 @@ func (f *cliFixture) cliVerifyWithConfiguredTarget(t *testing.T, manifestPath, a
 		args = append(args, "--operation-id", operationID)
 	}
 	env := f.env("auth:verifier")
+	env[config.EnvPGDSN] = f.restoreDSN
 	env[config.EnvRecoveryIsolatedTargetDSN] = configuredDSN
 	// The fixture's PostgreSQL owner is privileged and observes the same target
 	// endpoint, independently of the opaque restore binding.
@@ -543,7 +702,27 @@ func cliRestoreArgs(manifestPath, targetDSN, instanceID, operationID string) []s
 // cliRestore runs the real CLI restore.
 func (f *cliFixture) cliRestore(t *testing.T, manifestPath, targetDSN, operationID string) (int, string, string) {
 	t.Helper()
-	return runRecoveryAdmin(t, cliRestoreArgs(manifestPath, targetDSN, f.instanceID, operationID), f.env("deploy:executor"))
+	env := f.env("deploy:executor")
+	env[config.EnvPGDSN] = targetDSN
+	env[config.EnvRecoveryObserverDSN] = targetDSN
+	args := append(cliRestoreArgs(manifestPath, targetDSN, f.instanceID, operationID),
+		"--declaration", "production_main", "--reason", "controlled isolated PostgreSQL recovery fixture")
+	return runRecoveryAdmin(t, args, env)
+}
+
+func (f *cliFixture) cliRestoreContext(ctx context.Context, manifestPath, targetDSN, operationID string) (int, string, string) {
+	env := f.env("deploy:executor")
+	env[config.EnvPGDSN] = targetDSN
+	env[config.EnvRecoveryObserverDSN] = targetDSN
+	args := append(cliRestoreArgs(manifestPath, targetDSN, f.instanceID, operationID),
+		"--declaration", "production_main", "--reason", "controlled isolated PostgreSQL recovery fixture")
+	var stdout, stderr strings.Builder
+	code := Run(ctx, args, Deps{
+		Getenv: migrateTestEnv(env),
+		Stdout: &stdout,
+		Stderr: &stderr,
+	})
+	return code, stdout.String(), stderr.String()
 }
 
 // verifiedBackup is the S1/S2 setup: real backup + real isolated verify.
@@ -672,7 +851,7 @@ func TestRestoreCLIOperationIDReplayRerunAndInterruption(t *testing.T) {
 	manifestPath, backupID := f.verifiedBackup(t)
 
 	// Positive real restore through the CLI.
-	target := f.createDB(t, "restore")
+	target := f.restoreDSN
 	calls := f.toolCalls(t)
 	code, out, errOut := f.cliRestore(t, manifestPath, target, "op-rst-1")
 	if code != 0 || !strings.Contains(out, "restored=true") {
@@ -705,7 +884,8 @@ func TestRestoreCLIOperationIDReplayRerunAndInterruption(t *testing.T) {
 			tables, got, rows, f.probeRowCount(t, target))
 	}
 
-	// Conflict: same operation id, different target -> zero writes anywhere.
+	// A different database is outside the immutable instance binding and is
+	// refused before a restore can write anywhere.
 	conflict := f.createDB(t, "restore_conflict")
 	code, _, errOut = f.cliRestore(t, manifestPath, conflict, "op-rst-1")
 	if code != 1 || !strings.Contains(errOut, "operation_conflict") {
@@ -718,11 +898,11 @@ func TestRestoreCLIOperationIDReplayRerunAndInterruption(t *testing.T) {
 		t.Fatalf("a conflicting restore wrote evidence: %d rows", got)
 	}
 	if got := f.userTableCount(t, conflict); got != 0 {
-		t.Fatalf("a conflicting restore wrote %d tables into its target", got)
+		t.Fatalf("a refused restore wrote %d tables into its target", got)
 	}
 
 	// Omitted operation id: explicit real rerun, evidence appended.
-	rerun := f.createDB(t, "restore_rerun")
+	rerun := f.restoreDSN
 	calls = f.toolCalls(t)
 	code, out, errOut = f.cliRestore(t, manifestPath, rerun, "")
 	if code != 0 || !strings.Contains(out, "restored=true") {
@@ -739,16 +919,13 @@ func TestRestoreCLIOperationIDReplayRerunAndInterruption(t *testing.T) {
 			rows, generations)
 	}
 
-	// Interruption: park the real pg_restore on its first write, terminate it,
-	// and verify the CLI never claims success and never writes restored
-	// evidence.
-	interrupted := f.createDB(t, "restore_interrupt")
+	// Interruption: park the real pg_restore on its first write, cancel the
+	// owning CLI command, and verify its supervisor drains the
+	// process group before the target can be rebuilt.
+	interrupted := f.restoreDSN
 	locker, err := pgx.Connect(f.ctx, interrupted)
 	if err != nil {
 		t.Fatalf("connect interruption target: %v", err)
-	}
-	if _, err := locker.Exec(f.ctx, `CREATE TABLE `+cliProbeTable+` (dummy text)`); err != nil {
-		t.Fatalf("create conflicting table: %v", err)
 	}
 	if _, err := locker.Exec(f.ctx, `BEGIN`); err != nil {
 		t.Fatalf("begin locker: %v", err)
@@ -762,17 +939,14 @@ func TestRestoreCLIOperationIDReplayRerunAndInterruption(t *testing.T) {
 		stderr string
 	}
 	done := make(chan cliResult, 1)
+	cliCtx, cancelCLI := context.WithCancel(f.ctx)
+	defer cancelCLI()
 	go func() {
-		code, stdout, stderr := f.cliRestore(t, manifestPath, interrupted, "op-rst-int")
+		code, stdout, stderr := f.cliRestoreContext(cliCtx, manifestPath, interrupted, "op-rst-int")
 		done <- cliResult{code: code, stdout: stdout, stderr: stderr}
 	}()
-	pids := f.waitForLockWaiter(t, cliDBNameOf(t, interrupted), 30*time.Second)
-	for _, pid := range pids {
-		var ok bool
-		if err := f.admin.QueryRow(f.ctx, `SELECT pg_terminate_backend($1)`, pid).Scan(&ok); err != nil || !ok {
-			t.Fatalf("terminate backend %d: ok=%t err=%v", pid, ok, err)
-		}
-	}
+	_ = f.waitForLockWaiter(t, cliDBNameOf(t, interrupted), 30*time.Second)
+	cancelCLI()
 	if _, err := locker.Exec(f.ctx, `ROLLBACK`); err != nil {
 		t.Fatalf("release locker: %v", err)
 	}
@@ -801,17 +975,33 @@ func TestRestoreCLIOperationIDReplayRerunAndInterruption(t *testing.T) {
 	if got := f.markerCount(t, backupID); got != 3 {
 		t.Fatalf("restore_started markers = %d, want 3 (two successful runs + the interrupted attempt)", got)
 	}
+	// The cancelled command returned only after the PostgreSQL process-group
+	// supervisor drained its child. Independently prove there are no remaining
+	// sessions anywhere in the immutable target before rebuilding it.
+	f.waitForNoTargetSessions(t, cliDBNameOf(t, interrupted), 30*time.Second)
 
-	// Retry with the same failed operation id: the recorded refusal replays
-	// (not success), zero pg_dump shim calls and zero new evidence.
+	// Cancellation leaves the target guard dirty before the CLI can persist its
+	// operation receipt. The first post-interruption retry therefore records a
+	// refusal against that exact guard; it is never allowed to reuse the failed
+	// attempt as success.
 	calls = f.toolCalls(t)
 	code, out, errOut = f.cliRestore(t, manifestPath, interrupted, "op-rst-int")
-	if code != 1 || !strings.Contains(errOut, "replayed=true") {
-		t.Fatalf("failed operation id must replay the recorded refusal: exit=%d stdout=%q stderr=%q",
+	if code != 1 || !strings.Contains(errOut, "restored=false") || strings.Contains(out, "restored=true") {
+		t.Fatalf("retry of interrupted operation must refuse, not reuse it as success: exit=%d stdout=%q stderr=%q",
 			code, out, errOut)
 	}
-	if strings.Contains(out, "restored=true") {
-		t.Fatalf("failed evidence was reused as success: %q", out)
+	if got := f.toolCalls(t); got != calls {
+		t.Fatalf("retrying the failed operation invoked the pg_dump shim %d time(s)", got-calls)
+	}
+	if got := f.evidenceCount(t, "restore_probe", backupID); got != 2 {
+		t.Fatalf("retrying the failed operation wrote evidence: %d rows", got)
+	}
+	// Once that refusal is durably recorded, replaying the same failed operation
+	// id returns the refusal with no tool calls or evidence writes.
+	calls = f.toolCalls(t)
+	code, out, errOut = f.cliRestore(t, manifestPath, interrupted, "op-rst-int")
+	if code != 1 || !strings.Contains(errOut, "replayed=true") || strings.Contains(out, "restored=true") {
+		t.Fatalf("recorded failed operation must replay its refusal: exit=%d stdout=%q stderr=%q", code, out, errOut)
 	}
 	if got := f.toolCalls(t); got != calls {
 		t.Fatalf("replaying the failed operation invoked the pg_dump shim %d time(s)", got-calls)
@@ -819,11 +1009,31 @@ func TestRestoreCLIOperationIDReplayRerunAndInterruption(t *testing.T) {
 	if got := f.evidenceCount(t, "restore_probe", backupID); got != 2 {
 		t.Fatalf("replaying the failed operation wrote evidence: %d rows", got)
 	}
+	// A different operation id is an ordinary retry, not a replay. It must
+	// still refuse while the interrupted target is dirty; only the controlled
+	// same-target recreation below can make a subsequent attempt eligible.
+	calls = f.toolCalls(t)
+	code, out, errOut = f.cliRestore(t, manifestPath, interrupted, "op-rst-int-retry-too-soon")
+	if code != 1 || !strings.Contains(errOut, "restored=false") || strings.Contains(out, "restored=true") {
+		t.Fatalf("ordinary retry before controlled rebuild must refuse: exit=%d stdout=%q stderr=%q", code, out, errOut)
+	}
+	if got := f.toolCalls(t); got != calls {
+		t.Fatalf("ordinary retry against the dirty target invoked the pg_dump shim %d time(s)", got-calls)
+	}
+	if got := f.evidenceCount(t, "restore_probe", backupID); got != 2 {
+		t.Fatalf("ordinary retry against the dirty target wrote restore evidence: %d rows", got)
+	}
+	interruptedBinding := cliTargetBinding(t, interrupted)
+	guard, found, guardErr := controlstore.ReadTargetGuard(f.ctx, f.control, interruptedBinding.TargetGuardKey)
+	if guardErr != nil || !found || guard.State != controlstore.TargetGuardRebuildRequired || guard.ActiveWriter ||
+		guard.OperationID != "op-rst-int" {
+		t.Fatalf("ordinary retry must preserve the exact inactive interrupted guard: found=%t guard=%+v err=%v", found, guard, guardErr)
+	}
 
-	// Retry with a fresh operation id after rebuilding the target: a real
-	// rerun that succeeds and appends its own evidence (no reuse of the failed
-	// attempt's state).
-	rebuilt := f.rebuildDB(t, interrupted)
+	// Retry only after a controlled rebuild of the same immutable target. Hold
+	// the shared target lock across the non-FORCE drop/create and the transaction
+	// that records the observed rebuild and resolves its guard.
+	rebuilt := f.rebuildInterruptedTarget(t, interrupted, "op-rst-int")
 	calls = f.toolCalls(t)
 	code, out, errOut = f.cliRestore(t, manifestPath, rebuilt, "op-rst-int-2")
 	if code != 0 || !strings.Contains(out, "restored=true") {
@@ -838,8 +1048,9 @@ func TestRestoreCLIOperationIDReplayRerunAndInterruption(t *testing.T) {
 }
 
 // TestVerifyBackupCLINoOverEvidenceSuccessOnMissingObject is the CLI half of
-// G2: with an authoritative object missing, verify-backup concludes rejected,
-// restore refuses, and neither command prints a success beyond its evidence.
+// G2: with an authoritative object missing, verify-backup fails before
+// acceptance, records no success evidence and leaves its target dirty; restore
+// refuses, while the restored target and manifest retain causal failure proof.
 func TestVerifyBackupCLINoOverEvidenceSuccessOnMissingObject(t *testing.T) {
 	requireNativePGRestore(t)
 	f := newCLIFixture(t)
@@ -856,23 +1067,56 @@ func TestVerifyBackupCLINoOverEvidenceSuccessOnMissingObject(t *testing.T) {
 	if code != 1 {
 		t.Fatalf("verify-backup over a missing object must exit 1, got %d (stdout=%q stderr=%q)", code, out, errOut)
 	}
-	if !strings.Contains(out, "verification=rejected") {
-		t.Fatalf("verify-backup must report rejected: %q", out)
+	if strings.Contains(out+errOut, "verification=verified") || strings.Contains(out+errOut, "verified=true") ||
+		strings.Contains(out+errOut, "backup_manifest") {
+		t.Fatalf("verify-backup overclaimed acceptance before its probes passed: stdout=%q stderr=%q", out, errOut)
 	}
-	if strings.Contains(out, "verification=verified") || strings.Contains(out, "verified=true") {
-		t.Fatalf("verify-backup printed a success beyond its evidence: %q", out)
+	if !strings.Contains(errOut, "isolated verification was not accepted") {
+		t.Fatalf("verify-backup failed for an unexpected reason instead of the failed isolated probe: stdout=%q stderr=%q", out, errOut)
 	}
-	if !strings.Contains(out, "readable=true") ||
-		!strings.Contains(out, "structure_constraints=false") ||
-		!strings.Contains(out, "business_state_probes=false") ||
-		!strings.Contains(out, "verification_executable=false") {
-		t.Fatalf("verify-backup must expose the retained/failed dimensions: %q", out)
+	if f.relationExists(t, target, "consumer_inbox") || !f.relationExists(t, target, "consumer_inbox_015_damaged") {
+		t.Fatalf("verification target does not prove the causal missing consumer_inbox object (missing=%t damaged_copy=%t)",
+			!f.relationExists(t, target, "consumer_inbox"), f.relationExists(t, target, "consumer_inbox_015_damaged"))
+	}
+	if !f.relationExists(t, target, "consumer_progress") {
+		t.Fatal("verification target lost the surviving consumer_idempotency_progress category object")
+	}
+	manifestBytes, err := os.ReadFile(manifestPath)
+	if err != nil {
+		t.Fatalf("read rejected manifest after CLI probe failure: %v", err)
+	}
+	manifest, err := recovery.ParseManifest(manifestBytes)
+	if err != nil {
+		t.Fatalf("parse manifest after CLI probe failure: %v", err)
+	}
+	if manifest.Verification.State != recovery.VerificationUnverified {
+		t.Fatalf("failed missing-object probe must not write an accepted verification conclusion, got %q", manifest.Verification.State)
+	}
+	if manifest.Verification.Checks.AllTrue() || manifest.Verification.Checks.StructureConstraints ||
+		manifest.Verification.Checks.BusinessStateProbes || manifest.Verification.Checks.VerificationExecutable {
+		t.Fatalf("missing consumer_inbox in category consumer_idempotency_progress must not carry successful probe checks: %+v",
+			manifest.Verification.Checks)
+	}
+	if !slices.Contains(manifest.Coverage.Authoritative, "consumer_inbox") {
+		t.Fatalf("the failed consumer_inbox object is not declared authoritative in the rejected manifest: %v", manifest.Coverage.Authoritative)
 	}
 	if got := f.evidenceCount(t, "backup_manifest", backupID); got != 0 {
 		t.Fatalf("rejected verify-backup wrote backup_manifest evidence: %d rows", got)
 	}
+	configuredTarget, err := controlstore.ParseDSNTarget(target)
+	if err != nil {
+		t.Fatalf("parse failed verification target: %v", err)
+	}
+	guardKey, err := controlstore.TargetGuardKey(configuredTarget)
+	if err != nil {
+		t.Fatalf("derive failed verification target guard: %v", err)
+	}
+	guard, found, err := controlstore.ReadTargetGuard(f.ctx, f.control, guardKey)
+	if err != nil || !found || guard.State != controlstore.TargetGuardRebuildRequired || guard.ActiveWriter {
+		t.Fatalf("failed missing-object verification must leave its target dirty and inactive: found=%t guard=%+v err=%v", found, guard, err)
+	}
 
-	restoreTarget := f.createDB(t, "restore_negative")
+	restoreTarget := f.restoreDSN
 	calls := f.toolCalls(t)
 	code, out, errOut = f.cliRestore(t, manifestPath, restoreTarget, "op-rst-neg")
 	if code != 1 {

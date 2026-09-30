@@ -373,7 +373,7 @@ func resolveTargetGuardClean(ctx context.Context, tx pgx.Tx, key, operationID st
 		return err
 	}
 	query := `UPDATE recovery_target_guard
-SET disposition = 'clean', clean_at = now(), rebuild_evidence = $3::jsonb, operation_id = $2
+SET disposition = 'clean', rebuild_required_at = NULL, clean_at = now(), rebuild_evidence = $3::jsonb, operation_id = $2
 WHERE target_guard_key = $1 AND NOT active_writer AND
       (($4 = 'controlled' AND disposition IN ('unknown', 'rebuild_required')) OR disposition = $4)`
 	if attempt {

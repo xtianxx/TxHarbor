@@ -377,11 +377,23 @@ func (r RegisterParticipantRequest) canonical() (RegisterParticipantRequest, err
 	if len(r.ProofRef) > 256 || strings.ContainsAny(r.ProofRef, "\x00\n\r\t") {
 		return RegisterParticipantRequest{}, errors.New("proof_ref must be at most 256 characters without control characters")
 	}
+	if err := validateCredentialText("proof_ref", r.ProofRef); err != nil {
+		return RegisterParticipantRequest{}, err
+	}
 	if r.Actor, err = normalizeIdentityText(r.Actor, "audit actor", 256); err != nil {
+		return RegisterParticipantRequest{}, err
+	}
+	if err := validateCredentialText("audit actor", r.Actor); err != nil {
 		return RegisterParticipantRequest{}, err
 	}
 	r.Operator = strings.TrimSpace(r.Operator)
 	r.Reason = strings.TrimSpace(r.Reason)
+	if err := validateCredentialText("operator", r.Operator); err != nil {
+		return RegisterParticipantRequest{}, err
+	}
+	if err := validateCredentialText("reason", r.Reason); err != nil {
+		return RegisterParticipantRequest{}, err
+	}
 	if r.OperationID, err = normalizeOperationID(r.OperationID); err != nil {
 		return RegisterParticipantRequest{}, err
 	}
@@ -623,8 +635,17 @@ func (r SetIdentityMappingRequest) canonical() (SetIdentityMappingRequest, error
 	if r.RecordedBy, err = normalizeIdentityText(r.RecordedBy, "recorded_by", 256); err != nil {
 		return SetIdentityMappingRequest{}, err
 	}
+	if err := validateCredentialText("recorded_by", r.RecordedBy); err != nil {
+		return SetIdentityMappingRequest{}, err
+	}
 	r.Operator = strings.TrimSpace(r.Operator)
 	r.Reason = strings.TrimSpace(r.Reason)
+	if err := validateCredentialText("operator", r.Operator); err != nil {
+		return SetIdentityMappingRequest{}, err
+	}
+	if err := validateCredentialText("reason", r.Reason); err != nil {
+		return SetIdentityMappingRequest{}, err
+	}
 	if r.OperationID, err = normalizeOperationID(r.OperationID); err != nil {
 		return SetIdentityMappingRequest{}, err
 	}
@@ -639,8 +660,17 @@ func (r RevokeIdentityMappingRequest) canonical() (RevokeIdentityMappingRequest,
 	if r.RecordedBy, err = normalizeIdentityText(r.RecordedBy, "recorded_by", 256); err != nil {
 		return RevokeIdentityMappingRequest{}, err
 	}
+	if err := validateCredentialText("recorded_by", r.RecordedBy); err != nil {
+		return RevokeIdentityMappingRequest{}, err
+	}
 	r.Operator = strings.TrimSpace(r.Operator)
 	r.Reason = strings.TrimSpace(r.Reason)
+	if err := validateCredentialText("operator", r.Operator); err != nil {
+		return RevokeIdentityMappingRequest{}, err
+	}
+	if err := validateCredentialText("reason", r.Reason); err != nil {
+		return RevokeIdentityMappingRequest{}, err
+	}
 	if r.OperationID, err = normalizeOperationID(r.OperationID); err != nil {
 		return RevokeIdentityMappingRequest{}, err
 	}
