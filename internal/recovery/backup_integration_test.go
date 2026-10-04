@@ -826,6 +826,24 @@ func (f *bkpFixture) bindTestVerifyTarget(t *testing.T, targetDSN string) Isolat
 	return binding
 }
 
+// deploymentConvergence builds the fixture deployment-lane step for a bound
+// restore: the isolated fixture's admin identity converges public relation
+// ownership to the target's role and records the audited prerequisite.
+func (f *bkpFixture) deploymentConvergence(targetDSN string) ConvergenceStep {
+	target, err := controlstore.ParseDSNTarget(targetDSN)
+	if err != nil {
+		f.t.Fatalf("parse convergence target: %v", err)
+	}
+	step := DeploymentConvergence{
+		AdminDSN:     f.adminDSN,
+		TargetDSN:    targetDSN,
+		OriginalRole: target.Role,
+		Actor:        "deploy:convergence",
+		Store:        f.store,
+	}
+	return step.Converge
+}
+
 // restore is the shared happy-path restore call.
 func (f *bkpFixture) restore(t *testing.T, manifestPath, targetDSN string, declaration TargetDeclaration, reason string) RestoreResult {
 	t.Helper()
@@ -842,6 +860,7 @@ func (f *bkpFixture) restore(t *testing.T, manifestPath, targetDSN string, decla
 		Actor:             "deploy:executor",
 		ProgramVersion:    bkpProgramVersion,
 		PG:                f.pg,
+		Convergence:       f.deploymentConvergence(targetDSN),
 	})
 	if err != nil {
 		t.Fatalf("ExecuteRestore(%s): %v", filepath.Base(manifestPath), err)

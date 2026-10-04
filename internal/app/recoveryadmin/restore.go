@@ -151,6 +151,12 @@ func recoveryAdminRestore(ctx context.Context, args []string, d Deps) int {
 	}
 	defer env.pool.Close()
 
+	// R2 deployment lane: the privileged convergence identity that reassigns
+	// restored-object ownership to the original writer role and records the
+	// audited prerequisite. Optional here; a bound restore that reaches
+	// acceptance without it is refused by the coordinator (no bypass).
+	convergence := recoveryOpConvergenceStep(d, env, strings.TrimSpace(*targetDSN))
+
 	// A CLI declaration is not evidence that a target is isolated. Bind the
 	// requested target to the deployment's authoritative data endpoint and role
 	// before beginning an operation (which persists an audit/marker) or invoking
@@ -203,6 +209,7 @@ func recoveryAdminRestore(ctx context.Context, args []string, d Deps) int {
 		OperationID:       operation,
 		PG:                recovery.LocalPGCommand{},
 		GateDSN:           strings.TrimSpace(gateRoute),
+		Convergence:       convergence,
 		SignerEndpoint:    strings.TrimSpace(*signerEndpoint),
 		RPCURL:            strings.TrimSpace(*rpcURL),
 		BrokerDSN:         strings.TrimSpace(*brokerDSN),

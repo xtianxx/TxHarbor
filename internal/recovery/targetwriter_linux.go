@@ -123,6 +123,12 @@ type TargetWriterOptions struct {
 	// protected lane refuses a DSN carrying password/useroptions or a host
 	// that is not the local socket directory path.
 	RecoveryRoute string
+	// Convergence is the deployment-lane ownership convergence step for a
+	// bound restore (R2 limited ruling): it runs after drain/probes inside the
+	// protection window and must record the audited prerequisite the
+	// acceptance transaction verifies. A bound restore without it refuses —
+	// there is no bypass.
+	Convergence ConvergenceStep
 	// admission is wired by the coordinator itself when the caller did not
 	// hand one in; a supplied pointer must be a fresh un-minted state.
 	admission *admissionState
@@ -537,6 +543,24 @@ func runTargetWriter(ctx context.Context, opts TargetWriterOptions) (result Targ
 	if err := lockHealth(ctx); err != nil {
 		opts.admission.invalidate() // R5: lock health deteriorated voids the attempt
 		return result, errors.New("target writer lock health is uncertain after probe")
+	}
+	// R2 limited ruling: the deployment-lane ownership convergence runs inside
+	// the held protection interval, after drain/probes and before acceptance.
+	// A bound restore without a configured convergence step refuses; a failed
+	// convergence voids the attempt and can never reach guard clean.
+	if opts.OperationKind == TargetWriterOperationRestore && opts.InstanceID != "" {
+		if opts.Convergence == nil {
+			opts.admission.invalidate()
+			return result, errors.New("deployment-lane convergence step is not configured for a bound restore")
+		}
+		convergence := opts.Convergence
+		req := ConvergenceRequest{OperationID: opts.OperationID, InstanceID: opts.InstanceID, TargetGuardKey: key.String()}
+		if err := runWithTargetLockMonitor(ctx, lockHealth, opts.LockHealthInterval, func(cctx context.Context) error {
+			return convergence(cctx, req)
+		}); err != nil {
+			opts.admission.invalidate()
+			return result, errors.New("deployment-lane convergence failed or lost lock health")
+		}
 	}
 
 	acceptance := TargetWriterAcceptance{}

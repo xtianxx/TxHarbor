@@ -84,6 +84,10 @@ type RestoreOptions struct {
 	// (unprotected lane); non-empty switches the supervised child transport
 	// to it while every comparator stays on TargetDSN. Never audit or log.
 	GateDSN string
+	// Convergence is the R2 deployment-lane ownership convergence step for a
+	// bound restore. Optional at the API level; a bound restore whose
+	// coordinator call has no step refuses at acceptance time (fail-closed).
+	Convergence ConvergenceStep
 	// TargetDeclaration defaults to isolated.
 	TargetDeclaration TargetDeclaration
 	// TargetReason is required for a production_main declaration and recorded.
@@ -319,6 +323,7 @@ func executeRestoreWithTargetWriter(ctx context.Context, opts RestoreOptions, dr
 		ObserverDSN: opts.ObserverDSN, TrustedTarget: trustedTarget, InstanceID: token.InstanceID,
 		OperationID: operationID, Archive: archive,
 		RecoveryRoute: opts.GateDSN,
+		Convergence:   opts.Convergence,
 		Prelaunch: func(ctx context.Context, tx pgx.Tx, locked controlstore.InstanceToken) (EvidenceToken, error) {
 			// TargetWriter has locked the instance row before this callback.
 			// Recheck under the per-backup epoch lock before taking the target

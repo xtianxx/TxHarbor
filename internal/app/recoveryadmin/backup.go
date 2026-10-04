@@ -36,6 +36,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"os"
 	"strings"
 	"time"
 
@@ -205,6 +206,31 @@ func recoveryOpOpen(ctx context.Context, d Deps, command string) (*recoveryOpEnv
 		pool:                  pool,
 		store:                 store,
 	}, 0
+}
+
+// recoveryOpConvergenceStep builds the R2 deployment-lane convergence step
+// from TXHARBOR_RECOVERY_DEPLOYMENT_ADMIN_DSN. Missing configuration returns
+// nil: a bound restore then refuses at the coordinator's acceptance gate
+// (fail-closed) instead of silently skipping convergence. The original writer
+// role is the trusted authoritative data target's role (env.dataDSN), never a
+// caller-supplied value.
+func recoveryOpConvergenceStep(d Deps, env *recoveryOpEnv, targetDSN string) recovery.ConvergenceStep {
+	admin, ok := d.getenvValue(config.EnvRecoveryDeploymentAdminDSN)
+	if !ok || strings.TrimSpace(admin) == "" {
+		return nil
+	}
+	authoritative, err := controlstore.ParseDSNTarget(env.dataDSN)
+	if err != nil || authoritative.Role == "" {
+		return nil
+	}
+	step := recovery.DeploymentConvergence{
+		AdminDSN:     strings.TrimSpace(admin),
+		TargetDSN:    targetDSN,
+		OriginalRole: authoritative.Role,
+		Actor:        env.principal,
+		Store:        env.store,
+	}
+	return step.Converge
 }
 
 // recoveryOpArtifactDir resolves the artifact directory: --out wins, then
@@ -447,12 +473,24 @@ func recoveryAdminVerifyBackup(ctx context.Context, args []string, d Deps) int {
 	fs := flag.NewFlagSet("txharbor recovery-admin verify-backup", flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	manifestPath := fs.String("manifest", "", "manifest path (required)")
-	targetDSN := fs.String("target-dsn", "", "optional assertion of the deployment-configured isolated target (never used as the connection target)")
+	targetDSN := fs.String("target-dsn", "", "optional assertion of the deployment-configured isolated target (or "+recoveryTargetDSNEnv+"; never used as connection target)")
 	instanceFlag := fs.String("instance", "", "recovery instance id (optional; binds the conclusion)")
 	operationID := fs.String("operation-id", "", "idempotent operation identity (optional)")
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
+	targetFlagSet := false
+	fs.Visit(func(f *flag.Flag) {
+		if f.Name == "target-dsn" {
+			targetFlagSet = true
+		}
+	})
+	resolvedTarget, inputErr := recoveryProtectedDSNInput(*targetDSN, targetFlagSet, d.getenv(), recoveryTargetDSNEnv, "--target-dsn")
+	if inputErr != nil {
+		fmt.Fprintln(stderr, "txharbor recovery-admin verify-backup: invalid DSN source selection; refusing")
+		return 2
+	}
+	*targetDSN = resolvedTarget
 	if fs.NArg() > 0 || strings.TrimSpace(*manifestPath) == "" {
 		recoveryAdminActionUsage(stderr, recoveryAdminActionByNameOrZero("verify-backup"))
 		return 2
@@ -528,7 +566,8 @@ func recoveryAdminVerifyBackup(ctx context.Context, args []string, d Deps) int {
 	if release != nil {
 		defer release()
 	}
-	if replayed, code := recoveryOpReplay(stderr, stdout, recorded, inputDigest, operation); replayed {
+	if replayed, code := recoveryOpReplayVerifyBackup(ctx, stderr, stdout, env.store, recorded,
+		strings.TrimSpace(*manifestPath), inputDigest, operation, env.principal); replayed {
 		return code
 	}
 
@@ -552,18 +591,29 @@ func recoveryAdminVerifyBackup(ctx context.Context, args []string, d Deps) int {
 		PG:               recovery.LocalPGCommand{},
 	})
 	if err != nil {
+		reason := strings.TrimSpace(result.Reason)
+		if reason == "" {
+			reason = err.Error()
+		}
+		reason = recoveryOpSafeText(reason)
 		_ = recoveryOpRecord(ctx, env.pool, recoveryActionVerifyBackup, operation, env.principal, controlstore.AuditRefused,
-			map[string]any{"input_digest": inputDigest, "reason": logx.Redact(err.Error())},
+			map[string]any{"input_digest": inputDigest, "state": string(result.State), "reason": reason},
 			map[string]any{"manifest_path": recoveryOpSafeText(strings.TrimSpace(*manifestPath))})
-		fmt.Fprintf(stderr, "txharbor recovery-admin verify-backup: refused: %s\n", logx.Redact(err.Error()))
+		fmt.Fprintf(stderr, "txharbor recovery-admin verify-backup: %s: %s\n", result.State, reason)
 		return 1
 	}
 	checks := result.Checks
 	_ = recoveryOpRecord(ctx, env.pool, recoveryActionVerifyBackup, operation, env.principal,
 		map[bool]string{true: controlstore.AuditOK, false: controlstore.AuditRefused}[result.State == recovery.VerificationVerified],
 		map[string]any{
-			"input_digest": inputDigest,
-			"state":        string(result.State),
+			"input_digest":       inputDigest,
+			"state":              string(result.State),
+			"reason":             recoveryOpSafeText(result.Reason),
+			"backup_id":          result.BackupID,
+			"manifest_version":   result.ManifestVersion,
+			"evidence_ref":       result.EvidenceRef,
+			"verification_epoch": result.VerificationEpoch,
+			"accepted_audit_id":  result.AcceptedAuditID,
 			"checks": map[string]bool{
 				"readable":                checks.Readable,
 				"structure_constraints":   checks.StructureConstraints,
@@ -579,9 +629,67 @@ func recoveryAdminVerifyBackup(ctx context.Context, args []string, d Deps) int {
 		checks.BusinessStateProbes, checks.VerificationExecutable, result.EvidenceRef,
 		recoveryOpDisplayID(operation), env.principal, instanceID)
 	if result.State != recovery.VerificationVerified {
+		fmt.Fprintf(stderr, "txharbor recovery-admin verify-backup: verification %s: %s\n", result.State, recoveryOpSafeText(result.Reason))
 		return 1
 	}
 	return 0
+}
+
+// recoveryOpReplayVerifyBackup refuses a cached success once a newer START
+// epoch has superseded the exact accepted receipt. It performs only a control
+// store lookup and never runs pg_restore or other verification tools.
+func recoveryOpReplayVerifyBackup(ctx context.Context, stderr, stdout io.Writer, store *controlstore.Store,
+	recorded *recoveryOpRecorded, manifestPath, inputDigest, operation, actor string) (bool, int) {
+	if recorded == nil || recorded.Result != controlstore.AuditOK {
+		return recoveryOpReplay(stderr, stdout, recorded, inputDigest, operation)
+	}
+	var detail struct {
+		InputDigest     string `json:"input_digest"`
+		State           string `json:"state"`
+		BackupID        string `json:"backup_id"`
+		ManifestVersion string `json:"manifest_version"`
+		ManifestDigest  string `json:"manifest_digest"`
+		EvidenceRef     string `json:"evidence_ref"`
+		AcceptedAuditID int64  `json:"accepted_audit_id"`
+	}
+	if err := json.Unmarshal(recorded.Detail, &detail); err != nil || detail.InputDigest != inputDigest {
+		return recoveryOpReplay(stderr, stdout, recorded, inputDigest, operation)
+	}
+	if detail.State != string(recovery.VerificationVerified) || detail.BackupID == "" ||
+		detail.ManifestVersion == "" || detail.ManifestDigest == "" || detail.EvidenceRef == "" || detail.AcceptedAuditID <= 0 {
+		fmt.Fprintf(stderr, "txharbor recovery-admin: replay refused operation_id=%s cached verification has no accepted receipt\n", operation)
+		return true, 1
+	}
+	refuse := func(reason string) (bool, int) {
+		_ = recoveryOpRecord(ctx, store.Pool(), recoveryActionVerifyBackup, operation, actor, controlstore.AuditRefused,
+			map[string]any{"input_digest": inputDigest, "state": string(recovery.VerificationVerified), "reason": reason},
+			map[string]any{"manifest_path": recoveryOpSafeText(manifestPath)})
+		fmt.Fprintf(stderr, "txharbor recovery-admin: replay refused operation_id=%s %s\n", operation, reason)
+		return true, 1
+	}
+	manifestBytes, err := os.ReadFile(manifestPath)
+	if err != nil {
+		return refuse("cached verification manifest is unavailable or invalid")
+	}
+	manifest, err := recovery.ParseManifest(manifestBytes)
+	if err != nil {
+		return refuse("cached verification manifest is unavailable or invalid")
+	}
+	currentDigest, err := manifest.Digest()
+	if err != nil || manifest.BackupID != detail.BackupID || manifest.ManifestVersion != detail.ManifestVersion ||
+		manifest.Verification.State != recovery.VerificationVerified ||
+		manifest.Verification.EvidenceRef != detail.EvidenceRef || currentDigest != detail.ManifestDigest {
+		return refuse("cached verification manifest no longer matches its accepted receipt")
+	}
+	var target map[string]any
+	_ = json.Unmarshal(recorded.Target, &target)
+	instanceID, _ := target["instance_id"].(string)
+	current, err := recovery.BackupVerificationReceiptCurrent(ctx, store, detail.BackupID,
+		instanceID, detail.ManifestVersion, detail.ManifestDigest, detail.EvidenceRef, detail.AcceptedAuditID)
+	if err != nil || !current {
+		return refuse("verification receipt is no longer current")
+	}
+	return recoveryOpReplay(stderr, stdout, recorded, inputDigest, operation)
 }
 
 // ---------------------------------------------------------------------------
@@ -663,8 +771,12 @@ func recoveryOpReplay(stderr, stdout io.Writer, recorded *recoveryOpRecorded, in
 	_ = json.Unmarshal(recorded.Target, &target)
 	switch recorded.Result {
 	case controlstore.AuditOK:
+		verification := detail["verification"]
+		if verification == nil {
+			verification = detail["state"]
+		}
 		fmt.Fprintf(stdout, "txharbor recovery-admin: replayed=true operation_id=%s result=ok manifest=%v verification=%v\n",
-			operation, recoveryOpSafeText(fmt.Sprint(target["manifest_path"])), detail["verification"])
+			operation, recoveryOpSafeText(fmt.Sprint(target["manifest_path"])), verification)
 		return true, 0
 	default:
 		fmt.Fprintf(stderr, "txharbor recovery-admin: replayed=true operation_id=%s result=%s (the recorded refusal replays; zero side effects)\n",

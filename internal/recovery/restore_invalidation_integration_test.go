@@ -123,6 +123,7 @@ func rsiRestore(f *bkpFixture, backup BackupResult, target string, pg PGCommand)
 		Actor:             "deploy:executor",
 		ProgramVersion:    bkpProgramVersion,
 		PG:                pg,
+		Convergence:       f.deploymentConvergence(target),
 	})
 }
 
@@ -439,6 +440,7 @@ func TestRestoreStartInterleavingDoesNotRewindAdmittedAction(t *testing.T) {
 			Actor:             "deploy:executor",
 			ProgramVersion:    bkpProgramVersion,
 			PG:                pg,
+			Convergence:       f.deploymentConvergence(target),
 		})
 		done <- rsiOutcome{result: result, err: err}
 	}()

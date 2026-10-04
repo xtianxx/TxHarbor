@@ -129,7 +129,7 @@ func recoveryAdminDrill(ctx context.Context, args []string, d Deps) int {
 	fs := flag.NewFlagSet("txharbor recovery-admin drill", flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	manifestPath := fs.String("manifest", "", "manifest path (required; the control store must hold verified evidence bound to the instance and backup_id)")
-	targetDSN := fs.String("target-dsn", "", "isolated recovery-environment DSN (required; must address TXHARBOR_PG_DSN, never the control store)")
+	targetDSN := fs.String("target-dsn", "", "isolated recovery-environment DSN (or "+recoveryTargetDSNEnv+"; must address TXHARBOR_PG_DSN, never the control store)")
 	instanceFlag := fs.String("instance", "", "recovery instance id (required)")
 	chainIDFlag := fs.String("chain-id", "", "scope chain id (required; per-capability observation scope dimension)")
 	scenarioFlag := fs.String("scenario", string(recovery.DrillScenarioFullRecovery), "drill scenario: full_recovery or one of the seven failure injections (f1_..f7_)")
@@ -140,8 +140,29 @@ func recoveryAdminDrill(ctx context.Context, args []string, d Deps) int {
 	uncoveredIntervalSeconds := fs.Float64("uncovered-interval-seconds", -1, "operator-provided uncovered-interval local input (optional; recorded as an explicit test input)")
 	signerEndpoint := fs.String("signer-endpoint", "", "signer boundary endpoint for reachability probing (optional)")
 	rpcURL := fs.String("rpc-url", "", "RPC fact-source URL for the verification phase (optional; missing = verification not_configured)")
-	brokerDSN := fs.String("broker-dsn", "", "broker DSN for reachability probing (optional)")
+	brokerDSN := fs.String("broker-dsn", "", "broker DSN for reachability probing (optional; or "+recoveryBrokerDSNEnv+")")
 	if err := fs.Parse(args); err != nil {
+		return 2
+	}
+	targetFlagSet, brokerFlagSet := false, false
+	fs.Visit(func(f *flag.Flag) {
+		if f.Name == "target-dsn" {
+			targetFlagSet = true
+		}
+		if f.Name == "broker-dsn" {
+			brokerFlagSet = true
+		}
+	})
+	resolvedTarget, inputErr := recoveryProtectedDSNInput(*targetDSN, targetFlagSet, d.getenv(), recoveryTargetDSNEnv, "--target-dsn")
+	if inputErr == nil {
+		*targetDSN = resolvedTarget
+	}
+	resolvedBroker, brokerErr := recoveryProtectedDSNInput(*brokerDSN, brokerFlagSet, d.getenv(), recoveryBrokerDSNEnv, "--broker-dsn")
+	if brokerErr == nil {
+		*brokerDSN = resolvedBroker
+	}
+	if inputErr != nil || brokerErr != nil {
+		fmt.Fprintln(stderr, "txharbor recovery-admin drill: invalid DSN source selection; refusing")
 		return 2
 	}
 	if fs.NArg() > 0 || strings.TrimSpace(*manifestPath) == "" || strings.TrimSpace(*targetDSN) == "" ||
@@ -366,6 +387,7 @@ func recoveryAdminDrill(ctx context.Context, args []string, d Deps) int {
 			ProgramVersion:    programVersion,
 			OperationID:       operation,
 			PG:                recovery.LocalPGCommand{},
+			Convergence:       recoveryOpConvergenceStep(d, env, strings.TrimSpace(*targetDSN)),
 			SignerEndpoint:    strings.TrimSpace(*signerEndpoint),
 			RPCURL:            strings.TrimSpace(*rpcURL),
 			BrokerDSN:         strings.TrimSpace(*brokerDSN),

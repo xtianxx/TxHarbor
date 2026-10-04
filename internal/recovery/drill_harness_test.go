@@ -997,6 +997,7 @@ func (e *drillEnv) restoreWithContext(ctx context.Context, manifestPath, targetD
 		ProgramVersion:    drillProgramVersion,
 		OperationID:       operationID,
 		PG:                e.pg,
+		Convergence:       e.deploymentConvergence(targetDSN),
 	})
 	if err != nil {
 		e.t.Fatalf("ExecuteRestore: %v", err)
@@ -1005,6 +1006,25 @@ func (e *drillEnv) restoreWithContext(ctx context.Context, manifestPath, targetD
 		e.t.Fatalf("ExecuteRestore restored=false: %+v", result)
 	}
 	return result
+}
+
+// deploymentConvergence builds the fixture's deployment-management lane step
+// for a bound restore: the isolated fixture's admin identity converges public
+// relation ownership to the target's original role and records the audited
+// prerequisite the coordinator verifies. Real action, not an empty audit.
+func (e *drillEnv) deploymentConvergence(targetDSN string) recovery.ConvergenceStep {
+	target, err := controlstore.ParseDSNTarget(targetDSN)
+	if err != nil {
+		e.t.Fatalf("parse convergence target: %v", err)
+	}
+	step := recovery.DeploymentConvergence{
+		AdminDSN:     e.adminDSN,
+		TargetDSN:    targetDSN,
+		OriginalRole: target.Role,
+		Actor:        "deploy:convergence",
+		Store:        e.store,
+	}
+	return step.Converge
 }
 
 // refusedRestore runs a restore that must be refused: non-nil error,
@@ -1025,6 +1045,7 @@ func (e *drillEnv) refusedRestore(manifestPath, targetDSN, programVersion, opera
 		ProgramVersion:    programVersion,
 		OperationID:       operationID,
 		PG:                e.pg,
+		Convergence:       e.deploymentConvergence(targetDSN),
 	})
 	if err == nil {
 		e.t.Fatal("ExecuteRestore succeeded, want a fail-closed refusal")

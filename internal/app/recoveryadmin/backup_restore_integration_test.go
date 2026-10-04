@@ -5,11 +5,11 @@
 // against a real PostgreSQL 18.6 fixture (testcontainers) and isolated target
 // databases, with native pg_restore and the real pg_dump binary in the fixture.
 //
-// Tool path: pg_dump uses a test-only PATH shim to execute the real binary
-// inside the fixture container (`docker exec -i`) and rewrite the --dbname
-// DSN. pg_restore must be native and direct: the production guard rejects PATH
-// shell shims. Positive tests requiring restore skip explicitly when native
-// pg_restore is unavailable. The shim counter instruments pg_dump only;
+// Tool path: pg_dump uses a test-only PATH counter shim that execs the resolved
+// native PostgreSQL 18.6 client with the original host-mapped DSN unchanged.
+// pg_restore must be native and direct: the production guard rejects PATH
+// shell shims. Missing native tools report NOT RUN locally and fail in the
+// required CI environment. The counter instruments actual pg_dump calls;
 // positive restore assertions inspect actual restored data.
 //
 // Covered:
@@ -73,37 +73,18 @@ const cliBkpPGImage = "postgres:18.6-trixie"
 // dump-derived data (same fixture idea as internal/recovery).
 const cliProbeTable = "snapshot_probe_015"
 
-// cliPGShim executes pg_dump inside the fixture container. It is test
-// scaffolding around the real binary; pg_restore is never shimmed.
+// cliPGShim counts an invocation and execs the fixture's resolved native
+// pg_dump. It deliberately reads no ambient test-only variables: production's
+// PostgreSQL child environment is allowlisted and strips them.
 const cliPGShim = `#!/usr/bin/env bash
 set -euo pipefail
-tool="$(basename "$0")"
-ctr="${TXHARBOR_TEST_PG_CONTAINER:?TXHARBOR_TEST_PG_CONTAINER must name the fixture container}"
-if [[ -n "${TXHARBOR_TEST_CALLS:-}" ]]; then
-  printf '%s\n' "$tool" >> "$TXHARBOR_TEST_CALLS"
-fi
-args=()
-for a in "$@"; do
-  if [[ "$a" == --dbname=* ]]; then
-    dsn="${a#--dbname=}"
-    scheme="${dsn%%://*}"
-    rest="${dsn#*://}"
-    if [[ "$rest" == *@* ]]; then
-      userinfo="${rest%%@*}"
-      hostpath="${rest#*@}"
-      path="${hostpath#*/}"
-      a="--dbname=${scheme}://${userinfo}@127.0.0.1:5432/${path}"
-    fi
-  fi
-  args+=("$a")
-done
-exec docker exec -i "$ctr" "$tool" "${args[@]}"
+printf '%s\n' 'pg_dump' >> __CALLS_FILE__
+exec __PG_DUMP__ "$@"
 `
 
 type cliFixture struct {
 	t          *testing.T
 	ctx        context.Context
-	ctrID      string
 	baseDSN    string
 	admin      *pgxpool.Pool
 	dataDSN    string
@@ -125,37 +106,94 @@ func requireNativePGRestore(t *testing.T) {
 	t.Helper()
 	path, err := exec.LookPath("pg_restore")
 	if err != nil {
-		t.Skip("NOT RUN: native direct pg_restore unavailable")
+		requireNativeFixtureTool(t, "native direct PostgreSQL 18.6 pg_restore unavailable")
+		return
 	}
 	resolved, err := filepath.EvalSymlinks(path)
 	if err != nil {
-		t.Skipf("NOT RUN: native direct pg_restore unavailable: resolve executable: %v", err)
+		requireNativeFixtureTool(t, fmt.Sprintf("native direct PostgreSQL 18.6 pg_restore unavailable: resolve executable: %v", err))
+		return
 	}
 	binary, err := os.Open(resolved)
 	if err != nil {
-		t.Skipf("NOT RUN: native direct pg_restore unavailable: open executable: %v", err)
+		requireNativeFixtureTool(t, fmt.Sprintf("native direct PostgreSQL 18.6 pg_restore unavailable: open executable: %v", err))
+		return
 	}
 	magic := make([]byte, 4)
 	_, readErr := io.ReadFull(binary, magic)
 	closeErr := binary.Close()
 	if readErr != nil || closeErr != nil || string(magic) != "\x7fELF" {
-		t.Skip("NOT RUN: native direct pg_restore unavailable: executable is not a native ELF binary")
+		requireNativeFixtureTool(t, "native direct PostgreSQL 18.6 pg_restore unavailable: executable is not a native ELF binary")
+		return
 	}
 	version, err := exec.Command(path, "--version").CombinedOutput()
 	if err != nil {
-		t.Skipf("NOT RUN: native direct pg_restore unavailable: version command failed: %v", err)
+		requireNativeFixtureTool(t, fmt.Sprintf("native direct PostgreSQL 18.6 pg_restore unavailable: version command failed: %v", err))
+		return
 	}
-	// PostgreSQL 18 formats this as "pg_restore (PostgreSQL) 18.6 ...";
-	// validate both the exact program label and a numeric 18.x version rather
-	// than relying on a loose prefix that accepts wrappers or unrelated output.
+	// Accept packaging suffixes, but require an exact PostgreSQL 18.6 version.
 	versionText := strings.TrimSpace(string(version))
-	if !strings.HasPrefix(versionText, "pg_restore (PostgreSQL) 18.") {
-		t.Skipf("NOT RUN: native direct PostgreSQL 18 pg_restore unavailable: version=%q", versionText)
+	versionFields := strings.Fields(versionText)
+	if len(versionFields) < 3 || versionFields[0] != "pg_restore" ||
+		versionFields[1] != "(PostgreSQL)" || versionFields[2] != "18.6" {
+		requireNativeFixtureTool(t, fmt.Sprintf("native direct PostgreSQL 18.6 pg_restore unavailable: version=%q", versionText))
 	}
+}
+
+// nativePGDumpPath resolves and validates the real 18.6 client before the
+// fixture prepends its counter shim to PATH. The fixture server and dump client
+// must match; accepting another major/minor can produce misleading format or
+// compatibility failures.
+func nativePGDumpPath(t *testing.T) string {
+	t.Helper()
+	path, err := exec.LookPath("pg_dump")
+	if err != nil {
+		requireNativeFixtureTool(t, "native PostgreSQL 18.6 pg_dump unavailable: executable not found")
+		return ""
+	}
+	resolved, err := filepath.EvalSymlinks(path)
+	if err != nil {
+		requireNativeFixtureTool(t, fmt.Sprintf("native PostgreSQL 18.6 pg_dump unavailable: resolve executable: %v", err))
+		return ""
+	}
+	binary, err := os.Open(resolved)
+	if err != nil {
+		requireNativeFixtureTool(t, fmt.Sprintf("native PostgreSQL 18.6 pg_dump unavailable: open executable: %v", err))
+		return ""
+	}
+	magic := make([]byte, 4)
+	_, readErr := io.ReadFull(binary, magic)
+	closeErr := binary.Close()
+	if readErr != nil || closeErr != nil || string(magic) != "\x7fELF" {
+		requireNativeFixtureTool(t, "native PostgreSQL 18.6 pg_dump unavailable: executable is not a native ELF binary")
+		return ""
+	}
+	version, err := exec.Command(resolved, "--version").CombinedOutput()
+	versionText := strings.TrimSpace(string(version))
+	versionFields := strings.Fields(versionText)
+	if err != nil || len(versionFields) < 3 || versionFields[0] != "pg_dump" ||
+		versionFields[1] != "(PostgreSQL)" || versionFields[2] != "18.6" {
+		requireNativeFixtureTool(t, fmt.Sprintf("native PostgreSQL 18.6 pg_dump unavailable: version=%q", versionText))
+		return ""
+	}
+	return resolved
+}
+
+func requireNativeFixtureTool(t *testing.T, reason string) {
+	t.Helper()
+	if strings.EqualFold(os.Getenv("CI"), "true") || os.Getenv("TXHARBOR_REQUIRE_DOCKER") == "1" {
+		t.Fatalf("NOT RUN: %s (required integration environment)", reason)
+	}
+	t.Skip("NOT RUN: " + reason)
+}
+
+func shellQuote(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", "'\\''") + "'"
 }
 
 func newCLIFixture(t *testing.T) *cliFixture {
 	t.Helper()
+	pgDumpPath := nativePGDumpPath(t)
 	ctx := context.Background()
 	ctr, err := postgres.Run(ctx, cliBkpPGImage,
 		postgres.WithDatabase("txharbor"),
@@ -173,7 +211,7 @@ func newCLIFixture(t *testing.T) *cliFixture {
 		t.Fatalf("postgres connection string: %v", err)
 	}
 	f := &cliFixture{
-		t: t, ctx: ctx, ctrID: ctr.GetContainerID(), baseDSN: baseDSN,
+		t: t, ctx: ctx, baseDSN: baseDSN,
 		admin: migrateTestPool(t, baseDSN), artDir: t.TempDir(),
 		callsFile: filepath.Join(t.TempDir(), "tool-calls.log"),
 	}
@@ -231,15 +269,16 @@ func newCLIFixture(t *testing.T) *cliFixture {
 	f.register(t, "deploy:executor", "executor")
 	f.register(t, "auth:verifier", "verifier")
 
-	// PATH shim for pg_dump only. pg_restore resolves directly to the native
-	// executable checked by tests that perform real restores.
+	// PATH shim for pg_dump only. It counts the actual native client invocation
+	// and then execs that binary unchanged; pg_restore continues resolving
+	// directly to the native executable checked by real-restore tests.
 	binDir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(binDir, "pg_dump"), []byte(cliPGShim), 0o755); err != nil {
+	shim := strings.ReplaceAll(cliPGShim, "__CALLS_FILE__", shellQuote(f.callsFile))
+	shim = strings.ReplaceAll(shim, "__PG_DUMP__", shellQuote(pgDumpPath))
+	if err := os.WriteFile(filepath.Join(binDir, "pg_dump"), []byte(shim), 0o755); err != nil {
 		t.Fatalf("write pg_dump shim: %v", err)
 	}
 	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
-	t.Setenv("TXHARBOR_TEST_PG_CONTAINER", f.ctrID)
-	t.Setenv("TXHARBOR_TEST_CALLS", f.callsFile)
 	return f
 }
 
@@ -452,12 +491,13 @@ func cliDBNameOf(t *testing.T, dsn string) string {
 // is per-command because the CLI binds it from the environment.
 func (f *cliFixture) env(principal string) map[string]string {
 	return map[string]string{
-		config.EnvRecoveryControlDSN:  f.controlDSN,
-		config.EnvRecoveryObserverDSN: f.baseDSN,
-		config.EnvPGDSN:               f.dataDSN,
-		config.EnvRecoveryPrincipal:   principal,
-		config.EnvRecoveryArtifactDir: f.artDir,
-		config.EnvRecoveryEntryChains: "31337",
+		config.EnvRecoveryControlDSN:         f.controlDSN,
+		config.EnvRecoveryObserverDSN:        f.baseDSN,
+		config.EnvPGDSN:                      f.dataDSN,
+		config.EnvRecoveryPrincipal:          principal,
+		config.EnvRecoveryArtifactDir:        f.artDir,
+		config.EnvRecoveryEntryChains:        "31337",
+		config.EnvRecoveryDeploymentAdminDSN: f.baseDSN,
 	}
 }
 
@@ -1071,7 +1111,7 @@ func TestVerifyBackupCLINoOverEvidenceSuccessOnMissingObject(t *testing.T) {
 		strings.Contains(out+errOut, "backup_manifest") {
 		t.Fatalf("verify-backup overclaimed acceptance before its probes passed: stdout=%q stderr=%q", out, errOut)
 	}
-	if !strings.Contains(errOut, "isolated verification was not accepted") {
+	if !strings.Contains(errOut, "required table consumer_inbox is missing") {
 		t.Fatalf("verify-backup failed for an unexpected reason instead of the failed isolated probe: stdout=%q stderr=%q", out, errOut)
 	}
 	if f.relationExists(t, target, "consumer_inbox") || !f.relationExists(t, target, "consumer_inbox_015_damaged") {

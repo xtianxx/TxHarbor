@@ -193,9 +193,16 @@ const (
 	// audited or logged, never falls back to another route, and refuses a
 	// password, TLS parameters or identity overrides (validated in
 	// internal/recovery).
-	EnvRecoveryGateDSN     = "TXHARBOR_RECOVERY_GATE_DSN"
-	EnvRecoveryPrincipal   = "TXHARBOR_RECOVERY_PRINCIPAL"
-	EnvRecoveryArtifactDir = "TXHARBOR_RECOVERY_ARTIFACT_DIR"
+	EnvRecoveryGateDSN = "TXHARBOR_RECOVERY_GATE_DSN"
+	// EnvRecoveryDeploymentAdminDSN is the R2 deployment-lane ownership
+	// convergence identity: a privileged deployment-management connection to
+	// the same cluster as the restore target. It is used only for the
+	// convergence step that reassigns restored-object ownership to the
+	// original writer role and records the audited prerequisite; it never
+	// runs as the recovery role, and it is never audited or logged.
+	EnvRecoveryDeploymentAdminDSN = "TXHARBOR_RECOVERY_DEPLOYMENT_ADMIN_DSN"
+	EnvRecoveryPrincipal          = "TXHARBOR_RECOVERY_PRINCIPAL"
+	EnvRecoveryArtifactDir        = "TXHARBOR_RECOVERY_ARTIFACT_DIR"
 	// EnvRecoveryInstance binds an operator command to one recovery instance:
 	// a command invocation whose --instance disagrees with this deployment
 	// binding is refused (T022/T027 instance-bound execution).
@@ -494,6 +501,11 @@ type RecoveryConfig struct {
 	// this stays empty AND no admission handle is in force (ADR-004 §2.1).
 	// Never audit or log it.
 	GateDSN string
+	// DeploymentAdminDSN is the R2 deployment-lane convergence identity for
+	// bound restores. Empty means not configured: a bound restore refuses at
+	// the coordinator when it reaches acceptance without a convergence step.
+	// Never audit or log it.
+	DeploymentAdminDSN string
 	// Principal is the authenticated caller identity binding ("<kind>:<id>",
 	// controlled deployment config; free text never authorizes).
 	Principal string
@@ -1602,6 +1614,13 @@ func (c *Config) loadRecovery015(getenv Getenv, errs *[]error) {
 			*errs = append(*errs, invalid(EnvRecoveryGateDSN, "%v", err))
 		} else {
 			c.Recovery.GateDSN = raw
+		}
+	}
+	if raw, ok := getenv(EnvRecoveryDeploymentAdminDSN); ok && raw != "" {
+		if err := validateDSN(raw); err != nil {
+			*errs = append(*errs, invalid(EnvRecoveryDeploymentAdminDSN, "%v", err))
+		} else {
+			c.Recovery.DeploymentAdminDSN = raw
 		}
 	}
 	if raw, ok := getenv(EnvRecoveryPrincipal); ok && raw != "" {
