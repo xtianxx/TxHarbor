@@ -1038,7 +1038,14 @@ func TestBorrowedReplacementBoundPostcommitNativeStart(t *testing.T) {
 			t.Fatalf("the positive changed non-intended instance state: before=%+v after=%+v", base.snapshot, postSnap)
 		}
 		postRows := borrowedBoundNativeReadyRowsNow(t, ctx, b)
-		if postRows.evidenceCount != base.rows.evidenceCount || postRows.auditCount != base.rows.auditCount+2 {
+		// R5 ruling adds one audited durable fact to the interrupted attempt:
+		// the coordinator's retained attempt_proof row (child start identity,
+		// sole-Wait terminal, group drain and the role credential binding)
+		// recorded by the authentic supervisor at failure time. The lane
+		// therefore counts base+3 (marker + generation + retained proof) with
+		// the same exact-count discipline; all other positive/negative class
+		// assertions are unchanged.
+		if postRows.evidenceCount != base.rows.evidenceCount || postRows.auditCount != base.rows.auditCount+3 {
 			t.Fatalf("durable rows: evidence %d->%d audit %d->%d", base.rows.evidenceCount, postRows.evidenceCount, base.rows.auditCount, postRows.auditCount)
 		}
 		if afterOID, oidErr := borrowedOwnerDDLTargetOID(ctx, b); oidErr != nil || afterOID != base.catalogOID {
