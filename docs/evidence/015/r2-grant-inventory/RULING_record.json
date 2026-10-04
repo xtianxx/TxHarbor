@@ -1,0 +1,28 @@
+{
+  "ruling": "R2 approved (limited plan) + implementation authorization for T019/T020/T057/T058/T066/T068",
+  "ts": "2026-10-04 (round: implement closeout)",
+  "r2_boundaries": [
+    "restricted recovery role uses --clean --if-exists --no-owner --no-privileges; no superuser, no original-writer membership, no role-management rights",
+    "owner/ACL convergence by independent deployment-management identity per verified inventory, audited, inside the protection window, as a prerequisite for evidence acceptance and guard clean",
+    "four identities stay separated; every execution still requires R1 admission, R3 entry, R4 protection; R5 invalidation unchanged",
+    "this round's deployment-management actions are allowed ONLY in disposable isolated environments; no production permission changes or deployment authorized"
+  ],
+  "implementation_required": [
+    "real TxHarbor-schema backup archive for acceptance; verify objects, data, sequences, constraints, owner/ACL convergence; unknown/failure never accepted as success",
+    "protected peer entry + single admission; real verification: old-writer reconnect, other OS identities, copied/expired handles, same-target concurrency all refused; unauthorized paths blocked before first target write",
+    "fix wrong_role case wording (failed command but created objects = wrong-OWNERSHIP residue, NOT zero-write); keep original logs; record new protected-entry negative separately",
+    "serial protection covers target mutation, real tool process, deployment convergence, drain, probes, atomic acceptance; loss/interruption/invalid proof leaves no successful permit; old handles never revive",
+    "complete the six original acceptances incl. real on-chain payment + downstream effects, gap pause, repeated restore, approval invalidation; no SQL fixtures or table fingerprints may stand in for external effects"
+  ],
+  "build_housekeeping": [
+    "handle archived .go files breaking go build ./...; preserve bytes and traceability via suitable archive form (e.g. rename to .go.txt or pack) and sync the evidence index; restore standard full-repo build; do not pretend narrower build scope is the full build"
+  ],
+  "verification": [
+    "final merged tree: required checks + full required drill + previously-failing full-repo PG suite; reuse unaffected evidence; missing deps/SKIP not recorded as pass; new results recorded separately from historical FAIL/SKIP"
+  ],
+  "constraints": [
+    "preserve all 257 items; commit only this round's named outputs after ownership verification; no full staging; no unauthorized cleanup",
+    "task checkboxes updated ONLY per original criteria satisfied; otherwise stay OPEN",
+    "no release review, no push, no PR, no merge, no deploy, no protection change; T000-P OPEN; no production-readiness claim"
+  ]
+}
