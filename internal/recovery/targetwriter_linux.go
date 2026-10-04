@@ -505,6 +505,19 @@ func runTargetWriter(ctx context.Context, opts TargetWriterOptions) (result Targ
 	}
 	command, runErr := opts.Runner.RunPGCommandWithEnv(ctx, executable, args, opts.Archive, io.Discard, io.Discard, os.Environ(), lockHealth)
 	result.Command = command
+	// ADR-004 missing-condition #4 (bounded local form): a launched-and-failed
+	// bound restore retains its authentic attempt proof (child start identity,
+	// sole-Wait terminal, group drain, role credential binding) so a later
+	// controlled rebuild can be authorized only by that proof. Acceptance
+	// success does not write a proof.
+	accepted := false
+	if opts.OperationKind == TargetWriterOperationRestore && opts.InstanceID != "" && command.Started {
+		defer func() {
+			if retErr != nil && !accepted {
+				retainAttemptProof(context.Background(), opts, key, appName, command)
+			}
+		}()
+	}
 	result.processReceipt = bindTargetProcessReceipt(opts.Runner.observation.snapshot(), key, opts.TrustedTarget.DataTargetFingerprint().RoleFingerprint, opts.OperationID)
 	failureCleanupEligible = targetAttemptFailureCleanupEligible(command)
 	if command.Started {
@@ -661,6 +674,7 @@ func runTargetWriter(ctx context.Context, opts TargetWriterOptions) (result Targ
 	// WithTransaction returned only after the owner-session commit succeeded.
 	// Later acknowledgement/reporting or Release errors must not alter clean.
 	intentDurable = false
+	accepted = true
 	if opts.afterAcceptanceCommit != nil {
 		if err := opts.afterAcceptanceCommit(); err != nil {
 			return result, fmt.Errorf("target acceptance committed but its acknowledgement was uncertain: %w", err)

@@ -245,15 +245,50 @@ func drillWaitNoTargetSessions(ctx context.Context, admin *pgxpool.Pool, databas
 	return nil
 }
 
-// rebuildTargetWithWitness intentionally refuses this recovery path. The
-// interrupted restore's original target credentials/process handle are not
-// available here as immutable witness evidence; manufacturing a new NOLOGIN
-// role after the attempt would prove an unrelated identity. Keep this explicit
-// failure (rather than SKIP or a false clean transition) until the original
-// attempt can supply authentic local proof.
-func (e *drillEnv) rebuildTargetWithWitness(_ string, newOperation string) {
+// rebuildTargetWithWitness performs the controlled rebuild that ADR-004
+// missing-condition #4 requires: it can only proceed from the retained
+// original-attempt proof (child start identity + sole-Wait terminal + group
+// drain + role credential binding captured during the interrupted attempt).
+// Missing, partial or mismatched proof refuses — no manufactured witness and
+// no clean transition without the authentic facts.
+func (e *drillEnv) rebuildTargetWithWitness(target string, newOperation string) {
 	e.t.Helper()
-	e.t.Fatalf("local proof NOT ESTABLISHED: original interrupted attempt %q has no retained authenticated writer identity/process handle bound to its credentials; refusing DROP/CREATE and clean guard acceptance", newOperation)
+	trusted, err := controlstore.ParseDSNTarget(target)
+	if err != nil {
+		e.t.Fatalf("parse witnessed rebuild target: %v", err)
+	}
+	guardKey, err := controlstore.TargetGuardKey(trusted)
+	if err != nil {
+		e.t.Fatalf("derive witnessed rebuild guard key: %v", err)
+	}
+	guard, found, err := controlstore.ReadTargetGuard(e.ctx, e.ctrl, guardKey)
+	if err != nil || !found || guard.OperationID == "" || guard.AttemptAppName == "" {
+		e.t.Fatalf("witnessed rebuild requires the interrupted attempt guard: found=%t err=%v", found, err)
+	}
+	result, err := recovery.RebuildTargetWithRetainedProof(e.ctx, recovery.RebuildOptions{
+		Store:          e.store,
+		ControlDSN:     e.ctrlDSN,
+		TargetDSN:      target,
+		ObserverDSN:    e.adminDSN,
+		AdminDSN:       e.adminDSN,
+		TrustedTarget:  trusted,
+		OldOperationID: guard.OperationID,
+		NewOperationID: newOperation,
+		Actor:          "deploy:convergence",
+	})
+	if err != nil {
+		e.t.Fatalf("witnessed rebuild refused: %v", err)
+	}
+	if !result.Rebuilt || !result.GuardClean {
+		e.t.Fatalf("witnessed rebuild did not reach a clean guard: %+v", result)
+	}
+	after, found, err := controlstore.ReadTargetGuard(e.ctx, e.ctrl, guardKey)
+	if err != nil || !found || after.State != controlstore.TargetGuardClean || after.ActiveWriter {
+		e.t.Fatalf("witnessed rebuild guard is not clean: %+v found=%t err=%v", after, found, err)
+	}
+	if err := drillWaitNoTargetSessions(e.ctx, e.admin, e.dbNameOf(target)); err != nil {
+		e.t.Fatalf("witnessed rebuild left target sessions: %v", err)
+	}
 }
 
 func TestDrillTargetWitnessLossAndObserverInterruptionFailClosed(t *testing.T) {
@@ -404,6 +439,7 @@ func drillRestoreAcceptanceProofLoss(t *testing.T, terminateObserver bool) {
 			TargetDeclaration: recovery.TargetIsolated, TargetReason: "drill: isolated recovery environment",
 			Actor: "deploy:executor", ProgramVersion: drillProgramVersion,
 			OperationID: operation, PG: env.pg,
+			Convergence: env.deploymentConvergence(target),
 		})
 		restoreDone <- restoreOutcome{result: result, err: err}
 	}()

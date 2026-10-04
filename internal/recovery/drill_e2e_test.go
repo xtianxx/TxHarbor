@@ -941,6 +941,7 @@ func TestT058DrillEventLayerKafkaBrokerOffsetDivergence(t *testing.T) {
 
 	verifyTarget := env.createDatabase("kafka_verify")
 	env.verifyBackup(backup.ManifestPath, verifyTarget, env.operation("kafka-verify-backup"))
+	env.seedAuthoritativeTargetCleanBaseline()
 	recoveredDSN := env.recoveryTarget()
 	recovered := env.openPool(recoveredDSN)
 	env.restore(backup.ManifestPath, recoveredDSN, env.operation("kafka-restore"))
