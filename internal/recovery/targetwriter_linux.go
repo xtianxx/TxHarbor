@@ -648,9 +648,11 @@ func runTargetWriter(ctx context.Context, opts TargetWriterOptions) (result Targ
 		// convergence (recorded, audited by the deployment identity inside the
 		// protection window) is a PREREQUISITE for evidence acceptance and
 		// guard clean. The audited lane writes exactly one convergence trace
-		// for this operation in recovery_audit; a restore whose convergence is
-		// missing/unverified cannot reach clean or report restored.
-		if opts.OperationKind == TargetWriterOperationRestore {
+		// for this operation in recovery_audit; a bound restore whose
+		// convergence is missing/unverified cannot reach clean or report
+		// restored. Unbound (instance-less) restores keep their historical
+		// acceptance semantics.
+		if opts.OperationKind == TargetWriterOperationRestore && opts.InstanceID != "" {
 			if err := requireDeploymentConvergenceAudit(txCtx, acceptTx, key.String(), opts.OperationID); err != nil {
 				return err
 			}

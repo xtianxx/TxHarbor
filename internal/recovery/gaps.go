@@ -764,8 +764,14 @@ func (g *Gaps) Close(ctx context.Context, req CloseGapRequest) (Gap, error) {
 	if err := validateGapCredentialInputs(req.InstanceID, req.GapID, req.Actor, req.OperationID, req.Reason); err != nil {
 		return Gap{}, err
 	}
-	if err := controlstore.ValidateCredentialJSON("closure_evidence", req.ClosureEvidence); err != nil {
-		return Gap{}, err
+	// Blank evidence is "no new evidence" (ErrGapClosureEvidence), not a
+	// credential-shape refusal: the sentinel semantics come first, exactly as
+	// the closure discipline requires. Only non-blank evidence is checked for
+	// credential-shaped material before it can become a durable digest.
+	if len(bytes.TrimSpace(req.ClosureEvidence)) > 0 {
+		if err := controlstore.ValidateCredentialJSON("closure_evidence", req.ClosureEvidence); err != nil {
+			return Gap{}, err
+		}
 	}
 	instanceID, err := gapInstanceID(req.InstanceID)
 	if err != nil {

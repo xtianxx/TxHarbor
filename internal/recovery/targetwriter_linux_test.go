@@ -1194,6 +1194,15 @@ func writerOptions(f *targetWriterFixture, dsn string, target controlstore.DSNTa
 		Runner: TargetProcessRunner{DrainTimeout: 2 * time.Second, PollInterval: 10 * time.Millisecond,
 			HealthCheckInterval: 20 * time.Millisecond},
 		Probe: successfulWriterProbe, Acceptance: successfulWriterAcceptance,
+		Convergence: func(ctx context.Context, req ConvergenceRequest) error {
+			// Fixture deployment lane: the fixture's admin identity converges
+			// ownership to the target role and records the audited prerequisite.
+			step := DeploymentConvergence{
+				AdminDSN: dsn, TargetDSN: dsn, OriginalRole: target.Role,
+				Actor: "deploy:writer", Store: f.store,
+			}
+			return step.Converge(ctx, req)
+		},
 	}
 }
 
