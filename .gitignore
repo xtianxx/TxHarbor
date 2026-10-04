@@ -30,3 +30,7 @@ Thumbs.db
 .vscode/
 *.tmp
 *.swp
+
+# Python bytecode caches.
+__pycache__/
+*.pyc
