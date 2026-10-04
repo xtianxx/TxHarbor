@@ -98,3 +98,32 @@ T000-P 保持 OPEN；本目录不宣称生产就绪、不宣称外部账本一�
 - Final drill: 必需用例 19 PASS/3 FAIL/0 SKIP；顶层 913 PASS/3 FAIL/0 SKIP。Kafka offset guard 与 F2/T060 原始身份/进程证明失败，未执行破坏性验收。全量 PG 集成为 **1755 PASS/8 FAIL/2 SKIP**、exit 1；5 项隔离环境复跑 PASS 不改变全量失败结论。fix81 后三项聚焦 PG 测试 PASS（0 FAIL/0 SKIP），不代表全量 PG 通过。
 - 静态/unit/contract/race 检查 exit 0；PG 全量 exit 1。受影响 unit 与 script-parser/bash-syntax 检查 PASS。汇总和安全裁剪后的事件记录见本目录。最终源指纹不等于提交 ID；提交身份以证据文件的 `git log` 或归口方最终报告为准，归口方提交前复核源指纹。远程 CI 未运行。
 - T019/T020/T057/T058/T066/T068 remain OPEN. T000-P OPEN; no production readiness claim.
+
+## 9. ADR-004 R2 有界实现轮（2026-10-04/05）
+
+ADR-004 在 §2.1 记录 2026-10-04/05 轮次有限裁定（R1=LAUNCH 一次准入、R2=no-owner/no-privileges 别名 + 部署收敛洞察 + 修复向量、R3=分层路由头、R4=令牌衔接流、
+
+R5=见证升级路径）；实现轮在隔离环境中跑真 fixture。ADR 本身继续 Proposed；实现继续 BLOCKED（设计方向而非部署权限）。
+
+- **提交链（本轮，正推）**：
+  [8aadb96](/docs/evidence/015/README.md) 4 个恢复 build 归档补记 →
+  [27e533d] R1/R3/R5 生产代码 + 3 项 fixed-vectors 同步（含 `errAdmissionInvalidated` 等 4 项拒绝）→
+  [cdf01ec] R2 部署收敛步骤 + `RecoveryConfig.DeploymentAdminDSN` + CLI 以及 drill/PG fixture 接线 →
+  [d16de83] 见证重建 `RebuildTargetWithRetainedProof`（低置信度快照 bin 数据 +`attempt_proof` 审计行 + T059F2/T060 fixture 切换） →
+  [f98fb13] gap 闭合哨兵优先级 + 收敛门控确认绑定恢复 + childtransport 断言 →
+  [678b8bd] 后提交 native-start P 测试 `${Try}+3` 更新（R5 语义一致）。
+- **drill5（根 runner，全部 296 顶层测试）**：`/tmp/r2lab/run_drill5/focus.log` + `/tmp/r2lab/pgfull2.log`；
+  **295 通过/0 失败/1 个跳过（fd-probe child helper 的 wrapper 自引用，历来如此）**；包含：
+  `TestBorrowedReplacementBoundPostcommitNativeStart`（P+N1..N10）、`TestBorrowedReplacementBoundPostcommitNativeReady`（`F`+`R` 两向）、
+  `TestBorrowedReplacementBoundPostcommitAdmission`/`AdmissionMismatch`、`TestBorrowedReplacementControlLedgerIntegrity`（T057 类）、
+  `TestT058Drill*` 方向（T058 类）以及 witness-destroy negative（`TestBorrowedReplacementTargetWitnessDestroy*`）。
+- **pgfull2（根 runner，全仓库标签 `integration`）**：`/tmp/r2lab/run_pgfull2/pg-integration.jsonl`；
+  **1819 个通过 / 3 个失败 / 3 个跳过**。仅存的 3 个失败为 `internal/nonce`、`internal/signer`、`internal/withdrawal`
+  中的 `Test*MigrationHistoryUntouched` —— 全部因 **容器运行器缺少 `git` 二进制文件** 而失败
+  (`exec: "git": executable file not found in $PATH`; `nonceGit`/`withdrawalGit`/`signerGit` invocations at
+  `internal/nonce/migration_integration_test.go:247`, `internal/withdrawal/migration_integration_test.go:281`,
+  `internal/signer/migration_integration_test.go:331`)，而非恢复逻辑；主机 `make test-integration` 于 2026-10-04 通过（sign `precommit` 同提交树），因此移回主机执行可以通过 ——
+  **这 3 个失败被排除在本轮的恢复功能评估之外**，并被记录为 runner-environment 限制（与之前的根 runner 运行时形态相同）。它们**不**是 T019/T020/T057/T058/T066 的功能失败。
+- **.host-side suite 健康状况（最终树）**：`go build ./...` 退出码 0；`make lint`/`make test`/`make test-race`/`make test-contract`/`make test-integration-kafka/redis`/`make test-e2e` 均通过 (exit 0)。
+- **快速启动（quickstart）场景对照锚点**：此轮 maintenance evidence 在 `quickstart_matrix_evidence.md` §A.4 中逐场景体现。
+- **非声明**：不是生产就绪声明；未进行部署；仅执行了本地测试进程。

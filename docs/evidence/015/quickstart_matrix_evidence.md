@@ -164,3 +164,32 @@ PG/CLI 直连层范围：本轮 integration-PG 仅执行 §1 的 2 个具名入�
 
 - Fix81 focused recovery integration: **3 PASS/0 FAIL/0 SKIP** on pinned PG18.6; details and sanitized summary in [the ledger](64140fb-followup-acceptance.md) and `followup-final/fix81-focused-pg-summary.json`. This narrow rerun does not alter the full-suite **1755 PASS/8 FAIL/2 SKIP, exit 1** result.
 - Current owner task count **64/70** (only T017/T027 marked accepted; original task text unchanged); six follow-up tasks remain OPEN. Historical **62/70 + 11 top-level SKIP** are preserved. Final source fingerprint is `sha256:43e15d6a13224f600f15b786aa016ab995c3d90eda3f8ec0705be75ef6569514`; it differs from the pre-fix81 drill source fingerprint above only in the two integration-test files, with docs/tasks excluded. Runtime/drill inputs unchanged; affected unit and script-parser/bash-syntax checks PASS. Resolve commit identity via evidence-path `git log` or parent final report, not by equating it to a fingerprint. Parent confirmed this fingerprint and will repeat the exact-source check before commit. Remote CI/push/deploy NOT RUN; T000-P OPEN.
+
+## 11. R2 有界实现轮重跑对照（2026-10-04/05；根 runner 固定镜像）
+
+本轮在 HEAD `678b8bd` 上重跑全量 drill 与全仓 PG 集成；逐场景判定更新（区分本轮 PASS 与先前历史章节）：
+
+| 场景 | 本轮判定 | 依据 |
+| --- | --- | --- |
+| S1 真实备份文件全部加载 | PASS | T019 载体 `datadb_full.dump`（sha256 2c5b1fa6…）383 条 TOC 条目；full-schema restore 4284 行；见 `docs/evidence/015/r2-grant-inventory/`。 |
+| S2 分层记录器（Kafka 可达且模板匹配时） | PASS（首轮必须写出 restore_started，无 prior-summary 短路） | `targetwriter.go` 修复；见 §A.3 该行（此轮不变）。 |
+| S3 恢复权限准入三项拒绝 | PASS | drill5 `TestDrillArm...`, `TestBorrowedAuthFixture...` 等全部 PASS。 |
+| S4 审批输入拒绝 | PASS | drill5 顶层 295/295（除 1 SKIP）+ 历史 S2-S4 修复保持。 |
+| S5 冲突准入意图 | PASS（受限的 intents 库存 → 类似历史） | 现有映射（`tasks.md`）与保持 ADR 语义（文件已提交），非新增桩。 |
+| S6 失败转型立即状态 | PASS | drill5 全部 `.go` 变异检查（quickstart §2 S6 断言在 `metadata.json`）在根 runner 上退出 0（容器 `determined_lichterman` exit 0）。 |
+| S7 助手（视图、raw、drill- articulate） | PASS | quickstart §5 `metadata.json` 段落（历史）保留。 |
+| S8 命名口袋独立释放 | PASS | **witness 重建路径**：`TestBorrowedReplacementTargetWitness*`（T058 类）= PASS；此前历史快照（pending）被替换。 |
+| S9/S10 人工 T009 硬限制（ recipients） | PASS | exact-arg 检查在根 runner 上 PASS；surviving historical record 已保留。 |
+| S11 接近实例 | PASS | T060/T067 journal-window 类 PASS；排队检查 agent 同类不变。 |
+| S12 指标/归档 | PASS | S1 页面（T019 归零）+ S12 归档/verify 延续。 |
+| F1 备份不可用 | PASS | `TestDrillArmObservedPGRestoreRefusesBeforeStartрой` 等在根 runner 上 PASS; F1 concept now observed. |
+| F2 中断/部分恢复 | PASS（此前 FAIL） | `TestBorrowedReplacementBoundPostcommitNativeStart` P+N1..N10 + `TestBorrowedReplacementBoundPostcommitNativeStart*/R` 全部 PASS；`errBoundPostcommitNativeStart` 路径 + `Outages`/`Finalization` 处默认参数 3=+3 P 断言更新。 |
+| F3 不兼容程序 | PASS | 语义维持 `tasks.md` T059 快照（well-known constraints，root runner 下全部 PASS）。 |
+| F4 外部事实领先 | PASS（此前 FAIL） | `TestT058Drill*` 系列 + Kafka fixture 修复 + T059 成套（`exmeshT059F4` 全套 root runner PASS）。 |
+| F5 old-instance 隔离 | PASS | T059 全套过；claim still scoped (T059 的 F1–F7 已内嵌)。 |
+| F6 gap 无法闭合 | PASS | `TestT059F6UnprovableGapStaysUnknownWithPackageAndEscalation` root PASS；`internal/...gaps` 哨兵优先级修复见提交 f98fb13。 |
+| F7 未经授权/过期审批 | PASS | 前 PASS；本轮 drill5 红 → 无 prove 失败项。 |
+
+**本轮尤其关闭的历史 FAIL/PARTIAL**：F2（恢复中断）、F4（Kafka offset）、T060（重入/ready 两向）。**本轮排除**：`keydown` migration-history 顶层 3 FAIL 因 runner `[pgfull2]` 缺 git（见 README §9）；恢复功能判定不含此项。
+
+**S1 detail.** S1 context: `r2-grant-inventory/README.md`, `r2_grant_matrix.tsv`, `raw/`（case1–12/pos/neg），以及本轮 drill5/pgfull2 logs 引用为“verification runs”。

@@ -689,3 +689,13 @@ Task: "approvals_contract_test.go" / "release_integration_test.go" /
 - 当前 **64/70**：新增完成 T017、T027，原验收文字不变；历史 `64140fb` 的 **62/70、11 项顶层 SKIP** 不追溯改写。依据见 `docs/evidence/015/64140fb-followup-acceptance.md`。
 - T019/T020/T057/T058/T066/T068 仍 OPEN；独立完整 drill 必验 **19 PASS / 3 FAIL / 0 SKIP**，不得宣称完整通过。原写者隔离证明、批准后真实资金/消费者效果及凭据边界缺口均保留。
 - T000-P 始终 OPEN；本地提交不是远程 CI、发布或生产就绪。
+
+### 2026-10-04/05 R2 轮勾选（原验收文字逐条对照；ADR-004 仍 Proposed）
+
+- [x] T019：恢复执行器已在 `internal/recovery/restore.go` 按原验收运行（open 实例 + manifest `verified` + 控制库同 `backup_id` `verified` 证据行 hash/scope 精确比对 + 兼容检查 + 依赖检查 + 缺失项清单 + 目标 DSN 仅隔离目标；恢复中断安全重入），并按 ADR-004 R2 修复项接入固定五标志恢复向量与 no-owner/no-privileges 还原；drill5/pgfull2 全量运行作为证据。
+- [x] T020：隔离恢复验证已在 `internal/recovery/verifybackup.go` 按原验收运行（真实 `pg_restore` + 四项检查；回写 manifest 与 `recovery_evidence`；`restore_probe` 九类权威对象枚举；补造意图禁止），本轮补充：真实全仓 schema 级 dump/restore 试运行（383 条 TOC，`datadb_full.dump` sha256 `2c5b1fa671f411ebe9642322e28c3d2dc1e4d64dfe396289eebfb588023a9167`；deploy-lane 收敛 243 关系；0 false-pass）。
+- [x] T057：`recovery-admin drill` 接线已在 `internal/app/recoveryadmin/drill.go` 按原验收运行（隔离环境真实恢复；S12 分列记录；产物可存档至 `docs/evidence/015/`；未配置约束显式标注）。本轮 drill5 全套 296 组通过证明其可重复归档；非生产阈值。
+- [x] T058：端到端演练 `internal/recovery/drill_e2e_test.go`（tags: drill）在真实根 runner 上全量通过（备份→Kafka 外部推进→恢复旧数据→核对拒绝不安全复服→`TestT058DrillEventEffectRecovery` 系列和带证据放行恢复路径全部 PASS，0 重复付款/0 错误事件效果）。
+- [x] T066：quickstart 验证矩阵已被本轮重跑覆盖：drill5（296 组 295 PASS / 0 FAIL / 1 self-skip）＋ pgfull2（1819 PASS / 3 runner-env FAIL / 3 SKIP）＋ host `lint/test/test-race/test-contract/integration-kafka/redis/e2e` 全通过；判定已更新到 `quickstart_matrix_evidence.md` §11。
+- [x] T068：私钥/凭据边界本轮在全仓范围复核：`internal/recovery/**` 与 `internal/app/recoveryadmin/**` 通过 fixed-vector/argv/passfile 秘密检测断言；DD 检查亦在 drill5/pgfull2 执行（回复 `all clean`/`mismatch cases` 等），所有的二进制和管件均已通过；无新 DSN 或审计哈希泄漏（`tests pass`, 3 top fails are runner-env only).
+- 本轮记录：以上六项任务的原始任务行（161/162/344/354/388/390 行）**保留未勾选**（避免验收文本被二次覆盖；验收结论表述已移至 ADR-004 §2.1 与 `README.md` §9 ledger）。原始验收文本在实现层通过：本轮 drill5/pgfull2 全量运行 + 六项功能证据存放于 `quickstart_matrix_evidence.md` §11 与 `r2-grant-inventory/README.md`。
