@@ -529,6 +529,136 @@ func drillWaitRecoveryEvidenceInsert(ctx context.Context, admin *pgxpool.Pool, c
 	return errors.New("real restore did not reach the blocked recovery_evidence INSERT within the barrier deadline")
 }
 
+// TestDrillTargetWitnessSameRoleCredentialRotationPreservesBinding is the
+// first native-PG prototype for the ora11 decision. It deliberately uses one
+// LOGIN role and rotates only its SCRAM password: neither the immutable target
+// nor role fingerprint may change. The test is evidence about this pinned
+// fixture only, not production credential-management authority.
+func TestDrillTargetWitnessSameRoleCredentialRotationPreservesBinding(t *testing.T) {
+	env := newDrillEnv(t, false)
+	dsn := env.recoveryTarget()
+	role := fmt.Sprintf("drill_rotate_%d", env.seq+1)
+	roleSQL := pgx.Identifier{role}.Sanitize()
+	if _, err := env.admin.Exec(env.ctx, "CREATE ROLE "+roleSQL+" LOGIN PASSWORD 'drill-p0-secret'"); err != nil {
+		t.Fatal(err)
+	}
+	urlBefore, err := url.Parse(dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	urlBefore.User = url.UserPassword(role, "drill-p0-secret")
+	p0 := urlBefore.String()
+	before, err := controlstore.ParseDSNTarget(p0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	keyBefore, err := recovery.CanonicalTargetKey(before)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if conn, err := pgx.Connect(env.ctx, p0); err != nil {
+		t.Fatalf("P0 SCRAM credential did not authenticate: %v", err)
+	} else if err := conn.Close(env.ctx); err != nil {
+		t.Fatal(err)
+	}
+	wrongURL, _ := url.Parse(dsn)
+	wrongURL.User = url.UserPassword(role, "wrong-drill-password")
+	if conn, err := pgx.Connect(env.ctx, wrongURL.String()); err == nil {
+		_ = conn.Close(env.ctx)
+		t.Fatal("wrong SCRAM password authenticated")
+	}
+	var scram bool
+	if err := env.admin.QueryRow(env.ctx, `SELECT rolpassword LIKE 'SCRAM-SHA-256$%' FROM pg_authid WHERE rolname=$1`, role).Scan(&scram); err != nil {
+		t.Fatalf("read protected SCRAM verifier metadata: %v", err)
+	}
+	if !scram {
+		t.Fatal("fixture role did not store a SCRAM verifier")
+	}
+	if _, err := env.admin.Exec(env.ctx, "ALTER ROLE "+roleSQL+" PASSWORD 'drill-p1-secret'"); err != nil {
+		t.Fatal(err)
+	}
+	if conn, err := pgx.Connect(env.ctx, p0); err == nil {
+		_ = conn.Close(env.ctx)
+		t.Fatal("P0 authenticated after same-role credential rotation")
+	}
+	urlAfter, _ := url.Parse(dsn)
+	urlAfter.User = url.UserPassword(role, "drill-p1-secret")
+	conn, err := pgx.Connect(env.ctx, urlAfter.String())
+	if err != nil {
+		t.Fatalf("P1 SCRAM credential did not authenticate: %v", err)
+	}
+	_ = conn.Close(env.ctx)
+	after, err := controlstore.ParseDSNTarget(urlAfter.String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	keyAfter, err := recovery.CanonicalTargetKey(after)
+	if err != nil || keyAfter != keyBefore || after.DataTargetFingerprint().RoleFingerprint != before.DataTargetFingerprint().RoleFingerprint {
+		t.Fatalf("same-role password rotation changed immutable binding: before=%s after=%s err=%v", keyBefore, keyAfter, err)
+	}
+}
+
+// TestDrillTargetWitnessCredentialFenceBlocksPasswordAndMembershipChanges
+// is the PG18 catalog-lock prototype. SHARE locks on both auth catalogs must
+// hold a real ALTER ROLE password/self-password and membership edit until the
+// protected observer transaction ends.
+func TestDrillTargetWitnessCredentialFenceBlocksPasswordAndMembershipChanges(t *testing.T) {
+	env := newDrillEnv(t, false)
+	role := fmt.Sprintf("drill_fence_%d", env.seq+1)
+	member := role + "_member"
+	roleSQL, memberSQL := pgx.Identifier{role}.Sanitize(), pgx.Identifier{member}.Sanitize()
+	if _, err := env.admin.Exec(env.ctx, "CREATE ROLE "+roleSQL+" LOGIN PASSWORD 'fence-p0-secret'"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := env.admin.Exec(env.ctx, "CREATE ROLE "+memberSQL); err != nil {
+		t.Fatal(err)
+	}
+	observer, err := pgx.Connect(env.ctx, env.adminDSN)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer observer.Close(context.Background())
+	if _, err := observer.Exec(env.ctx, `BEGIN`); err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _, _ = observer.Exec(context.Background(), `ROLLBACK`) }()
+	if _, err := observer.Exec(env.ctx, `LOCK TABLE pg_catalog.pg_authid, pg_catalog.pg_auth_members IN SHARE MODE`); err != nil {
+		t.Fatalf("PG18 credential catalog fence unavailable: %v", err)
+	}
+	blockedDDL := func(dsn, statement, label string) {
+		t.Helper()
+		mutator, err := pgx.Connect(env.ctx, dsn)
+		if err != nil {
+			t.Fatal(err)
+		}
+		blockedCtx, cancel := context.WithTimeout(env.ctx, 300*time.Millisecond)
+		defer cancel()
+		_, execErr := mutator.Exec(blockedCtx, statement)
+		_ = mutator.Close(context.Background())
+		if execErr == nil || !errors.Is(execErr, context.DeadlineExceeded) {
+			t.Fatalf("%s was not blocked until deadline: %v", label, execErr)
+		}
+	}
+	selfURL, err := url.Parse(env.adminDSN)
+	if err != nil {
+		t.Fatal(err)
+	}
+	selfURL.User = url.UserPassword(role, "fence-p0-secret")
+	blockedDDL(selfURL.String(), "ALTER ROLE "+roleSQL+" PASSWORD 'fence-p1-secret'", "self-password ALTER ROLE")
+	blockedDDL(env.adminDSN, "GRANT "+roleSQL+" TO "+memberSQL, "membership change")
+	if _, err := observer.Exec(env.ctx, `COMMIT`); err != nil {
+		t.Fatal(err)
+	}
+	mutator, err := pgx.Connect(env.ctx, selfURL.String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer mutator.Close(context.Background())
+	if _, err := mutator.Exec(env.ctx, "ALTER ROLE "+roleSQL+" PASSWORD 'fence-p1-secret'"); err != nil {
+		t.Fatalf("password rotation remained blocked after fence release: %v", err)
+	}
+}
+
 // The target advisory lock is owned by the exact session whose transaction is
 // supplied here; the guard snapshot, rebuild audit and clean transition share
 // that same lock-owner transaction.

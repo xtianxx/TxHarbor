@@ -761,6 +761,12 @@ func (g *Gaps) Close(ctx context.Context, req CloseGapRequest) (Gap, error) {
 	if g == nil || g.store == nil {
 		return Gap{}, errors.New("evidence gaps require a controlstore.Store built by controlstore.NewStore")
 	}
+	if err := validateGapCredentialInputs(req.InstanceID, req.GapID, req.Actor, req.OperationID, req.Reason); err != nil {
+		return Gap{}, err
+	}
+	if err := controlstore.ValidateCredentialJSON("closure_evidence", req.ClosureEvidence); err != nil {
+		return Gap{}, err
+	}
 	instanceID, err := gapInstanceID(req.InstanceID)
 	if err != nil {
 		g.writeGapRefusal(ctx, req.InstanceID, req.Actor, ActionGapClose, "", err.Error(), req.OperationID)
@@ -914,6 +920,9 @@ RETURNING `+gapSelectColumns,
 func (g *Gaps) Escalate(ctx context.Context, req EscalateGapRequest) (Gap, error) {
 	if g == nil || g.store == nil {
 		return Gap{}, errors.New("evidence gaps require a controlstore.Store built by controlstore.NewStore")
+	}
+	if err := validateGapCredentialInputs(req.InstanceID, req.GapID, req.Actor, req.OperationID, req.EscalationRef, req.Reason); err != nil {
+		return Gap{}, err
 	}
 	instanceID, err := gapInstanceID(req.InstanceID)
 	if err != nil {
@@ -1074,6 +1083,9 @@ func (g *Gaps) Note(ctx context.Context, req GapNoteRequest) (Gap, error) {
 	if g == nil || g.store == nil {
 		return Gap{}, errors.New("evidence gaps require a controlstore.Store built by controlstore.NewStore")
 	}
+	if err := validateGapCredentialInputs(req.InstanceID, req.GapID, req.Actor, req.OperationID, string(req.Kind), req.Reason); err != nil {
+		return Gap{}, err
+	}
 	instanceID, err := gapInstanceID(req.InstanceID)
 	if err != nil {
 		return Gap{}, err
@@ -1156,6 +1168,18 @@ func (g *Gaps) Note(ctx context.Context, req GapNoteRequest) (Gap, error) {
 		return Gap{}, err
 	}
 	return record, nil
+}
+
+// validateGapCredentialInputs rejects recognizable credential material in
+// every caller-controlled value that may become a durable identifier, state
+// value, or audit field. It is intentionally applied before canonicalization.
+func validateGapCredentialInputs(values ...string) error {
+	for _, value := range values {
+		if err := controlstore.ValidateCredentialText("gap input", value); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // ---------------------------------------------------------------------------

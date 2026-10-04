@@ -70,6 +70,8 @@ func (LocalPGCommand) Run(ctx context.Context, name string, args []string, stdin
 	cmd.Stdin = stdin
 	cmd.Stdout = stdout
 	cmd.Stderr = stderr
+	releaseLifecycleThread := lockPGChildParentDeath(cmd)
+	defer releaseLifecycleThread()
 	if err := cmd.Run(); err != nil {
 		return fmt.Errorf("run %s: %w", name, err)
 	}

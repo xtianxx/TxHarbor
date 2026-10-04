@@ -21,9 +21,12 @@ var credentialFieldNames = map[string]bool{
 	"secret": true, "clientsecret": true,
 	"credential": true, "credentials": true,
 	"dsn": true, "databaseurl": true, "url": true, "uri": true,
+	"accesstoken": true, "jwt": true,
 }
 
 var privateKeyPEM = regexp.MustCompile(`(?i)-----BEGIN (?:[A-Z0-9 ]+ )?PRIVATE KEY-----`)
+var jwtValue = regexp.MustCompile(`\b[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\b`)
+var accessTokenValue = regexp.MustCompile(`(?i)(?:\baccess[_-]?token\s*=\s*(?:"[^"]*"|'[^']*'|[^\s,;&?]+)|[?&]access[_-]?token=([^&\s]+))`)
 
 // client_secret is part of the recognized structured-field vocabulary even
 // though the shared log redactor's legacy pattern does not yet include it.
@@ -47,7 +50,7 @@ func validateCredentialText(field, value string) error {
 	if redactedMarker(value) {
 		return nil
 	}
-	if logx.Redact(value) != value || clientSecretValue.MatchString(value) || privateKeyPEM.MatchString(value) {
+	if logx.Redact(value) != value || clientSecretValue.MatchString(value) || accessTokenValue.MatchString(value) || privateKeyPEM.MatchString(value) || jwtValue.MatchString(value) {
 		return fmt.Errorf("%s contains credential material", field)
 	}
 	return nil

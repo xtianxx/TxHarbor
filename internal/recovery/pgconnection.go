@@ -1,20 +1,12 @@
 package recovery
 
 // PostgreSQL client child-process connection preparation. Never place a DSN
-// password in argv: process listings and diagnostic tooling commonly expose
-// argv. The password is instead written to a private, invocation-scoped
-// libpq passfile. Normal return/error paths remove the private directory; an
-// uncatchable SIGKILL or machine crash can leave it behind in the OS temp
-// directory (whose child directory is mode 0700). This helper is exported within the internal package for
-// later supervised-command reuse. It supports only a documented, explicit
-// target and option allowlist; a target must explicitly specify host/hostaddr,
-// port, database, and user. Allowed optional settings are application_name,
-// SSL certificate/mode/protocol settings, gssencmode, channel_binding,
-// connect_timeout, client_encoding, target_session_attrs, load_balance_hosts,
-// keepalive settings, and tcp_user_timeout. Service/passfile indirection,
-// ambient PG* configuration, unknown options, and options with secret payloads
-// (including sslpassword) are refused because they could change target
-// identity or leak credentials.
+// password in the PostgreSQL child's argv: process listings and diagnostic
+// tooling commonly expose argv. Credentials use a private anonymous
+// descriptor-backed libpq passfile, so interruption cannot leave a pathname.
+// The helper supports only a documented explicit target and option allowlist;
+// ambient PG* configuration, service/passfile indirection, unknown options,
+// and secret-bearing unsupported options fail closed.
 
 import (
 	"fmt"
@@ -24,14 +16,23 @@ import (
 	"strings"
 )
 
-// PreparePGChildConnection converts one libpq DSN to a credential-free DSN,
-// plus private environment entries and a cleanup function. URI and keyword
-// conninfo syntax are preserved for the supported option allowlist; malformed
-// and unsupported forms fail closed. The caller must reject ambient PG*
-// environment and use the returned entries only after that check. When the
-// DSN has no embedded password, env is empty and cleanup is a no-op.
+// PreparePGChildConnection converts a libpq DSN to a credential-free DSN,
+// plus a PGPASSFILE entry referencing a private open descriptor and cleanup.
+// Command launchers should use protectPGChildArgsWithEnvironment to arrange
+// descriptor passing to the child.
 func PreparePGChildConnection(dsn string) (safeDSN string, env []string, cleanup func(), err error) {
-	cleanup = func() {}
+	safeDSN, credential, err := preparePGChildConnection(dsn)
+	if err != nil {
+		return "", nil, func() {}, err
+	}
+	if credential == nil {
+		return safeDSN, nil, func() {}, nil
+	}
+	fd := credential.Fd()
+	return safeDSN, []string{fmt.Sprintf("PGPASSFILE=/proc/self/fd/%d", fd)}, func() { _ = credential.Close() }, nil
+}
+
+func preparePGChildConnection(dsn string) (string, *os.File, error) {
 	if strings.HasPrefix(strings.ToLower(dsn), "postgres://") || strings.HasPrefix(strings.ToLower(dsn), "postgresql://") {
 		return preparePGURI(dsn)
 	}
@@ -56,11 +57,24 @@ func pgChildEnvironment(environ []string) []string {
 	filtered := make([]string, 0, len(environ))
 	for _, entry := range environ {
 		key, _, ok := strings.Cut(entry, "=")
-		if !ok || len(key) < 2 || !strings.EqualFold(key[:2], "PG") {
+		if ok && isPGChildRuntimeEnvironmentKey(key) {
 			filtered = append(filtered, entry)
 		}
 	}
 	return filtered
+}
+
+// isPGChildRuntimeEnvironmentKey is deliberately a small operating-system
+// runtime allowlist. In particular, do not pass the application's environment
+// wholesale: it may contain connection DSNs, signer credentials, API keys, or
+// other secrets unrelated to the PostgreSQL client.
+func isPGChildRuntimeEnvironmentKey(key string) bool {
+	switch key {
+	case "PATH", "HOME", "TMPDIR", "TMP", "TEMP", "LANG", "LC_ALL", "LC_CTYPE", "LC_COLLATE", "LC_MESSAGES", "LC_MONETARY", "LC_NUMERIC", "LC_TIME", "SYSTEMROOT", "WINDIR":
+		return true
+	default:
+		return false
+	}
 }
 
 func protectPGChildArgs(cmd *exec.Cmd, name string, args []string) (func(), error) {
@@ -102,14 +116,22 @@ func protectPGChildArgsWithEnvironment(cmd *exec.Cmd, name string, args, environ
 	if dsn == "" {
 		return func() {}, fmt.Errorf("database option has no value")
 	}
-	safe, env, cleanup, err := PreparePGChildConnection(dsn)
+	safe, credential, err := preparePGChildConnection(dsn)
 	if err != nil {
 		return func() {}, err
 	}
 	args[dbIndex] = "--dbname=" + safe
-	cmd.Env = append(cmd.Env, env...)
+	if credential != nil {
+		childFD := 3 + len(cmd.ExtraFiles)
+		cmd.ExtraFiles = append(cmd.ExtraFiles, credential)
+		cmd.Env = append(cmd.Env, fmt.Sprintf("PGPASSFILE=/proc/self/fd/%d", childFD))
+	}
 	cmd.Args = append([]string{cmd.Args[0]}, args...)
-	return cleanup, nil
+	return func() {
+		if credential != nil {
+			_ = credential.Close()
+		}
+	}, nil
 }
 
 func isPGTargetOverrideArg(arg string) bool {
@@ -121,16 +143,16 @@ func isPGTargetOverrideArg(arg string) bool {
 	return arg == "-h" || arg == "-p" || arg == "-U" || strings.HasPrefix(arg, "-h") && len(arg) > 2 || strings.HasPrefix(arg, "-p") && len(arg) > 2 || strings.HasPrefix(arg, "-U") && len(arg) > 2
 }
 
-func preparePGURI(dsn string) (string, []string, func(), error) {
+func preparePGURI(dsn string) (string, *os.File, error) {
 	u, err := url.Parse(dsn)
 	if err != nil || u.Scheme != "postgres" && u.Scheme != "postgresql" || u.Opaque != "" || u.Fragment != "" {
-		return "", nil, func() {}, fmt.Errorf("unsupported PostgreSQL URI")
+		return "", nil, fmt.Errorf("unsupported PostgreSQL URI")
 	}
 	if u.Hostname() == "" || u.Port() == "" || u.User == nil || u.User.Username() == "" || strings.Trim(u.Path, "/") == "" {
-		return "", nil, func() {}, fmt.Errorf("PostgreSQL URI requires explicit host, port, database, and user")
+		return "", nil, fmt.Errorf("PostgreSQL URI requires explicit host, port, database, and user")
 	}
 	if strings.ContainsAny(strings.Trim(u.Path, "/"), " =\t\r\n") {
-		return "", nil, func() {}, fmt.Errorf("unsupported PostgreSQL database name")
+		return "", nil, fmt.Errorf("unsupported PostgreSQL database name")
 	}
 	password, hasPassword := "", false
 	if u.User != nil {
@@ -141,34 +163,34 @@ func preparePGURI(dsn string) (string, []string, func(), error) {
 	}
 	query, err := url.ParseQuery(u.RawQuery)
 	if err != nil {
-		return "", nil, func() {}, fmt.Errorf("unsupported PostgreSQL URI query")
+		return "", nil, fmt.Errorf("unsupported PostgreSQL URI query")
 	}
 	if values, exists := query["password"]; exists {
 		if len(values) != 1 || hasPassword {
-			return "", nil, func() {}, fmt.Errorf("ambiguous password in PostgreSQL URI")
+			return "", nil, fmt.Errorf("ambiguous password in PostgreSQL URI")
 		}
 		password, hasPassword = values[0], true
 		delete(query, "password")
 	}
 	for key, values := range query {
 		if key == "service" || key == "passfile" || key == "sslpassword" || !supportedPGOption(key) {
-			return "", nil, func() {}, fmt.Errorf("unsupported PostgreSQL URI option")
+			return "", nil, fmt.Errorf("unsupported PostgreSQL URI option")
 		}
 		if len(values) != 1 {
-			return "", nil, func() {}, fmt.Errorf("duplicate PostgreSQL URI option")
+			return "", nil, fmt.Errorf("duplicate PostgreSQL URI option")
 		}
 		if key == "host" || key == "hostaddr" || key == "port" || key == "dbname" || key == "user" {
-			return "", nil, func() {}, fmt.Errorf("duplicate PostgreSQL target setting")
+			return "", nil, fmt.Errorf("duplicate PostgreSQL target setting")
 		}
 	}
 	if !hasPassword {
-		return u.String(), nil, func() {}, nil
+		return u.String(), nil, nil
 	}
 	if _, explicit := query["passfile"]; explicit {
-		return "", nil, func() {}, fmt.Errorf("password with explicit passfile is unsupported")
+		return "", nil, fmt.Errorf("password with explicit passfile is unsupported")
 	}
 	if err := validatePassfilePassword(password); err != nil {
-		return "", nil, func() {}, err
+		return "", nil, err
 	}
 	u.RawQuery = query.Encode()
 	return writePrivatePGPassfile(u.String(), password)
@@ -195,10 +217,10 @@ func supportedPGOption(key string) bool {
 	}
 }
 
-func preparePGKeywordDSN(dsn string) (string, []string, func(), error) {
+func preparePGKeywordDSN(dsn string) (string, *os.File, error) {
 	options, err := parsePGKeywordDSN(dsn)
 	if err != nil {
-		return "", nil, func() {}, fmt.Errorf("unsupported PostgreSQL keyword DSN")
+		return "", nil, fmt.Errorf("unsupported PostgreSQL keyword DSN")
 	}
 	password, hasPassword := "", false
 	filtered := make([]pgConnOption, 0, len(options))
@@ -206,7 +228,7 @@ func preparePGKeywordDSN(dsn string) (string, []string, func(), error) {
 	identity := make(map[string]string, len(options))
 	for _, option := range options {
 		if seen[option.key] {
-			return "", nil, func() {}, fmt.Errorf("duplicate PostgreSQL connection option")
+			return "", nil, fmt.Errorf("duplicate PostgreSQL connection option")
 		}
 		seen[option.key] = true
 		switch option.key {
@@ -214,7 +236,7 @@ func preparePGKeywordDSN(dsn string) (string, []string, func(), error) {
 			password, hasPassword = option.value, true
 		default:
 			if option.key == "service" || option.key == "passfile" || option.key == "sslpassword" || !supportedPGOption(option.key) {
-				return "", nil, func() {}, fmt.Errorf("unsupported PostgreSQL connection option")
+				return "", nil, fmt.Errorf("unsupported PostgreSQL connection option")
 			}
 			if option.key == "host" || option.key == "hostaddr" || option.key == "port" || option.key == "dbname" || option.key == "user" {
 				identity[option.key] = option.value
@@ -223,19 +245,26 @@ func preparePGKeywordDSN(dsn string) (string, []string, func(), error) {
 		}
 	}
 	if identity["host"] == "" && identity["hostaddr"] == "" || identity["port"] == "" || identity["dbname"] == "" || identity["user"] == "" {
-		return "", nil, func() {}, fmt.Errorf("keyword DSN requires explicit host, port, database, and user")
+		return "", nil, fmt.Errorf("keyword DSN requires explicit host, port, database, and user")
 	}
 	if strings.ContainsAny(identity["dbname"], " =?\t\r\n") || strings.Contains(identity["dbname"], "://") {
-		return "", nil, func() {}, fmt.Errorf("unsupported PostgreSQL database name")
+		return "", nil, fmt.Errorf("unsupported PostgreSQL database name")
+	}
+	// R3 protected peer lane: a passwordless local-socket host is the only
+	// permitted form for the recovery route. A password-bearing keyword DSN
+	// never rides the peer lane — the recovery role's admission lives on the
+	// gate's OS identity, never on a secret the child could carry.
+	if hasPassword && isSocketHost(identity["host"]) {
+		return "", nil, fmt.Errorf("peer socket route must be passwordless")
 	}
 	if hasPassword {
 		if err := validatePassfilePassword(password); err != nil {
-			return "", nil, func() {}, err
+			return "", nil, err
 		}
 	}
 	safe := formatPGKeywordDSN(filtered)
 	if !hasPassword {
-		return safe, nil, func() {}, nil
+		return safe, nil, nil
 	}
 	return writePrivatePGPassfile(safe, password)
 }
@@ -327,32 +356,27 @@ func validatePassfilePassword(password string) error {
 	return nil
 }
 
-func writePrivatePGPassfile(safeDSN, password string) (string, []string, func(), error) {
-	dir, err := os.MkdirTemp("", "txharbor-pg-*")
+func writePrivatePGPassfile(safeDSN, password string) (string, *os.File, error) {
+	file, err := createPGCredentialFile()
 	if err != nil {
-		return "", nil, func() {}, fmt.Errorf("create private PostgreSQL credential directory")
+		return "", nil, err
 	}
-	cleanup := func() { _ = os.RemoveAll(dir) }
-	path := dir + string(os.PathSeparator) + "pgpass"
-	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
-	if err != nil {
+	cleanup := func() { _ = file.Close() }
+	escape := func(s string) string { s = strings.ReplaceAll(s, `\`, `\\`); return strings.ReplaceAll(s, ":", `\:`) }
+	if _, err := fmt.Fprintf(file, "*:*:*:*:%s\n", escape(password)); err != nil {
 		cleanup()
-		return "", nil, func() {}, fmt.Errorf("create private PostgreSQL passfile")
+		return "", nil, fmt.Errorf("write private PostgreSQL passfile")
 	}
-	if err := f.Chmod(0o600); err != nil {
-		_ = f.Close()
+	if _, err := file.Seek(0, 0); err != nil {
 		cleanup()
-		return "", nil, func() {}, fmt.Errorf("protect private PostgreSQL passfile")
+		return "", nil, fmt.Errorf("prepare private PostgreSQL passfile")
 	}
-	escape := func(s string) string {
-		s = strings.ReplaceAll(s, `\`, `\\`)
-		return strings.ReplaceAll(s, ":", `\:`)
-	}
-	_, writeErr := fmt.Fprintf(f, "*:*:*:*:%s\n", escape(password))
-	closeErr := f.Close()
-	if writeErr != nil || closeErr != nil {
-		cleanup()
-		return "", nil, func() {}, fmt.Errorf("write private PostgreSQL passfile")
-	}
-	return safeDSN, []string{"PGPASSFILE=" + path}, cleanup, nil
+	return safeDSN, file, nil
+}
+
+// isSocketHost reports whether a keyword-DSN host names a local Unix-socket
+// directory (libpq: an absolute path or a path-like prefix). It is the R3
+// peer-lane form check; IP/hostname hosts return false.
+func isSocketHost(host string) bool {
+	return strings.HasPrefix(host, "/")
 }

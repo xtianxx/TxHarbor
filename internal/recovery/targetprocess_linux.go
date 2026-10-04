@@ -10,6 +10,9 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
+	"strings"
+	"sync"
 	"syscall"
 	"time"
 )
@@ -23,6 +26,132 @@ type TargetProcessRunner struct {
 	PollInterval        time.Duration
 	HealthCheckInterval time.Duration
 	HealthCheckTimeout  time.Duration
+	observation         *targetProcessObservation
+}
+
+// targetProcessObservation is an internal, non-callback observation channel.
+// It retains the exact Cmd/Process owned by this runner and records, under a
+// short mutex, three separate facts: the observed start identity, the bounded
+// disposition the runner returned to its caller, and the actual completion of
+// the sole cmd.Wait. It can neither Wait nor influence child cancellation. It
+// is intentionally not a public proving interface.
+type targetProcessObservation struct {
+	mu                 sync.Mutex
+	started            bool
+	cmd                *exec.Cmd
+	process            *os.Process
+	pid                int
+	startID            uint64
+	startErr           error
+	runnerReturned     bool
+	result             PGCommandResult
+	childWaitCompleted bool
+	waitErr            error
+	waitExitCode       int
+	terminal           bool
+}
+
+type targetProcessSnapshot struct {
+	started            bool
+	cmd                *exec.Cmd
+	process            *os.Process
+	pid                int
+	startID            uint64
+	startErr           error
+	runnerReturned     bool
+	result             PGCommandResult
+	childWaitCompleted bool
+	waitErr            error
+	waitExitCode       int
+	terminal           bool
+}
+
+func (o *targetProcessObservation) recordStart(cmd *exec.Cmd) {
+	if o == nil || cmd == nil || cmd.Process == nil {
+		return
+	}
+	startID, err := linuxProcessStartIdentity(cmd.Process.Pid)
+	o.mu.Lock()
+	o.started, o.cmd, o.process, o.pid, o.startID, o.startErr = true, cmd, cmd.Process, cmd.Process.Pid, startID, err
+	o.mu.Unlock()
+}
+
+// recordRunnerReturned records the bounded disposition this runner returned to
+// its caller. A disposition is not proof that the child was reaped: on a
+// deadline bound the runner may return PGCommandAmbiguous while the sole wait
+// is still pending.
+func (o *targetProcessObservation) recordRunnerReturned(result PGCommandResult) {
+	if o == nil {
+		return
+	}
+	o.mu.Lock()
+	o.runnerReturned, o.result = true, result
+	o.mu.Unlock()
+}
+
+// recordChildWaitCompleted records the only authentic terminal fact: the sole
+// owner observed cmd.Wait return for the exact child. It is written by that
+// owner after the wait returns and never by a bounded runner return.
+func (o *targetProcessObservation) recordChildWaitCompleted(err error) {
+	if o == nil {
+		return
+	}
+	o.mu.Lock()
+	o.childWaitCompleted, o.waitErr, o.waitExitCode, o.terminal = true, err, processExitCode(err), true
+	o.mu.Unlock()
+}
+
+func (o *targetProcessObservation) snapshot() targetProcessSnapshot {
+	if o == nil {
+		return targetProcessSnapshot{}
+	}
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	return targetProcessSnapshot{
+		started:            o.started,
+		cmd:                o.cmd,
+		process:            o.process,
+		pid:                o.pid,
+		startID:            o.startID,
+		startErr:           o.startErr,
+		runnerReturned:     o.runnerReturned,
+		result:             o.result,
+		childWaitCompleted: o.childWaitCompleted,
+		waitErr:            o.waitErr,
+		waitExitCode:       o.waitExitCode,
+		terminal:           o.terminal,
+	}
+}
+
+func linuxProcessStartIdentity(pid int) (uint64, error) {
+	b, err := os.ReadFile(fmt.Sprintf("/proc/%d/stat", pid))
+	if err != nil {
+		return 0, err
+	}
+	// comm is parenthesized and may itself contain spaces or ')'; fields after
+	// its final ')' begin with field 3 (state), making starttime field 22 index 19.
+	end := strings.LastIndexByte(string(b), ')')
+	if end < 0 {
+		return 0, errors.New("malformed proc stat")
+	}
+	fields := strings.Fields(string(b[end+1:]))
+	if len(fields) <= 19 {
+		return 0, errors.New("truncated proc stat")
+	}
+	return strconv.ParseUint(fields[19], 10, 64)
+}
+
+type targetProcessReceipt struct {
+	mu              sync.Mutex
+	consumed        bool
+	snapshot        targetProcessSnapshot
+	targetKey       TargetKey
+	roleFingerprint string
+	operationID     string
+}
+
+func bindTargetProcessReceipt(snapshot targetProcessSnapshot, key TargetKey, roleFingerprint, operationID string) *targetProcessReceipt {
+	return &targetProcessReceipt{snapshot: snapshot, targetKey: key, roleFingerprint: roleFingerprint, operationID: operationID}
 }
 
 // PGCommandOutcome is deliberately about process supervision, not target
@@ -150,51 +279,88 @@ func (r TargetProcessRunner) runSupervised(ctx context.Context, executable strin
 	}
 	defer cleanup()
 	cmd.Stdin, cmd.Stdout, cmd.Stderr = stdin, stdout, stderr
-	if err := cmd.Start(); err != nil {
+
+	// Launch and the sole cmd.Wait belong to one owner goroutine pinned to its
+	// OS thread. Linux delivers Pdeathsig when the thread that forked the child
+	// exits, so lifecycle ownership must outlive the actual Wait: the bounded
+	// runner below may return deadline ambiguity while that wait is still
+	// pending, and the same pinned owner records the authentic reaped facts
+	// when Wait returns. The caller never issues a second Wait.
+	startCh := make(chan error, 1)
+	waitCh := make(chan error, 1)
+	go func() {
+		releaseLifecycleThread := lockPGChildParentDeath(cmd)
+		if err := cmd.Start(); err != nil {
+			startCh <- err
+			releaseLifecycleThread()
+			return
+		}
+		// The start identity is captured here, on the same pinned owner and
+		// before the sole Wait can reap the child.
+		r.observation.recordStart(cmd)
+		startCh <- nil
+		waitErr := cmd.Wait()
+		r.observation.recordChildWaitCompleted(waitErr)
+		waitCh <- waitErr
+		releaseLifecycleThread()
+	}()
+	if err := <-startCh; err != nil {
 		return result, errors.New("start supervised target child failed")
 	}
 	result.Started = true
 	pid := cmd.Process.Pid
-	waitCh := make(chan error, 1)
-	go func() { waitCh <- cmd.Wait() }()
 	ticker := time.NewTicker(healthInterval)
 	defer ticker.Stop()
 	for {
 		select {
 		case childErr := <-waitCh:
+			// The pinned owner already recorded the actual wait completion for
+			// this event; only process-group drain facts remain to be proven.
 			result.ExitCode = processExitCode(childErr)
 			if err := waitProcessGroupGone(pid, limit, poll); err != nil {
 				_ = syscall.Kill(-pid, syscall.SIGKILL)
 				if drainErr := waitProcessGroupGone(pid, limit, poll); drainErr != nil {
 					result.Outcome = PGCommandAmbiguous
-					return result, errors.New("target process group drain could not be proven")
+					return r.recordRunnerReturned(result, errors.New("target process group drain could not be proven"))
 				}
 				result.ProcessGroupDrained = true
 				result.Outcome = PGCommandAmbiguous
-				return result, errors.New("target child exited with remaining process-group members")
+				return r.recordRunnerReturned(result, errors.New("target child exited with remaining process-group members"))
 			}
 			result.ProcessGroupDrained = true
 			if childErr != nil {
 				result.Outcome = PGCommandFailed
-				return result, errors.New("target child failed")
+				return r.recordRunnerReturned(result, errors.New("target child failed"))
 			}
 			result.Outcome = PGCommandSucceeded
-			return result, nil
+			return r.recordRunnerReturned(result, nil)
 		case <-ctx.Done():
-			return r.stopProcessGroup(ctx, pid, waitCh, result, PGCommandCanceled, limit, poll, ctx.Err())
+			stopped, stopErr := r.stopProcessGroup(ctx, pid, waitCh, result, PGCommandCanceled, limit, poll, ctx.Err())
+			return r.recordRunnerReturned(stopped, stopErr)
 		case <-ticker.C:
 			if lockHealth == nil {
 				continue
 			}
 			if err := runBoundedLockHealth(ctx, lockHealth, healthTimeout); err != nil {
 				if ctx.Err() != nil {
-					return r.stopProcessGroup(ctx, pid, waitCh, result, PGCommandCanceled, limit, poll, ctx.Err())
+					stopped, stopErr := r.stopProcessGroup(ctx, pid, waitCh, result, PGCommandCanceled, limit, poll, ctx.Err())
+					return r.recordRunnerReturned(stopped, stopErr)
 				}
-				return r.stopProcessGroup(ctx, pid, waitCh, result, PGCommandLockLost, limit, poll,
+				stopped, stopErr := r.stopProcessGroup(ctx, pid, waitCh, result, PGCommandLockLost, limit, poll,
 					errors.New("target lock health could not be proven"))
+				return r.recordRunnerReturned(stopped, stopErr)
 			}
 		}
 	}
+}
+
+// recordRunnerReturned records the bounded disposition handed to the caller.
+// It deliberately does not claim that the child was waited: that fact is
+// recorded only by the pinned owner once the sole cmd.Wait returns, so a
+// deadline-bound ambiguity can never fabricate a terminal receipt.
+func (r TargetProcessRunner) recordRunnerReturned(result PGCommandResult, err error) (PGCommandResult, error) {
+	r.observation.recordRunnerReturned(result)
+	return result, err
 }
 
 func (r TargetProcessRunner) stopProcessGroup(ctx context.Context, pgid int, waitCh <-chan error,
@@ -223,16 +389,20 @@ func (r TargetProcessRunner) stopProcessGroup(ctx context.Context, pgid int, wai
 }
 
 func runBoundedLockHealth(parent context.Context, check func(context.Context) error, timeout time.Duration) error {
-	ctx, cancel := context.WithTimeout(parent, timeout)
-	defer cancel()
-	done := make(chan error, 1)
-	go func() { done <- check(ctx) }()
-	select {
-	case err := <-done:
-		return err
-	case <-ctx.Done():
-		return ctx.Err()
+	if parent == nil || check == nil {
+		return errors.New("target lock health context and check are required")
 	}
+	if timeout <= 0 {
+		timeout = time.Second
+	}
+	// Child cancellation must not cancel the control-session query: pgx treats a
+	// canceled query context as a connection failure and closes the borrowed
+	// advisory-lock owner. The independent deadline keeps the query bounded.
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(parent), timeout)
+	defer cancel()
+	// Run synchronously so no health goroutine can retain the lock mutex or
+	// continue querying after this result is used to stop/reap the writer.
+	return check(ctx)
 }
 
 func processExitCode(err error) int {

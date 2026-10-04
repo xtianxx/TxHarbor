@@ -60,15 +60,36 @@ func recoveryAdminRestore(ctx context.Context, args []string, d Deps) int {
 	fs := flag.NewFlagSet("txharbor recovery-admin restore", flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	manifestPath := fs.String("manifest", "", "manifest path (required)")
-	targetDSN := fs.String("target-dsn", "", "target DSN (required; isolated unless explicitly declared)")
+	targetDSN := fs.String("target-dsn", "", "target DSN (or "+recoveryTargetDSNEnv+"; isolated unless explicitly declared)")
 	instanceFlag := fs.String("instance", "", "recovery instance id (required)")
 	declaration := fs.String("declaration", string(recovery.TargetIsolated), "target declaration: isolated|production_main")
 	reason := fs.String("reason", "", "explicit recorded reason (required for production_main; audit annotation only)")
 	operationID := fs.String("operation-id", "", "idempotent operation identity (optional)")
 	signerEndpoint := fs.String("signer-endpoint", "", "signer boundary endpoint for reachability probing (optional)")
 	rpcURL := fs.String("rpc-url", "", "RPC fact-source URL for reachability probing (optional)")
-	brokerDSN := fs.String("broker-dsn", "", "broker DSN for reachability probing (optional)")
+	brokerDSN := fs.String("broker-dsn", "", "broker DSN for reachability probing (optional; or "+recoveryBrokerDSNEnv+")")
 	if err := fs.Parse(args); err != nil {
+		return 2
+	}
+	targetFlagSet, brokerFlagSet := false, false
+	fs.Visit(func(f *flag.Flag) {
+		if f.Name == "target-dsn" {
+			targetFlagSet = true
+		}
+		if f.Name == "broker-dsn" {
+			brokerFlagSet = true
+		}
+	})
+	resolvedTarget, inputErr := recoveryProtectedDSNInput(*targetDSN, targetFlagSet, d.getenv(), recoveryTargetDSNEnv, "--target-dsn")
+	if inputErr == nil {
+		*targetDSN = resolvedTarget
+	}
+	resolvedBroker, brokerErr := recoveryProtectedDSNInput(*brokerDSN, brokerFlagSet, d.getenv(), recoveryBrokerDSNEnv, "--broker-dsn")
+	if brokerErr == nil {
+		*brokerDSN = resolvedBroker
+	}
+	if inputErr != nil || brokerErr != nil {
+		fmt.Fprintf(stderr, "txharbor recovery-admin restore: invalid DSN source selection; refusing\n")
 		return 2
 	}
 	if fs.NArg() > 0 || strings.TrimSpace(*manifestPath) == "" || strings.TrimSpace(*targetDSN) == "" ||
@@ -101,6 +122,12 @@ func recoveryAdminRestore(ctx context.Context, args []string, d Deps) int {
 		fmt.Fprintf(stderr, "txharbor recovery-admin restore: %s is required (not configured); refusing\n", config.EnvRecoveryObserverDSN)
 		return 1
 	}
+	// R3 protected lane: the passwordless peer route for the supervised
+	// restore child. Optional deployment config; when present, every identity
+	// comparator stays on TargetDSN and the route must be socket-local,
+	// passwordless and name the deployed recovery role (validated in
+	// internal/recovery before any marker or guard work).
+	gateRoute, _ := d.getenvValue(config.EnvRecoveryGateDSN)
 	operation, err := recoveryOpOperationID(*operationID)
 	if err != nil {
 		fmt.Fprintf(stderr, "txharbor recovery-admin restore: %s\n", logx.Redact(err.Error()))
@@ -175,6 +202,7 @@ func recoveryAdminRestore(ctx context.Context, args []string, d Deps) int {
 		ProgramVersion:    programVersion,
 		OperationID:       operation,
 		PG:                recovery.LocalPGCommand{},
+		GateDSN:           strings.TrimSpace(gateRoute),
 		SignerEndpoint:    strings.TrimSpace(*signerEndpoint),
 		RPCURL:            strings.TrimSpace(*rpcURL),
 		BrokerDSN:         strings.TrimSpace(*brokerDSN),

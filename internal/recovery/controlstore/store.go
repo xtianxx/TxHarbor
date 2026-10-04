@@ -1291,49 +1291,81 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`
 // class. Callable on a pool or inside a transaction (same-transaction audit
 // is the pairing anchor of decision writes).
 func WriteAudit(ctx context.Context, q Queryer, rec AuditRecord) error {
+	args, err := auditInsertArgs(q, rec)
+	if err != nil {
+		return err
+	}
+	if _, err := q.Exec(ctx, insertAuditSQL, args...); err != nil {
+		return fmt.Errorf("write recovery audit: %w", err)
+	}
+	return nil
+}
+
+// WriteAuditReturningID appends a fully validated audit row and returns the
+// database-generated audit_id from that exact INSERT.
+func WriteAuditReturningID(ctx context.Context, q Queryer, rec AuditRecord) (int64, error) {
+	args, err := auditInsertArgs(q, rec)
+	if err != nil {
+		return 0, err
+	}
+	var auditID int64
+	if err := q.QueryRow(ctx, insertAuditSQL+` RETURNING audit_id`, args...).Scan(&auditID); err != nil {
+		return 0, fmt.Errorf("write recovery audit: %w", err)
+	}
+	return auditID, nil
+}
+
+func auditInsertArgs(q Queryer, rec AuditRecord) ([]any, error) {
 	if q == nil {
-		return errors.New("audit write requires a database handle")
+		return nil, errors.New("audit write requires a database handle")
+	}
+	// Validate the original strings before trimming or passing them to the
+	// driver: these fields are durable audit data, not log-only annotations.
+	for field, value := range map[string]string{"actor": rec.Actor, "action": rec.Action, "operation_id": rec.OperationID} {
+		if err := validateCredentialText(field, value); err != nil {
+			return nil, err
+		}
 	}
 	actor := strings.TrimSpace(rec.Actor)
 	if actor == "" {
-		return errors.New("audit actor is required")
+		return nil, errors.New("audit actor is required")
 	}
 	action := strings.TrimSpace(rec.Action)
 	if action == "" {
-		return errors.New("audit action is required")
+		return nil, errors.New("audit action is required")
 	}
 	if _, ok := auditResults[rec.Result]; !ok {
-		return fmt.Errorf("audit result %q is not in the closed set ok|refused|discarded|failed", rec.Result)
+		return nil, fmt.Errorf("audit result %q is not in the closed set ok|refused|discarded|failed", rec.Result)
 	}
 	if rec.RefusalClass != "" {
 		if _, ok := refusalClasses[rec.RefusalClass]; !ok {
-			return fmt.Errorf("audit refusal_class %q is not in the closed set", rec.RefusalClass)
+			return nil, fmt.Errorf("audit refusal_class %q is not in the closed set", rec.RefusalClass)
 		}
 	}
 	if rec.EvidenceGeneration != nil && *rec.EvidenceGeneration < 0 {
-		return fmt.Errorf("audit evidence_generation must be >= 0, got %d", *rec.EvidenceGeneration)
+		return nil, fmt.Errorf("audit evidence_generation must be >= 0, got %d", *rec.EvidenceGeneration)
 	}
 	var instanceID any
 	if strings.TrimSpace(rec.InstanceID) != "" {
 		id, err := normalizeUUID(rec.InstanceID, "instance_id")
 		if err != nil {
-			return err
+			return nil, err
 		}
 		instanceID = id
 	}
 	target, err := normalizeJSON("target", rec.Target)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	if err := validateCredentialJSON("audit target", target); err != nil {
-		return err
+		return nil, err
 	}
 	detail, err := normalizeJSON("detail", rec.Detail)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	if err := validateCredentialJSON("audit detail", detail); err != nil {
-		return err
+		return nil, err
 	}
 	var refusalClass any
 	if rec.RefusalClass != "" {
@@ -1347,11 +1379,7 @@ func WriteAudit(ctx context.Context, q Queryer, rec AuditRecord) error {
 	if strings.TrimSpace(rec.OperationID) != "" {
 		operationID = rec.OperationID
 	}
-	if _, err := q.Exec(ctx, insertAuditSQL, instanceID, actor, action,
-		jsonOrNil(target), jsonOrNil(detail), rec.Result, refusalClass, generation, operationID); err != nil {
-		return fmt.Errorf("write recovery audit: %w", err)
-	}
-	return nil
+	return []any{instanceID, actor, action, jsonOrNil(target), jsonOrNil(detail), rec.Result, refusalClass, generation, operationID}, nil
 }
 
 // ---------------------------------------------------------------------------

@@ -71,11 +71,16 @@ type VerifyBackupOptions struct {
 // unverified/rejected/verified; verified is only returned when all four
 // checks passed on a real restore.
 type VerifyBackupResult struct {
-	State          VerificationState `json:"state"`
-	Checks         ManifestChecks    `json:"checks"`
-	EvidenceRef    string            `json:"evidence_ref,omitempty"`
-	ManifestPath   string            `json:"manifest_path"`
-	ManifestDigest string            `json:"manifest_digest,omitempty"`
+	State             VerificationState `json:"state"`
+	Checks            ManifestChecks    `json:"checks"`
+	Reason            string            `json:"reason,omitempty"`
+	EvidenceRef       string            `json:"evidence_ref,omitempty"`
+	BackupID          string            `json:"backup_id,omitempty"`
+	ManifestVersion   string            `json:"manifest_version,omitempty"`
+	ManifestPath      string            `json:"manifest_path"`
+	ManifestDigest    string            `json:"manifest_digest,omitempty"`
+	VerificationEpoch int64             `json:"verification_epoch,omitempty"`
+	AcceptedAuditID   int64             `json:"accepted_audit_id,omitempty"`
 }
 
 // ExecuteVerifyBackup runs the real isolated verification of one manifest.
@@ -84,7 +89,7 @@ type VerifyBackupResult struct {
 // real restore with all four checks records `verified` plus the control-store
 // evidence.
 func ExecuteVerifyBackup(ctx context.Context, opts VerifyBackupOptions) (VerifyBackupResult, error) {
-	result := VerifyBackupResult{ManifestPath: opts.ManifestPath}
+	result := VerifyBackupResult{ManifestPath: opts.ManifestPath, State: VerificationUnverified}
 	if strings.TrimSpace(opts.ManifestPath) == "" {
 		return result, errors.New("verify-backup requires a manifest path")
 	}
@@ -128,7 +133,29 @@ func ExecuteVerifyBackup(ctx context.Context, opts VerifyBackupOptions) (VerifyB
 	if err != nil {
 		return result, err
 	}
-	result.State = m.Verification.State
+	result.BackupID = m.BackupID
+	result.ManifestVersion = m.ManifestVersion
+	epoch, err := beginBackupVerificationEpoch(ctx, opts.ControlStore, m, opts.Verifier,
+		verifyOperationID(opts, m), opts.InstanceID, opts.Binding.TargetFingerprint(),
+		opts.Binding.RoleFingerprint(), opts.ProgramVersion)
+	if err != nil {
+		return result, fmt.Errorf("could not start backup verification epoch: %w", err)
+	}
+	result.VerificationEpoch = epoch.AuditID
+	// Revoke a prior conclusion before work that can fail or be interrupted.
+	// Accepted evidence history remains immutable; the current manifest and
+	// target guard are the live authorization binding.
+	starting := *m
+	starting.Verification = ManifestVerification{State: VerificationUnverified}
+	current, err := writeManifestForCurrentVerificationEpoch(ctx, opts.ControlStore, epoch, opts.ManifestPath, &starting)
+	if err != nil {
+		result.Reason = "could not invalidate the previous verification conclusion"
+		return result, fmt.Errorf("%s: %w", result.Reason, err)
+	}
+	if !current {
+		result.Reason = "verification attempt was superseded before manifest invalidation"
+		return result, errors.New(result.Reason)
+	}
 
 	// Instance-bound verification needs the open instance token captured
 	// before the result is derived (data-model §5); a closed/missing instance
@@ -148,12 +175,23 @@ func ExecuteVerifyBackup(ctx context.Context, opts VerifyBackupOptions) (VerifyB
 	// `rejected` with a manifest write-back and no evidence.
 	digest, integrityErr := checkManifestIntegrity(opts.ManifestPath, m)
 	if integrityErr != nil {
+		if !definiteIntegrityRefusal(integrityErr) {
+			result.Reason = "integrity could not be determined: " + safeVerificationReason(integrityErr.Error())
+			return result, errors.New(result.Reason)
+		}
 		rejected := *m
 		rejected.Verification = ManifestVerification{State: VerificationRejected, Verifier: opts.Verifier}
-		if writeErr := writeVerifiedManifest(opts.ManifestPath, &rejected); writeErr != nil {
-			return result, fmt.Errorf("verification refused (%v) and the rejected conclusion could not be recorded: %w", integrityErr, writeErr)
+		written, writeErr := writeManifestForCurrentVerificationEpoch(ctx, opts.ControlStore, epoch, opts.ManifestPath, &rejected)
+		if writeErr != nil {
+			result.Reason = "integrity refusal; rejected state could not be recorded"
+			return result, fmt.Errorf("%s: %w", result.Reason, writeErr)
+		}
+		if !written {
+			result.Reason = "integrity refusal was superseded by a newer verification attempt"
+			return result, errors.New(result.Reason)
 		}
 		result.State = VerificationRejected
+		result.Reason = safeVerificationReason(integrityErr.Error())
 		return result, nil
 	}
 	result.ManifestDigest = digest
@@ -162,7 +200,8 @@ func ExecuteVerifyBackup(ctx context.Context, opts VerifyBackupOptions) (VerifyB
 	// touching the target (F3: zero silent downgrade/rewrite).
 	serverVersion, err := serverVersionOf(ctx, boundDSN)
 	if err != nil {
-		return result, fmt.Errorf("verification target is unreachable: %s", logx.Redact(err.Error()))
+		result.Reason = "verification target is unreachable: " + safeVerificationReason(err.Error())
+		return result, errors.New(result.Reason)
 	}
 	serverMajor, err := majorVersion(serverVersion)
 	if err != nil {
@@ -179,10 +218,17 @@ func ExecuteVerifyBackup(ctx context.Context, opts VerifyBackupOptions) (VerifyB
 	}); err != nil {
 		rejected := *m
 		rejected.Verification = ManifestVerification{State: VerificationRejected, Verifier: opts.Verifier}
-		if writeErr := writeVerifiedManifest(opts.ManifestPath, &rejected); writeErr != nil {
-			return result, fmt.Errorf("verification refused (%v) and the rejected conclusion could not be recorded: %w", err, writeErr)
+		written, writeErr := writeManifestForCurrentVerificationEpoch(ctx, opts.ControlStore, epoch, opts.ManifestPath, &rejected)
+		if writeErr != nil {
+			result.Reason = "compatibility refusal; rejected state could not be recorded"
+			return result, fmt.Errorf("%s: %w", result.Reason, writeErr)
+		}
+		if !written {
+			result.Reason = "compatibility refusal was superseded by a newer verification attempt"
+			return result, errors.New(result.Reason)
 		}
 		result.State = VerificationRejected
+		result.Reason = safeVerificationReason(err.Error())
 		return result, nil
 	}
 
@@ -198,8 +244,10 @@ func ExecuteVerifyBackup(ctx context.Context, opts VerifyBackupOptions) (VerifyB
 	evidenceID := newUUIDString()
 	evidenceRef := "control:recovery_evidence/" + evidenceID
 	verified := *m
+	verified.Verification = ManifestVerification{State: VerificationUnverified}
 	var outcome probeOutcome
 	var finalDigest string
+	var acceptedAuditID int64
 	writer, err := runTargetWriter(ctx, TargetWriterOptions{
 		OperationKind: TargetWriterOperationVerifyBackup,
 		Store:         opts.ControlStore, ControlDSN: opts.ControlDSN, TargetDSN: boundDSN,
@@ -208,13 +256,22 @@ func ExecuteVerifyBackup(ctx context.Context, opts VerifyBackupOptions) (VerifyB
 		OperationID: verifyOperationID(opts, &verified), Archive: archive,
 		Probe: func(probeCtx context.Context, proof TargetWriterProof) (TargetWriterProbeResult, error) {
 			outcome = probeRestoredTarget(probeCtx, opts.PG, opts.ManifestPath, m, boundDSN)
+			result.Checks = outcome.Checks
 			if !outcome.Checks.AllTrue() {
-				return TargetWriterProbeResult{}, errors.New("four verification probes did not all pass")
+				detail := strings.TrimSpace(strings.Join(outcome.Problems, "; "))
+				if detail == "" {
+					detail = "required verification checks did not all complete successfully"
+				}
+				result.Reason = safeVerificationReason(detail)
+				return TargetWriterProbeResult{}, errors.New(result.Reason)
 			}
 			evidence, _ := json.Marshal(map[string]any{"checks": outcome.Checks, "business": outcome.Business, "verification": outcome.Verification})
 			return TargetWriterProbeResult{Outcome: TargetWriterProbePassed, ApplicationName: proof.Application, Evidence: evidence}, nil
 		},
 		Acceptance: func(ctx context.Context, tx pgx.Tx, proof TargetWriterProof) (TargetWriterAcceptance, error) {
+			if err := requireCurrentBackupVerificationEpoch(ctx, tx, epoch); err != nil {
+				return TargetWriterAcceptance{}, err
+			}
 			verified.Verification = ManifestVerification{State: VerificationVerified,
 				VerifiedAt: time.Now().UTC().Format(time.RFC3339), Verifier: opts.Verifier,
 				Target: VerificationTargetIsolated, Checks: outcome.Checks, EvidenceRef: evidenceRef}
@@ -228,7 +285,7 @@ func ExecuteVerifyBackup(ctx context.Context, opts VerifyBackupOptions) (VerifyB
 			}
 			scope, err := json.Marshal(map[string]any{
 				"backup_id": verified.BackupID, "manifest_version": verified.ManifestVersion,
-				"manifest_digest": finalDigest, "verifier": opts.Verifier,
+				"manifest_digest": finalDigest, "verification_epoch": epoch.AuditID, "verifier": opts.Verifier,
 				"target_fingerprint": opts.Binding.TargetFingerprint(), "target_role": VerificationTargetIsolated,
 				"checks": outcome.Checks, "business_coverage": outcome.Business,
 				"verification_coverage": outcome.Verification,
@@ -262,6 +319,10 @@ func ExecuteVerifyBackup(ctx context.Context, opts VerifyBackupOptions) (VerifyB
 					return TargetWriterAcceptance{}, err
 				}
 			}
+			if acceptedAuditID, err = recordBackupVerificationAccepted(ctx, tx, epoch, verified.ManifestVersion,
+				finalDigest, evidenceID, evidenceRef, token.InstanceID, opts.Verifier, accepted.Generation); err != nil {
+				return TargetWriterAcceptance{}, err
+			}
 			var txid int64
 			if err := tx.QueryRow(ctx, `SELECT txid_current()`).Scan(&txid); err != nil {
 				return TargetWriterAcceptance{}, err
@@ -270,11 +331,31 @@ func ExecuteVerifyBackup(ctx context.Context, opts VerifyBackupOptions) (VerifyB
 		},
 	})
 	if err != nil {
+		// Acceptance may have failed after the callback published a provisional
+		// verified manifest. Revoke it unless the complete writer transaction
+		// returned successfully; historical evidence rows remain immutable.
+		unverified := *m
+		unverified.Verification = ManifestVerification{State: VerificationUnverified, Checks: outcome.Checks}
+		written, writeErr := writeManifestForCurrentVerificationEpoch(ctx, opts.ControlStore, epoch, opts.ManifestPath, &unverified)
+		if writeErr != nil {
+			result.Reason = "verification did not complete; unverified state could not be recorded"
+		} else if !written {
+			result.Reason = "verification did not complete because a newer attempt superseded this epoch"
+		} else {
+			if strings.TrimSpace(result.Reason) == "" {
+				result.Reason = safeVerificationReason(err.Error())
+			}
+		}
 		return result, fmt.Errorf("isolated verification was not accepted: %w", err)
 	}
 	result.State, result.Checks, result.EvidenceRef, result.ManifestDigest = VerificationVerified, outcome.Checks, evidenceRef, finalDigest
+	result.AcceptedAuditID = acceptedAuditID
 	_ = writer
 	return result, nil
+}
+
+func safeVerificationReason(reason string) string {
+	return strings.TrimSpace(logx.Redact(reason))
 }
 
 func readOpenIsolatedBindings(ctx context.Context, store *controlstore.Store) ([]IsolatedInstanceBinding, error) {

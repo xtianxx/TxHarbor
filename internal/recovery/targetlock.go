@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"net"
 	"net/url"
 	"strings"
 	"sync"
@@ -53,11 +54,12 @@ func (k TargetKey) String() string { return "sha256:" + hex.EncodeToString(k[:])
 // connection. It is a live coordination primitive only; it is not a durable
 // guard and does not establish target cleanliness.
 type TargetLock struct {
-	conn   advisoryConn
-	key1   int32
-	key2   int32
-	mu     sync.Mutex
-	closed bool
+	conn       advisoryConn
+	key1       int32
+	key2       int32
+	controlKey TargetKey
+	mu         sync.Mutex
+	closed     bool
 }
 
 type advisoryConn interface {
@@ -81,12 +83,31 @@ func AcquireTargetLock(ctx context.Context, controlDSN string, key TargetKey, ti
 	}
 	bounded, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
-	conn, err := pgx.Connect(bounded, controlDSN)
+	conn, err := connectTargetLockSession(bounded, controlDSN)
 	if err != nil {
 		return nil, fmt.Errorf("connect dedicated target-lock session: %w", err)
 	}
+	dsnTarget, err := controlstore.ParseDSNTarget(controlDSN)
+	if err != nil {
+		_ = conn.Close(context.Background())
+		return nil, errors.New("target-lock control-store identity is invalid")
+	}
+	connectedTarget := controlstore.DSNTarget{
+		Host: conn.Config().Host, Port: conn.Config().Port,
+		Database: conn.Config().Database, Role: conn.Config().User,
+	}
+	dsnKey, err := CanonicalTargetKey(dsnTarget)
+	if err != nil {
+		_ = conn.Close(context.Background())
+		return nil, errors.New("target-lock control-store identity is unknown")
+	}
+	connectedKey, err := CanonicalTargetKey(connectedTarget)
+	if err != nil || connectedKey != dsnKey {
+		_ = conn.Close(context.Background())
+		return nil, errors.New("target-lock connected control-store identity does not match its DSN")
+	}
 	k1, k2 := key.AdvisoryLockKey()
-	lock := &TargetLock{conn: conn, key1: k1, key2: k2}
+	lock := &TargetLock{conn: conn, key1: k1, key2: k2, controlKey: connectedKey}
 	ticker := time.NewTicker(pollInterval)
 	defer ticker.Stop()
 	for {
@@ -111,14 +132,55 @@ func AcquireTargetLock(ctx context.Context, controlDSN string, key TargetKey, ti
 	}
 }
 
+// acquireHealthMutex serializes Health with WithTransaction and Release using
+// the same lock mutex, but never blocks past the caller context: TryLock is
+// polled on a bounded ticker and the wait is abandoned as soon as ctx ends. It
+// starts no goroutine, so a caller deadline can never leave a waiter behind
+// that would later steal serialization, and no SQL runs while waiting.
+func (l *TargetLock) acquireHealthMutex(ctx context.Context) error {
+	if ctx == nil {
+		return errors.New("target lock health requires a context")
+	}
+	if err := ctx.Err(); err != nil {
+		return fmt.Errorf("target lock health context is already done: %w", err)
+	}
+	if l.mu.TryLock() {
+		return nil
+	}
+	ticker := time.NewTicker(time.Millisecond)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("target lock health could not acquire serialization before context end: %w", ctx.Err())
+		case <-ticker.C:
+			if l.mu.TryLock() {
+				return nil
+			}
+		}
+	}
+}
+
 // Health verifies both that the dedicated control connection responds and
-// that this exact session still owns the expected advisory lock.
+// that this exact session still owns the expected advisory lock. The mutex
+// acquisition is context-aware: a nil context, an already-done context, or a
+// context that ends while another operation holds serialization refuses with
+// a fixed safe stage that wraps the context cause (errors.Is works) before any
+// SQL call and before the holder is released. Without a deadline a caller may
+// wait indefinitely, matching the conventional context contract; production
+// callers cap the wait (the control anchor caps at 3s with a 1s health
+// interval).
 func (l *TargetLock) Health(ctx context.Context) error {
 	if l == nil || l.conn == nil {
 		return errors.New("target lock is unknown")
 	}
-	l.mu.Lock()
+	if err := l.acquireHealthMutex(ctx); err != nil {
+		return err
+	}
 	defer l.mu.Unlock()
+	if err := ctx.Err(); err != nil {
+		return fmt.Errorf("target lock health context ended before the health check: %w", err)
+	}
 	closed := l.closed
 	if closed {
 		return errors.New("target lock session is closed")
@@ -174,8 +236,23 @@ func (l *TargetLock) WithTransaction(ctx context.Context, callback func(context.
 		return fmt.Errorf("begin target-lock acceptance transaction: %w", err)
 	}
 	rollback := func(cause error) error {
-		if rollbackErr := tx.Rollback(context.Background()); rollbackErr != nil && !errors.Is(rollbackErr, pgx.ErrTxClosed) {
-			return errors.Join(cause, fmt.Errorf("rollback target-lock acceptance transaction: %w", rollbackErr))
+		// Independent bounded rollback context: an already cancelled caller
+		// must not strand the owner transaction, and the cleanup never uses the
+		// unbounded background close of Release.
+		rollbackCtx, cancelRollback := context.WithTimeout(context.Background(), targetLockRollbackBudget)
+		rollbackErr := tx.Rollback(rollbackCtx)
+		cancelRollback()
+		if rollbackErr != nil {
+			// pgx.ErrTxClosed is NOT an acknowledged rollback of THIS exact
+			// transaction: a callback that finalized the transaction early (for
+			// example committed it through the supplied tx) and still returned
+			// an error lands here. Unless an acknowledged rollback of that exact
+			// transaction was separately established (it is not here), the
+			// uncertainty is conservatively reported and the owner is
+			// permanently retired with a bounded disposal whose errors are
+			// joined into the returned error.
+			disposalErr := l.retireOwnerAfterUncertainRollbackLocked()
+			return errors.Join(cause, fmt.Errorf("rollback target-lock acceptance transaction: %w", rollbackErr), disposalErr)
 		}
 		return cause
 	}
@@ -364,4 +441,126 @@ func WaitTargetQuiescent(ctx context.Context, targetDSN, appName string, timeout
 		case <-ticker.C:
 		}
 	}
+}
+
+// ---------------------------------------------------------------------------
+// Drill-only owner-session socket wrap seam
+// ---------------------------------------------------------------------------
+
+// targetLockSocketWrap is the unexported fixed wrapper signature of the
+// drill-only seam. It is never exported and never accepts a caller-supplied
+// socket callback: only the drill companion (same package, build-tagged test
+// file) reserves it with its fixed fault controls.
+type targetLockSocketWrap func(net.Conn) net.Conn
+
+var (
+	targetLockSocketWrapMu     sync.Mutex
+	targetLockSocketWrapGen    uint64
+	targetLockSocketWrapActive bool
+	targetLockSocketWrapFn     targetLockSocketWrap
+)
+
+// reserveTargetLockSocketWrap atomically reserves the SINGLE drill-only socket
+// wrap installation for the NEXT dedicated owner-session connection
+// establishment, refusing an overlapping reservation. The returned reset is
+// conditional on THIS installation identity, so a stale reset can never clear a
+// newer installation.
+func reserveTargetLockSocketWrap(wrap targetLockSocketWrap) (func(), error) {
+	if wrap == nil {
+		return nil, errors.New("target-lock socket wrap is required")
+	}
+	targetLockSocketWrapMu.Lock()
+	defer targetLockSocketWrapMu.Unlock()
+	if targetLockSocketWrapActive {
+		return nil, errors.New("target-lock socket wrap is already reserved")
+	}
+	targetLockSocketWrapActive = true
+	targetLockSocketWrapFn = wrap
+	targetLockSocketWrapGen++
+	generation := targetLockSocketWrapGen
+	return func() {
+		targetLockSocketWrapMu.Lock()
+		defer targetLockSocketWrapMu.Unlock()
+		if !targetLockSocketWrapActive || targetLockSocketWrapGen != generation {
+			return
+		}
+		targetLockSocketWrapActive = false
+		targetLockSocketWrapFn = nil
+	}, nil
+}
+
+// consumeTargetLockSocketWrap atomically consumes the reserved installation for
+// ONE connection establishment; every later acquisition is unaffected.
+func consumeTargetLockSocketWrap() targetLockSocketWrap {
+	targetLockSocketWrapMu.Lock()
+	defer targetLockSocketWrapMu.Unlock()
+	if !targetLockSocketWrapActive {
+		return nil
+	}
+	wrap := targetLockSocketWrapFn
+	targetLockSocketWrapActive = false
+	targetLockSocketWrapFn = nil
+	return wrap
+}
+
+// connectTargetLockSession establishes the dedicated owner session through the
+// EXISTING pgx.Connect path unless the drill-only socket wrap seam is reserved.
+// A consumed reservation wraps the REAL established socket of the unchanged
+// control DSN exactly once; no DSN, key, owner, identity check or acquisition
+// step is replaced.
+func connectTargetLockSession(ctx context.Context, controlDSN string) (*pgx.Conn, error) {
+	wrap := consumeTargetLockSocketWrap()
+	if wrap == nil {
+		return pgx.Connect(ctx, controlDSN)
+	}
+	config, err := pgx.ParseConfig(controlDSN)
+	if err != nil {
+		return nil, err
+	}
+	dialer := &net.Dialer{}
+	config.DialFunc = func(dialCtx context.Context, network, addr string) (net.Conn, error) {
+		rawConn, dialErr := dialer.DialContext(dialCtx, network, addr)
+		if dialErr != nil {
+			return nil, dialErr
+		}
+		wrapped := wrap(rawConn)
+		if wrapped == nil {
+			_ = rawConn.Close()
+			return nil, errors.New("target-lock socket wrap returned no connection")
+		}
+		return wrapped, nil
+	}
+	return pgx.ConnectConfig(ctx, config)
+}
+
+// targetLockRollbackBudget is the independent bounded budget of the rollback
+// cleanup. The caller context is never used for this cleanup: an already
+// cancelled caller must not strand the owner transaction.
+const targetLockRollbackBudget = 10 * time.Second
+
+// targetLockDisposalBudget is the independent bounded budget of the
+// uncertain-rollback connection disposal; it is SEPARATE from (never combined
+// with) the rollback budget.
+const targetLockDisposalBudget = 10 * time.Second
+
+// retireOwnerAfterUncertainRollbackLocked permanently retires the owner handle
+// after an uncertain rollback and boundedly disposes its dedicated connection,
+// returning any disposal error so the caller can join it. A nil return means
+// the bounded disposal was CONFIRMED, never merely attempted. It deliberately
+// does not use the Release SQL path and never performs an unbounded close; the
+// caller must hold l.mu.
+func (l *TargetLock) retireOwnerAfterUncertainRollbackLocked() error {
+	if l.closed {
+		return nil
+	}
+	l.closed = true
+	if l.conn == nil {
+		return nil
+	}
+	disposeCtx, cancelDispose := context.WithTimeout(context.Background(), targetLockDisposalBudget)
+	defer cancelDispose()
+	if err := l.conn.Close(disposeCtx); err != nil {
+		return fmt.Errorf("dispose retired target-lock session (bounded disposal attempt, closure not confirmed): %w", err)
+	}
+	return nil
 }

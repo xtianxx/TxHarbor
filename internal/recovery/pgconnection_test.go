@@ -29,19 +29,8 @@ func TestPreparePGChildConnectionMovesKeywordPassword(t *testing.T) {
 		t.Fatalf("passfile env = %#v", env)
 	}
 	passfile := strings.TrimPrefix(env[0], "PGPASSFILE=")
-	info, err := os.Stat(passfile)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if info.Mode().Perm() != 0o600 {
-		t.Fatalf("passfile mode = %o, want 600", info.Mode().Perm())
-	}
-	dirInfo, err := os.Stat(filepath.Dir(passfile))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if dirInfo.Mode().Perm() != 0o700 {
-		t.Fatalf("credential directory mode = %o, want 700", dirInfo.Mode().Perm())
+	if !strings.HasPrefix(passfile, "/proc/self/fd/") {
+		t.Fatalf("passfile is not descriptor-backed: %q", passfile)
 	}
 	data, err := os.ReadFile(passfile)
 	if err != nil {
@@ -51,8 +40,8 @@ func TestPreparePGChildConnectionMovesKeywordPassword(t *testing.T) {
 		t.Fatalf("password missing/incorrectly escaped in passfile: %q", data)
 	}
 	cleanup()
-	if _, err := os.Stat(passfile); !os.IsNotExist(err) {
-		t.Fatalf("passfile remains after cleanup: %v", err)
+	if _, err := os.Stat(passfile); err == nil {
+		t.Fatalf("closed credential descriptor remains readable: %v", err)
 	}
 }
 
@@ -106,7 +95,7 @@ func TestPreparePGChildConnectionPreservesParentTargetAndApplicationName(t *test
 func TestLocalPGCommandChildArgvIsCredentialFree(t *testing.T) {
 	const password = "not-in-argv-very-secret"
 	child := writePGChildScript(t, `#!/bin/sh
-test "$(stat -c %a "$PGPASSFILE")" = 600 || exit 8
+test -r "$PGPASSFILE" || exit 8
 printf 'PASSFILE='
 cat "$PGPASSFILE"
 printf '\nARGV\n'
@@ -150,8 +139,8 @@ func TestLocalPGCommandCleansPassfileWhenChildFailsAndDoesNotLeakError(t *testin
 	if path == "" {
 		t.Fatal("child did not receive a passfile")
 	}
-	if _, statErr := os.Stat(path); !os.IsNotExist(statErr) {
-		t.Fatalf("passfile remains after child failure: %v", statErr)
+	if !strings.HasPrefix(path, "/proc/self/fd/") {
+		t.Fatalf("child did not receive an anonymous descriptor path: %q", path)
 	}
 }
 
@@ -208,6 +197,36 @@ func TestPGChildEnvironmentRejectsAnyPGOverride(t *testing.T) {
 	_, err := protectPGChildArgsWithEnvironment(cmd, "pg_dump", []string{"--dbname=host=db"}, []string{"PGHOST=other"})
 	if err == nil {
 		t.Fatal("LocalPGCommand argument preparation accepted an ambient PG override")
+	}
+}
+
+func TestPGChildEnvironmentForwardsOnlyRuntimeAllowlist(t *testing.T) {
+	environ := []string{
+		"PATH=/usr/bin", "HOME=/home/operator", "TMPDIR=/tmp", "LANG=C.UTF-8", "LC_ALL=C",
+		"SYSTEMROOT=C:\\Windows", "TXHARBOR_RECOVERY_TARGET_DSN=postgres://u:target-secret@db/target",
+		"TXHARBOR_RECOVERY_CONTROL_DSN=postgres://u:control-secret@db/control",
+		"TXHARBOR_PG_DSN=postgres://u:data-secret@db/data", "TXHARBOR_RPC_URL=https://rpc.invalid/key-secret",
+		"TXHARBOR_SIGNER_PRIVATE_KEY=signer-secret", "VAULT_TOKEN=vault-secret", "TESTSECRET=custom-secret",
+		"LD_PRELOAD=/tmp/injected.so", "BROKER_DSN=postgres://u:broker-secret@db/broker", "broken-entry",
+	}
+	got := pgChildEnvironment(environ)
+	want := []string{"PATH=/usr/bin", "HOME=/home/operator", "TMPDIR=/tmp", "LANG=C.UTF-8", "LC_ALL=C", "SYSTEMROOT=C:\\Windows"}
+	if strings.Join(got, "\n") != strings.Join(want, "\n") {
+		t.Fatalf("child environment = %#v, want runtime allowlist %#v", got, want)
+	}
+	cmd := exec.Command("/bin/true")
+	cleanup, err := protectPGChildArgsWithEnvironment(cmd, "pg_dump", []string{"--dbname=host=db port=5432 dbname=ledger user=backup password=secret"}, environ)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cleanup()
+	for _, entry := range cmd.Env {
+		if strings.HasPrefix(entry, "PGPASSFILE=") {
+			continue
+		}
+		if strings.Contains(entry, "secret") || strings.HasPrefix(entry, "TESTSECRET=") || strings.HasPrefix(entry, "LD_PRELOAD=") {
+			t.Fatalf("sensitive/unapproved environment forwarded: %q", entry)
+		}
 	}
 }
 

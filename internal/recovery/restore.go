@@ -79,6 +79,11 @@ type RestoreOptions struct {
 	ObserverDSN string
 	// TargetDSN is the explicit restore target.
 	TargetDSN string
+	// GateDSN is the R3 protected-lane conninfo (passwordless local socket,
+	// restricted recovery role). Empty keeps the historical TargetDSN route
+	// (unprotected lane); non-empty switches the supervised child transport
+	// to it while every comparator stays on TargetDSN. Never audit or log.
+	GateDSN string
 	// TargetDeclaration defaults to isolated.
 	TargetDeclaration TargetDeclaration
 	// TargetReason is required for a production_main declaration and recorded.
@@ -145,7 +150,35 @@ func (r *restoreRun) fail() (RestoreResult, error) {
 // non-nil error and a Restored=false result with the blocked list populated;
 // the target is never touched before all preconditions hold.
 func ExecuteRestore(ctx context.Context, opts RestoreOptions) (RestoreResult, error) {
+	result, _, err := executeRestoreWithTargetWriter(ctx, opts, defaultTargetWriterDriver())
+	return result, err
+}
+
+type targetWriterDriver func(context.Context, TargetWriterOptions) (TargetWriterResult, error)
+
+func defaultTargetWriterDriver() targetWriterDriver { return runTargetWriter }
+
+// executeRestoreWithBorrowedTargetLock is a package-private drill seam. The
+// supplied lock remains caller-owned; it is never released by this helper.
+// It adds no target-cleanliness, authorization, or acceptance bypass.
+func executeRestoreWithBorrowedTargetLock(ctx context.Context, opts RestoreOptions, lock *TargetLock) (RestoreResult, TargetWriterResult, error) {
+	return executeRestoreWithTargetWriter(ctx, opts, func(runCtx context.Context, writerOpts TargetWriterOptions) (TargetWriterResult, error) {
+		writerOpts.borrowedLock = lock
+		return runTargetWriter(runCtx, writerOpts)
+	})
+}
+
+func executeRestoreWithTargetWriter(ctx context.Context, opts RestoreOptions, driver targetWriterDriver) (RestoreResult, TargetWriterResult, error) {
 	run := &restoreRun{opts: opts}
+	var writerResult TargetWriterResult
+	fail := func() (RestoreResult, TargetWriterResult, error) {
+		result, err := run.fail()
+		return result, writerResult, err
+	}
+	if driver == nil {
+		run.blocked = append(run.blocked, "target writer driver is required")
+		return fail()
+	}
 	run.result.Declaration = opts.TargetDeclaration
 	if run.result.Declaration == "" {
 		run.result.Declaration = TargetIsolated
@@ -156,7 +189,7 @@ func ExecuteRestore(ctx context.Context, opts RestoreOptions) (RestoreResult, er
 	// the supplied text must never enter an error, log, or audit record.
 	if err := ValidateRestoreTargetReason(opts.TargetReason); err != nil {
 		run.blocked = append(run.blocked, err.Error())
-		return run.fail()
+		return fail()
 	}
 
 	// Structural preconditions.
@@ -178,23 +211,23 @@ func ExecuteRestore(ctx context.Context, opts RestoreOptions) (RestoreResult, er
 		run.require(false, fmt.Sprintf("unknown target declaration %q (want isolated|production_main)", opts.TargetDeclaration))
 	}
 	if len(run.blocked) > 0 {
-		return run.fail()
+		return fail()
 	}
 
 	// Target guard: the control store database can never be a restore target.
 	controlTarget, err := controlstore.ParseDSNTarget(opts.ControlDSN)
 	if err != nil {
 		run.blocked = append(run.blocked, "control DSN is invalid: "+logx.Redact(err.Error()))
-		return run.fail()
+		return fail()
 	}
 	targetTarget, err := controlstore.ParseDSNTarget(opts.TargetDSN)
 	if err != nil {
 		run.blocked = append(run.blocked, "target DSN is invalid: "+logx.Redact(err.Error()))
-		return run.fail()
+		return fail()
 	}
 	if !run.require(!controlTarget.SameDatabase(targetTarget),
 		"the target DSN addresses the control-store database; the control store is outside the data restore set") {
-		return run.fail()
+		return fail()
 	}
 	run.result.TargetFingerprint = targetTarget.DataTargetFingerprint().TargetFingerprint
 
@@ -202,29 +235,29 @@ func ExecuteRestore(ctx context.Context, opts RestoreOptions) (RestoreResult, er
 	m, err := readManifestFile(opts.ManifestPath)
 	if err != nil {
 		run.blocked = append(run.blocked, logx.Redact(err.Error()))
-		return run.fail()
+		return fail()
 	}
 	digest, err := checkManifestIntegrity(opts.ManifestPath, m)
 	if err != nil {
 		run.blocked = append(run.blocked, err.Error())
-		return run.fail()
+		return fail()
 	}
 	run.result.ManifestDigest = digest
 
 	serverVersion, err := serverVersionOf(ctx, opts.TargetDSN)
 	if err != nil {
 		run.blocked = append(run.blocked, "target DSN is unreachable: "+logx.Redact(err.Error()))
-		return run.fail()
+		return fail()
 	}
 	serverMajor, err := majorVersion(serverVersion)
 	if err != nil {
 		run.blocked = append(run.blocked, fmt.Sprintf("target server version %q is unparsable", serverVersion))
-		return run.fail()
+		return fail()
 	}
 	targetSchema, err := RepositoryTargetSchema()
 	if err != nil {
 		run.blocked = append(run.blocked, err.Error())
-		return run.fail()
+		return fail()
 	}
 	validation := ManifestValidation{
 		PGServerMajor:  serverMajor,
@@ -233,27 +266,32 @@ func ExecuteRestore(ctx context.Context, opts RestoreOptions) (RestoreResult, er
 	}
 	if err := m.CheckUsable(ManifestUseRestore, validation); err != nil {
 		run.blocked = append(run.blocked, "manifest is not usable for restore: "+err.Error())
-		return run.fail()
+		return fail()
 	}
 
 	// Open instance + control-store evidence bound to this backup_id.
 	token, err := CaptureEvidenceToken(ctx, opts.ControlStore.Pool(), opts.InstanceID)
 	if err != nil {
 		run.blocked = append(run.blocked, "recovery instance is not usable: "+err.Error())
-		return run.fail()
+		return fail()
 	}
 	if !run.require(token.State == "open",
 		"recovery instance "+token.InstanceID+" is not open (state="+token.State+")") {
-		return run.fail()
+		return fail()
 	}
-	if !run.require(controlEvidenceMatches(ctx, opts.ControlStore, token.InstanceID, m, digest, run),
-		"control store has no verified evidence bound to this instance and backup_id matching the current manifest digest; re-run verify-backup (F7/DG-2)") {
-		return run.fail()
+	verificationBinding, evidenceMatches, epochErr := restoreBackupVerificationBinding(ctx, opts.ControlStore, token.InstanceID, m, digest, run)
+	if epochErr != nil {
+		run.blocked = append(run.blocked, "control-store verification receipt lookup failed: "+logx.Redact(epochErr.Error()))
+		return fail()
+	}
+	if !run.require(evidenceMatches,
+		"control store has no current verified receipt bound to this instance and backup_id matching the manifest digest; re-run verify-backup (F7/DG-2)") {
+		return fail()
 	}
 
 	// Optional dependency probes (configured-and-unreachable blocks).
 	if !run.dependencies(ctx) {
-		return run.fail()
+		return fail()
 	}
 
 	// Open the artifact before the marker: a missing artifact is refused
@@ -262,25 +300,46 @@ func ExecuteRestore(ctx context.Context, opts RestoreOptions) (RestoreResult, er
 	archive, err := os.Open(archivePath)
 	if err != nil {
 		run.blocked = append(run.blocked, "artifact cannot be opened: "+err.Error())
-		return run.fail()
+		return fail()
 	}
 
 	defer archive.Close()
 	trustedTarget, err := controlstore.ParseDSNTarget(opts.TargetDSN)
 	if err != nil {
 		run.blocked = append(run.blocked, "target identity is invalid")
-		return run.fail()
+		return fail()
 	}
 	operationID := restoreOperationID(opts, m)
 	evidenceID := newUUIDString()
 	evidenceRef := "control:recovery_evidence/" + evidenceID
 	var outcome probeOutcome
-	_, err = runTargetWriter(ctx, TargetWriterOptions{
+	writerResult, err = driver(ctx, TargetWriterOptions{
 		OperationKind: TargetWriterOperationRestore,
 		Store:         opts.ControlStore, ControlDSN: opts.ControlDSN, TargetDSN: opts.TargetDSN,
 		ObserverDSN: opts.ObserverDSN, TrustedTarget: trustedTarget, InstanceID: token.InstanceID,
 		OperationID: operationID, Archive: archive,
+		RecoveryRoute: opts.GateDSN,
 		Prelaunch: func(ctx context.Context, tx pgx.Tx, locked controlstore.InstanceToken) (EvidenceToken, error) {
+			// TargetWriter has locked the instance row before this callback.
+			// Recheck under the per-backup epoch lock before taking the target
+			// guard or writing the restore-start marker.
+			if _, err := controlstore.LockInstance(ctx, tx, locked.InstanceID); err != nil {
+				return EvidenceToken{}, err
+			}
+			if err := lockBackupVerificationEpoch(ctx, tx, m.BackupID); err != nil {
+				return EvidenceToken{}, err
+			}
+			latest, err := latestBackupVerificationEpoch(ctx, tx, m.BackupID)
+			if err != nil {
+				return EvidenceToken{}, err
+			}
+			if verificationBinding.Legacy {
+				if latest != 0 {
+					return EvidenceToken{}, errors.New("legacy backup verification was revoked by a verification epoch")
+				}
+			} else if latest != verificationBinding.EpochID {
+				return EvidenceToken{}, errors.New("backup verification receipt was superseded before restore launch")
+			}
 			write, err := CommitEvidenceWriteTx(ctx, tx, EvidenceWriteRequest{
 				InstanceID: locked.InstanceID, Token: LockedEvidenceToken(locked), Kind: MutationRestoreStarted,
 				Actor: opts.Actor, Reason: "restore started: pre-write invalidation of the previous evidence generation",
@@ -314,6 +373,23 @@ func ExecuteRestore(ctx context.Context, opts RestoreOptions) (RestoreResult, er
 			return TargetWriterProbeResult{Outcome: TargetWriterProbePassed, ApplicationName: proof.Application, Evidence: basis}, nil
 		},
 		Acceptance: func(ctx context.Context, tx pgx.Tx, proof TargetWriterProof) (TargetWriterAcceptance, error) {
+			if _, err := controlstore.LockInstance(ctx, tx, proof.MarkerToken.InstanceID); err != nil {
+				return TargetWriterAcceptance{}, err
+			}
+			if err := lockBackupVerificationEpoch(ctx, tx, m.BackupID); err != nil {
+				return TargetWriterAcceptance{}, err
+			}
+			latest, err := latestBackupVerificationEpoch(ctx, tx, m.BackupID)
+			if err != nil {
+				return TargetWriterAcceptance{}, err
+			}
+			if verificationBinding.Legacy {
+				if latest != 0 {
+					return TargetWriterAcceptance{}, errors.New("legacy backup verification was revoked before restore acceptance")
+				}
+			} else if latest != verificationBinding.EpochID {
+				return TargetWriterAcceptance{}, errors.New("backup verification receipt was superseded before restore acceptance")
+			}
 			scope, err := json.Marshal(map[string]any{
 				"backup_id": m.BackupID, "manifest_version": m.ManifestVersion, "manifest_digest": digest,
 				"target_fingerprint": run.result.TargetFingerprint, "target_role": string(run.result.Declaration),
@@ -350,12 +426,12 @@ func ExecuteRestore(ctx context.Context, opts RestoreOptions) (RestoreResult, er
 	run.result.Checks = outcome.Checks
 	if err != nil {
 		run.blocked = append(run.blocked, "supervised target restore was not accepted: "+err.Error())
-		return run.fail()
+		return fail()
 	}
 
 	run.result.Restored = true
 	run.result.EvidenceRef = evidenceRef
-	return run.result, nil
+	return run.result, writerResult, nil
 }
 
 // ValidateRestoreTargetReason rejects values that the shared redaction
@@ -441,31 +517,61 @@ func restoreOperationID(opts RestoreOptions, m *Manifest) string {
 // checkManifestIntegrity verifies the artifact bindings and archive
 // readability, and returns the canonical manifest digest.
 func checkManifestIntegrity(manifestPath string, m *Manifest) (string, error) {
+	if len(m.Artifacts) == 0 {
+		return "", definiteManifestIntegrityError(errors.New("manifest contains no artifacts"))
+	}
 	for i, artifact := range m.Artifacts {
 		path := resolveArtifactPath(manifestPath, artifact.Path)
 		info, err := os.Stat(path)
 		if err != nil {
-			return "", fmt.Errorf("artifacts[%d] is missing: %w", i, err)
+			if errors.Is(err, os.ErrNotExist) {
+				return "", definiteManifestIntegrityError(fmt.Errorf("artifacts[%d] is missing: %w", i, err))
+			}
+			return "", indeterminateManifestIntegrityError(fmt.Errorf("inspect artifacts[%d]: %w", i, err))
 		}
 		if info.Size() != artifact.Bytes {
-			return "", fmt.Errorf("artifacts[%d] size %d does not match the manifest %d", i, info.Size(), artifact.Bytes)
+			return "", definiteManifestIntegrityError(fmt.Errorf("artifacts[%d] size %d does not match the manifest %d", i, info.Size(), artifact.Bytes))
 		}
 		actual, err := fileSHA256(path)
 		if err != nil {
-			return "", err
+			if errors.Is(err, os.ErrNotExist) {
+				return "", definiteManifestIntegrityError(fmt.Errorf("artifacts[%d] is missing: %w", i, err))
+			}
+			return "", indeterminateManifestIntegrityError(err)
 		}
 		if actual != artifact.SHA256 {
-			return "", fmt.Errorf("artifacts[%d] sha256 does not match the manifest", i)
+			return "", definiteManifestIntegrityError(fmt.Errorf("artifacts[%d] sha256 does not match the manifest", i))
 		}
 	}
 	digest, err := m.Digest()
 	if err != nil {
-		return "", err
+		return "", definiteManifestIntegrityError(err)
 	}
 	if err := CheckManifestDigest(m, digest); err != nil {
-		return "", err
+		return "", definiteManifestIntegrityError(err)
 	}
 	return digest, nil
+}
+
+type manifestIntegrityError struct {
+	determinate bool
+	err         error
+}
+
+func (e *manifestIntegrityError) Error() string { return e.err.Error() }
+func (e *manifestIntegrityError) Unwrap() error { return e.err }
+
+func definiteManifestIntegrityError(err error) error {
+	return &manifestIntegrityError{determinate: true, err: err}
+}
+
+func indeterminateManifestIntegrityError(err error) error {
+	return &manifestIntegrityError{determinate: false, err: err}
+}
+
+func definiteIntegrityRefusal(err error) bool {
+	var integrityErr *manifestIntegrityError
+	return errors.As(err, &integrityErr) && integrityErr.determinate
 }
 
 // controlEvidenceMatches reports whether the control store holds a row bound
@@ -476,6 +582,25 @@ func controlEvidenceMatches(ctx context.Context, store *controlstore.Store,
 	if store == nil {
 		return false
 	}
+	_, matches, err := restoreBackupVerificationBinding(ctx, store, instanceID, m, digest, run)
+	return err == nil && matches
+}
+
+func restoreBackupVerificationBinding(ctx context.Context, store *controlstore.Store, instanceID string,
+	m *Manifest, digest string, run *restoreRun) (backupVerificationBinding, bool, error) {
+	if store == nil {
+		return backupVerificationBinding{}, false, nil
+	}
+	binding, accepted, err := currentBackupVerificationBinding(ctx, store.Pool(), instanceID, m, digest)
+	if err != nil {
+		return backupVerificationBinding{}, false, err
+	}
+	if !binding.Legacy {
+		return binding, accepted, nil
+	}
+	if !accepted {
+		return binding, false, nil
+	}
 	rows, err := store.Pool().Query(ctx, `
 SELECT artifact_hash, COALESCE(scope, '{}'::jsonb)::text
 FROM recovery_evidence
@@ -483,7 +608,7 @@ WHERE kind = 'backup_manifest' AND instance_id = $1 AND scope->>'backup_id' = $2
 ORDER BY created_at DESC, evidence_id`, instanceID, m.BackupID)
 	if err != nil {
 		run.blocked = append(run.blocked, "control-store evidence lookup failed: "+logx.Redact(err.Error()))
-		return false
+		return binding, false, nil
 	}
 	defer rows.Close()
 	available := false
@@ -491,7 +616,7 @@ ORDER BY created_at DESC, evidence_id`, instanceID, m.BackupID)
 		var artifactHash, scopeRaw string
 		if err := rows.Scan(&artifactHash, &scopeRaw); err != nil {
 			run.blocked = append(run.blocked, "control-store evidence read failed: "+logx.Redact(err.Error()))
-			return false
+			return binding, false, nil
 		}
 		available = true
 		if artifactHash != digest {
@@ -504,18 +629,18 @@ ORDER BY created_at DESC, evidence_id`, instanceID, m.BackupID)
 		scopeDigest, _ := scope["manifest_digest"].(string)
 		scopeVersion, _ := scope["manifest_version"].(string)
 		if scopeDigest == digest && scopeVersion == m.ManifestVersion {
-			return true
+			return binding, true, nil
 		}
 	}
 	if err := rows.Err(); err != nil {
 		run.blocked = append(run.blocked, "control-store evidence read failed: "+logx.Redact(err.Error()))
-		return false
+		return binding, false, nil
 	}
 	if available {
 		run.blocked = append(run.blocked, "control-store evidence for backup_id "+m.BackupID+
 			" does not match the current manifest digest (manifest copied/edited?); re-run verify-backup")
 	}
-	return false
+	return binding, false, nil
 }
 
 // ActionRestoreStarted is the recovery_audit action of the pre-write restore

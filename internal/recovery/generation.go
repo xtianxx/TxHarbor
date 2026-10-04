@@ -596,6 +596,13 @@ func writeEvidenceTransitionAudit(ctx context.Context, tx pgx.Tx, req EvidenceWr
 // unknown mutation kind, a missing actor and a missing Apply hook are
 // programming errors, not concurrency events.
 func (r EvidenceWriteRequest) validate() error {
+	for field, value := range map[string]string{
+		"actor": r.Actor, "reason": r.Reason, "operation_id": r.OperationID,
+	} {
+		if err := controlstore.ValidateCredentialText(field, value); err != nil {
+			return err
+		}
+	}
 	instanceID := strings.ToLower(strings.TrimSpace(r.InstanceID))
 	if instanceID == "" {
 		return errors.New("evidence write requires an instance_id")

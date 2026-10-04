@@ -78,9 +78,12 @@ func TestVerifyBackupRejectsMissingAuthoritativeObject(t *testing.T) {
 	if result.State != VerificationUnverified {
 		t.Fatalf("verify state = %q, want %q (checks=%+v)", result.State, VerificationUnverified, result.Checks)
 	}
-	if result.Checks.Readable || result.Checks.StructureConstraints ||
+	if !result.Checks.Readable || result.Checks.StructureConstraints ||
 		result.Checks.BusinessStateProbes || result.Checks.VerificationExecutable {
-		t.Fatalf("unaccepted post-restore probe must not claim any successful check, got %+v", result.Checks)
+		t.Fatalf("completed probe facts = %+v, want readable-only; these checks are not accepted evidence", result.Checks)
+	}
+	if !strings.Contains(result.Reason, probeMissingObject) || !strings.Contains(result.Reason, probeMissingObjectCategory) {
+		t.Fatalf("unverified result reason = %q, want missing object and category", result.Reason)
 	}
 
 	// No accepted evidence of any kind, and the manifest write-back remains
@@ -98,6 +101,9 @@ func TestVerifyBackupRejectsMissingAuthoritativeObject(t *testing.T) {
 	written := bkpReadManifest(t, backup.ManifestPath)
 	if written.Verification.State != VerificationUnverified {
 		t.Fatalf("manifest write-back state = %q, want %q", written.Verification.State, VerificationUnverified)
+	}
+	if written.Verification.Checks != result.Checks {
+		t.Fatalf("manifest checks = %+v, want accurately observed checks %+v", written.Verification.Checks, result.Checks)
 	}
 
 	// Per-dimension detail: the failed real probe identifies the missing

@@ -186,6 +186,14 @@ const (
 	// target endpoint, used to supervise and drain recovery child processes.
 	// It has no default and must never be included in audit data.
 	EnvRecoveryObserverDSN = "TXHARBOR_RECOVERY_OBSERVER_DSN"
+	// EnvRecoveryGateDSN is the R3 protected-lane recovery route: a
+	// passwordless local-socket conninfo naming the deployment's restricted
+	// recovery database role, used ONLY as the supervised restore child's
+	// peer-authenticated connection in the bound restore lane. It is never
+	// audited or logged, never falls back to another route, and refuses a
+	// password, TLS parameters or identity overrides (validated in
+	// internal/recovery).
+	EnvRecoveryGateDSN = "TXHARBOR_RECOVERY_GATE_DSN"
 	EnvRecoveryPrincipal   = "TXHARBOR_RECOVERY_PRINCIPAL"
 	EnvRecoveryArtifactDir = "TXHARBOR_RECOVERY_ARTIFACT_DIR"
 	// EnvRecoveryInstance binds an operator command to one recovery instance:
@@ -480,6 +488,12 @@ type RecoveryConfig struct {
 	// target endpoint used by verify-backup supervision. It is optional for
 	// ordinary commands and required by verify-backup. Never audit or log it.
 	ObserverDSN string
+	// GateDSN is the R3 protected-lane recovery route (passwordless local
+	// socket, restricted recovery role). Empty means not configured; the
+	// bound restore lane may use the historical TargetDSN route only when
+	// this stays empty AND no admission handle is in force (ADR-004 §2.1).
+	// Never audit or log it.
+	GateDSN string
 	// Principal is the authenticated caller identity binding ("<kind>:<id>",
 	// controlled deployment config; free text never authorizes).
 	Principal string
@@ -1581,6 +1595,13 @@ func (c *Config) loadRecovery015(getenv Getenv, errs *[]error) {
 			*errs = append(*errs, invalid(EnvRecoveryObserverDSN, "%v", err))
 		} else {
 			c.Recovery.ObserverDSN = raw
+		}
+	}
+	if raw, ok := getenv(EnvRecoveryGateDSN); ok && raw != "" {
+		if err := validateDSN(raw); err != nil {
+			*errs = append(*errs, invalid(EnvRecoveryGateDSN, "%v", err))
+		} else {
+			c.Recovery.GateDSN = raw
 		}
 	}
 	if raw, ok := getenv(EnvRecoveryPrincipal); ok && raw != "" {
