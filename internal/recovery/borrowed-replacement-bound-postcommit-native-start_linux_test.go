@@ -45,6 +45,7 @@ package recovery_test
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net"
@@ -867,6 +868,7 @@ func borrowedNativeStartLiveHook(hookCtx context.Context, t *testing.T, b *borro
 	obs.fenceRechecked = true
 	obs.nativeOperation = obs.attemptID
 	obs.nativeResult, obs.nativeReceipt, obs.nativeErr = finished.result, finished.receipt, finished.err
+	obs.nativeChildPID, obs.nativeChildStartID = identity.PID, identity.StartID
 	return nil
 }
 
@@ -1047,6 +1049,55 @@ func TestBorrowedReplacementBoundPostcommitNativeStart(t *testing.T) {
 		// assertions are unchanged.
 		if postRows.evidenceCount != base.rows.evidenceCount || postRows.auditCount != base.rows.auditCount+3 {
 			t.Fatalf("durable rows: evidence %d->%d audit %d->%d", base.rows.evidenceCount, postRows.evidenceCount, base.rows.auditCount, postRows.auditCount)
+		}
+		// The +3d row must be THIS attempt's retained proof: exactly one
+		// attempt_proof row for THIS attempt's operation, action/result from
+		// the coordinator's own write (not any observer or player), bound to
+		// the original operation identity and the child's authentic facts.
+		proofCount, proofHash := borrowedBoundNativeReadyAttemptProof(t, ctx, b, nativeAttemptID)
+		if proofCount != 1 {
+			t.Fatalf("attempt_proof rows for this attempt's operation = %d, want exactly 1 (the interrupted attempt's R5 row)", proofCount)
+		}
+		if proofHash == "" {
+			t.Fatal("attempt_proof row digest absent")
+		}
+		var (
+			proofActor, proofOperation, proofApplication, proofFactsJSON, proofTargetKeyOut string
+			proofFacts                                                                       struct {
+				TargetGuardKey  string `json:"target_guard_key"`
+				Application     string `json:"application_name"`
+				ChildPID        int    `json:"child_pid"`
+				ChildStartID    uint64 `json:"child_start_id"`
+				WaitTerminal    bool   `json:"wait_terminal"`
+				ProcessDrained  bool   `json:"process_group_drained"`
+				RoleFingerprint string `json:"role_fingerprint"`
+				VerifierSHA256  string `json:"verifier_sha256"`
+				Complete        bool   `json:"complete"`
+			}
+		)
+		if err := b.fixture.controlPool.QueryRow(ctx, `
+SELECT actor, operation_id, target->>'target_guard_key', detail->>'application_name', detail
+FROM recovery_audit WHERE instance_id=$1 AND action='attempt_proof' AND result='ok'
+  AND operation_id=$2`,
+			b.fixture.instanceID, nativeAttemptID).Scan(&proofActor, &proofOperation, &proofTargetKeyOut, &proofApplication, &proofFactsJSON); err != nil {
+			t.Fatalf("attempt_proof row read refused: %v", err)
+		}
+		if proofActor != "system:recovery-coordinator" {
+			t.Fatalf("attempt_proof actor %q is not the coordinator's own write", proofActor)
+		}
+		if proofOperation != obs.attemptID || proofApplication != obs.nativeResult.Application || proofTargetKeyOut != f.guardKey {
+			t.Fatalf("attempt_proof identity lost the original operation/app/target binding: op=%q app=%q target=%q want op=%q app=%q target=%q",
+				proofOperation, proofApplication, proofTargetKeyOut, obs.attemptID, obs.nativeResult.Application, f.guardKey)
+		}
+		if err := json.Unmarshal([]byte(proofFactsJSON), &proofFacts); err != nil {
+			t.Fatalf("attempt_proof detail json refused: %v", err)
+		}
+		if proofFacts.TargetGuardKey != f.guardKey || proofFacts.Application != obs.nativeResult.Application ||
+			proofFacts.ChildPID != obs.nativeChildPID || proofFacts.ChildStartID != obs.nativeChildStartID ||
+			!proofFacts.WaitTerminal || !proofFacts.ProcessDrained ||
+			proofFacts.RoleFingerprint != fresh.binding.OriginalRoleFingerprint() ||
+			proofFacts.VerifierSHA256 == "" || !proofFacts.Complete {
+			t.Fatalf("attempt_proof facts do not bind the authentic interrupted child: %+v", proofFacts)
 		}
 		if afterOID, oidErr := borrowedOwnerDDLTargetOID(ctx, b); oidErr != nil || afterOID != base.catalogOID {
 			t.Fatalf("replacement catalog changed: oid=%d err=%v", afterOID, oidErr)
