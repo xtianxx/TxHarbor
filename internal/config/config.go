@@ -193,7 +193,7 @@ const (
 	// audited or logged, never falls back to another route, and refuses a
 	// password, TLS parameters or identity overrides (validated in
 	// internal/recovery).
-	EnvRecoveryGateDSN = "TXHARBOR_RECOVERY_GATE_DSN"
+	EnvRecoveryGateDSN     = "TXHARBOR_RECOVERY_GATE_DSN"
 	EnvRecoveryPrincipal   = "TXHARBOR_RECOVERY_PRINCIPAL"
 	EnvRecoveryArtifactDir = "TXHARBOR_RECOVERY_ARTIFACT_DIR"
 	// EnvRecoveryInstance binds an operator command to one recovery instance:

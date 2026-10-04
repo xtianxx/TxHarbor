@@ -53,6 +53,7 @@ var auditLayerTags = []string{
 	"e2e",
 	"fault",
 	"perf",
+	"drill",
 	"integration_backlog",
 	"integration_dualproc",
 }
