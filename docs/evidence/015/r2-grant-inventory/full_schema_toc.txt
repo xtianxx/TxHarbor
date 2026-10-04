@@ -1,0 +1,393 @@
+;
+; Archive created at 2026-10-04 03:55:05 UTC
+;     dbname: datadb
+;     TOC Entries: 383
+;     Compression: gzip
+;     Dump Version: 1.16-0
+;     Format: CUSTOM
+;     Integer: 4 bytes
+;     Offset: 8 bytes
+;     Dumped from database version: 18.6 (Debian 18.6-1.pgdg13+2)
+;     Dumped by pg_dump version: 18.6 (Debian 18.6-1.pgdg13+2)
+;
+;
+; Selected TOC Entries:
+;
+4613; 0 0 ACL - SCHEMA public pg_database_owner
+239; 1259 19451 TABLE public api_key writer_owner
+238; 1259 19450 SEQUENCE public api_key_key_id_seq writer_owner
+237; 1259 19433 TABLE public caller writer_owner
+219; 1259 19001 TABLE public chain_blocks writer_owner
+232; 1259 19276 TABLE public confirmation_policy_history writer_owner
+290; 1259 20477 TABLE public consumer_inbox writer_owner
+289; 1259 20463 TABLE public consumer_progress writer_owner
+293; 1259 20510 TABLE public consumer_quarantine writer_owner
+292; 1259 20509 SEQUENCE public consumer_quarantine_id_seq writer_owner
+291; 1259 20495 TABLE public consumer_versions writer_owner
+265; 1259 19915 TABLE public delivery_admissions writer_owner
+264; 1259 19914 SEQUENCE public delivery_admissions_admission_id_seq writer_owner
+228; 1259 19213 TABLE public deposit_checkpoint writer_owner
+226; 1259 19141 TABLE public deposit_config_history writer_owner
+236; 1259 19409 TABLE public deposit_observation_transitions writer_owner
+227; 1259 19175 TABLE public deposit_observations writer_owner
+229; 1259 19229 SEQUENCE public deposit_pause_id_seq writer_owner
+230; 1259 19230 TABLE public deposit_pause writer_owner
+231; 1259 19251 TABLE public deposit_pause_audit writer_owner
+301; 1259 20639 TABLE public discrepancy writer_owner
+303; 1259 20680 TABLE public discrepancy_occurrence writer_owner
+302; 1259 20679 SEQUENCE public discrepancy_occurrence_occurrence_id_seq writer_owner
+304; 1259 20705 TABLE public disposition writer_owner
+223; 1259 19078 TABLE public erc20_transfer_logs writer_owner
+312; 1259 20840 TABLE public event_obligation writer_owner
+311; 1259 20839 SEQUENCE public event_obligation_obligation_id_seq writer_owner
+295; 1259 20532 TABLE public event_ops_audit writer_owner
+294; 1259 20531 SEQUENCE public event_ops_audit_id_seq writer_owner
+296; 1259 20551 TABLE public event_system_state writer_owner
+284; 1259 20369 TABLE public execution_caller_permission writer_owner
+279; 1259 20263 TABLE public execution_claims writer_owner
+282; 1259 20327 TABLE public execution_events writer_owner
+281; 1259 20326 SEQUENCE public execution_events_event_id_seq writer_owner
+286; 1259 20389 TABLE public execution_ops_audit writer_owner
+285; 1259 20388 SEQUENCE public execution_ops_audit_audit_id_seq writer_owner
+280; 1259 20294 TABLE public execution_steps writer_owner
+220; 1259 19024 TABLE public indexer_checkpoint writer_owner
+221; 1259 19046 TABLE public indexer_lease writer_owner
+222; 1259 19061 TABLE public indexer_pause writer_owner
+224; 1259 19110 TABLE public log_checkpoint writer_owner
+225; 1259 19126 TABLE public log_pause writer_owner
+251; 1259 19658 TABLE public nonce_binding_events writer_owner
+250; 1259 19657 SEQUENCE public nonce_binding_events_event_id_seq writer_owner
+249; 1259 19619 TABLE public nonce_bindings writer_owner
+252; 1259 19676 TABLE public nonce_observations writer_owner
+255; 1259 19730 TABLE public nonce_ops_audit writer_owner
+254; 1259 19729 SEQUENCE public nonce_ops_audit_audit_id_seq writer_owner
+253; 1259 19702 TABLE public nonce_scope_holds writer_owner
+248; 1259 19598 TABLE public nonce_scope_state writer_owner
+247; 1259 19579 TABLE public nonce_wallet_registry writer_owner
+288; 1259 20421 TABLE public outbox_events writer_owner
+287; 1259 20420 SEQUENCE public outbox_events_id_seq writer_owner
+278; 1259 20227 TABLE public payment_intents writer_owner
+308; 1259 20765 TABLE public recon_audit writer_owner
+307; 1259 20764 SEQUENCE public recon_audit_audit_id_seq writer_owner
+298; 1259 20599 TABLE public recon_checkpoint writer_owner
+300; 1259 20619 TABLE public recon_gap writer_owner
+299; 1259 20618 SEQUENCE public recon_gap_gap_id_seq writer_owner
+310; 1259 20819 TABLE public recon_permission writer_owner
+309; 1259 20790 TABLE public recon_scan_attempt writer_owner
+297; 1259 20562 TABLE public recon_task writer_owner
+233; 1259 19323 TABLE public reorg_policy_history writer_owner
+234; 1259 19352 TABLE public reorg_recovery writer_owner
+235; 1259 19389 TABLE public reorg_recovery_events writer_owner
+283; 1259 20343 TABLE public request_status_projection writer_owner
+306; 1259 20742 TABLE public reverify writer_owner
+305; 1259 20741 SEQUENCE public reverify_reverify_id_seq writer_owner
+261; 1259 19874 TABLE public signature_results writer_owner
+256; 1259 19761 TABLE public signer_caller writer_owner
+258; 1259 19779 TABLE public signer_credential writer_owner
+257; 1259 19778 SEQUENCE public signer_credential_credential_id_seq writer_owner
+263; 1259 19896 TABLE public signing_request_audit writer_owner
+262; 1259 19895 SEQUENCE public signing_request_audit_audit_id_seq writer_owner
+260; 1259 19801 TABLE public signing_requests writer_owner
+259; 1259 19800 SEQUENCE public signing_requests_id_seq writer_owner
+276; 1259 20190 TABLE public tx_attempt_events writer_owner
+275; 1259 20189 SEQUENCE public tx_attempt_events_event_id_seq writer_owner
+268; 1259 20055 TABLE public tx_attempt_signings writer_owner
+267; 1259 19981 TABLE public tx_attempts writer_owner
+277; 1259 20212 TABLE public tx_intent_freezes writer_owner
+274; 1259 20143 TABLE public tx_receipts writer_owner
+273; 1259 20142 SEQUENCE public tx_receipts_receipt_id_seq writer_owner
+272; 1259 20116 TABLE public tx_reconciliations writer_owner
+271; 1259 20115 SEQUENCE public tx_reconciliations_reconcile_id_seq writer_owner
+270; 1259 20079 TABLE public tx_send_attempts writer_owner
+269; 1259 20078 SEQUENCE public tx_send_attempts_send_id_seq writer_owner
+266; 1259 19952 TABLE public withdrawal_authorization_scopes writer_owner
+242; 1259 19510 TABLE public withdrawal_authorizations writer_owner
+246; 1259 19556 TABLE public withdrawal_grant_audit writer_owner
+245; 1259 19555 SEQUENCE public withdrawal_grant_audit_audit_id_seq writer_owner
+244; 1259 19539 TABLE public withdrawal_request_audit writer_owner
+243; 1259 19538 SEQUENCE public withdrawal_request_audit_audit_id_seq writer_owner
+241; 1259 19473 TABLE public withdrawal_requests writer_owner
+240; 1259 19472 SEQUENCE public withdrawal_requests_id_seq writer_owner
+4532; 0 19451 TABLE DATA public api_key writer_owner
+4530; 0 19433 TABLE DATA public caller writer_owner
+4512; 0 19001 TABLE DATA public chain_blocks writer_owner
+4525; 0 19276 TABLE DATA public confirmation_policy_history writer_owner
+4583; 0 20477 TABLE DATA public consumer_inbox writer_owner
+4582; 0 20463 TABLE DATA public consumer_progress writer_owner
+4586; 0 20510 TABLE DATA public consumer_quarantine writer_owner
+4584; 0 20495 TABLE DATA public consumer_versions writer_owner
+4558; 0 19915 TABLE DATA public delivery_admissions writer_owner
+4521; 0 19213 TABLE DATA public deposit_checkpoint writer_owner
+4519; 0 19141 TABLE DATA public deposit_config_history writer_owner
+4529; 0 19409 TABLE DATA public deposit_observation_transitions writer_owner
+4520; 0 19175 TABLE DATA public deposit_observations writer_owner
+4523; 0 19230 TABLE DATA public deposit_pause writer_owner
+4524; 0 19251 TABLE DATA public deposit_pause_audit writer_owner
+4594; 0 20639 TABLE DATA public discrepancy writer_owner
+4596; 0 20680 TABLE DATA public discrepancy_occurrence writer_owner
+4597; 0 20705 TABLE DATA public disposition writer_owner
+4516; 0 19078 TABLE DATA public erc20_transfer_logs writer_owner
+4605; 0 20840 TABLE DATA public event_obligation writer_owner
+4588; 0 20532 TABLE DATA public event_ops_audit writer_owner
+4589; 0 20551 TABLE DATA public event_system_state writer_owner
+4577; 0 20369 TABLE DATA public execution_caller_permission writer_owner
+4572; 0 20263 TABLE DATA public execution_claims writer_owner
+4575; 0 20327 TABLE DATA public execution_events writer_owner
+4579; 0 20389 TABLE DATA public execution_ops_audit writer_owner
+4573; 0 20294 TABLE DATA public execution_steps writer_owner
+4513; 0 19024 TABLE DATA public indexer_checkpoint writer_owner
+4514; 0 19046 TABLE DATA public indexer_lease writer_owner
+4515; 0 19061 TABLE DATA public indexer_pause writer_owner
+4517; 0 19110 TABLE DATA public log_checkpoint writer_owner
+4518; 0 19126 TABLE DATA public log_pause writer_owner
+4544; 0 19658 TABLE DATA public nonce_binding_events writer_owner
+4542; 0 19619 TABLE DATA public nonce_bindings writer_owner
+4545; 0 19676 TABLE DATA public nonce_observations writer_owner
+4548; 0 19730 TABLE DATA public nonce_ops_audit writer_owner
+4546; 0 19702 TABLE DATA public nonce_scope_holds writer_owner
+4541; 0 19598 TABLE DATA public nonce_scope_state writer_owner
+4540; 0 19579 TABLE DATA public nonce_wallet_registry writer_owner
+4581; 0 20421 TABLE DATA public outbox_events writer_owner
+4571; 0 20227 TABLE DATA public payment_intents writer_owner
+4601; 0 20765 TABLE DATA public recon_audit writer_owner
+4591; 0 20599 TABLE DATA public recon_checkpoint writer_owner
+4593; 0 20619 TABLE DATA public recon_gap writer_owner
+4603; 0 20819 TABLE DATA public recon_permission writer_owner
+4602; 0 20790 TABLE DATA public recon_scan_attempt writer_owner
+4590; 0 20562 TABLE DATA public recon_task writer_owner
+4526; 0 19323 TABLE DATA public reorg_policy_history writer_owner
+4527; 0 19352 TABLE DATA public reorg_recovery writer_owner
+4528; 0 19389 TABLE DATA public reorg_recovery_events writer_owner
+4576; 0 20343 TABLE DATA public request_status_projection writer_owner
+4599; 0 20742 TABLE DATA public reverify writer_owner
+4554; 0 19874 TABLE DATA public signature_results writer_owner
+4549; 0 19761 TABLE DATA public signer_caller writer_owner
+4551; 0 19779 TABLE DATA public signer_credential writer_owner
+4556; 0 19896 TABLE DATA public signing_request_audit writer_owner
+4553; 0 19801 TABLE DATA public signing_requests writer_owner
+4569; 0 20190 TABLE DATA public tx_attempt_events writer_owner
+4561; 0 20055 TABLE DATA public tx_attempt_signings writer_owner
+4560; 0 19981 TABLE DATA public tx_attempts writer_owner
+4570; 0 20212 TABLE DATA public tx_intent_freezes writer_owner
+4567; 0 20143 TABLE DATA public tx_receipts writer_owner
+4565; 0 20116 TABLE DATA public tx_reconciliations writer_owner
+4563; 0 20079 TABLE DATA public tx_send_attempts writer_owner
+4559; 0 19952 TABLE DATA public withdrawal_authorization_scopes writer_owner
+4535; 0 19510 TABLE DATA public withdrawal_authorizations writer_owner
+4539; 0 19556 TABLE DATA public withdrawal_grant_audit writer_owner
+4537; 0 19539 TABLE DATA public withdrawal_request_audit writer_owner
+4534; 0 19473 TABLE DATA public withdrawal_requests writer_owner
+4614; 0 0 SEQUENCE SET public api_key_key_id_seq writer_owner
+4615; 0 0 SEQUENCE SET public consumer_quarantine_id_seq writer_owner
+4616; 0 0 SEQUENCE SET public delivery_admissions_admission_id_seq writer_owner
+4617; 0 0 SEQUENCE SET public deposit_pause_id_seq writer_owner
+4618; 0 0 SEQUENCE SET public discrepancy_occurrence_occurrence_id_seq writer_owner
+4619; 0 0 SEQUENCE SET public event_obligation_obligation_id_seq writer_owner
+4620; 0 0 SEQUENCE SET public event_ops_audit_id_seq writer_owner
+4621; 0 0 SEQUENCE SET public execution_events_event_id_seq writer_owner
+4622; 0 0 SEQUENCE SET public execution_ops_audit_audit_id_seq writer_owner
+4623; 0 0 SEQUENCE SET public nonce_binding_events_event_id_seq writer_owner
+4624; 0 0 SEQUENCE SET public nonce_ops_audit_audit_id_seq writer_owner
+4625; 0 0 SEQUENCE SET public outbox_events_id_seq writer_owner
+4626; 0 0 SEQUENCE SET public recon_audit_audit_id_seq writer_owner
+4627; 0 0 SEQUENCE SET public recon_gap_gap_id_seq writer_owner
+4628; 0 0 SEQUENCE SET public reverify_reverify_id_seq writer_owner
+4629; 0 0 SEQUENCE SET public signer_credential_credential_id_seq writer_owner
+4630; 0 0 SEQUENCE SET public signing_request_audit_audit_id_seq writer_owner
+4631; 0 0 SEQUENCE SET public signing_requests_id_seq writer_owner
+4632; 0 0 SEQUENCE SET public tx_attempt_events_event_id_seq writer_owner
+4633; 0 0 SEQUENCE SET public tx_receipts_receipt_id_seq writer_owner
+4634; 0 0 SEQUENCE SET public tx_reconciliations_reconcile_id_seq writer_owner
+4635; 0 0 SEQUENCE SET public tx_send_attempts_send_id_seq writer_owner
+4636; 0 0 SEQUENCE SET public withdrawal_grant_audit_audit_id_seq writer_owner
+4637; 0 0 SEQUENCE SET public withdrawal_request_audit_audit_id_seq writer_owner
+4638; 0 0 SEQUENCE SET public withdrawal_requests_id_seq writer_owner
+4132; 2606 19466 CONSTRAINT public api_key api_key_key_hash_uniq writer_owner
+4134; 2606 19464 CONSTRAINT public api_key api_key_pkey writer_owner
+4130; 2606 19449 CONSTRAINT public caller caller_pkey writer_owner
+4073; 2606 19023 CONSTRAINT public chain_blocks chain_blocks_chain_id_hash_key writer_owner
+4075; 2606 19021 CONSTRAINT public chain_blocks chain_blocks_chain_id_number_hash_key writer_owner
+4077; 2606 19319 CONSTRAINT public chain_blocks chain_blocks_pkey writer_owner
+4113; 2606 19298 CONSTRAINT public confirmation_policy_history confirmation_policy_history_chain_id_request_id_key writer_owner
+4115; 2606 19296 CONSTRAINT public confirmation_policy_history confirmation_policy_history_pkey writer_owner
+4268; 2606 20493 CONSTRAINT public consumer_inbox consumer_inbox_pkey writer_owner
+4265; 2606 20476 CONSTRAINT public consumer_progress consumer_progress_pkey writer_owner
+4273; 2606 20529 CONSTRAINT public consumer_quarantine consumer_quarantine_pkey writer_owner
+4270; 2606 20508 CONSTRAINT public consumer_versions consumer_versions_pkey writer_owner
+4194; 2606 19944 CONSTRAINT public delivery_admissions delivery_admissions_pkey writer_owner
+4196; 2606 19946 CONSTRAINT public delivery_admissions delivery_admissions_request_attempt_uniq writer_owner
+4104; 2606 19228 CONSTRAINT public deposit_checkpoint deposit_checkpoint_pkey writer_owner
+4095; 2606 19168 CONSTRAINT public deposit_config_history deposit_config_history_chain_id_request_id_key writer_owner
+4097; 2606 19166 CONSTRAINT public deposit_config_history deposit_config_history_pkey writer_owner
+4128; 2606 19432 CONSTRAINT public deposit_observation_transitions deposit_observation_transitio_chain_id_block_hash_tx_hash_l_key writer_owner
+4101; 2606 19205 CONSTRAINT public deposit_observations deposit_observations_pkey writer_owner
+4110; 2606 19275 CONSTRAINT public deposit_pause_audit deposit_pause_audit_chain_id_pause_id_revision_action_key writer_owner
+4106; 2606 19250 CONSTRAINT public deposit_pause deposit_pause_pause_id_key writer_owner
+4108; 2606 19248 CONSTRAINT public deposit_pause deposit_pause_pkey writer_owner
+4296; 2606 20692 CONSTRAINT public discrepancy_occurrence discrepancy_occurrence_pkey writer_owner
+4292; 2606 20670 CONSTRAINT public discrepancy discrepancy_pkey writer_owner
+4300; 2606 20734 CONSTRAINT public disposition disposition_idempotency_key_uniq writer_owner
+4302; 2606 20732 CONSTRAINT public disposition disposition_pkey writer_owner
+4085; 2606 19108 CONSTRAINT public erc20_transfer_logs erc20_transfer_logs_chain_id_block_hash_log_index_key writer_owner
+4088; 2606 19106 CONSTRAINT public erc20_transfer_logs erc20_transfer_logs_pkey writer_owner
+4321; 2606 20864 CONSTRAINT public event_obligation event_obligation_identity_uniq writer_owner
+4324; 2606 20862 CONSTRAINT public event_obligation event_obligation_pkey writer_owner
+4275; 2606 20550 CONSTRAINT public event_ops_audit event_ops_audit_operation_id_key writer_owner
+4277; 2606 20548 CONSTRAINT public event_ops_audit event_ops_audit_pkey writer_owner
+4279; 2606 20561 CONSTRAINT public event_system_state event_system_state_pkey writer_owner
+4249; 2606 20382 CONSTRAINT public execution_caller_permission execution_caller_permission_pkey writer_owner
+4237; 2606 20288 CONSTRAINT public execution_claims execution_claims_pkey writer_owner
+4243; 2606 20341 CONSTRAINT public execution_events execution_events_pkey writer_owner
+4251; 2606 20414 CONSTRAINT public execution_ops_audit execution_ops_audit_operation_id_uniq writer_owner
+4253; 2606 20412 CONSTRAINT public execution_ops_audit execution_ops_audit_pkey writer_owner
+4240; 2606 20319 CONSTRAINT public execution_steps execution_steps_pkey writer_owner
+4079; 2606 19040 CONSTRAINT public indexer_checkpoint indexer_checkpoint_pkey writer_owner
+4081; 2606 19060 CONSTRAINT public indexer_lease indexer_lease_pkey writer_owner
+4083; 2606 19077 CONSTRAINT public indexer_pause indexer_pause_pkey writer_owner
+4090; 2606 19125 CONSTRAINT public log_checkpoint log_checkpoint_pkey writer_owner
+4092; 2606 19140 CONSTRAINT public log_pause log_pause_pkey writer_owner
+4162; 2606 19675 CONSTRAINT public nonce_binding_events nonce_binding_events_binding_to_uniq writer_owner
+4164; 2606 19673 CONSTRAINT public nonce_binding_events nonce_binding_events_pkey writer_owner
+4156; 2606 19649 CONSTRAINT public nonce_bindings nonce_bindings_intent_uniq writer_owner
+4158; 2606 19647 CONSTRAINT public nonce_bindings nonce_bindings_pkey writer_owner
+4160; 2606 19651 CONSTRAINT public nonce_bindings nonce_bindings_scope_nonce_uniq writer_owner
+4166; 2606 19700 CONSTRAINT public nonce_observations nonce_observations_pkey writer_owner
+4171; 2606 19760 CONSTRAINT public nonce_ops_audit nonce_ops_audit_operation_id_uniq writer_owner
+4173; 2606 19758 CONSTRAINT public nonce_ops_audit nonce_ops_audit_pkey writer_owner
+4169; 2606 19723 CONSTRAINT public nonce_scope_holds nonce_scope_holds_pkey writer_owner
+4154; 2606 19613 CONSTRAINT public nonce_scope_state nonce_scope_state_pkey writer_owner
+4152; 2606 19597 CONSTRAINT public nonce_wallet_registry nonce_wallet_registry_pkey writer_owner
+4255; 2606 20456 CONSTRAINT public outbox_events outbox_events_event_id_uniq writer_owner
+4261; 2606 20454 CONSTRAINT public outbox_events outbox_events_pkey writer_owner
+4231; 2606 20257 CONSTRAINT public payment_intents payment_intents_authorization_uniq writer_owner
+4233; 2606 20253 CONSTRAINT public payment_intents payment_intents_pkey writer_owner
+4235; 2606 20255 CONSTRAINT public payment_intents payment_intents_request_uniq writer_owner
+4309; 2606 20787 CONSTRAINT public recon_audit recon_audit_pkey writer_owner
+4285; 2606 20612 CONSTRAINT public recon_checkpoint recon_checkpoint_pkey writer_owner
+4287; 2606 20632 CONSTRAINT public recon_gap recon_gap_pkey writer_owner
+4318; 2606 20838 CONSTRAINT public recon_permission recon_permission_pkey writer_owner
+4313; 2606 20808 CONSTRAINT public recon_scan_attempt recon_scan_attempt_pkey writer_owner
+4315; 2606 20810 CONSTRAINT public recon_scan_attempt recon_scan_attempt_task_attempt_uniq writer_owner
+4282; 2606 20596 CONSTRAINT public recon_task recon_task_pkey writer_owner
+4118; 2606 19345 CONSTRAINT public reorg_policy_history reorg_policy_history_chain_id_request_id_key writer_owner
+4120; 2606 19343 CONSTRAINT public reorg_policy_history reorg_policy_history_pkey writer_owner
+4126; 2606 19408 CONSTRAINT public reorg_recovery_events reorg_recovery_events_chain_id_recovery_id_event_seq_key writer_owner
+4122; 2606 19381 CONSTRAINT public reorg_recovery reorg_recovery_pkey writer_owner
+4124; 2606 19383 CONSTRAINT public reorg_recovery reorg_recovery_recovery_id_key writer_owner
+4245; 2606 20363 CONSTRAINT public request_status_projection request_status_projection_intent_uniq writer_owner
+4247; 2606 20361 CONSTRAINT public request_status_projection request_status_projection_pkey writer_owner
+4305; 2606 20757 CONSTRAINT public reverify reverify_pkey writer_owner
+4188; 2606 19887 CONSTRAINT public signature_results signature_results_pkey writer_owner
+4190; 2606 19889 CONSTRAINT public signature_results signature_results_tx_hash_uniq writer_owner
+4175; 2606 19777 CONSTRAINT public signer_caller signer_caller_pkey writer_owner
+4177; 2606 19792 CONSTRAINT public signer_credential signer_credential_pkey writer_owner
+4179; 2606 19794 CONSTRAINT public signer_credential signer_credential_secret_hash_uniq writer_owner
+4192; 2606 19913 CONSTRAINT public signing_request_audit signing_request_audit_pkey writer_owner
+4181; 2606 19862 CONSTRAINT public signing_requests signing_requests_attempt_uniq writer_owner
+4184; 2606 19860 CONSTRAINT public signing_requests signing_requests_caller_request_uniq writer_owner
+4186; 2606 19858 CONSTRAINT public signing_requests signing_requests_pkey writer_owner
+4225; 2606 20210 CONSTRAINT public tx_attempt_events tx_attempt_events_attempt_seq_uniq writer_owner
+4227; 2606 20208 CONSTRAINT public tx_attempt_events tx_attempt_events_pkey writer_owner
+4206; 2606 20070 CONSTRAINT public tx_attempt_signings tx_attempt_signings_pkey writer_owner
+4208; 2606 20072 CONSTRAINT public tx_attempt_signings tx_attempt_signings_tx_hash_uniq writer_owner
+4201; 2606 20035 CONSTRAINT public tx_attempts tx_attempts_pkey writer_owner
+4204; 2606 20037 CONSTRAINT public tx_attempts tx_attempts_signing_request_uniq writer_owner
+4229; 2606 20226 CONSTRAINT public tx_intent_freezes tx_intent_freezes_pkey writer_owner
+4220; 2606 20179 CONSTRAINT public tx_receipts tx_receipts_pkey writer_owner
+4222; 2606 20181 CONSTRAINT public tx_receipts tx_receipts_tx_block_uniq writer_owner
+4216; 2606 20135 CONSTRAINT public tx_reconciliations tx_reconciliations_pkey writer_owner
+4211; 2606 20108 CONSTRAINT public tx_send_attempts tx_send_attempts_attempt_seq_uniq writer_owner
+4213; 2606 20106 CONSTRAINT public tx_send_attempts tx_send_attempts_pkey writer_owner
+4198; 2606 19975 CONSTRAINT public withdrawal_authorization_scopes withdrawal_authorization_scopes_pkey writer_owner
+4144; 2606 19532 CONSTRAINT public withdrawal_authorizations withdrawal_authorizations_pkey writer_owner
+4148; 2606 19578 CONSTRAINT public withdrawal_grant_audit withdrawal_grant_audit_operation_id_uniq writer_owner
+4150; 2606 19576 CONSTRAINT public withdrawal_grant_audit withdrawal_grant_audit_pkey writer_owner
+4146; 2606 19554 CONSTRAINT public withdrawal_request_audit withdrawal_request_audit_pkey writer_owner
+4136; 2606 19504 CONSTRAINT public withdrawal_requests withdrawal_requests_authorization_uniq writer_owner
+4138; 2606 19502 CONSTRAINT public withdrawal_requests withdrawal_requests_caller_key_uniq writer_owner
+4140; 2606 19498 CONSTRAINT public withdrawal_requests withdrawal_requests_pkey writer_owner
+4142; 2606 19500 CONSTRAINT public withdrawal_requests withdrawal_requests_request_id_uniq writer_owner
+4071; 1259 19320 INDEX public chain_blocks_canonical_uniq writer_owner
+4111; 1259 19304 INDEX public confirmation_policy_history_bootstrap_uniq writer_owner
+4266; 1259 20494 INDEX public consumer_inbox_aggregate_idx writer_owner
+4271; 1259 20530 INDEX public consumer_quarantine_open_uniq writer_owner
+4093; 1259 19174 INDEX public deposit_config_history_bootstrap_uniq writer_owner
+4098; 1259 19211 INDEX public deposit_observations_height_idx writer_owner
+4099; 1259 19317 INDEX public deposit_observations_pending_height_idx writer_owner
+4102; 1259 19212 INDEX public deposit_observations_recipient_height_idx writer_owner
+4289; 1259 20677 INDEX public discrepancy_business_idx writer_owner
+4290; 1259 20678 INDEX public discrepancy_claim_queue_idx writer_owner
+4294; 1259 20703 INDEX public discrepancy_occurrence_discrepancy_idx writer_owner
+4297; 1259 20704 INDEX public discrepancy_occurrence_task_idx writer_owner
+4293; 1259 20676 INDEX public discrepancy_state_idx writer_owner
+4298; 1259 20740 INDEX public disposition_discrepancy_idx writer_owner
+4086; 1259 19109 INDEX public erc20_transfer_logs_height_idx writer_owner
+4319; 1259 20865 INDEX public event_obligation_aggregate_idx writer_owner
+4322; 1259 20866 INDEX public event_obligation_obligated_at_idx writer_owner
+4241; 1259 20342 INDEX public execution_events_intent_time_idx writer_owner
+4238; 1259 20325 INDEX public execution_steps_open_uniq writer_owner
+4167; 1259 19701 INDEX public nonce_observations_scope_time_idx writer_owner
+4256; 1259 20457 INDEX public outbox_events_log_identity_uniq writer_owner
+4257; 1259 20458 INDEX public outbox_events_object_identity_uniq writer_owner
+4258; 1259 20460 INDEX public outbox_events_pending_capacity_idx writer_owner
+4259; 1259 20459 INDEX public outbox_events_pending_queue_idx writer_owner
+4262; 1259 20461 INDEX public outbox_events_published_retention_idx writer_owner
+4263; 1259 20462 INDEX public outbox_events_source_audit_idx writer_owner
+4306; 1259 20789 INDEX public recon_audit_action_idx writer_owner
+4307; 1259 20788 INDEX public recon_audit_actor_idx writer_owner
+4288; 1259 20638 INDEX public recon_gap_task_idx writer_owner
+4310; 1259 20816 INDEX public recon_scan_attempt_claimed_uniq writer_owner
+4311; 1259 20817 INDEX public recon_scan_attempt_lease_idx writer_owner
+4316; 1259 20818 INDEX public recon_scan_attempt_task_idx writer_owner
+4280; 1259 20598 INDEX public recon_task_chain_idx writer_owner
+4283; 1259 20597 INDEX public recon_task_state_idx writer_owner
+4116; 1259 19351 INDEX public reorg_policy_history_bootstrap_uniq writer_owner
+4303; 1259 20763 INDEX public reverify_discrepancy_idx writer_owner
+4182; 1259 19873 INDEX public signing_requests_authorization_anchor_uniq writer_owner
+4223; 1259 20211 INDEX public tx_attempt_events_attempt_idx writer_owner
+4199; 1259 20054 INDEX public tx_attempts_intent_idx writer_owner
+4202; 1259 20053 INDEX public tx_attempts_scan_idx writer_owner
+4217; 1259 20187 INDEX public tx_receipts_attempt_idx writer_owner
+4218; 1259 20188 INDEX public tx_receipts_open_idx writer_owner
+4214; 1259 20141 INDEX public tx_reconciliations_attempt_idx writer_owner
+4209; 1259 20114 INDEX public tx_send_attempts_attempt_idx writer_owner
+4332; 2606 19467 FK CONSTRAINT public api_key api_key_caller_id_fkey writer_owner
+4329; 2606 19299 FK CONSTRAINT public confirmation_policy_history confirmation_policy_history_chain_id_prev_seq_fkey writer_owner
+4342; 2606 19947 FK CONSTRAINT public delivery_admissions delivery_admissions_request_fkey writer_owner
+4326; 2606 19169 FK CONSTRAINT public deposit_config_history deposit_config_history_chain_id_prev_seq_fkey writer_owner
+4327; 2606 19206 FK CONSTRAINT public deposit_observations deposit_observations_chain_id_version_seq_fkey writer_owner
+4328; 2606 19310 FK CONSTRAINT public deposit_observations deposit_observations_confirm_policy_seq_fkey writer_owner
+4359; 2606 20671 FK CONSTRAINT public discrepancy discrepancy_linked_to_fkey writer_owner
+4360; 2606 20693 FK CONSTRAINT public discrepancy_occurrence discrepancy_occurrence_discrepancy_fkey writer_owner
+4361; 2606 20698 FK CONSTRAINT public discrepancy_occurrence discrepancy_occurrence_scan_task_fkey writer_owner
+4362; 2606 20735 FK CONSTRAINT public disposition disposition_discrepancy_fkey writer_owner
+4356; 2606 20383 FK CONSTRAINT public execution_caller_permission execution_caller_permission_caller_fkey writer_owner
+4353; 2606 20289 FK CONSTRAINT public execution_claims execution_claims_intent_fkey writer_owner
+4354; 2606 20320 FK CONSTRAINT public execution_steps execution_steps_intent_fkey writer_owner
+4325; 2606 19041 FK CONSTRAINT public indexer_checkpoint indexer_checkpoint_chain_id_height_block_hash_fkey writer_owner
+4336; 2606 19652 FK CONSTRAINT public nonce_bindings nonce_bindings_registry_fkey writer_owner
+4337; 2606 19724 FK CONSTRAINT public nonce_scope_holds nonce_scope_holds_registry_fkey writer_owner
+4335; 2606 19614 FK CONSTRAINT public nonce_scope_state nonce_scope_state_registry_fkey writer_owner
+4352; 2606 20258 FK CONSTRAINT public payment_intents payment_intents_request_fkey writer_owner
+4357; 2606 20613 FK CONSTRAINT public recon_checkpoint recon_checkpoint_task_fkey writer_owner
+4358; 2606 20633 FK CONSTRAINT public recon_gap recon_gap_task_fkey writer_owner
+4364; 2606 20811 FK CONSTRAINT public recon_scan_attempt recon_scan_attempt_task_fkey writer_owner
+4330; 2606 19346 FK CONSTRAINT public reorg_policy_history reorg_policy_history_chain_id_prev_seq_fkey writer_owner
+4331; 2606 19384 FK CONSTRAINT public reorg_recovery reorg_recovery_chain_id_policy_seq_fkey writer_owner
+4355; 2606 20364 FK CONSTRAINT public request_status_projection request_status_projection_intent_fkey writer_owner
+4363; 2606 20758 FK CONSTRAINT public reverify reverify_discrepancy_fkey writer_owner
+4341; 2606 19890 FK CONSTRAINT public signature_results signature_results_request_fkey writer_owner
+4338; 2606 19795 FK CONSTRAINT public signer_credential signer_credential_caller_id_fkey writer_owner
+4339; 2606 19863 FK CONSTRAINT public signing_requests signing_requests_caller_id_fkey writer_owner
+4340; 2606 19868 FK CONSTRAINT public signing_requests signing_requests_replacement_fkey writer_owner
+4348; 2606 20073 FK CONSTRAINT public tx_attempt_signings tx_attempt_signings_attempt_fkey writer_owner
+4344; 2606 20048 FK CONSTRAINT public tx_attempts tx_attempts_authorization_fkey writer_owner
+4345; 2606 20043 FK CONSTRAINT public tx_attempts tx_attempts_binding_fkey writer_owner
+4346; 2606 20415 FK CONSTRAINT public tx_attempts tx_attempts_intent_fkey writer_owner
+4347; 2606 20038 FK CONSTRAINT public tx_attempts tx_attempts_replacement_fkey writer_owner
+4351; 2606 20182 FK CONSTRAINT public tx_receipts tx_receipts_attempt_fkey writer_owner
+4350; 2606 20136 FK CONSTRAINT public tx_reconciliations tx_reconciliations_attempt_fkey writer_owner
+4349; 2606 20109 FK CONSTRAINT public tx_send_attempts tx_send_attempts_attempt_fkey writer_owner
+4343; 2606 19976 FK CONSTRAINT public withdrawal_authorization_scopes withdrawal_authorization_scopes_authorization_fkey writer_owner
+4334; 2606 19533 FK CONSTRAINT public withdrawal_authorizations withdrawal_authorizations_caller_id_fkey writer_owner
+4333; 2606 19505 FK CONSTRAINT public withdrawal_requests withdrawal_requests_caller_id_fkey writer_owner
