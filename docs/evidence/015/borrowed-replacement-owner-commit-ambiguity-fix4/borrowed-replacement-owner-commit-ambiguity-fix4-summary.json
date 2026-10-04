@@ -1,0 +1,137 @@
+{
+  "task": "Bounded repair of 2 residual commit-ambiguity P2s (P2-B2 serialized deadline application with real-socket coverage; P2-B3 break-aware stalls / error wake)",
+  "date": "2026-10-01",
+  "head": "e504462",
+  "worktree_tracked_modified": 22,
+  "scope": {
+    "modified_files": [
+      "internal/recovery/targetlock_commitambiguity_hook_linux_test.go",
+      "internal/recovery/borrowed-replacement-owner-commit-ambiguity_linux_test.go"
+    ],
+    "preserved_seam": "internal/recovery/targetlock.go stays 529c71c4 (0-hunk diff)",
+    "untouched": "journal ee880415, guard-row 264cbc81, owner-tail 819585c4, observation f1c7601a, window a11b33fc, autonomous d9fe63ee, prelaunch/session/binding/driver/successor/DDL/bridges"
+  },
+  "source_hashes": {
+    "targetlock_before_after": "529c71c4b3e494988526e539e48472d4f80140149ca9cc51913e454a0731a30a",
+    "companion_before": "cdeddfb30fd6483ad4c8b5fcc6fd83b4ea024599454a24d24d9167f1339ad8a4",
+    "companion_after": "ff2bb3527dda9a81999f15e41518a44db808e386766249ba2e4892288a3f9ebf",
+    "lane_before": "2651ef8c52b8541e29ecd5522bf264b210a6ca231547e4844e8d87b4af4ed4d5",
+    "lane_after": "7e613d18329334ef5c6a4237ec2d339328636f1d4d49200de5ea87c0699e7b08"
+  },
+  "fixes": {
+    "P2-B2": {
+      "change": "the minimum computation and the absolute SetReadDeadline application are serialized under the SAME deadline mutex (applyEffectiveDeadlineLocked called while holding deadlineMu; the lock is never held across a Read). A concurrent cancellation can no longer be undone by a stale assembly apply, and a concurrent clear can no longer remove the active assembly cap",
+      "coverage": "real net.Pipe socket probe (NewTargetLockCommitAmbiguityDeadlineProbe) sharing the exact adapter path: 25 rounds of competing caller-update vs apply must settle on the expired minimum (blocked real-socket read returns os.ErrDeadlineExceeded; a stale future apply would hang), plus clear-during-assembly and mid-read clear must keep the cap (bounded cap deadline on the real socket)"
+    },
+    "P2-B3": {
+      "change": "both stall selects observe brokenCh and return a fail-closed transport error PROMPTLY; ControlFeedServerError also wakes stalled readers (same wake signal as byte feeds, with the actual-data check); added break-while-stalled and queued-error-wake completion proofs in the lane",
+      "coverage": "break while stalled finishes the reader promptly (no 30s cap wait) with the 6 partial bytes consumed and no WITHHELD; a queued EOF wakes the stalled reader boundedly"
+    }
+  },
+  "gold": {
+    "log": "borrowed-replacement-owner-commit-ambiguity-fix4-gold.log",
+    "sha256": "b42d67dc98bdbb36a79050ae9dab324eda531459bbfdcd01aaf6a4d3a28f109d",
+    "exit": 0,
+    "top_pass": 1,
+    "top_fail": 0,
+    "top_skip": 0,
+    "data_race": 0,
+    "warning": 0,
+    "duration": "66.94s",
+    "first_run": true,
+    "first_fail": null
+  },
+  "race": {
+    "log": "borrowed-replacement-owner-commit-ambiguity-fix4-race.log",
+    "sha256": "7caa623f819f5b8a2b0945cee139ab5bccfb72758b3f73632ac74c3a6dba2911",
+    "exit": 0,
+    "top_pass": 1,
+    "top_fail": 0,
+    "top_skip": 0,
+    "data_race": 0,
+    "warning": 0,
+    "panic": 0,
+    "duration": "100.28s",
+    "binary": "borrowed-replacement-owner-commit-ambiguity-fix4-race.test",
+    "binary_sha256": "065b43ffc3d31d88ceb7ee57f987d68c33a7ecbc070dc3f9ba0809e36fd385fc",
+    "build_log_sha256": "545d6d065bfca9994113a8c961e12d3823c802fe4b36627acf7a04929e974566",
+    "build_log_records": [
+      "commit-ambiguity 7e613d18",
+      "commit-ambiguity-companion ff2bb352",
+      "targetlock-seam 529c71c4 (preserved)",
+      "owner-journal-window ee880415",
+      "guard-row-window 264cbc81",
+      "plus all other predecessors directly"
+    ]
+  },
+  "container": {
+    "image": "postgres@sha256:4ef4dbc939d61acea57712655ddb4b4ab27419c913f94cca0cd57cb3ea3c2280",
+    "root": true,
+    "private_pid": true,
+    "init": true,
+    "hostnet": true,
+    "CI": "true",
+    "TXHARBOR_REQUIRE_DOCKER": "1",
+    "PGDATA_PG_MAJOR_PG_VERSION": "unset",
+    "test_regex": "^TestBorrowedReplacementOwnerCommitAmbiguity$"
+  },
+  "diffs": {
+    "targetlock": {
+      "file": "borrowed-replacement-owner-commit-ambiguity-fix4-targetlock.diff",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "hunk_count": 0
+    },
+    "companion": {
+      "file": "borrowed-replacement-owner-commit-ambiguity-fix4-companion.diff",
+      "sha256": "ddc7fac7ceed81c871894db2bb45b449f6905c6007d2c74ff9b59594cf9b4d44",
+      "hunk_count": 7,
+      "hunks": [
+        "@@ -333,6 +333,10 @@",
+        "@@ -343,12 +347,7 @@",
+        "@@ -569,16 +568,29 @@",
+        "@@ -629,35 +641,46 @@",
+        "@@ -690,12 +713,12 @@",
+        "@@ -741,10 +764,11 @@",
+        "@@ -786,6 +810,125 @@"
+      ]
+    },
+    "lane": {
+      "file": "borrowed-replacement-owner-commit-ambiguity-fix4-lane.diff",
+      "sha256": "d23930fc1835f0ec2a3cea1c5c63884dd6ae3ca6c1e05eb7f0198317d992dd40",
+      "hunk_count": 1,
+      "hunks": [
+        "@@ -888,6 +888,149 @@"
+      ]
+    }
+  },
+  "brackets": {
+    "before": "borrowed-replacement-owner-commit-ambiguity-fix4-hashes-before.txt",
+    "before_sha256": "7b9b6c7958c8b2695a904223bf5e5dda984fb6c7f5081a85f7700680f53b0e62",
+    "after": "borrowed-replacement-owner-commit-ambiguity-fix4-hashes-after.txt",
+    "after_sha256": "b3a17885b92d5f74a66f705402caf4fbe672dfbf5073282a77c9ce5f73bce4c5",
+    "after_runs": "borrowed-replacement-owner-commit-ambiguity-fix4-hashes-after-runs.txt",
+    "after_runs_sha256": "8c8445caa75dbcdc1f3590cc79d0a516efc8c42837d4a042fc641fe30f37d944",
+    "source_stable": true,
+    "closed_predecessors_identical": true,
+    "seam_preserved": true
+  },
+  "runners": {
+    "gold_runner_sha256": "391f6dad5ede3bd86c16c7f015927e4ab822fb77b0cec0fb4ee59cb7f9898056",
+    "race_runner_sha256": "1d250d9c7da5f8d395d399a8ae7392e764c78b4a6efcf8db2bdb60d9c1d89914",
+    "race_build_sha256": "a05688a2b68a081efd9f39406e5fff2fd9d6cd878c3c2cb9fa8dbf108ba50785",
+    "bracket_sha256": "39a2e8f2ce189df112e51f0be4f2957d9eb1535c852c0fc0ed58164c180c1b9d",
+    "bracket_before_sha256": "d48ab63aa56bc3a3894d09b475639ad8ce776da643840436baea991894dd6928"
+  },
+  "history_unrebound": {
+    "commit_ambiguity_fix3_summary_sha256": "e864fc4b0b2f7ce601f53a5f2061347dad6d11809ac56a11da91f7e14bb7d75b",
+    "commit_ambiguity_fix2_summary_sha256": "0d9955e99fbc976c95c3447296bce9983e48298fe4db18ab9a15567d8e623df3",
+    "commit_ambiguity_fix_summary_sha256": "7cd227a2515ff506a79c8c0c425d9bfa48003cc240b4ff8f464fb751f993ba34"
+  },
+  "notes": [
+    "No commit; HEAD e504462; 22 tracked modified files; one new untracked companion.",
+    "targetlock.go byte-identical (0-hunk) as required; P2-A1/B1/B3 behaviour kept.",
+    "Gold and race were first-run passes; no first-fail artifact.",
+    "The real-socket probe uses net.Pipe (a real net.Conn with deadlines) sharing the exact adapter/core deadline mechanism; it is never installed into the production seam.",
+    "Never assert rollback where COMMIT may have occurred; ack-loss stays UNKNOWN; secrets/DSNs/verifiers unlogged."
+  ]
+}

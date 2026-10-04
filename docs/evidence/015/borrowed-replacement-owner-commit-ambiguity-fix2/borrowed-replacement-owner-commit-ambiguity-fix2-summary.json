@@ -1,0 +1,136 @@
+{
+  "task": "Bounded repair of residual commit-ambiguity P2s (P2-A1, P2-B1, P2-B2, P2-B3) across targetlock.go (kept as-is), the drill companion and the lane",
+  "date": "2026-10-01",
+  "head": "e504462",
+  "worktree_tracked_modified": 22,
+  "scope": {
+    "modified_files": [
+      "internal/recovery/targetlock_commitambiguity_hook_linux_test.go",
+      "internal/recovery/borrowed-replacement-owner-commit-ambiguity_linux_test.go"
+    ],
+    "unchanged_as_required": "internal/recovery/targetlock.go stays 529c71c4 (0-hunk diff) keeping the unexported nil-default hook + atomic reserve/consume + generation-conditional reset",
+    "untouched": "journal ee880415, guard-row 264cbc81, owner-tail 819585c4, observation f1c7601a, window a11b33fc, autonomous d9fe63ee, prelaunch/session/binding/driver/successor/DDL/bridges"
+  },
+  "source_hashes": {
+    "targetlock_before_after": "529c71c4b3e494988526e539e48472d4f80140149ca9cc51913e454a0731a30a",
+    "companion_before": "7b6532f88b4ad720e4d60928b4ffff581e8c6d9ec87e8f786f4c8b1db0392c23",
+    "companion_after": "1fce8bb95279194a0f6b40e8e5cac14fc05558c89d6f583a2ac45fe136441d06",
+    "lane_before": "773b81351edb7260e10ed3b57f46d84825774d8be556c5f03172e26f5b7f2ecf",
+    "lane_after": "3b445db457f35b93977a8351ac120798dff9c28cd672702ca627642eb8e51d30"
+  },
+  "fixes": {
+    "P2-A1": {
+      "change": "the exported handle is now an opaque fixed-operations control (arm/break/witness/query) with NO Read/Write/Close/deadline net.Conn capability; the live-socket adapter is the unexported targetLockCommitAmbiguitySocket (the only net.Conn); the deterministic byte-feed/read/deadline controls REJECT live-socket instances; production hook stays unexported nil-default",
+      "controls": "the positive asserts live-socket rejection of ControlWriteClientBytes/ControlRead/ControlFeedServerBytes/ControlSetReadDeadline",
+      "hunks": "companion 12 hunks"
+    },
+    "P2-B1": {
+      "change": "strict completion validation: CommandComplete body must be exactly \"COMMIT\\0\" and ReadyForQuery must be exactly length 5 with the idle status; malformed/short/unknown frames never publish WITHHELD; readRaw RETURNS queued control bytes BEFORE any queued error so partial frames are ACTUALLY consumed before failure; AssembledBytes query added",
+      "controls": "malformed-completion negatives (missing-NUL, short-ready, wrong-status, wrong-tag, command-only), partial-frame consumption asserted at exactly 6 bytes"
+    },
+    "P2-B2": {
+      "change": "the assembly enforces the EARLIER of the assembly limit and the caller's current tracked deadline, re-read every iteration, never overwriting concurrent deadline changes with a later one; expiry fails closed without upgrading the witness",
+      "controls": "earlier-caller-deadline control with VALID frames queued (no bytes consumed, no withheld), partial-read + deadline error control"
+    },
+    "P2-B3": {
+      "change": "the worker returns an idempotent cleanup (cancel -> break -> bounded wait on the ACTUAL done channel) that the calling scope defers IMMEDIATELY before invoking the composed flow; t.Cleanup retained ONLY as fallback; join() uses the SAME done channel as the completion proof",
+      "controls": "positive asserts UNKNOWN/no-composite/replay-refusal after the done-channel proven completion"
+    }
+  },
+  "gold": {
+    "log": "borrowed-replacement-owner-commit-ambiguity-fix2-gold.log",
+    "sha256": "828c1ee341200eee7b2b66f69a643ab69c5dff3cab1f66064ceb269f9d6db846",
+    "exit": 0,
+    "top_pass": 1,
+    "top_fail": 0,
+    "top_skip": 0,
+    "data_race": 0,
+    "warning": 0,
+    "duration": "67.90s",
+    "first_run": true,
+    "first_fail": null
+  },
+  "race": {
+    "log": "borrowed-replacement-owner-commit-ambiguity-fix2-race.log",
+    "sha256": "1928f17c3b867aee332ac06ce902d5c0aca194f5840e308650dca40fc0851e18",
+    "exit": 0,
+    "top_pass": 1,
+    "top_fail": 0,
+    "top_skip": 0,
+    "data_race": 0,
+    "warning": 0,
+    "panic": 0,
+    "duration": "93.25s",
+    "binary": "borrowed-replacement-owner-commit-ambiguity-fix2-race.test",
+    "binary_sha256": "d581cd97a979f502c66db0a6e502bf59b8b05090844a18ee4c6282f16ea4e8bb",
+    "build_log_sha256": "ada240b89c08e8bcf3e44d36a99a9797271fdc8769ef0bd63c49b81863c276e8",
+    "build_log_records": [
+      "commit-ambiguity 3b445db4",
+      "commit-ambiguity-companion 1fce8bb9",
+      "targetlock-seam 529c71c4 (unchanged)",
+      "owner-journal-window ee880415",
+      "guard-row-window 264cbc81",
+      "plus all other predecessors directly"
+    ]
+  },
+  "container": {
+    "image": "postgres@sha256:4ef4dbc939d61acea57712655ddb4b4ab27419c913f94cca0cd57cb3ea3c2280",
+    "root": true,
+    "private_pid": true,
+    "init": true,
+    "hostnet": true,
+    "CI": "true",
+    "TXHARBOR_REQUIRE_DOCKER": "1",
+    "PGDATA_PG_MAJOR_PG_VERSION": "unset",
+    "test_regex": "^TestBorrowedReplacementOwnerCommitAmbiguity$"
+  },
+  "diffs": {
+    "targetlock": {
+      "file": "borrowed-replacement-owner-commit-ambiguity-fix2-targetlock.diff",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "hunk_count": 0,
+      "note": "unchanged as required"
+    },
+    "companion": {
+      "file": "borrowed-replacement-owner-commit-ambiguity-fix2-companion.diff",
+      "sha256": "7b5565569d321b6a5b9b8c0719ecb8b9751cb7f7bafe0b7f16c81d2e32e95dcf",
+      "hunk_count": 12
+    },
+    "lane": {
+      "file": "borrowed-replacement-owner-commit-ambiguity-fix2-lane.diff",
+      "sha256": "5d3498874b864e052c7ea50465f94834c854ef4d63b45ba60e7ccecc731d6f99",
+      "hunk_count": 12
+    }
+  },
+  "brackets": {
+    "before": "borrowed-replacement-owner-commit-ambiguity-fix2-hashes-before.txt",
+    "before_sha256": "f627cd4b16fe6c0f5d7eaf8bfd6282ec7933d95a3287d306fdfc57ccc61fa4fe",
+    "after": "borrowed-replacement-owner-commit-ambiguity-fix2-hashes-after.txt",
+    "after_sha256": "ab9ed696260820848730095ef163b280c43f1207bbd1eb9acc9e253898bf8901",
+    "after_runs": "borrowed-replacement-owner-commit-ambiguity-fix2-hashes-after-runs.txt",
+    "after_runs_sha256": "fbc961799b31d25a3e8806bcf5792200d8c1404264494bf475a7a5a9bc10966b",
+    "source_stable": true,
+    "closed_predecessors_identical": true,
+    "journal_seam_companion_measured_directly": true
+  },
+  "runners": {
+    "gold_runner_sha256": "1fdff42f724b7cd62e3d41634fdedfcb729205bb3a0e53531230fecca0cb69da",
+    "race_runner_sha256": "e18cd07a9dd2899f8a6da0a0816c84ead364d888c7e28490e9f74b5fc35db4dd",
+    "race_build_sha256": "69018e8d826e2d446ee900fa62b0bb7c002534f4dc6d07e217124bc2754c026c",
+    "bracket_sha256": "c18722c46892ecef655efb3d75810485a35be8d72bd77de99f5584e8985953e7",
+    "bracket_before_sha256": "215e355b550f79666b6f485f446462f21a60a12d29eeadd0cf6a7e8a65927280"
+  },
+  "history_unrebound": {
+    "commit_ambiguity_fix_summary_sha256": "7cd227a2515ff506a79c8c0c425d9bfa48003cc240b4ff8f464fb751f993ba34",
+    "original_commit_ambiguity_summary_sha256": "16be4eff8858a33e6d3b7ee23a1d4e33dd05d7d834e8d78dd0620a6b1b936428",
+    "journal_fix_summary_sha256": "a17a3158ca1a4754764c2dc6cddd23224acb8bc6f989ae15397495a1981b3a89",
+    "guard_row_summary_sha256": "c8bd708790da09fb39daf0e7af357647646c7088c622e235547769a593e9044f"
+  },
+  "notes": [
+    "No commit; HEAD e504462; 22 tracked modified files; one new untracked companion.",
+    "Gold and race were first-run passes; no first-fail artifact.",
+    "The deterministic-block log sentence still enumerates the fix1 negative set; the added malformed-completion and earlier-deadline assertions executed inside the same passing case (their assertions are in the lane diff) - the source was not touched after validation to keep hash provenance intact.",
+    "The exported handle has no live Read/Write capability; live-socket control rejection is asserted. The production seam stays unexported nil-default.",
+    "Never assert rollback where COMMIT may have occurred; ack-loss stays UNKNOWN; secrets/DSNs/verifiers unlogged."
+  ]
+}

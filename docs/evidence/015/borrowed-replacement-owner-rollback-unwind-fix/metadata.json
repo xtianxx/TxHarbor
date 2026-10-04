@@ -1,0 +1,58 @@
+{
+  "Gate1": "HOLD",
+  "archive_hashes": {
+    "borrowed-replacement-owner-rollback-unwind-fix-bracket-before.sh": "b4ad0509512663d332dc4ce977f9be305621bf4843ac161167bda38d8583ff30",
+    "borrowed-replacement-owner-rollback-unwind-fix-bracket.sh": "a67a2f786d25424172bdbd2056186467c0f37b409c770c3fa1c1e00d3b2269e1",
+    "borrowed-replacement-owner-rollback-unwind-fix-companion-before.go": "a42a4db9cc386c3bb129c84c300dacf5ced5e54b343d6e99947f08adced5b5cf",
+    "borrowed-replacement-owner-rollback-unwind-fix-companion.diff": "e754e0711ba33268a93d8b2f46f6c90df5b28189aebd66343047dfe29383ce5c",
+    "borrowed-replacement-owner-rollback-unwind-fix-gold-console.txt": "23242d6db2d711f4d6d1280b4c2afb49aa2d32528aa0f940c64cac9bca563863",
+    "borrowed-replacement-owner-rollback-unwind-fix-gold-pass1-console.txt": "fddc58719e89dcdfcc4dcc975f6513cc06eee88e5b68b1c60f9eba608f4c9f72",
+    "borrowed-replacement-owner-rollback-unwind-fix-gold-pass1.log": "fddc58719e89dcdfcc4dcc975f6513cc06eee88e5b68b1c60f9eba608f4c9f72",
+    "borrowed-replacement-owner-rollback-unwind-fix-gold-runner.sh": "d5076e682b3ab4781e649bdd4d55e0d06810416f5e6524a1f67f985a93695a1b",
+    "borrowed-replacement-owner-rollback-unwind-fix-gold.log": "23242d6db2d711f4d6d1280b4c2afb49aa2d32528aa0f940c64cac9bca563863",
+    "borrowed-replacement-owner-rollback-unwind-fix-hashes-after-preN4.txt": "4201ac4ea2b816c65d0f3fd0ad0bd1c0d619ac0c95c1f9256a953c851948b8ea",
+    "borrowed-replacement-owner-rollback-unwind-fix-hashes-after-runs.txt": "dd4240c47346e8b225339a8e836e290f931ca2e54331ccea5fb7a63f940fffd2",
+    "borrowed-replacement-owner-rollback-unwind-fix-hashes-after.txt": "1d8cf8c3b98648473493b6a1bc08d5be7227bf325574808df1ce6df3233c0463",
+    "borrowed-replacement-owner-rollback-unwind-fix-hashes-before.txt": "bbda8e3a18347bf9926a32639fc706c5afb346ee075f200d49de7e8d38ec9444",
+    "borrowed-replacement-owner-rollback-unwind-fix-lane-before.go": "fd238aed339765aff0c013974557a813db0045a644ed4d892529a6c18a70a557",
+    "borrowed-replacement-owner-rollback-unwind-fix-lane.diff": "cdffa619921d26f8ba4e4b4012e6680ae2007d688c750da3ce9b2571c2210cc3",
+    "borrowed-replacement-owner-rollback-unwind-fix-race-build.log": "6ab7a2eca9aec3b0c7e54a3321050a9d134303939c5433c5544b54980ca09f64",
+    "borrowed-replacement-owner-rollback-unwind-fix-race-build.sh": "a06a45804098bdfde98db5d146f7254e9c60e13fe8ddef60debcb4e098a16c2a",
+    "borrowed-replacement-owner-rollback-unwind-fix-race-build2.log": "4e1ce79b3bc322e4ca61e47403771f7fa199e512b79bc49bf82e3f249408d194",
+    "borrowed-replacement-owner-rollback-unwind-fix-race-build2.sh": "121ca7922e1a038089216deb01b56dca61f115c2ec997de2ae55162df8d1d452",
+    "borrowed-replacement-owner-rollback-unwind-fix-race-console.txt": "a622ffbcf04b75e713c9899306ade90985880683fa70f9149dba7611fdbb36bc",
+    "borrowed-replacement-owner-rollback-unwind-fix-race-runner.sh": "ea2b3efec4a722ac3fd92e5fa5c7e4fbd3652f251ff0d7b43e90b070402fb864",
+    "borrowed-replacement-owner-rollback-unwind-fix-race.log": "a622ffbcf04b75e713c9899306ade90985880683fa70f9149dba7611fdbb36bc",
+    "borrowed-replacement-owner-rollback-unwind-fix-race.test": "8db852b157b9bb5a34e4ac689053d5cae3c4e05694ff3b1db266c9a4022b99ac",
+    "borrowed-replacement-owner-rollback-unwind-fix-summary-hash.txt": "232c5134cdd73d3edff76b92fad92001269d81c4ad3eb47073263b564b501695",
+    "borrowed-replacement-owner-rollback-unwind-fix-summary.json": "77dd6e76462f0249e9d85c820153f57794e77d87691af8ca5cf002a763c8a64e",
+    "borrowed-replacement-owner-rollback-unwind-fix-targetlock-before.go": "45f09896c65aa986dca827cfee10ba6dafc2f97f72d21d8502f5d346c9de5177",
+    "borrowed-replacement-owner-rollback-unwind-fix-targetlock.diff": "33d03c25416386b0f359301e0843484c213888ec5fb7cb24f67e7046ce2497a3",
+    "borrowed-replacement-owner-rollback-unwind-fix-targetlock-before.go.archived": "45f09896c65aa986dca827cfee10ba6dafc2f97f72d21d8502f5d346c9de5177"
+  },
+  "bracket": "repair+extension+lane changed, commit-ambiguity preserved, after==after_runs, source_stable, closed_predecessors_identical",
+  "companion_after": "b1eec55085ee1f0cf75e191a18044170caa1eeb30655e37d2f97bf2069b33093",
+  "companion_before": "a42a4db9cc386c3bb129c84c300dacf5ced5e54b343d6e99947f08adced5b5cf",
+  "counts": {
+    "borrowed-replacement-owner-rollback-unwind-fix-gold-pass1.log": {
+      "preserved_preN4_pass": true
+    },
+    "borrowed-replacement-owner-rollback-unwind-fix-gold.log": {
+      "top_PASS": 1
+    },
+    "borrowed-replacement-owner-rollback-unwind-fix-race.log": {
+      "top_PASS": 1
+    }
+  },
+  "credential_scan": "known shapes only",
+  "first_fails": "none for repaired sources; pre-N4 pass + first build superseded preserved",
+  "historical": "96 prior groups preserved unrebound (tolerant schema check)",
+  "lane_after": "8ec44864ac643ab92f08e44f5ffa01f87eea5451266344848c94f7d8ed0747e3",
+  "lane_before": "fd238aed339765aff0c013974557a813db0045a644ed4d892529a6c18a70a557",
+  "oracle_gate": "pending ora-19 rollback-unwind-fix re-review (P2-A1/A2/B1/B2/C1/C2/C3)",
+  "scope": "rollback-unwind 7 P2s (A1/A2/B1/B2/C1/C2/C3) only; commit-ambiguity preserved",
+  "six_tasks_T000P": "OPEN",
+  "targetlock_after": "3bea2e24344a0cdce30ef7565b148191b7f81b28d362a3f9a088ce5e27e27661",
+  "targetlock_before": "45f09896c65aa986dca827cfee10ba6dafc2f97f72d21d8502f5d346c9de5177",
+  "traceability_note": "2026-10-04: targetlock-before.go snapshots renamed to *.go.archived to restore standard full-repo `go build ./...` (bytes unchanged, hash recorded). Original .go Key kept in git history; see RULING_record.json"
+}

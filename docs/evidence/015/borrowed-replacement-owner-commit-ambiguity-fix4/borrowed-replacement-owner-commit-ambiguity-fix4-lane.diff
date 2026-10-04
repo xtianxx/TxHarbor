@@ -1,0 +1,152 @@
+--- borrowed-replacement-owner-commit-ambiguity-fix4-lane-before.go	2026-10-02 05:38:09.747976725 +0800
++++ /home/dream/product_env/TxHarbor/internal/recovery/borrowed-replacement-owner-commit-ambiguity_linux_test.go	2026-10-02 05:51:57.506357087 +0800
+@@ -888,6 +888,149 @@
+ 		if clearErr == nil {
+ 			t.Fatal("commit-ambiguity clear-during-assembly read was expected to end with the transport break")
+ 		}
++		// P2-B3: a break while the deterministic stall is active finishes the
++		// reader PROMPTLY with a fail-closed transport error (no 30s cap wait).
++		breakWhileStalled := recovery.NewTargetLockCommitAmbiguityControl()
++		breakWhileStalled.ArmGate()
++		if err := breakWhileStalled.ControlWriteClientBytes(recovery.TargetLockCommitRequestFrame()); err != nil {
++			t.Fatalf("commit-ambiguity break-while-stalled request refused: %v", err)
++		}
++		if err := breakWhileStalled.ControlFeedServerBytes(interleaveCompletion[:6]); err != nil {
++			t.Fatalf("commit-ambiguity break-while-stalled partial feed refused: %v", err)
++		}
++		if err := breakWhileStalled.ControlStallAfterBytes(6); err != nil {
++			t.Fatalf("commit-ambiguity break-while-stalled stall refused: %v", err)
++		}
++		breakDone := make(chan struct{})
++		var breakErr error
++		t.Cleanup(func() {
++			breakWhileStalled.Break()
++			select {
++			case <-breakDone:
++			case <-time.After(10 * time.Second):
++				t.Errorf("commit-ambiguity break-while-stalled reader did not finish within the bounded unwind join")
++			}
++		})
++		go func() {
++			defer close(breakDone)
++			_, breakErr = breakWhileStalled.ControlRead(make([]byte, 64))
++		}()
++		breakStallCtx, cancelBreakStall := context.WithTimeout(ctx, 5*time.Second)
++		breakStall := breakWhileStalled.ControlStallReached(breakStallCtx)
++		cancelBreakStall()
++		if !breakStall {
++			t.Fatal("commit-ambiguity break-while-stalled stall was never reached")
++		}
++		breakWhileStalled.Break()
++		select {
++		case <-breakDone:
++		case <-time.After(5 * time.Second):
++			t.Fatal("commit-ambiguity break while stalled did not finish the reader promptly")
++		}
++		if breakErr == nil {
++			t.Fatal("commit-ambiguity break while stalled did not fail closed")
++		}
++		if breakWhileStalled.Witness() == recovery.TargetLockCommitWitnessWithheld {
++			t.Fatal("commit-ambiguity break while stalled published WITHHELD")
++		}
++		if got := breakWhileStalled.AssembledBytes(); got != 6 {
++			t.Fatalf("commit-ambiguity break while stalled consumed %d bytes, want the 6 partial bytes", got)
++		}
++		// P2-B3: a queued server error also wakes a stalled reader promptly.
++		stallError := recovery.NewTargetLockCommitAmbiguityControl()
++		stallError.ArmGate()
++		if err := stallError.ControlWriteClientBytes(recovery.TargetLockCommitRequestFrame()); err != nil {
++			t.Fatalf("commit-ambiguity stalled-error request refused: %v", err)
++		}
++		if err := stallError.ControlFeedServerBytes(interleaveCompletion[:6]); err != nil {
++			t.Fatalf("commit-ambiguity stalled-error partial feed refused: %v", err)
++		}
++		if err := stallError.ControlStallAfterBytes(6); err != nil {
++			t.Fatalf("commit-ambiguity stalled-error stall refused: %v", err)
++		}
++		errorDone := make(chan struct{})
++		var errorErr error
++		t.Cleanup(func() {
++			stallError.Break()
++			select {
++			case <-errorDone:
++			case <-time.After(10 * time.Second):
++				t.Errorf("commit-ambiguity stalled-error reader did not finish within the bounded unwind join")
++			}
++		})
++		go func() {
++			defer close(errorDone)
++			_, errorErr = stallError.ControlRead(make([]byte, 64))
++		}()
++		errorStallCtx, cancelErrorStall := context.WithTimeout(ctx, 5*time.Second)
++		errorStall := stallError.ControlStallReached(errorStallCtx)
++		cancelErrorStall()
++		if !errorStall {
++			t.Fatal("commit-ambiguity stalled-error stall was never reached")
++		}
++		if err := stallError.ControlFeedServerError(io.EOF); err != nil {
++			t.Fatalf("commit-ambiguity stalled-error feed refused: %v", err)
++		}
++		select {
++		case <-errorDone:
++		case <-time.After(5 * time.Second):
++			t.Fatal("commit-ambiguity queued error did not wake the stalled reader")
++		}
++		if errorErr == nil {
++			t.Fatal("commit-ambiguity queued error did not fail the stalled reader closed")
++		}
++		if stallError.Witness() == recovery.TargetLockCommitWitnessWithheld {
++			t.Fatal("commit-ambiguity queued error published WITHHELD")
++		}
++		if got := stallError.AssembledBytes(); got != 6 {
++			t.Fatalf("commit-ambiguity queued error consumed %d bytes, want the 6 partial bytes", got)
++		}
++		// P2-B2: competing socket-deadline applications over a REAL socket pair:
++		// every round must settle on the expired MINIMUM (a stale future apply
++		// would leave the real socket without the expired deadline).
++		deadlineProbe := recovery.NewTargetLockCommitAmbiguityDeadlineProbe()
++		t.Cleanup(deadlineProbe.Break)
++		deadlineProbe.ProbeSetAssemblyCap(time.Now().Add(30 * time.Second))
++		for round := 0; round < 25; round++ {
++			start := make(chan struct{})
++			var wait sync.WaitGroup
++			wait.Add(2)
++			go func() {
++				defer wait.Done()
++				<-start
++				deadlineProbe.ProbeSetCallerDeadline(time.Now().Add(-time.Second))
++			}()
++			go func() {
++				defer wait.Done()
++				<-start
++				deadlineProbe.ProbeApplyEffectiveDeadline()
++			}()
++			close(start)
++			wait.Wait()
++			deadlineProbe.ProbeStartBlockedRead()
++			if err := deadlineProbe.ProbeAwaitRead(2 * time.Second); !errors.Is(err, os.ErrDeadlineExceeded) {
++				t.Fatalf("commit-ambiguity competing deadline round %d settled on %v, want the expired minimum", round, err)
++			}
++			deadlineProbe.ProbeSetCallerDeadline(time.Now().Add(30 * time.Second))
++		}
++		// P2-B2: clearing the caller deadline during assembly must NOT remove
++		// the active assembly cap ON THE REAL SOCKET.
++		clearProbe := recovery.NewTargetLockCommitAmbiguityDeadlineProbe()
++		t.Cleanup(clearProbe.Break)
++		clearProbe.ProbeSetAssemblyCap(time.Now().Add(200 * time.Millisecond))
++		clearProbe.ProbeClearCallerDeadline()
++		clearProbe.ProbeStartBlockedRead()
++		if err := clearProbe.ProbeAwaitRead(3 * time.Second); !errors.Is(err, os.ErrDeadlineExceeded) {
++			t.Fatalf("commit-ambiguity clear-during-assembly real socket read=%v, want the cap deadline", err)
++		}
++		// Clearing WHILE a read is already blocked must not extend it.
++		clearProbe.ProbeSetAssemblyCap(time.Now().Add(200 * time.Millisecond))
++		clearProbe.ProbeStartBlockedRead()
++		time.Sleep(30 * time.Millisecond)
++		clearProbe.ProbeClearCallerDeadline()
++		if err := clearProbe.ProbeAwaitRead(3 * time.Second); !errors.Is(err, os.ErrDeadlineExceeded) {
++			t.Fatalf("commit-ambiguity mid-read clear real socket read=%v, want the cap deadline", err)
++		}
+ 		// Missing barriers: a break before any establishment.
+ 		missingBarriers := recovery.NewTargetLockCommitAmbiguityControl()
+ 		missingBarriers.ArmGate()

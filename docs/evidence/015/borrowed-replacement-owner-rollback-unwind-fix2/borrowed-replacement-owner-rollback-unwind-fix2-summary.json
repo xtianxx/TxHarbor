@@ -1,0 +1,125 @@
+{
+  "task": "Bounded repair of 2 residual rollback-unwind P2s: P2-B2 observation-entry guard (record both commands for the whole armed interval), P2-C4 post-dispatch wrong-command ordering controls",
+  "date": "2026-10-01",
+  "head": "e504462",
+  "worktree_tracked_modified": 22,
+  "scope": {
+    "modified_files": [
+      "internal/recovery/targetlock_commitambiguity_hook_linux_test.go",
+      "internal/recovery/borrowed-replacement-owner-rollback-unwind_linux_test.go"
+    ],
+    "preserved_seam": "internal/recovery/targetlock.go stays 3bea2e24 (0-hunk; not touched)",
+    "untouched": "journal ee880415, guard-row 264cbc81, owner-tail 819585c4, observation f1c7601a, window a11b33fc, autonomous d9fe63ee, prelaunch/session/binding/driver/successor/DDL/bridges, commit-ambiguity lane 7e613d18"
+  },
+  "source_hashes": {
+    "targetlock_preserved": "3bea2e24344a0cdce30ef7565b148191b7f81b28d362a3f9a088ce5e27e27661",
+    "companion_before": "b1eec55085ee1f0cf75e191a18044170caa1eeb30655e37d2f97bf2069b33093",
+    "companion_after": "b68e3a2e2628fef3d2b07fe118be929b8ca7ae0fec2ac56e470388b7063168e0",
+    "lane_before": "8ec44864ac643ab92f08e44f5ffa01f87eea5451266344848c94f7d8ed0747e3",
+    "lane_after": "9692418e150874084a42e6c40b9c26ac44489a329a1c6745206d7536d7017f90"
+  },
+  "fixes": {
+    "P2-B2": {
+      "change": "removed c.dispatched from the observation-entry guard: actual COMMIT and ROLLBACK frames are now recorded independently for the WHOLE armed interval, even after the selected command dispatched; the existing !c.dispatched guard remains solely for the one-shot selected-command dispatch and channel closure",
+      "control": "arm ROLLBACK -> forward ROLLBACK -> forward COMMIT now yields CommitObserved=true with the sealed rollback dispatch unchanged"
+    },
+    "P2-C4": {
+      "change": "added selected-ROLLBACK -> wrong-COMMIT coverage on a fresh control (both observation flags, unchanged sealed rollback dispatch, no relabeled commit dispatch) plus symmetric selected-COMMIT -> wrong-ROLLBACK coverage proving independent observation in both modes",
+      "control": "observation-ordering controls executed in gold and race"
+    }
+  },
+  "gold": {
+    "log": "borrowed-replacement-owner-rollback-unwind-fix2-gold.log",
+    "sha256": "73ba4788fbe14124c3bb3316d03076b211e8694b2dd2d10af5f5b2e5077c10f2",
+    "exit": 0,
+    "top_pass": 1,
+    "top_fail": 0,
+    "top_skip": 0,
+    "data_race": 0,
+    "warning": 0,
+    "duration": "62.27s",
+    "first_run": true,
+    "first_fail": null
+  },
+  "race": {
+    "log": "borrowed-replacement-owner-rollback-unwind-fix2-race.log",
+    "sha256": "76172762c61082df5606b8efa0c64982cbe6bcc490ef35539aa3226d1133ef27",
+    "exit": 0,
+    "top_pass": 1,
+    "top_fail": 0,
+    "top_skip": 0,
+    "data_race": 0,
+    "warning": 0,
+    "panic": 0,
+    "duration": "86.36s",
+    "binary": "borrowed-replacement-owner-rollback-unwind-fix2-race.test",
+    "binary_sha256": "fff4dbc6d5ba0ed1755951b757d8371118a392e80b5502c26ec8ac06c8ab1019",
+    "build_log_sha256": "ed76bc19deea566c08734dd99a770f7bc41021bac33f8791bbffe22769fccd1a",
+    "build_log_records": [
+      "rollback-unwind 9692418e",
+      "commit-ambiguity 7e613d18 (preserved)",
+      "commit-ambiguity-companion b68e3a2e",
+      "targetlock-seam 3bea2e24 (preserved)",
+      "owner-journal-window ee880415",
+      "guard-row-window 264cbc81",
+      "plus all other predecessors directly"
+    ]
+  },
+  "container": {
+    "image": "postgres@sha256:4ef4dbc939d61acea57712655ddb4b4ab27419c913f94cca0cd57cb3ea3c2280",
+    "root": true,
+    "private_pid": true,
+    "init": true,
+    "hostnet": true,
+    "CI": "true",
+    "TXHARBOR_REQUIRE_DOCKER": "1",
+    "PGDATA_PG_MAJOR_PG_VERSION": "unset",
+    "test_regex": "^TestBorrowedReplacementOwnerRollbackUnwind$"
+  },
+  "diffs": {
+    "companion": {
+      "file": "borrowed-replacement-owner-rollback-unwind-fix2-companion.diff",
+      "sha256": "214966392b40bbf137d9d6a4d27015284683fd0f605a804c50e188e57e471d79",
+      "hunks": [
+        "@@ -561,7 +561,7 @@"
+      ]
+    },
+    "lane": {
+      "file": "borrowed-replacement-owner-rollback-unwind-fix2-lane.diff",
+      "sha256": "ad023a710e25e6f5afbda5c45778fe386ed8d12134a788b867764fc7148c315c",
+      "hunks": [
+        "@@ -488,6 +488,61 @@"
+      ]
+    },
+    "targetlock": "not touched; 0-hunk by construction"
+  },
+  "brackets": {
+    "before": "borrowed-replacement-owner-rollback-unwind-fix2-hashes-before.txt",
+    "before_sha256": "63c9508f981364ecd11ff5446042072d8b97ced416698573dcc403bc10018f83",
+    "after": "borrowed-replacement-owner-rollback-unwind-fix2-hashes-after.txt",
+    "after_sha256": "001b5a6e91980506e4dd451e4af1198e13d1e8930797ef62b953268f2d074fcd",
+    "after_runs": "borrowed-replacement-owner-rollback-unwind-fix2-hashes-after-runs.txt",
+    "after_runs_sha256": "c0bd43d16929b7e9e9ff63d5858fd9b6a0fee322197913ccb566e094bc99d98b",
+    "source_stable": true,
+    "closed_predecessors_identical": true,
+    "seam_preserved": true
+  },
+  "runners": {
+    "gold_runner_sha256": "f27d097671c6055ad50731fe3559f9a4d7ef41ea65b4946fb35b02899d319b16",
+    "race_runner_sha256": "ffa504a51d76b2aa692d91cf85e7f027794a0e6343187e3a38beb3c733a4ac78",
+    "race_build_sha256": "60ae2d2500fbb1e1709ec81eabb871d9df881255faf98c4a3fcb17c84264132b",
+    "bracket_sha256": "ccc197942c5ebd39291b22847660c8f453a67aeaea3bd0982fc69ca88b9e26b4",
+    "bracket_before_sha256": "d236f43681e788202e206a81e77218b15b0f8b762a03d141dbd458787d336af4"
+  },
+  "history_unrebound": {
+    "rollback_unwind_fix_summary_sha256": "77dd6e76462f0249e9d85c820153f57794e77d87691af8ca5cf002a763c8a64e",
+    "rollback_unwind_summary_sha256": "be1c8a0a2333a3cec98ba7c7914d28d04b54292bb03ca12c380436f47bca3e7b",
+    "note": "an intermediate misnamed build output (race2/build2) was produced and removed after canonical-name alignment; no run referenced it"
+  },
+  "notes": [
+    "No commit; HEAD e504462; 22 tracked modified files.",
+    "Gold and race were first-run passes; no first-fail artifact.",
+    "Production targetlock.go is byte-identical (0-hunk) as required; P2-C1/C2/C3 and P2-A1/A2/B1 stay fixed.",
+    "Never assert rollback where COMMIT may have occurred; zero rows alone is never an acknowledged rollback; secrets unlogged."
+  ]
+}

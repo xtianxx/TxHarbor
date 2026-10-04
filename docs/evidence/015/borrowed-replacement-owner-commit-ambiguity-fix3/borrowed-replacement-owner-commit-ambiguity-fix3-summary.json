@@ -1,0 +1,134 @@
+{
+  "task": "Bounded repair of 2 residual commit-ambiguity P2s (P2-A1 immutable handle mode, P2-B2 single synchronized deadline path) in the companion + lane",
+  "date": "2026-10-01",
+  "head": "e504462",
+  "worktree_tracked_modified": 22,
+  "scope": {
+    "modified_files": [
+      "internal/recovery/targetlock_commitambiguity_hook_linux_test.go",
+      "internal/recovery/borrowed-replacement-owner-commit-ambiguity_linux_test.go"
+    ],
+    "preserved_seam": "internal/recovery/targetlock.go stays 529c71c4 (0-hunk diff; unexported nil-default hook + atomic reserve/consume + generation-conditional reset)",
+    "untouched": "journal ee880415, guard-row 264cbc81, owner-tail 819585c4, observation f1c7601a, window a11b33fc, autonomous d9fe63ee, prelaunch/session/binding/driver/successor/DDL/bridges"
+  },
+  "source_hashes": {
+    "targetlock_before_after": "529c71c4b3e494988526e539e48472d4f80140149ca9cc51913e454a0731a30a",
+    "companion_before_fix2": "1fce8bb95279194a0f6b40e8e5cac14fc05558c89d6f583a2ac45fe136441d06",
+    "companion_after": "cdeddfb30fd6483ad4c8b5fcc6fd83b4ea024599454a24d24d9167f1339ad8a4",
+    "lane_before_fix2": "3b445db457f35b93977a8351ac120798dff9c28cd672702ca627642eb8e51d30",
+    "lane_after": "2651ef8c52b8541e29ecd5522bf264b210a6ca231547e4844e8d87b4af4ed4d5",
+    "before_snapshots": "fix3 companion/lane before-snapshots reconstructed EXACTLY from the fix2 diffs (content-addressed, verified hashes match 1fce8bb9 / 3b445db4)"
+  },
+  "fixes": {
+    "P2-A1": {
+      "change": "every handle has an IMMUTABLE construction mode: reserved NATIVE-fault handles reject EVERY deterministic Control* operation from reservation onward (not merely after wrapping); deterministic CONTROL handles are never installed into the production seam. controlAllowed() checks the immutable mode first and the live state second",
+      "controls": "pre-acquisition rejection controls for all Control* operations added in the reservation block; post-acquisition rejection retained in the positive"
+    },
+    "P2-B2": {
+      "change": "ONE synchronized deadline path: callerDeadline + active assemblyCap; the effective read deadline is their MINIMUM, computed under the mutex and applied as an ABSOLUTE timestamp without holding a lock across a read; both setters and the assembly use the same path, so a stale assembly snapshot can never undo a concurrent cancellation and a concurrent clear can never remove the assembly cap",
+      "controls": "one-shot deterministic stall after N consumed bytes: concurrent deadline update DURING assembly (partial bytes consumed, bounded deadline interruption, no WITHHELD) and clear-during-assembly (effective deadline stays the cap; remaining bytes still validate to WITHHELD)"
+    }
+  },
+  "first_fail": {
+    "log": "borrowed-replacement-owner-commit-ambiguity-fix3-gold-fail1.log",
+    "sha256": "e4711574b6e65844517a9f66c6ac2189a9d462e3e2b744ab03ac4aa2785d729a",
+    "stage": "concurrent-deadline stall control: read returned EOF instead of the bounded deadline",
+    "defect": "the partial server feed left a buffered wake signal which the stall consumed as a spurious release; the subsequent read hit the empty-buffer EOF path",
+    "fix": "ControlStallAfterBytes drains any stale wake signal before arming; stallWait releases only when server data/error is ACTUALLY available (controlHasData), otherwise keeps waiting",
+    "companion_fail1_diff_sha256": "2dd7daf2ce2ddf926e5ead644ae4125d7fa2601ec4a9cb6b194e73a00a2fb046",
+    "hashes_after_fail1_sha256": "borrowed-replacement-owner-commit-ambiguity-fix3-hashes-after-fail1.txt preserved"
+  },
+  "gold": {
+    "log": "borrowed-replacement-owner-commit-ambiguity-fix3-gold.log",
+    "sha256": "889caf64a5487ba1bae1d9bfd21345373bd764d9d99262383dad2d785ea3e520",
+    "exit": 0,
+    "top_pass": 1,
+    "top_fail": 0,
+    "top_skip": 0,
+    "data_race": 0,
+    "warning": 0,
+    "duration": "63.05s",
+    "first_fail": "borrowed-replacement-owner-commit-ambiguity-fix3-gold-fail1.log (66.13s, exit 1)"
+  },
+  "race": {
+    "log": "borrowed-replacement-owner-commit-ambiguity-fix3-race.log",
+    "sha256": "c71b671fbdf851adfd4e3af4e4334656a47e1ba8b02035053cc63a476f4ce8b7",
+    "exit": 0,
+    "top_pass": 1,
+    "top_fail": 0,
+    "top_skip": 0,
+    "data_race": 0,
+    "warning": 0,
+    "panic": 0,
+    "duration": "95.51s",
+    "binary": "borrowed-replacement-owner-commit-ambiguity-fix3-race.test",
+    "binary_sha256": "c0e9e45a5307763959278756be999954745c040d665fed5e2c785dda58f48ffb",
+    "build_log_sha256": "cdeade6b00acf9437d86df982317d531287064c1b3ca68ee88c4227c32a07c35",
+    "build_log_records": [
+      "commit-ambiguity 2651ef8c",
+      "commit-ambiguity-companion cdeddfb3",
+      "targetlock-seam 529c71c4 (preserved)",
+      "owner-journal-window ee880415",
+      "guard-row-window 264cbc81",
+      "plus all other predecessors directly"
+    ]
+  },
+  "container": {
+    "image": "postgres@sha256:4ef4dbc939d61acea57712655ddb4b4ab27419c913f94cca0cd57cb3ea3c2280",
+    "root": true,
+    "private_pid": true,
+    "init": true,
+    "hostnet": true,
+    "CI": "true",
+    "TXHARBOR_REQUIRE_DOCKER": "1",
+    "PGDATA_PG_MAJOR_PG_VERSION": "unset",
+    "test_regex": "^TestBorrowedReplacementOwnerCommitAmbiguity$"
+  },
+  "diffs": {
+    "targetlock": {
+      "file": "borrowed-replacement-owner-commit-ambiguity-fix3-targetlock.diff",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "hunk_count": 0
+    },
+    "companion": {
+      "file": "borrowed-replacement-owner-commit-ambiguity-fix3-companion.diff",
+      "sha256": "dde8ba756fd70b9f8028de705ebaa51abe04945182435dc63b049d5f1bc6e20c",
+      "hunk_count": 11
+    },
+    "lane": {
+      "file": "borrowed-replacement-owner-commit-ambiguity-fix3-lane.diff",
+      "sha256": "5e6fb3e3a78b7bea4f3996316635b8defb365275b52edc050b5534c6e52e6674",
+      "hunk_count": 2
+    }
+  },
+  "brackets": {
+    "before": "borrowed-replacement-owner-commit-ambiguity-fix3-hashes-before.txt",
+    "before_sha256": "88edbccc6c5eec8537d4105523f00958754605d27d813510d9af53ab44d6264a",
+    "after": "borrowed-replacement-owner-commit-ambiguity-fix3-hashes-after.txt",
+    "after_sha256": "df38ed78d89da522bbb84d665cea12dac9ee4500ed9a4ea9e660b74a957a22b9",
+    "after_runs": "borrowed-replacement-owner-commit-ambiguity-fix3-hashes-after-runs.txt",
+    "after_runs_sha256": "253b9c28bb1335760afad216ef6c68d97bdeacff25a7e95a72ad21bba1faed40",
+    "source_stable": true,
+    "closed_predecessors_identical": true,
+    "seam_preserved": true
+  },
+  "runners": {
+    "gold_runner_sha256": "d1b2b52eca80a7285ca3fee3a4c69ab396246f6e358ce75ac59b8febb42b6499",
+    "race_runner_sha256": "ea0d56c78950494c1f1f56deb22765c415f897102c15eae4e222be1f16d0fa40",
+    "race_build_sha256": "7917be64dd06b723370a3afc7b02698f17f9c6b8ccf5ccd391c938aaae06fca6",
+    "bracket_sha256": "f5b1ff44a3f6c667a54176730a82c15a12e52dbaad7093ef4a792c56db18209c",
+    "bracket_before_sha256": "6eb14feedd8fa653ade2631e7c1c91c2aaaec1d42fcfb8c1d223affe60b32a5b"
+  },
+  "history_unrebound": {
+    "commit_ambiguity_fix2_summary_sha256": "0d9955e99fbc976c95c3447296bce9983e48298fe4db18ab9a15567d8e623df3",
+    "commit_ambiguity_fix_summary_sha256": "7cd227a2515ff506a79c8c0c425d9bfa48003cc240b4ff8f464fb751f993ba34",
+    "original_commit_ambiguity_summary_sha256": "16be4eff8858a33e6d3b7ee23a1d4e33dd05d7d834e8d78dd0620a6b1b936428"
+  },
+  "notes": [
+    "No commit; HEAD e504462; 22 tracked modified files; one new untracked companion.",
+    "targetlock.go is byte-identical to the fix2 state (0-hunk) as required.",
+    "The first fix3 gold run failed at the new interleaving control and is preserved as fail1 (e4711574); the stall wake fix made both gold and race first-try passes afterwards.",
+    "P2-B1/B3 behaviour kept: strict completion validation, ordered reads with partial consumption, idempotent calling-scope worker cleanup with done-channel proof.",
+    "Never assert rollback where COMMIT may have occurred; ack-loss stays UNKNOWN; secrets/DSNs/verifiers unlogged."
+  ]
+}

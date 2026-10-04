@@ -1,0 +1,52 @@
+{
+  "Gate1": "HOLD",
+  "archive_hashes": {
+    "borrowed-replacement-owner-commit-ambiguity-bracket-before.sh": "1200dd9c59689f8ded30996b79b1e1818e98da5be9dc5e3838c14846c2466be4",
+    "borrowed-replacement-owner-commit-ambiguity-bracket.sh": "1609a55e3a7d2cf8c59d723a83136b099d612a34ded329749a9d0a2c825de41d",
+    "borrowed-replacement-owner-commit-ambiguity-creation.diff": "d100fbddf7a231a2b1b19450bae17ebdfd0d17f89a2117362eb58af0329481e2",
+    "borrowed-replacement-owner-commit-ambiguity-gold-console.txt": "62f6c9a348d3837083d71ac283430533944c4c4ab6344560fde201ee642fce26",
+    "borrowed-replacement-owner-commit-ambiguity-gold-runner.sh": "9bd6a66539395631e88797bfc7516354b6cf05fc09f1268d7908d39d5099610c",
+    "borrowed-replacement-owner-commit-ambiguity-gold.log": "62f6c9a348d3837083d71ac283430533944c4c4ab6344560fde201ee642fce26",
+    "borrowed-replacement-owner-commit-ambiguity-hashes-after-runs.txt": "7cf788a66c179be5956f9adca48c5125cd8fb75183132f041cc50a76feaba943",
+    "borrowed-replacement-owner-commit-ambiguity-hashes-after.txt": "77908a031589b47fc1a9124ad4d65b0f2b929326f2b0a1171c2ea7a175ee51a1",
+    "borrowed-replacement-owner-commit-ambiguity-hashes-before.txt": "88433e27fe41e37587b986de537c35e1af2518f7effa30f97c884710da247b73",
+    "borrowed-replacement-owner-commit-ambiguity-race-build.log": "56f19942751d861dde923833b78ca9029ffcad54f6c74705b55b9da27348936c",
+    "borrowed-replacement-owner-commit-ambiguity-race-build.sh": "b2825cbf385753a6cc6b11818caefe05a6581e4a7f8f048869b172d770a62120",
+    "borrowed-replacement-owner-commit-ambiguity-race-build2.log": "90ec8da9c624bc955a41130cd8fa55c79d77f5ddcfff11a3e9652babb8f6bb16",
+    "borrowed-replacement-owner-commit-ambiguity-race-build2.sh": "db147c24ff165bbeecdb31c31e4768e78c6b89b99f887bd4e255b231aa357009",
+    "borrowed-replacement-owner-commit-ambiguity-race-console.txt": "80ef1947e12e2c98fb48fcb3f1def7c6aa6377622c39c5f36efc8e87b6df03dd",
+    "borrowed-replacement-owner-commit-ambiguity-race-runner-wrongselect1.sh": "aebeb59c275df876e264ada223e6bb70ff92c46235dd35187f1cc8b4982c0c7c",
+    "borrowed-replacement-owner-commit-ambiguity-race-runner.sh": "d1fe2c9ef3aee7ae85221a74684514ef2e08a540a14a3706e5e7b069c8c8241a",
+    "borrowed-replacement-owner-commit-ambiguity-race-wrongselect1-console.txt": "495830da5fca3c2b45b409549e568388751d6f565c04e32569aacaade34802b8",
+    "borrowed-replacement-owner-commit-ambiguity-race-wrongselect1.log": "495830da5fca3c2b45b409549e568388751d6f565c04e32569aacaade34802b8",
+    "borrowed-replacement-owner-commit-ambiguity-race.log": "80ef1947e12e2c98fb48fcb3f1def7c6aa6377622c39c5f36efc8e87b6df03dd",
+    "borrowed-replacement-owner-commit-ambiguity-race.test": "8b3ce987eb46089082f111427fd34a2f51a07f2491d7cb1c42cc954c6f058faa",
+    "borrowed-replacement-owner-commit-ambiguity-summary-hash.txt": "ccb993a2c67c9b48c423d0b96b1326a04b7e2c67cb8e8b514b2d1c46b06992c0",
+    "borrowed-replacement-owner-commit-ambiguity-summary.json": "16be4eff8858a33e6d3b7ee23a1d4e33dd05d7d834e8d78dd0620a6b1b936428",
+    "borrowed-replacement-owner-commit-ambiguity-targetlock-before.go": "53280bc096821d890a5c8e21a969b3ec51904b7d02d39ae5dd6159bd047ac81d",
+    "borrowed-replacement-owner-commit-ambiguity-targetlock.diff": "8d051d0e52762895dded8a253c9ab705e3e0e1691534168ae18e7945b8c6f81f",
+    "borrowed-replacement-owner-commit-ambiguity-targetlock-before.go.archived": "53280bc096821d890a5c8e21a969b3ec51904b7d02d39ae5dd6159bd047ac81d"
+  },
+  "bracket": "new file added + seam changed, 32+ entries after==after_runs, source_stable, closed_predecessors_identical",
+  "counts": {
+    "borrowed-replacement-owner-commit-ambiguity-gold.log": {
+      "top_PASS": 1
+    },
+    "borrowed-replacement-owner-commit-ambiguity-race-wrongselect1.log": {
+      "preserved_not_evidence": true
+    },
+    "borrowed-replacement-owner-commit-ambiguity-race.log": {
+      "top_PASS": 1
+    }
+  },
+  "credential_scan": "known shapes only",
+  "first_fails": "none (first-run pass); wrongselect1 preserved (stale regex ran prior lane, never evidence)",
+  "historical": "90 prior groups preserved unrebound (tolerant schema check)",
+  "new_file": "a9cfb8d6fbbb668679c17ab87322a4266c88de4933c9769aa34af93a244bdb0a",
+  "oracle_gate": "pending commit-ambiguity review (seam + lane)",
+  "scope": "real owner COMMIT acknowledgement-loss only; non-authorizing, UNKNOWN never success/rollback",
+  "seam_after": "b88b177b1481c45c2364d510836bb90498ee3b76d72fd0ccdb09bce0d6ceda3a",
+  "seam_before": "53280bc096821d890a5c8e21a969b3ec51904b7d02d39ae5dd6159bd047ac81d",
+  "six_tasks_T000P": "OPEN",
+  "traceability_note": "2026-10-04: targetlock-before.go snapshots renamed to *.go.archived to restore standard full-repo `go build ./...` (bytes unchanged, hash recorded). Original .go Key kept in git history; see RULING_record.json"
+}

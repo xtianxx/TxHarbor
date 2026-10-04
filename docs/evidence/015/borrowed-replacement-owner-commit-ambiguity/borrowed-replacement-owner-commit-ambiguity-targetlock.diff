@@ -1,0 +1,88 @@
+--- borrowed-replacement-owner-commit-ambiguity-targetlock-before.go	2026-10-01 04:12:14.740906866 +0800
++++ /home/dream/product_env/TxHarbor/internal/recovery/targetlock.go	2026-10-02 04:40:17.563099844 +0800
+@@ -7,9 +7,11 @@
+ 	"encoding/hex"
+ 	"errors"
+ 	"fmt"
++	"net"
+ 	"net/url"
+ 	"strings"
+ 	"sync"
++	"sync/atomic"
+ 	"time"
+ 	"unicode/utf8"
+ 
+@@ -82,7 +84,7 @@
+ 	}
+ 	bounded, cancel := context.WithTimeout(ctx, timeout)
+ 	defer cancel()
+-	conn, err := pgx.Connect(bounded, controlDSN)
++	conn, err := connectTargetLockSession(bounded, controlDSN)
+ 	if err != nil {
+ 		return nil, fmt.Errorf("connect dedicated target-lock session: %w", err)
+ 	}
+@@ -426,3 +428,64 @@
+ 		}
+ 	}
+ }
++
++// ---------------------------------------------------------------------------
++// Drill-only owner-session socket wrap seam
++// ---------------------------------------------------------------------------
++
++// TargetLockSocketWrap is the drill-only one-shot socket wrapper of the
++// dedicated owner target-lock session. It receives the REAL established socket
++// at the actual dialed address of the unchanged control DSN and must return a
++// connection carrying the same stream. It cannot choose the endpoint, rebind
++// the DSN/key/owner, run SQL, substitute a connector, or change the canonical
++// identity checks, the acquisition loop or the transaction machinery.
++type TargetLockSocketWrap func(net.Conn) net.Conn
++
++// targetLockSocketWrapSeam is the nil-default drill-only seam consulted ONLY at
++// the dedicated owner-session connection establishment. When nil the EXISTING
++// pgx.Connect path runs unchanged; a wrapped socket retains the actual
++// addresses and every downstream canonical identity check.
++var targetLockSocketWrapSeam atomic.Pointer[TargetLockSocketWrap]
++
++// ArmTargetLockSocketWrap installs the drill-only socket wrapper used at the
++// next dedicated owner-session connection establishment and returns an
++// idempotent reset. A nil wrap clears the seam. Ordinary traffic is unchanged
++// while the wrapper passes bytes through.
++func ArmTargetLockSocketWrap(wrap TargetLockSocketWrap) func() {
++	if wrap == nil {
++		targetLockSocketWrapSeam.Store(nil)
++		return func() { targetLockSocketWrapSeam.Store(nil) }
++	}
++	targetLockSocketWrapSeam.Store(&wrap)
++	return func() { targetLockSocketWrapSeam.Store(nil) }
++}
++
++// connectTargetLockSession establishes the dedicated owner session through the
++// EXISTING pgx.Connect path unless the drill-only socket wrap seam is armed. An
++// armed seam dials the REAL address of the unchanged control DSN and wraps the
++// established socket; no DSN, key, owner, identity check or acquisition step is
++// replaced.
++func connectTargetLockSession(ctx context.Context, controlDSN string) (*pgx.Conn, error) {
++	wrap := targetLockSocketWrapSeam.Load()
++	if wrap == nil {
++		return pgx.Connect(ctx, controlDSN)
++	}
++	config, err := pgx.ParseConfig(controlDSN)
++	if err != nil {
++		return nil, err
++	}
++	dialer := &net.Dialer{}
++	config.DialFunc = func(dialCtx context.Context, network, addr string) (net.Conn, error) {
++		rawConn, dialErr := dialer.DialContext(dialCtx, network, addr)
++		if dialErr != nil {
++			return nil, dialErr
++		}
++		wrapped := (*wrap)(rawConn)
++		if wrapped == nil {
++			_ = rawConn.Close()
++			return nil, errors.New("target-lock socket wrap returned no connection")
++		}
++		return wrapped, nil
++	}
++	return pgx.ConnectConfig(ctx, config)
++}

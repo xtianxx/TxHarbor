@@ -1,0 +1,525 @@
+--- borrowed-replacement-owner-commit-ambiguity-fix3-companion-before.go	2026-10-02 05:38:27.787727357 +0800
++++ /home/dream/product_env/TxHarbor/internal/recovery/targetlock_commitambiguity_hook_linux_test.go	2026-10-02 05:40:28.050942157 +0800
+@@ -4,15 +4,19 @@
+ // companion of the owner COMMIT acknowledgement-loss lane. It reserves the
+ // unexported production socket-wrap seam with ONE fixed wire gate and exposes
+ // ONLY an opaque control handle with fixed fault operations (arm/withhold/
+-// break/witness/query). The live-socket adapter is UNEXPORTED and is the only
+-// net.Conn: the exported handle has NO Read/Write/Close capability, and the
+-// deterministic byte-feed/read controls REJECT live-socket instances. It never
+-// exposes a raw connection, a caller-supplied socket callback, a connector or
+-// SQL authority, and it never changes the DSN, key, owner, canonical identity
+-// checks or acquisition machinery. WITHHELD is published only after the ACTUAL
+-// PostgreSQL COMMIT completion has been bounded-assembled and strictly
+-// validated (CommandComplete body exactly "COMMIT\0" followed by a correctly
+-// sized ReadyForQuery with the idle status). EOF, read errors, deadline expiry,
++// break/witness/query). Every handle has an IMMUTABLE mode assigned at
++// construction: a reserved NATIVE-fault handle can NEVER use the
++// deterministic byte-feed/read/stall controls (from reservation onward, not
++// merely after wrapping), and a deterministic CONTROL handle is never
++// installed into the production seam. The live-socket adapter is UNEXPORTED
++// and is the only net.Conn: the exported handle has NO Read/Write/Close
++// capability. WITHHELD is published only after the ACTUAL PostgreSQL COMMIT
++// completion has been bounded-assembled and strictly validated
++// (CommandComplete body exactly "COMMIT\0" followed by a length-5
++// ReadyForQuery with the idle status). Assembly and both deadline setters use
++// ONE synchronized deadline path computing the MINIMUM of the CURRENT caller
++// deadline and the active assembly cap, applied as an absolute timestamp
++// without holding a lock across a read. EOF, read errors, deadline expiry,
+ // partial and unrecognized/malformed framing stay NOTESTABLISHED/UNCERTAIN and
+ // are never inferred as a rollback or a success.
+ package recovery
+@@ -36,6 +40,15 @@
+ 	TargetLockCommitWitnessWithheld       = "withheld"
+ )
+ 
++// targetLockCommitAmbiguityMode is the IMMUTABLE handle mode assigned at
++// construction.
++type targetLockCommitAmbiguityMode int
++
++const (
++	targetLockCommitAmbiguityNativeMode targetLockCommitAmbiguityMode = iota
++	targetLockCommitAmbiguityControlMode
++)
++
+ // targetLockCommitAmbiguityCore is the unexported shared state of one fault.
+ type targetLockCommitAmbiguityCore struct {
+ 	real net.Conn
+@@ -59,22 +72,33 @@
+ 	breakOnce    sync.Once
+ 
+ 	// deterministic in-memory transport of the control instance
+-	controlMu        sync.Mutex
+-	controlServer    bytes.Buffer
+-	controlServerErr error
+-
+-	// deadline/cancellation awareness of the assembly and withheld waits
++	controlMu           sync.Mutex
++	controlServer       bytes.Buffer
++	controlServerErr    error
++	controlConsumed     int
++	controlStallAfter   int
++	controlStallOngoing bool
++	controlStallCh      chan struct{}
++	controlWakeCh       chan struct{}
++
++	// ONE synchronized deadline state: the caller deadline (set by both
++	// setters) and the active assembly cap; the effective read deadline is
++	// their MINIMUM.
+ 	deadlineMu      sync.Mutex
+-	readDeadline    time.Time
++	callerDeadline  time.Time
++	assemblyCap     time.Time
+ 	deadlineChanged chan struct{}
+ }
+ 
+ func newTargetLockCommitAmbiguityCore() *targetLockCommitAmbiguityCore {
+ 	return &targetLockCommitAmbiguityCore{
+-		dispatchedCh:    make(chan struct{}),
+-		withheldCh:      make(chan struct{}),
+-		brokenCh:        make(chan struct{}),
+-		deadlineChanged: make(chan struct{}, 1),
++		dispatchedCh:      make(chan struct{}),
++		withheldCh:        make(chan struct{}),
++		brokenCh:          make(chan struct{}),
++		deadlineChanged:   make(chan struct{}, 1),
++		controlStallAfter: -1,
++		controlStallCh:    make(chan struct{}, 1),
++		controlWakeCh:     make(chan struct{}, 1),
+ 	}
+ }
+ 
+@@ -120,31 +144,44 @@
+ 
+ // TargetLockCommitAmbiguityFault is the fixed OPAQUE control handle. It exposes
+ // only fixed fault operations; it is not a net.Conn and has no Read/Write/Close
+-// capability. Deterministic byte-feed/read controls reject live-socket
+-// instances.
++// capability. The mode is IMMUTABLE: a reserved native-fault handle rejects
++// every deterministic control from reservation onward.
+ type TargetLockCommitAmbiguityFault struct {
+ 	core *targetLockCommitAmbiguityCore
++	mode targetLockCommitAmbiguityMode
++}
++
++// controlAllowed rejects every deterministic control on a native-fault handle
++// (reserved or live) using the IMMUTABLE construction mode.
++func (f *TargetLockCommitAmbiguityFault) controlAllowed() error {
++	if f.mode != targetLockCommitAmbiguityControlMode {
++		return errors.New("target-lock commit fault: deterministic controls are unavailable on a reserved native-fault handle")
++	}
++	if f.core.isLive() {
++		return errors.New("target-lock commit fault: deterministic controls are unavailable on a live-socket fault")
++	}
++	return nil
+ }
+ 
+ // ArmTargetLockCommitAmbiguityFault reserves the production socket-wrap seam
+-// with this fixed fault and returns the opaque handle, the identity-conditional
+-// reset and an error for an overlapping reservation. No socket callback is
+-// accepted.
++// with this fixed fault and returns the opaque NATIVE handle, the
++// identity-conditional reset and an error for an overlapping reservation. No
++// socket callback is accepted.
+ func ArmTargetLockCommitAmbiguityFault() (*TargetLockCommitAmbiguityFault, func(), error) {
+ 	core := newTargetLockCommitAmbiguityCore()
+ 	reset, err := reserveTargetLockSocketWrap(core.wrap)
+ 	if err != nil {
+ 		return nil, nil, err
+ 	}
+-	return &TargetLockCommitAmbiguityFault{core: core}, reset, nil
++	return &TargetLockCommitAmbiguityFault{core: core, mode: targetLockCommitAmbiguityNativeMode}, reset, nil
+ }
+ 
+-// NewTargetLockCommitAmbiguityControl builds the deterministic control
++// NewTargetLockCommitAmbiguityControl builds the deterministic CONTROL
+ // instance (never installed into the production seam) whose fixed in-memory
+ // transport is driven through ControlWriteClientBytes / ControlFeedServerBytes
+-// / ControlFeedServerError / ControlRead.
++// / ControlFeedServerError / ControlRead / ControlStallAfterBytes.
+ func NewTargetLockCommitAmbiguityControl() *TargetLockCommitAmbiguityFault {
+-	return &TargetLockCommitAmbiguityFault{core: newTargetLockCommitAmbiguityCore()}
++	return &TargetLockCommitAmbiguityFault{core: newTargetLockCommitAmbiguityCore(), mode: targetLockCommitAmbiguityControlMode}
+ }
+ 
+ // TargetLockCommitRequestFrame is the exact simple-protocol commit query frame
+@@ -262,32 +299,36 @@
+ }
+ 
+ // ControlWriteClientBytes drives the fixed classifier with client bytes; it
+-// REJECTS live-socket instances.
++// REJECTS native-fault handles from reservation onward.
+ func (f *TargetLockCommitAmbiguityFault) ControlWriteClientBytes(b []byte) error {
+-	if f.core.isLive() {
+-		return errors.New("target-lock commit fault: control byte feed is unavailable on a live-socket fault")
++	if err := f.controlAllowed(); err != nil {
++		return err
+ 	}
+ 	f.core.maybeEstablishDispatch(b)
+ 	return nil
+ }
+ 
+ // ControlFeedServerBytes queues server bytes for the deterministic transport;
+-// it REJECTS live-socket instances.
++// it REJECTS native-fault handles from reservation onward.
+ func (f *TargetLockCommitAmbiguityFault) ControlFeedServerBytes(b []byte) error {
+-	if f.core.isLive() {
+-		return errors.New("target-lock commit fault: control server feed is unavailable on a live-socket fault")
++	if err := f.controlAllowed(); err != nil {
++		return err
+ 	}
+ 	f.core.controlMu.Lock()
+ 	f.core.controlServer.Write(b)
+ 	f.core.controlMu.Unlock()
++	select {
++	case f.core.controlWakeCh <- struct{}{}:
++	default:
++	}
+ 	return nil
+ }
+ 
+ // ControlFeedServerError queues one read failure for the deterministic
+-// transport; it REJECTS live-socket instances.
++// transport; it REJECTS native-fault handles from reservation onward.
+ func (f *TargetLockCommitAmbiguityFault) ControlFeedServerError(err error) error {
+-	if f.core.isLive() {
+-		return errors.New("target-lock commit fault: control server error is unavailable on a live-socket fault")
++	if err := f.controlAllowed(); err != nil {
++		return err
+ 	}
+ 	f.core.controlMu.Lock()
+ 	f.core.controlServerErr = err
+@@ -295,21 +336,70 @@
+ 	return nil
+ }
+ 
+-// ControlSetReadDeadline sets the tracked read deadline of the deterministic
+-// control instance; it REJECTS live-socket instances.
++// ControlSetReadDeadline sets the tracked caller read deadline of the
++// deterministic control instance; it REJECTS native-fault handles from
++// reservation onward.
+ func (f *TargetLockCommitAmbiguityFault) ControlSetReadDeadline(t time.Time) error {
+-	if f.core.isLive() {
+-		return errors.New("target-lock commit fault: control deadline is unavailable on a live-socket fault")
++	if err := f.controlAllowed(); err != nil {
++		return err
+ 	}
+-	f.core.noteDeadline(t)
++	f.core.deadlineMu.Lock()
++	f.core.callerDeadline = t
++	f.core.deadlineMu.Unlock()
++	f.core.applyDeadlineToSocket()
++	f.core.wakeDeadlineWaiters()
+ 	return nil
+ }
+ 
+-// ControlRead drives the fixed Read path once; it REJECTS live-socket
+-// instances.
++// ControlStallAfterBytes arms the one-shot deterministic stall after n consumed
++// server bytes; it REJECTS native-fault handles from reservation onward.
++func (f *TargetLockCommitAmbiguityFault) ControlStallAfterBytes(n int) error {
++	if err := f.controlAllowed(); err != nil {
++		return err
++	}
++	if n < 0 {
++		return errors.New("target-lock commit fault: stall byte offset must be >= 0")
++	}
++	select {
++	case <-f.core.controlWakeCh:
++	default:
++	}
++	f.core.controlMu.Lock()
++	f.core.controlStallAfter = n
++	f.core.controlMu.Unlock()
++	return nil
++}
++
++// ControlStallReached waits boundedly until the armed deterministic stall is
++// entered; it REJECTS native-fault handles from reservation onward.
++func (f *TargetLockCommitAmbiguityFault) ControlStallReached(ctx context.Context) bool {
++	if err := f.controlAllowed(); err != nil {
++		return false
++	}
++	select {
++	case <-f.core.controlStallCh:
++		return true
++	case <-ctx.Done():
++		return false
++	}
++}
++
++// ControlEffectiveDeadline returns the currently computed effective read
++// deadline (the MINIMUM of the current caller deadline and the active assembly
++// cap); it REJECTS native-fault handles from reservation onward.
++func (f *TargetLockCommitAmbiguityFault) ControlEffectiveDeadline() (time.Time, error) {
++	if err := f.controlAllowed(); err != nil {
++		return time.Time{}, err
++	}
++	effective, _ := f.core.effectiveDeadline()
++	return effective, nil
++}
++
++// ControlRead drives the fixed Read path once; it REJECTS native-fault handles
++// from reservation onward.
+ func (f *TargetLockCommitAmbiguityFault) ControlRead(p []byte) (int, error) {
+-	if f.core.isLive() {
+-		return 0, errors.New("target-lock commit fault: control read is unavailable on a live-socket fault")
++	if err := f.controlAllowed(); err != nil {
++		return 0, err
+ 	}
+ 	return f.core.read(p)
+ }
+@@ -409,29 +499,37 @@
+ 
+ // withholdCommitCompletion bounded-assembles and STRICTLY validates the actual
+ // PostgreSQL COMMIT completion; failure marks the read failed and NEVER
+-// publishes WITHHELD. The effective read deadline is the earlier of the
+-// assembly limit and the caller's current tracked deadline.
++// publishes WITHHELD. It installs the active assembly cap and re-applies the
++// CURRENT minimum (caller deadline vs cap) as an absolute timestamp before each
++// read via the single synchronized deadline path.
+ func (c *targetLockCommitAmbiguityCore) withholdCommitCompletion() (err error) {
+ 	const completionLimit = 1 << 16
+-	assemblyDeadline := time.Now().Add(30 * time.Second)
++	c.deadlineMu.Lock()
++	c.assemblyCap = time.Now().Add(30 * time.Second)
++	c.deadlineMu.Unlock()
++	c.applyDeadlineToSocket()
+ 	assembled := make([]byte, 0, 256)
+ 	scratch := make([]byte, 512)
+ 	defer func() {
++		c.deadlineMu.Lock()
++		c.assemblyCap = time.Time{}
++		c.deadlineMu.Unlock()
++		c.applyDeadlineToSocket()
++		c.wakeDeadlineWaiters()
+ 		c.mu.Lock()
+ 		c.assembledBytes = len(assembled)
+ 		c.mu.Unlock()
+ 	}()
+ 	for len(assembled) <= completionLimit {
+-		effective := c.effectiveReadDeadline(assemblyDeadline)
+-		remaining := time.Until(effective)
+-		if remaining <= 0 {
++		effective, set := c.effectiveDeadline()
++		if set && !time.Now().Before(effective) {
+ 			c.markReadFailure()
+ 			return os.ErrDeadlineExceeded
+ 		}
+-		if real := c.realConn(); real != nil {
+-			// Never set a later deadline than the caller's current one.
+-			_ = real.SetReadDeadline(time.Now().Add(remaining))
+-		}
++		// Re-apply the CURRENT minimum before each read: a stale snapshot can
++		// never undo a concurrent cancellation, and a concurrent clear can never
++		// remove the active assembly cap.
++		c.applyDeadlineToSocket()
+ 		n, readErr := c.readRaw(scratch)
+ 		if n > 0 {
+ 			assembled = append(assembled, scratch[:n]...)
+@@ -449,25 +547,55 @@
+ 	return errors.New("target-lock COMMIT completion framing was not recognized")
+ }
+ 
+-// effectiveReadDeadline is the earlier of the assembly limit and the caller's
+-// current tracked deadline.
+-func (c *targetLockCommitAmbiguityCore) effectiveReadDeadline(assemblyDeadline time.Time) time.Time {
++// effectiveDeadlineLocked computes the MINIMUM of the current caller deadline
++// and the active assembly cap.
++func (c *targetLockCommitAmbiguityCore) effectiveDeadlineLocked() (time.Time, bool) {
++	effective := time.Time{}
++	set := false
++	if !c.callerDeadline.IsZero() {
++		effective = c.callerDeadline
++		set = true
++	}
++	if !c.assemblyCap.IsZero() && (!set || c.assemblyCap.Before(effective)) {
++		effective = c.assemblyCap
++		set = true
++	}
++	return effective, set
++}
++
++func (c *targetLockCommitAmbiguityCore) effectiveDeadline() (time.Time, bool) {
+ 	c.deadlineMu.Lock()
+-	callerDeadline := c.readDeadline
+-	c.deadlineMu.Unlock()
+-	if !callerDeadline.IsZero() && callerDeadline.Before(assemblyDeadline) {
+-		return callerDeadline
++	defer c.deadlineMu.Unlock()
++	return c.effectiveDeadlineLocked()
++}
++
++// applyDeadlineToSocket applies the CURRENT effective absolute deadline to the
++// real socket without holding any lock across the application.
++func (c *targetLockCommitAmbiguityCore) applyDeadlineToSocket() {
++	effective, set := c.effectiveDeadline()
++	if real := c.realConn(); real != nil {
++		if set {
++			_ = real.SetReadDeadline(effective)
++		} else {
++			_ = real.SetReadDeadline(time.Time{})
++		}
++	}
++}
++
++func (c *targetLockCommitAmbiguityCore) wakeDeadlineWaiters() {
++	select {
++	case c.deadlineChanged <- struct{}{}:
++	default:
+ 	}
+-	return assemblyDeadline
+ }
+ 
+-// waitAfterWithhold blocks until the transport is broken or the tracked read
++// waitAfterWithhold blocks until the transport is broken or the tracked caller
+ // deadline expires; deadline changes and Close are honored and a timeout fails
+ // closed without upgrading the witness.
+ func (c *targetLockCommitAmbiguityCore) waitAfterWithhold() error {
+ 	for {
+ 		c.deadlineMu.Lock()
+-		deadline := c.readDeadline
++		deadline := c.callerDeadline
+ 		c.deadlineMu.Unlock()
+ 		var timer *time.Timer
+ 		var timerCh <-chan time.Time
+@@ -487,7 +615,7 @@
+ 			return net.ErrClosed
+ 		case <-timerCh:
+ 			c.deadlineMu.Lock()
+-			current := c.readDeadline
++			current := c.callerDeadline
+ 			c.deadlineMu.Unlock()
+ 			if !current.IsZero() && !time.Now().Before(current) {
+ 				return os.ErrDeadlineExceeded
+@@ -500,22 +628,90 @@
+ 	}
+ }
+ 
++// stallWait waits until the armed deterministic stall is woken by an ACTUAL
++// server feed (a stale wake without data keeps waiting) or the effective
++// deadline expires.
++func (c *targetLockCommitAmbiguityCore) stallWait() bool {
++	for {
++		effective, set := c.effectiveDeadline()
++		if set {
++			remaining := time.Until(effective)
++			if remaining <= 0 {
++				return true
++			}
++			timer := time.NewTimer(remaining)
++			select {
++			case <-c.controlWakeCh:
++				timer.Stop()
++				if c.controlHasData() {
++					return false
++				}
++				continue
++			case <-c.deadlineChanged:
++				timer.Stop()
++				continue
++			case <-timer.C:
++				return true
++			}
++		}
++		select {
++		case <-c.controlWakeCh:
++			if c.controlHasData() {
++				return false
++			}
++			continue
++		case <-c.deadlineChanged:
++			continue
++		}
++	}
++}
++
++// controlHasData reports whether queued server bytes or a queued error are
++// actually available for the deterministic transport.
++func (c *targetLockCommitAmbiguityCore) controlHasData() bool {
++	c.controlMu.Lock()
++	defer c.controlMu.Unlock()
++	return c.controlServer.Len() > 0 || c.controlServerErr != nil
++}
++
+ // readRaw returns queued control bytes BEFORE any queued control error, so a
+-// partial frame is ACTUALLY consumed before the failure is surfaced.
++// partial frame is ACTUALLY consumed before the failure is surfaced. The
++// deterministic stall is one-shot and honors the effective deadline.
+ func (c *targetLockCommitAmbiguityCore) readRaw(p []byte) (int, error) {
+ 	if real := c.realConn(); real != nil {
+ 		return real.Read(p)
+ 	}
+ 	c.controlMu.Lock()
+-	defer c.controlMu.Unlock()
++	if c.controlStallAfter >= 0 && c.controlConsumed >= c.controlStallAfter {
++		c.controlStallAfter = -1
++		c.controlStallOngoing = true
++		select {
++		case c.controlStallCh <- struct{}{}:
++		default:
++		}
++		c.controlMu.Unlock()
++		expired := c.stallWait()
++		c.controlMu.Lock()
++		c.controlStallOngoing = false
++		c.controlMu.Unlock()
++		if expired {
++			return 0, os.ErrDeadlineExceeded
++		}
++		return c.readRaw(p)
++	}
+ 	if c.controlServer.Len() > 0 {
+-		return c.controlServer.Read(p)
++		n, err := c.controlServer.Read(p)
++		c.controlConsumed += n
++		c.controlMu.Unlock()
++		return n, err
+ 	}
+ 	if c.controlServerErr != nil {
+ 		err := c.controlServerErr
+ 		c.controlServerErr = nil
++		c.controlMu.Unlock()
+ 		return 0, err
+ 	}
++	c.controlMu.Unlock()
+ 	return 0, io.EOF
+ }
+ 
+@@ -544,28 +740,21 @@
+ 	c.mu.Unlock()
+ }
+ 
+-func (c *targetLockCommitAmbiguityCore) noteDeadline(t time.Time) {
++func (c *targetLockCommitAmbiguityCore) setReadDeadline(t time.Time) error {
+ 	c.deadlineMu.Lock()
+-	c.readDeadline = t
++	c.callerDeadline = t
+ 	c.deadlineMu.Unlock()
+-	select {
+-	case c.deadlineChanged <- struct{}{}:
+-	default:
+-	}
+-}
+-
+-func (c *targetLockCommitAmbiguityCore) setReadDeadline(t time.Time) error {
+-	c.noteDeadline(t)
+-	if real := c.realConn(); real != nil {
+-		return real.SetReadDeadline(t)
+-	}
++	c.applyDeadlineToSocket()
++	c.wakeDeadlineWaiters()
+ 	return nil
+ }
+ 
+ func (c *targetLockCommitAmbiguityCore) setDeadline(t time.Time) error {
+-	c.noteDeadline(t)
++	if err := c.setReadDeadline(t); err != nil {
++		return err
++	}
+ 	if real := c.realConn(); real != nil {
+-		return real.SetDeadline(t)
++		return real.SetWriteDeadline(t)
+ 	}
+ 	return nil
+ }

@@ -1,0 +1,154 @@
+{
+  "task": "NEW bounded lane: real owner COMMIT acknowledgement-loss in NEW internal/recovery/borrowed-replacement-owner-commit-ambiguity_linux_test.go PLUS ONE drill-only connection-establishment seam in internal/recovery/targetlock.go at/near line 85",
+  "date": "2026-10-01",
+  "head": "e504462",
+  "worktree_tracked_modified": 22,
+  "scope": {
+    "new_files": [
+      "internal/recovery/borrowed-replacement-owner-commit-ambiguity_linux_test.go"
+    ],
+    "modified_files": [
+      "internal/recovery/targetlock.go"
+    ],
+    "seam": "append-only drill-only nil-default socket wrap at the dedicated owner-session connection establishment (line 85); when unarmed the EXISTING pgx.Connect path runs unchanged; canonical identity checks and acquisition machinery (lines 89-123) untouched; no raw connection/arbitrary connector/SQL authority; no replacement owner, DSN/key rebinding or copied acquisition loop; actual addresses retained"
+  },
+  "new_file": {
+    "sha256": "a9cfb8d6fbbb668679c17ab87322a4266c88de4933c9769aa34af93a244bdb0a",
+    "lines": 797,
+    "test": "TestBorrowedReplacementOwnerCommitAmbiguity",
+    "creation_diff": {
+      "file": "borrowed-replacement-owner-commit-ambiguity-creation.diff",
+      "sha256": "d100fbddf7a231a2b1b19450bae17ebdfd0d17f89a2117362eb58af0329481e2",
+      "hunks": [
+        "@@ -0,0 +1,797 @@"
+      ],
+      "hunk_count": 1
+    },
+    "local_components": [
+      "one-shot wire gate over the REAL owner socket (arm/Write read-only classification of the exact simple-protocol COMMIT frame/withhold server completion before pgx/Break)",
+      "witness enum NOTESTABLISHED|DISPATCHED|WITHHELD + cleanupUncertain",
+      "owner-socket registry requiring exactly one wrapped socket",
+      "immutable audit-ID/attempt tuple + fault worker (tuple channel, barrier waits, independent bounded committed-row/guard reads, transport break, bounded join, guaranteed break on every path)",
+      "deterministic in-memory transport and gate state-machine negatives"
+    ]
+  },
+  "seam_diff": {
+    "file": "borrowed-replacement-owner-commit-ambiguity-targetlock.diff",
+    "sha256": "8d051d0e52762895dded8a253c9ab705e3e0e1691534168ae18e7945b8c6f81f",
+    "before_sha256": "53280bc096821d890a5c8e21a969b3ec51904b7d02d39ae5dd6159bd047ac81d",
+    "after_sha256": "b88b177b1481c45c2364d510836bb90498ee3b76d72fd0ccdb09bce0d6ceda3a",
+    "hunk_count": 3,
+    "hunks": [
+      "@@ -7,9 +7,11 @@ (imports: net, sync/atomic)",
+      "@@ -82,7 +84,7 @@ (line 85: existing pgx.Connect call routed through the nil-default seam helper)",
+      "@@ -426,3 +428,64 @@ (appended companion bridge: TargetLockSocketWrap, arm/reset, connectTargetLockSession)"
+    ]
+  },
+  "gold": {
+    "log": "borrowed-replacement-owner-commit-ambiguity-gold.log",
+    "sha256": "62f6c9a348d3837083d71ac283430533944c4c4ab6344560fde201ee642fce26",
+    "exit": 0,
+    "top_pass": 1,
+    "top_fail": 0,
+    "top_skip": 0,
+    "data_race": 0,
+    "warning": 0,
+    "duration": "65.88s",
+    "first_run": true,
+    "first_fail": null
+  },
+  "race": {
+    "log": "borrowed-replacement-owner-commit-ambiguity-race.log",
+    "sha256": "80ef1947e12e2c98fb48fcb3f1def7c6aa6377622c39c5f36efc8e87b6df03dd",
+    "exit": 0,
+    "top_pass": 1,
+    "top_fail": 0,
+    "top_skip": 0,
+    "data_race": 0,
+    "warning": 0,
+    "panic": 0,
+    "duration": "88.86s",
+    "binary": "borrowed-replacement-owner-commit-ambiguity-race.test",
+    "binary_sha256": "8b3ce987eb46089082f111427fd34a2f51a07f2491d7cb1c42cc954c6f058faa",
+    "build_log_sha256": "56f19942751d861dde923833b78ca9029ffcad54f6c74705b55b9da27348936c",
+    "corrected_rebuild": {
+      "log": "borrowed-replacement-owner-commit-ambiguity-race-build2.log",
+      "log_sha256": "90ec8da9c624bc955a41130cd8fa55c79d77f5ddcfff11a3e9652babb8f6bb16",
+      "binary_sha256": "8b3ce987eb46089082f111427fd34a2f51a07f2491d7cb1c42cc954c6f058faa",
+      "rebuild_identical": true,
+      "labels": "commit-ambiguity a9cfb8d6, guard-row-window 264cbc81, owner-journal-window ee880415 and all other predecessors recorded directly"
+    },
+    "wrong_selection_artifact": {
+      "log": "borrowed-replacement-owner-commit-ambiguity-race-wrongselect1.log",
+      "sha256": "495830da5fca3c2b45b409549e568388751d6f565c04e32569aacaade34802b8",
+      "note": "first race invocation ran the wrong -test.run regex (previous lane's test); preserved as an execution artifact, never presented as this lane's race evidence; the corrected runner selected ^TestBorrowedReplacementOwnerCommitAmbiguity and passed"
+    }
+  },
+  "container": {
+    "image": "postgres@sha256:4ef4dbc939d61acea57712655ddb4b4ab27419c913f94cca0cd57cb3ea3c2280",
+    "root": true,
+    "private_pid": true,
+    "init": true,
+    "hostnet": true,
+    "CI": "true",
+    "TXHARBOR_REQUIRE_DOCKER": "1",
+    "PGDATA_PG_MAJOR_PG_VERSION": "unset",
+    "test_regex": "^TestBorrowedReplacementOwnerCommitAmbiguity$"
+  },
+  "cases": {
+    "P_positive_commit_ambiguity": "owner created through the UNARMED gate (ordinary traffic unchanged); real unique refused attempt; journal stage locked the exact guard row via the supplied tx, inserted the refused non-instance-bound row (RETURNING audit_id=1), proved pending invisibility and contender 55P03; atArbitration (after insertion + successful facts) armed the gate and published the immutable audit-ID/attempt tuple; the gate established the ACTUAL COMMIT was sent (real 'Q' commit frame forwarded) and withheld the server completion before pgx; while withheld the independent bounded read observed exactly ONE committed refused row and the released guard row, and a contender locked the released guard row; the transport was then broken, making the ACTUAL Commit call return an error (no injected acknowledgement error); ownerErr is the ambiguous COMMIT path and never a rollback; composite refused; durable row remained exactly one; provisional eligibility one-shot and non-reusable; guard unchanged/unresolved; acceptance zero; worker joined, P1 conn closed, owner never reacquired",
+    "N1_unarmed_control": "gate attached but NEVER armed: no witness claimed, ordinary COMMIT acknowledged, composite published, exactly one genuine refused row, guard unchanged, guarded retirement ran, replay/copy refused, ordinary dirty-guard refusal preserved",
+    "N2_pre_commit_cancellation": "gate ARMED then the lane canceled at atArbitration: precise arbitration refusal, NO COMMIT dispatched, confirmed clean rollback (no commit/rollback failure suffixes), zero durable rows, witness-timeout stayed NOTESTABLISHED (never inferred as rollback), owner session survived",
+    "N3_gate_state_machine": "unrecognized framing, missing barriers, witness timeout and uncertain cleanup all stayed NOTESTABLISHED/UNCERTAIN and were never inferred as rollback or success; the exact commit frame was recognized, dispatched and withheld until the transport break"
+  },
+  "brackets": {
+    "before": "borrowed-replacement-owner-commit-ambiguity-hashes-before.txt",
+    "before_sha256": "88433e27fe41e37587b986de537c35e1af2518f7effa30f97c884710da247b73",
+    "after": "borrowed-replacement-owner-commit-ambiguity-hashes-after.txt",
+    "after_sha256": "77908a031589b47fc1a9124ad4d65b0f2b929326f2b0a1171c2ea7a175ee51a1",
+    "after_runs": "borrowed-replacement-owner-commit-ambiguity-hashes-after-runs.txt",
+    "after_runs_sha256": "7cf788a66c179be5956f9adca48c5125cd8fb75183132f041cc50a76feaba943",
+    "source_stable": true,
+    "closed_predecessors_identical": true,
+    "measured_directly": {
+      "new_file": "a9cfb8d6fbbb668679c17ab87322a4266c88de4933c9769aa34af93a244bdb0a",
+      "targetlock_seam_before": "53280bc096821d890a5c8e21a969b3ec51904b7d02d39ae5dd6159bd047ac81d",
+      "targetlock_seam_after": "b88b177b1481c45c2364d510836bb90498ee3b76d72fd0ccdb09bce0d6ceda3a",
+      "journal": "ee880415e79c7bb0190a6468e88ef3358b9f3afe11abf70982d7d546aace0f3d",
+      "guard_row": "264cbc81d1f9548c09b847698cf6e1b1afc4abf313aee4fd0f2f05737459fd92",
+      "owner_tail": "819585c4444152a01bd60b0fd19a7a7e8223674ce4a7e7c507578da418f5e969",
+      "observation_window": "f1c7601ab09083fba4320f393d458682a5cddcdc895b00c9d1e66a2eaa68b960",
+      "catalog_window": "a11b33fc0670fef015476d2a1f45f5423cc18c7fae36ea1b75bce215896cd402",
+      "prelaunch": "1ec0bc6b8ffc30b0497bad58666f58215049b99f6f0c8c76fb71093c63c47020",
+      "autonomous_observation": "d9fe63eea188731b7068c987c61558c1e690112e6ca3c1e36d4f4e8adb95192e",
+      "session": "2613dcec7f403c45834895af4e0cf0d7fd5c7de4140bafd71051afc4ba6df64f",
+      "binding": "3bb42a0a8eef549af1f9777985535e3683cefa698005585e1033c996b5a9f20c",
+      "driver": "e8456e2b7503cbc8b748c16e570daaeb41167181966fbca2a6d7b81559695a8f",
+      "successor": "64a14de4a97d9929b74e01b80e30e0b2504cd92a7d2d1255c4a9bf5d5534519a",
+      "ddl_bridge": "b0a70a67412c5c2e457d496276500c70b9e6b763ebf36056bb217c90fd9c65ae",
+      "ddl_test": "8deb2417e7e20e3863d099b826856e4e37ff52d5c4141764d21231a48a354a4d"
+    }
+  },
+  "runners": {
+    "gold_runner_sha256": "9bd6a66539395631e88797bfc7516354b6cf05fc09f1268d7908d39d5099610c",
+    "race_runner_sha256": "d1fe2c9ef3aee7ae85221a74684514ef2e08a540a14a3706e5e7b069c8c8241a",
+    "race_runner_wrongselect1_sha256": "aebeb59c275df876e264ada223e6bb70ff92c46235dd35187f1cc8b4982c0c7c",
+    "race_build_sha256": "b2825cbf385753a6cc6b11818caefe05a6581e4a7f8f048869b172d770a62120",
+    "race_build2_sha256": "db147c24ff165bbeecdb31c31e4768e78c6b89b99f887bd4e255b231aa357009",
+    "bracket_sha256": "1609a55e3a7d2cf8c59d723a83136b099d612a34ded329749a9d0a2c825de41d",
+    "bracket_before_sha256": "1200dd9c59689f8ded30996b79b1e1818e98da5be9dc5e3838c14846c2466be4"
+  },
+  "history_unrebound": {
+    "journal_fix_summary_sha256": "a17a3158ca1a4754764c2dc6cddd23224acb8bc6f989ae15397495a1981b3a89",
+    "original_journal_summary_sha256": "1c51fb393fbaaa8254f0a97b1406e3cbbd43acf6a355b9ddf3c67adaaafb5465",
+    "guard_row_summary_sha256": "c8bd708790da09fb39daf0e7af357647646c7088c622e235547769a593e9044f"
+  },
+  "notes": [
+    "No commit; HEAD e504462; 22 tracked modified files (targetlock.go modified within the allowed seam); exactly one new untracked lane file.",
+    "Every closed predecessor is byte-identical (directly measured, CLOSED-PREDECESSORS-IDENTICAL, SOURCE-STABLE).",
+    "The COMMIT acknowledgement loss is UNKNOWN and is never reported as success or rollback; the withholder never returns an injected error after receiving the acknowledgement - it withholds the real completion and then breaks the transport so the ACTUAL Commit call fails.",
+    "The journal row is append-only, refused, non-instance-bound (NULL/empty instance_id), never deleted/compensated or treated as acceptance.",
+    "The first race invocation selected the wrong test via a stale -test.run regex and is preserved as a wrongselect1 artifact; the corrected run executed ^TestBorrowedReplacementOwnerCommitAmbiguity and passed, with a byte-identical rebuild.",
+    "No secrets/DSNs/verifiers logged; no rollback asserted where a COMMIT may have occurred."
+  ]
+}

@@ -1,0 +1,169 @@
+pg_restore (PostgreSQL) 18.6 (Debian 18.6-1.pgdg13+2)
+go version go1.26.5 linux/amd64
+2026/10/01 20:44:15 github.com/testcontainers/testcontainers-go - Connected to docker: 
+  Server Version: 29.6.1
+  API Version: 1.55
+  Operating System: Ubuntu 24.04.4 LTS
+  Total Memory: 15915 MB
+  Testcontainers for Go Version: v0.44.0
+  Resolved Docker Host: unix:///var/run/docker.sock
+  Resolved Docker Socket Path: /var/run/docker.sock
+  Test SessionID: fd021c970541f9a226b76dbea4ba5fe2cc9b3b17c48f2818bbc7b126e1fdc662
+  Test ProcessID: fead0e94-79e8-4c53-8564-5817b5ec364e
+=== RUN   TestBorrowedReplacementOwnerJournalWindow
+2026/10/01 20:44:15 🐳 Creating container for image postgres@sha256:4ef4dbc939d61acea57712655ddb4b4ab27419c913f94cca0cd57cb3ea3c2280
+2026/10/01 20:44:15 🐳 Creating container for image testcontainers/ryuk:0.14.0
+2026/10/01 20:44:16 ✅ Container created: 9c064964fb27
+2026/10/01 20:44:16 🐳 Starting container: 9c064964fb27
+2026/10/01 20:44:16 ✅ Container started: 9c064964fb27
+2026/10/01 20:44:16 ⏳ Waiting for container id 9c064964fb27 image: testcontainers/ryuk:0.14.0. Waiting for: all of: [log message "Started", port 8080/tcp to be listening]
+2026/10/01 20:44:16 Shell not found in container
+2026/10/01 20:44:16 🔔 Container is ready: 9c064964fb27
+2026/10/01 20:44:16 ✅ Container created: c1bddaec7452
+2026/10/01 20:44:16 🐳 Starting container: c1bddaec7452
+2026/10/01 20:44:17 ✅ Container started: c1bddaec7452
+2026/10/01 20:44:17 ⏳ Waiting for container id c1bddaec7452 image: postgres@sha256:4ef4dbc939d61acea57712655ddb4b4ab27419c913f94cca0cd57cb3ea3c2280. Waiting for: log message "database system is ready to accept connections" (occurrence: 2)
+2026/10/01 20:44:18 🔔 Container is ready: c1bddaec7452
+    borrowed-replacement-owner-journal-window_linux_test.go:277: protected fixture actual HBA rules (all SCRAM, no trust fallback): line=1 type=local address="" auth=scram-sha-256; line=2 type=host address="127.0.0.1" auth=scram-sha-256; line=3 type=host address="::1" auth=scram-sha-256; line=4 type=host address="all" auth=scram-sha-256
+    borrowed-replacement-owner-journal-window_linux_test.go:277: successor retired: backend PID 329 incarnation strictly gone, owner health retained, guard non-clean, acceptance zero
+    borrowed-replacement-owner-journal-window_linux_test.go:277: guard-row window fixture: fixture original canonical key retained, disposition "rebuild_required" (deliberately unresolved), operation provenance matches the fixture original
+    borrowed-replacement-owner-journal-window_linux_test.go:279: native-ready replacement attempt refused by the dirty guard: disposition "rebuild_required" -> "rebuild_required", no Started, no executable frames, no callbacks, replacement catalog unchanged (OID 16757)
+    borrowed-replacement-owner-journal-window_linux_test.go:333: replacement session retired: backend PID 590 incarnation strictly gone, owner health retained, guard non-clean, acceptance zero
+    borrowed-replacement-owner-journal-window_linux_test.go:337: owner-journal positive: the actual refused attempt was journaled as ONE non-instance-bound refused audit row through the supplied transaction (RETURNING audit_id=1, invisible to an independent read until COMMIT, contender 55P03 held), the unchanged arbitration granted the one-shot provisional eligibility, the acknowledged COMMIT left exactly one durable matching row with the guard unchanged, guarded retirement ran and the guard stayed unresolved with acceptance zero
+2026/10/01 20:44:48 🐳 Creating container for image postgres@sha256:4ef4dbc939d61acea57712655ddb4b4ab27419c913f94cca0cd57cb3ea3c2280
+2026/10/01 20:44:48 ✅ Container created: 2b8be936d23d
+2026/10/01 20:44:48 🐳 Starting container: 2b8be936d23d
+2026/10/01 20:44:49 ✅ Container started: 2b8be936d23d
+2026/10/01 20:44:49 ⏳ Waiting for container id 2b8be936d23d image: postgres@sha256:4ef4dbc939d61acea57712655ddb4b4ab27419c913f94cca0cd57cb3ea3c2280. Waiting for: log message "database system is ready to accept connections" (occurrence: 2)
+2026/10/01 20:44:51 🔔 Container is ready: 2b8be936d23d
+    borrowed-replacement-owner-journal-window_linux_test.go:342: protected fixture actual HBA rules (all SCRAM, no trust fallback): line=1 type=local address="" auth=scram-sha-256; line=2 type=host address="127.0.0.1" auth=scram-sha-256; line=3 type=host address="::1" auth=scram-sha-256; line=4 type=host address="all" auth=scram-sha-256
+    borrowed-replacement-owner-journal-window_linux_test.go:342: successor retired: backend PID 330 incarnation strictly gone, owner health retained, guard non-clean, acceptance zero
+    borrowed-replacement-owner-journal-window_linux_test.go:342: guard-row window fixture: fixture original canonical key retained, disposition "rebuild_required" (deliberately unresolved), operation provenance matches the fixture original
+    borrowed-replacement-owner-journal-window_linux_test.go:370: owner-journal contender-first negative: the held guard row refused the fence with the structured 55P03 BEFORE any journal write (zero matching rows), with no eligibility and no composite
+2026/10/01 20:45:15 🐳 Creating container for image postgres@sha256:4ef4dbc939d61acea57712655ddb4b4ab27419c913f94cca0cd57cb3ea3c2280
+2026/10/01 20:45:15 ✅ Container created: 7d783fd89e09
+2026/10/01 20:45:15 🐳 Starting container: 7d783fd89e09
+2026/10/01 20:45:16 ✅ Container started: 7d783fd89e09
+2026/10/01 20:45:16 ⏳ Waiting for container id 7d783fd89e09 image: postgres@sha256:4ef4dbc939d61acea57712655ddb4b4ab27419c913f94cca0cd57cb3ea3c2280. Waiting for: log message "database system is ready to accept connections" (occurrence: 2)
+2026/10/01 20:45:17 🔔 Container is ready: 7d783fd89e09
+    borrowed-replacement-owner-journal-window_linux_test.go:376: protected fixture actual HBA rules (all SCRAM, no trust fallback): line=1 type=local address="" auth=scram-sha-256; line=2 type=host address="127.0.0.1" auth=scram-sha-256; line=3 type=host address="::1" auth=scram-sha-256; line=4 type=host address="all" auth=scram-sha-256
+    borrowed-replacement-owner-journal-window_linux_test.go:376: successor retired: backend PID 329 incarnation strictly gone, owner health retained, guard non-clean, acceptance zero
+    borrowed-replacement-owner-journal-window_linux_test.go:376: guard-row window fixture: fixture original canonical key retained, disposition "rebuild_required" (deliberately unresolved), operation provenance matches the fixture original
+    borrowed-replacement-owner-journal-window_linux_test.go:399: owner-journal absent-guard negative: the absent row refused the fence explicitly BEFORE any journal write with no fallback inventory and no eligibility/composite
+2026/10/01 20:45:40 🐳 Creating container for image postgres@sha256:4ef4dbc939d61acea57712655ddb4b4ab27419c913f94cca0cd57cb3ea3c2280
+2026/10/01 20:45:40 ✅ Container created: 69ba90dc1e7c
+2026/10/01 20:45:40 🐳 Starting container: 69ba90dc1e7c
+2026/10/01 20:45:41 ✅ Container started: 69ba90dc1e7c
+2026/10/01 20:45:41 ⏳ Waiting for container id 69ba90dc1e7c image: postgres@sha256:4ef4dbc939d61acea57712655ddb4b4ab27419c913f94cca0cd57cb3ea3c2280. Waiting for: log message "database system is ready to accept connections" (occurrence: 2)
+2026/10/01 20:45:43 🔔 Container is ready: 69ba90dc1e7c
+    borrowed-replacement-owner-journal-window_linux_test.go:405: protected fixture actual HBA rules (all SCRAM, no trust fallback): line=1 type=local address="" auth=scram-sha-256; line=2 type=host address="127.0.0.1" auth=scram-sha-256; line=3 type=host address="::1" auth=scram-sha-256; line=4 type=host address="all" auth=scram-sha-256
+    borrowed-replacement-owner-journal-window_linux_test.go:405: successor retired: backend PID 331 incarnation strictly gone, owner health retained, guard non-clean, acceptance zero
+    borrowed-replacement-owner-journal-window_linux_test.go:405: guard-row window fixture: fixture original canonical key retained, disposition "rebuild_required" (deliberately unresolved), operation provenance matches the fixture original
+    borrowed-replacement-owner-journal-window_linux_test.go:427: owner-journal wrong-operation negative: the mismatched provenance refused the fence BEFORE any journal write with zero matching rows and no eligibility/composite
+2026/10/01 20:46:08 🐳 Creating container for image postgres@sha256:4ef4dbc939d61acea57712655ddb4b4ab27419c913f94cca0cd57cb3ea3c2280
+2026/10/01 20:46:08 ✅ Container created: c2df6a7a28b8
+2026/10/01 20:46:08 🐳 Starting container: c2df6a7a28b8
+2026/10/01 20:46:08 ✅ Container started: c2df6a7a28b8
+2026/10/01 20:46:08 ⏳ Waiting for container id c2df6a7a28b8 image: postgres@sha256:4ef4dbc939d61acea57712655ddb4b4ab27419c913f94cca0cd57cb3ea3c2280. Waiting for: log message "database system is ready to accept connections" (occurrence: 2)
+2026/10/01 20:46:10 🔔 Container is ready: c2df6a7a28b8
+    borrowed-replacement-owner-journal-window_linux_test.go:433: protected fixture actual HBA rules (all SCRAM, no trust fallback): line=1 type=local address="" auth=scram-sha-256; line=2 type=host address="127.0.0.1" auth=scram-sha-256; line=3 type=host address="::1" auth=scram-sha-256; line=4 type=host address="all" auth=scram-sha-256
+    borrowed-replacement-owner-journal-window_linux_test.go:433: successor retired: backend PID 328 incarnation strictly gone, owner health retained, guard non-clean, acceptance zero
+    borrowed-replacement-owner-journal-window_linux_test.go:433: guard-row window fixture: fixture original canonical key retained, disposition "rebuild_required" (deliberately unresolved), operation provenance matches the fixture original
+    borrowed-replacement-owner-journal-window_linux_test.go:434: native-ready replacement attempt refused by the dirty guard: disposition "rebuild_required" -> "rebuild_required", no Started, no executable frames, no callbacks, replacement catalog unchanged (OID 16757)
+    borrowed-replacement-owner-journal-window_linux_test.go:468: owner-journal cancel negative: the cancel was injected after the insertion and the successful facts check; the REAL arbitration refused pre-COMMIT and the rollback left zero durable journal rows
+2026/10/01 20:46:32 🐳 Creating container for image postgres@sha256:4ef4dbc939d61acea57712655ddb4b4ab27419c913f94cca0cd57cb3ea3c2280
+2026/10/01 20:46:32 ✅ Container created: 13b69ccd9eb7
+2026/10/01 20:46:32 🐳 Starting container: 13b69ccd9eb7
+2026/10/01 20:46:33 ✅ Container started: 13b69ccd9eb7
+2026/10/01 20:46:33 ⏳ Waiting for container id 13b69ccd9eb7 image: postgres@sha256:4ef4dbc939d61acea57712655ddb4b4ab27419c913f94cca0cd57cb3ea3c2280. Waiting for: log message "database system is ready to accept connections" (occurrence: 2)
+2026/10/01 20:46:35 🔔 Container is ready: 13b69ccd9eb7
+    borrowed-replacement-owner-journal-window_linux_test.go:474: protected fixture actual HBA rules (all SCRAM, no trust fallback): line=1 type=local address="" auth=scram-sha-256; line=2 type=host address="127.0.0.1" auth=scram-sha-256; line=3 type=host address="::1" auth=scram-sha-256; line=4 type=host address="all" auth=scram-sha-256
+    borrowed-replacement-owner-journal-window_linux_test.go:474: successor retired: backend PID 329 incarnation strictly gone, owner health retained, guard non-clean, acceptance zero
+    borrowed-replacement-owner-journal-window_linux_test.go:474: guard-row window fixture: fixture original canonical key retained, disposition "rebuild_required" (deliberately unresolved), operation provenance matches the fixture original
+    borrowed-replacement-owner-journal-window_linux_test.go:475: native-ready replacement attempt refused by the dirty guard: disposition "rebuild_required" -> "rebuild_required", no Started, no executable frames, no callbacks, replacement catalog unchanged (OID 16757)
+    borrowed-replacement-owner-journal-window_linux_test.go:520: owner-journal observer-loss negative: the loss was injected after the insertion and the successful facts check, the REAL arbitration refused pre-COMMIT and the rollback left zero durable journal rows
+2026/10/01 20:47:28 🐳 Creating container for image postgres@sha256:4ef4dbc939d61acea57712655ddb4b4ab27419c913f94cca0cd57cb3ea3c2280
+2026/10/01 20:47:28 ✅ Container created: 4e94b00983e9
+2026/10/01 20:47:28 🐳 Starting container: 4e94b00983e9
+2026/10/01 20:47:29 ✅ Container started: 4e94b00983e9
+2026/10/01 20:47:29 ⏳ Waiting for container id 4e94b00983e9 image: postgres@sha256:4ef4dbc939d61acea57712655ddb4b4ab27419c913f94cca0cd57cb3ea3c2280. Waiting for: log message "database system is ready to accept connections" (occurrence: 2)
+2026/10/01 20:47:30 🔔 Container is ready: 4e94b00983e9
+    borrowed-replacement-owner-journal-window_linux_test.go:526: protected fixture actual HBA rules (all SCRAM, no trust fallback): line=1 type=local address="" auth=scram-sha-256; line=2 type=host address="127.0.0.1" auth=scram-sha-256; line=3 type=host address="::1" auth=scram-sha-256; line=4 type=host address="all" auth=scram-sha-256
+    borrowed-replacement-owner-journal-window_linux_test.go:526: successor retired: backend PID 329 incarnation strictly gone, owner health retained, guard non-clean, acceptance zero
+    borrowed-replacement-owner-journal-window_linux_test.go:526: guard-row window fixture: fixture original canonical key retained, disposition "rebuild_required" (deliberately unresolved), operation provenance matches the fixture original
+    borrowed-replacement-owner-journal-window_linux_test.go:527: native-ready replacement attempt refused by the dirty guard: disposition "rebuild_required" -> "rebuild_required", no Started, no executable frames, no callbacks, replacement catalog unchanged (OID 16757)
+    borrowed-replacement-owner-journal-window_linux_test.go:545: owner-journal journal-failure negative: the fixed audit insert query failed stage-specifically after the fence with no eligibility, no composite and zero durable journal rows
+2026/10/01 20:47:55 🐳 Creating container for image postgres@sha256:4ef4dbc939d61acea57712655ddb4b4ab27419c913f94cca0cd57cb3ea3c2280
+2026/10/01 20:47:56 ✅ Container created: 6bdf52f1ca36
+2026/10/01 20:47:56 🐳 Starting container: 6bdf52f1ca36
+2026/10/01 20:47:56 ✅ Container started: 6bdf52f1ca36
+2026/10/01 20:47:56 ⏳ Waiting for container id 6bdf52f1ca36 image: postgres@sha256:4ef4dbc939d61acea57712655ddb4b4ab27419c913f94cca0cd57cb3ea3c2280. Waiting for: log message "database system is ready to accept connections" (occurrence: 2)
+2026/10/01 20:47:59 🔔 Container is ready: 6bdf52f1ca36
+    borrowed-replacement-owner-journal-window_linux_test.go:551: protected fixture actual HBA rules (all SCRAM, no trust fallback): line=1 type=local address="" auth=scram-sha-256; line=2 type=host address="127.0.0.1" auth=scram-sha-256; line=3 type=host address="::1" auth=scram-sha-256; line=4 type=host address="all" auth=scram-sha-256
+    borrowed-replacement-owner-journal-window_linux_test.go:551: successor retired: backend PID 331 incarnation strictly gone, owner health retained, guard non-clean, acceptance zero
+    borrowed-replacement-owner-journal-window_linux_test.go:551: guard-row window fixture: fixture original canonical key retained, disposition "rebuild_required" (deliberately unresolved), operation provenance matches the fixture original
+    borrowed-replacement-owner-journal-window_linux_test.go:627: owner-journal worker-unknown negative: the REAL bounded worker stall prevented the journal stage (zero rows), no lane verdict was produced, retirement/reuse were refused and completion was proven through the ACTUAL completion channel after cancel-before-release
+2026/10/01 20:48:22 🐳 Creating container for image postgres@sha256:4ef4dbc939d61acea57712655ddb4b4ab27419c913f94cca0cd57cb3ea3c2280
+2026/10/01 20:48:22 ✅ Container created: c6733c06dac0
+2026/10/01 20:48:22 🐳 Starting container: c6733c06dac0
+2026/10/01 20:48:23 ✅ Container started: c6733c06dac0
+2026/10/01 20:48:23 ⏳ Waiting for container id c6733c06dac0 image: postgres@sha256:4ef4dbc939d61acea57712655ddb4b4ab27419c913f94cca0cd57cb3ea3c2280. Waiting for: log message "database system is ready to accept connections" (occurrence: 2)
+2026/10/01 20:48:25 🔔 Container is ready: c6733c06dac0
+    borrowed-replacement-owner-journal-window_linux_test.go:633: protected fixture actual HBA rules (all SCRAM, no trust fallback): line=1 type=local address="" auth=scram-sha-256; line=2 type=host address="127.0.0.1" auth=scram-sha-256; line=3 type=host address="::1" auth=scram-sha-256; line=4 type=host address="all" auth=scram-sha-256
+    borrowed-replacement-owner-journal-window_linux_test.go:633: successor retired: backend PID 328 incarnation strictly gone, owner health retained, guard non-clean, acceptance zero
+    borrowed-replacement-owner-journal-window_linux_test.go:633: guard-row window fixture: fixture original canonical key retained, disposition "rebuild_required" (deliberately unresolved), operation provenance matches the fixture original
+    borrowed-replacement-owner-journal-window_linux_test.go:697: owner-journal pump-unknown negative: the UNKNOWN pump join prevented the journal stage (zero rows), produced no lane verdict, blocked retirement/reuse and the pump completion was proven after the release
+2026/10/01 20:49:18 🐳 Creating container for image postgres@sha256:4ef4dbc939d61acea57712655ddb4b4ab27419c913f94cca0cd57cb3ea3c2280
+2026/10/01 20:49:18 ✅ Container created: 88963ae1b1b6
+2026/10/01 20:49:18 🐳 Starting container: 88963ae1b1b6
+2026/10/01 20:49:19 ✅ Container started: 88963ae1b1b6
+2026/10/01 20:49:19 ⏳ Waiting for container id 88963ae1b1b6 image: postgres@sha256:4ef4dbc939d61acea57712655ddb4b4ab27419c913f94cca0cd57cb3ea3c2280. Waiting for: log message "database system is ready to accept connections" (occurrence: 2)
+2026/10/01 20:49:19 🔔 Container is ready: 88963ae1b1b6
+    borrowed-replacement-owner-journal-window_linux_test.go:703: protected fixture actual HBA rules (all SCRAM, no trust fallback): line=1 type=local address="" auth=scram-sha-256; line=2 type=host address="127.0.0.1" auth=scram-sha-256; line=3 type=host address="::1" auth=scram-sha-256; line=4 type=host address="all" auth=scram-sha-256
+    borrowed-replacement-owner-journal-window_linux_test.go:703: successor retired: backend PID 328 incarnation strictly gone, owner health retained, guard non-clean, acceptance zero
+    borrowed-replacement-owner-journal-window_linux_test.go:703: guard-row window fixture: fixture original canonical key retained, disposition "rebuild_required" (deliberately unresolved), operation provenance matches the fixture original
+    borrowed-replacement-owner-journal-window_linux_test.go:704: native-ready replacement attempt refused by the dirty guard: disposition "rebuild_required" -> "rebuild_required", no Started, no executable frames, no callbacks, replacement catalog unchanged (OID 16757)
+    borrowed-replacement-owner-journal-window_linux_test.go:760: owner-journal post-COMMIT loss negative: the COMMIT was acknowledged and the ONE refused non-instance-bound journal row referencing the actual refused attempt legitimately remained, while the terminal composite refused; the row was never deleted, compensated or treated as acceptance
+2026/10/01 20:50:11 🐳 Stopping container: 88963ae1b1b6
+2026/10/01 20:50:12 ✅ Container stopped: 88963ae1b1b6
+2026/10/01 20:50:12 🐳 Terminating container: 88963ae1b1b6
+2026/10/01 20:50:12 🚫 Container terminated: 88963ae1b1b6
+2026/10/01 20:50:12 🐳 Stopping container: c6733c06dac0
+2026/10/01 20:50:12 ✅ Container stopped: c6733c06dac0
+2026/10/01 20:50:12 🐳 Terminating container: c6733c06dac0
+2026/10/01 20:50:12 🚫 Container terminated: c6733c06dac0
+2026/10/01 20:50:12 🐳 Stopping container: 6bdf52f1ca36
+2026/10/01 20:50:13 ✅ Container stopped: 6bdf52f1ca36
+2026/10/01 20:50:13 🐳 Terminating container: 6bdf52f1ca36
+2026/10/01 20:50:13 🚫 Container terminated: 6bdf52f1ca36
+2026/10/01 20:50:13 🐳 Stopping container: 4e94b00983e9
+2026/10/01 20:50:13 ✅ Container stopped: 4e94b00983e9
+2026/10/01 20:50:13 🐳 Terminating container: 4e94b00983e9
+2026/10/01 20:50:13 🚫 Container terminated: 4e94b00983e9
+2026/10/01 20:50:13 🐳 Stopping container: 13b69ccd9eb7
+2026/10/01 20:50:14 ✅ Container stopped: 13b69ccd9eb7
+2026/10/01 20:50:14 🐳 Terminating container: 13b69ccd9eb7
+2026/10/01 20:50:14 🚫 Container terminated: 13b69ccd9eb7
+2026/10/01 20:50:14 🐳 Stopping container: c2df6a7a28b8
+2026/10/01 20:50:14 ✅ Container stopped: c2df6a7a28b8
+2026/10/01 20:50:14 🐳 Terminating container: c2df6a7a28b8
+2026/10/01 20:50:14 🚫 Container terminated: c2df6a7a28b8
+2026/10/01 20:50:14 🐳 Stopping container: 69ba90dc1e7c
+2026/10/01 20:50:15 ✅ Container stopped: 69ba90dc1e7c
+2026/10/01 20:50:15 🐳 Terminating container: 69ba90dc1e7c
+2026/10/01 20:50:15 🚫 Container terminated: 69ba90dc1e7c
+2026/10/01 20:50:15 🐳 Stopping container: 7d783fd89e09
+2026/10/01 20:50:15 ✅ Container stopped: 7d783fd89e09
+2026/10/01 20:50:15 🐳 Terminating container: 7d783fd89e09
+2026/10/01 20:50:15 🚫 Container terminated: 7d783fd89e09
+2026/10/01 20:50:15 🐳 Stopping container: 2b8be936d23d
+2026/10/01 20:50:15 ✅ Container stopped: 2b8be936d23d
+2026/10/01 20:50:15 🐳 Terminating container: 2b8be936d23d
+2026/10/01 20:50:16 🚫 Container terminated: 2b8be936d23d
+2026/10/01 20:50:16 🐳 Stopping container: c1bddaec7452
+2026/10/01 20:50:16 ✅ Container stopped: c1bddaec7452
+2026/10/01 20:50:16 🐳 Terminating container: c1bddaec7452
+2026/10/01 20:50:16 🚫 Container terminated: c1bddaec7452
+--- PASS: TestBorrowedReplacementOwnerJournalWindow (379.86s)
+PASS
+exit=0

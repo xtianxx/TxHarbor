@@ -1,0 +1,164 @@
+--- borrowed-replacement-owner-commit-ambiguity-fix3-lane-before.go	2026-10-02 05:38:27.789582351 +0800
++++ /home/dream/product_env/TxHarbor/internal/recovery/borrowed-replacement-owner-commit-ambiguity_linux_test.go	2026-10-02 05:38:09.747976725 +0800
+@@ -447,6 +447,40 @@
+ 		ordinaryID := borrowedReplacementOwnerJournalActualRefusal(t, ctx, b, fresh, "ordinary", &probeCalls, &acceptanceCalls)
+ 		t.Logf("commit-ambiguity unarmed control: the UNARMED fixed fault passed all ordinary traffic (no witness claimed), the COMMIT was acknowledged with exactly ONE genuine refused row (audit_id=%d, attempt %s), the guard stayed unchanged, guarded retirement ran, replay/copy refused and the ordinary native-ready attempt was still refused by the dirty guard", facts.auditID, ordinaryID)
+ 
++		// P2-A1: a freshly reserved NATIVE-fault handle rejects EVERY
++		// deterministic control from reservation onward, before any acquisition.
++		preFault, preReset, preErr := recovery.ArmTargetLockCommitAmbiguityFault()
++		if preErr != nil {
++			t.Fatalf("commit-ambiguity pre-acquisition reservation refused: %v", preErr)
++		}
++		if preFault.WrappedCount() != 0 {
++			t.Fatal("commit-ambiguity pre-acquisition native handle already wrapped a socket")
++		}
++		if err := preFault.ControlWriteClientBytes(recovery.TargetLockCommitRequestFrame()); err == nil {
++			t.Fatal("commit-ambiguity pre-acquisition native handle accepted a control byte feed")
++		}
++		if _, err := preFault.ControlRead(make([]byte, 8)); err == nil {
++			t.Fatal("commit-ambiguity pre-acquisition native handle accepted a control read")
++		}
++		if err := preFault.ControlFeedServerBytes([]byte("x")); err == nil {
++			t.Fatal("commit-ambiguity pre-acquisition native handle accepted a control server feed")
++		}
++		if err := preFault.ControlFeedServerError(io.EOF); err == nil {
++			t.Fatal("commit-ambiguity pre-acquisition native handle accepted a control server error")
++		}
++		if err := preFault.ControlSetReadDeadline(time.Now()); err == nil {
++			t.Fatal("commit-ambiguity pre-acquisition native handle accepted a control deadline")
++		}
++		if err := preFault.ControlStallAfterBytes(1); err == nil {
++			t.Fatal("commit-ambiguity pre-acquisition native handle accepted a control stall")
++		}
++		if _, err := preFault.ControlEffectiveDeadline(); err == nil {
++			t.Fatal("commit-ambiguity pre-acquisition native handle accepted a control deadline query")
++		}
++		if preFault.Witness() != recovery.TargetLockCommitWitnessNotEstablished {
++			t.Fatal("commit-ambiguity pre-acquisition native handle claimed a witness")
++		}
++		preReset()
+ 		// Reservation/consume controls with ACTUAL PG behavior.
+ 		keyA := recovery.TargetKey{}
+ 		keyA[0] = 0xA1
+@@ -740,6 +774,120 @@
+ 		if !earlyDeadline.CleanupUncertain() {
+ 			t.Fatal("commit-ambiguity early-deadline cleanup was not uncertain")
+ 		}
++		// P2-B2: a concurrent deadline update DURING the assembly (after the
++		// partial bytes were consumed) is honored: the stall expires boundedly
++		// and the completion is never published.
++		interleaveCompletion := recovery.TargetLockCommitCompletionFrames()
++		concurrentDeadline := recovery.NewTargetLockCommitAmbiguityControl()
++		concurrentDeadline.ArmGate()
++		if err := concurrentDeadline.ControlWriteClientBytes(recovery.TargetLockCommitRequestFrame()); err != nil {
++			t.Fatalf("commit-ambiguity concurrent-deadline request refused: %v", err)
++		}
++		if err := concurrentDeadline.ControlFeedServerBytes(interleaveCompletion[:6]); err != nil {
++			t.Fatalf("commit-ambiguity concurrent-deadline partial feed refused: %v", err)
++		}
++		if err := concurrentDeadline.ControlStallAfterBytes(6); err != nil {
++			t.Fatalf("commit-ambiguity concurrent-deadline stall refused: %v", err)
++		}
++		concurrentDone := make(chan struct{})
++		var concurrentErr error
++		t.Cleanup(func() {
++			concurrentDeadline.Break()
++			select {
++			case <-concurrentDone:
++			case <-time.After(10 * time.Second):
++				t.Errorf("commit-ambiguity concurrent-deadline reader did not finish within the bounded unwind join")
++			}
++		})
++		go func() {
++			defer close(concurrentDone)
++			_, concurrentErr = concurrentDeadline.ControlRead(make([]byte, 64))
++		}()
++		concurrentStallCtx, cancelConcurrentStall := context.WithTimeout(ctx, 5*time.Second)
++		concurrentStall := concurrentDeadline.ControlStallReached(concurrentStallCtx)
++		cancelConcurrentStall()
++		if !concurrentStall {
++			t.Fatal("commit-ambiguity concurrent-deadline stall was never reached")
++		}
++		if err := concurrentDeadline.ControlSetReadDeadline(time.Now().Add(100 * time.Millisecond)); err != nil {
++			t.Fatalf("commit-ambiguity concurrent-deadline update refused: %v", err)
++		}
++		select {
++		case <-concurrentDone:
++		case <-time.After(5 * time.Second):
++			t.Fatal("commit-ambiguity concurrent deadline update did not interrupt the stalled assembly")
++		}
++		if !errors.Is(concurrentErr, os.ErrDeadlineExceeded) {
++			t.Fatalf("commit-ambiguity concurrent deadline read=%v, want the bounded deadline", concurrentErr)
++		}
++		if concurrentDeadline.Witness() == recovery.TargetLockCommitWitnessWithheld {
++			t.Fatal("commit-ambiguity concurrent deadline published WITHHELD")
++		}
++		if got := concurrentDeadline.AssembledBytes(); got != 6 {
++			t.Fatalf("commit-ambiguity concurrent deadline consumed %d bytes, want the 6 partial bytes", got)
++		}
++		concurrentDeadline.Break()
++		// P2-B2: clearing the caller deadline DURING the assembly must NOT
++		// remove the active assembly cap; the remaining bytes still validate.
++		clearDuring := recovery.NewTargetLockCommitAmbiguityControl()
++		clearDuring.ArmGate()
++		if err := clearDuring.ControlWriteClientBytes(recovery.TargetLockCommitRequestFrame()); err != nil {
++			t.Fatalf("commit-ambiguity clear-during-assembly request refused: %v", err)
++		}
++		if err := clearDuring.ControlFeedServerBytes(interleaveCompletion[:6]); err != nil {
++			t.Fatalf("commit-ambiguity clear-during-assembly partial feed refused: %v", err)
++		}
++		if err := clearDuring.ControlStallAfterBytes(6); err != nil {
++			t.Fatalf("commit-ambiguity clear-during-assembly stall refused: %v", err)
++		}
++		clearDone := make(chan struct{})
++		var clearErr error
++		t.Cleanup(func() {
++			clearDuring.Break()
++			select {
++			case <-clearDone:
++			case <-time.After(10 * time.Second):
++				t.Errorf("commit-ambiguity clear-during-assembly reader did not finish within the bounded unwind join")
++			}
++		})
++		go func() {
++			defer close(clearDone)
++			_, clearErr = clearDuring.ControlRead(make([]byte, 64))
++		}()
++		clearStallCtx, cancelClearStall := context.WithTimeout(ctx, 5*time.Second)
++		clearStall := clearDuring.ControlStallReached(clearStallCtx)
++		cancelClearStall()
++		if !clearStall {
++			t.Fatal("commit-ambiguity clear-during-assembly stall was never reached")
++		}
++		if err := clearDuring.ControlSetReadDeadline(time.Time{}); err != nil {
++			t.Fatalf("commit-ambiguity clear-during-assembly deadline clear refused: %v", err)
++		}
++		effectiveDeadline, effectiveErr := clearDuring.ControlEffectiveDeadline()
++		if effectiveErr != nil {
++			t.Fatalf("commit-ambiguity clear-during-assembly effective deadline refused: %v", effectiveErr)
++		}
++		if effectiveDeadline.IsZero() {
++			t.Fatal("commit-ambiguity clearing the caller deadline removed the active assembly cap")
++		}
++		if err := clearDuring.ControlFeedServerBytes(interleaveCompletion[6:]); err != nil {
++			t.Fatalf("commit-ambiguity clear-during-assembly remaining feed refused: %v", err)
++		}
++		clearWithheldCtx, cancelClearWithheld := context.WithTimeout(ctx, 5*time.Second)
++		clearWithheld := clearDuring.AwaitWithheld(clearWithheldCtx)
++		cancelClearWithheld()
++		if !clearWithheld {
++			t.Fatal("commit-ambiguity clear-during-assembly did not validate the completion")
++		}
++		clearDuring.Break()
++		select {
++		case <-clearDone:
++		case <-time.After(5 * time.Second):
++			t.Fatal("commit-ambiguity clear-during-assembly reader did not finish after the break")
++		}
++		if clearErr == nil {
++			t.Fatal("commit-ambiguity clear-during-assembly read was expected to end with the transport break")
++		}
+ 		// Missing barriers: a break before any establishment.
+ 		missingBarriers := recovery.NewTargetLockCommitAmbiguityControl()
+ 		missingBarriers.ArmGate()

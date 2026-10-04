@@ -1,0 +1,17 @@
+# owner commit-ambiguity race binary provenance build 2026-10-01T20:44:01Z
+# command: go test -c -tags drill -race -o /tmp/opencode/015-e504462/borrowed-replacement-owner-commit-ambiguity-race.test ./internal/recovery/
+# go version: go version go1.26.5 linux/amd64
+# guard-row-window: ee880415e79c7bb0190a6468e88ef3358b9f3afe11abf70982d7d546aace0f3d  internal/recovery/borrowed-replacement-owner-journal-window_linux_test.go
+# owner-tail: 819585c4444152a01bd60b0fd19a7a7e8223674ce4a7e7c507578da418f5e969  internal/recovery/borrowed-replacement-owner-tail-feasibility_linux_test.go
+# autonomous-observation: d9fe63eea188731b7068c987c61558c1e690112e6ca3c1e36d4f4e8adb95192e  internal/recovery/borrowed-replacement-autonomous-observation_linux_test.go
+# observation-window: f1c7601ab09083fba4320f393d458682a5cddcdc895b00c9d1e66a2eaa68b960  internal/recovery/borrowed-replacement-observation-window_linux_test.go
+# catalog-window: a11b33fc0670fef015476d2a1f45f5423cc18c7fae36ea1b75bce215896cd402  internal/recovery/borrowed-replacement-catalog-window_linux_test.go
+# prelaunch: 1ec0bc6b8ffc30b0497bad58666f58215049b99f6f0c8c76fb71093c63c47020  internal/recovery/borrowed-replacement-prelaunch-feasibility_linux_test.go
+# session: 2613dcec7f403c45834895af4e0cf0d7fd5c7de4140bafd71051afc4ba6df64f  internal/recovery/borrowed-replacement-session-registration_linux_test.go
+# binding: 3bb42a0a8eef549af1f9777985535e3683cefa698005585e1033c996b5a9f20c  internal/recovery/borrowed-replacement-binding-feasibility_linux_test.go
+# driver: e8456e2b7503cbc8b748c16e570daaeb41167181966fbca2a6d7b81559695a8f  internal/recovery/borrowed-receipt-auth-drain-driver_linux_test.go
+# successor: 64a14de4a97d9929b74e01b80e30e0b2504cd92a7d2d1255c4a9bf5d5534519a  internal/recovery/borrowed-successor-probe-registration_linux_test.go
+# bridge: b0a70a67412c5c2e457d496276500c70b9e6b763ebf36056bb217c90fd9c65ae  internal/recovery/targetwriter_controlanchor_drillbridge_linux_test.go
+# ddl-test: 8deb2417e7e20e3863d099b826856e4e37ff52d5c4141764d21231a48a354a4d  internal/recovery/borrowed-owner-ddl-feasibility_linux_test.go
+exit=0
+8b3ce987eb46089082f111427fd34a2f51a07f2491d7cb1c42cc954c6f058faa  /tmp/opencode/015-e504462/borrowed-replacement-owner-commit-ambiguity-race.test

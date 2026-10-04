@@ -1,0 +1,48 @@
+{
+  "Gate1": "HOLD",
+  "archive_hashes": {
+    "borrowed-replacement-owner-rollback-unwind-bracket-before.sh": "7b29dfac832d285f6d2828419ab823517138144db891ac7eccf7d57b9ad3ce8c",
+    "borrowed-replacement-owner-rollback-unwind-bracket.sh": "0a69abcb0b01253a8d4bc5bd79e6f901d0bbc0553f716759108a71aaeb7955c9",
+    "borrowed-replacement-owner-rollback-unwind-companion-before.go": "ff2bb3527dda9a81999f15e41518a44db808e386766249ba2e4892288a3f9ebf",
+    "borrowed-replacement-owner-rollback-unwind-companion.diff": "22e3549cb14e274fb0cc951dd01fca0506f780d71d2a1452810c64bc40549766",
+    "borrowed-replacement-owner-rollback-unwind-gold-console.txt": "e449ca5764e87121bbfa8110c25978698b897108c402da38bf3d9cf4db3d545e",
+    "borrowed-replacement-owner-rollback-unwind-gold-runner.sh": "51f11d9feaa38ae4ad9f0da015505311b8d85d6d47826297f587b5408c45f6f1",
+    "borrowed-replacement-owner-rollback-unwind-gold.log": "e449ca5764e87121bbfa8110c25978698b897108c402da38bf3d9cf4db3d545e",
+    "borrowed-replacement-owner-rollback-unwind-hashes-after-runs.txt": "ccec8cc2ddc2521e34a37715133691cc42a97890a28419a78671630bada9efc9",
+    "borrowed-replacement-owner-rollback-unwind-hashes-after.txt": "e759545790e44e7033ec15e411cbe1d7504497c8ecace70e2295d7baf6fe1809",
+    "borrowed-replacement-owner-rollback-unwind-hashes-before.txt": "0436f7d33414af10951649ddd80b87097570b1bc469caa4cabb71e53eafb3666",
+    "borrowed-replacement-owner-rollback-unwind-lane.diff": "3836464fa2d5f6aef9aed2a0b0aa0e5d528df6f32593bfb5905dd45b5a92f089",
+    "borrowed-replacement-owner-rollback-unwind-race-build.log": "62cf97a71a9c0dbf6af610a6c52c596fb14cbada9ea1719b833ed289afab7016",
+    "borrowed-replacement-owner-rollback-unwind-race-build.sh": "f6c44fc806322f799991dd69d2eb5354547700a443d065b4d67b267e6456b868",
+    "borrowed-replacement-owner-rollback-unwind-race-console.txt": "fc78a135eef987dc272b9e2b81b0d8581b8dfb5b75e72a234f3252d3fb2abf76",
+    "borrowed-replacement-owner-rollback-unwind-race-runner.sh": "4a1f4c223af87824ad9b74a0232d5305065cb8c67201153715e42097697420d7",
+    "borrowed-replacement-owner-rollback-unwind-race.log": "fc78a135eef987dc272b9e2b81b0d8581b8dfb5b75e72a234f3252d3fb2abf76",
+    "borrowed-replacement-owner-rollback-unwind-race.test": "37d84dda4a2a30cb0fb5d920e953557136302278fb5c4c1272a3f24738309e81",
+    "borrowed-replacement-owner-rollback-unwind-summary-hash.txt": "86da0692e9abb4e64385fbd075eb13d33036af2afba513e38c24c1cb4da7a365",
+    "borrowed-replacement-owner-rollback-unwind-summary.json": "be1c8a0a2333a3cec98ba7c7914d28d04b54292bb03ca12c380436f47bca3e7b",
+    "borrowed-replacement-owner-rollback-unwind-targetlock-before.go": "529c71c4b3e494988526e539e48472d4f80140149ca9cc51913e454a0731a30a",
+    "borrowed-replacement-owner-rollback-unwind-targetlock.diff": "2c458a4b338e7fa8334034d5daa5c406c67dfe25ad086b2e573ab16e490c38b5",
+    "borrowed-replacement-owner-rollback-unwind-targetlock-before.go.archived": "529c71c4b3e494988526e539e48472d4f80140149ca9cc51913e454a0731a30a"
+  },
+  "bracket": "repair+extension changed, new lane added, after==after_runs, source_stable, closed_predecessors_identical, commit_ambiguity preserved",
+  "companion_after": "a42a4db9cc386c3bb129c84c300dacf5ced5e54b343d6e99947f08adced5b5cf",
+  "companion_before": "ff2bb3527dda9a81999f15e41518a44db808e386766249ba2e4892288a3f9ebf",
+  "counts": {
+    "borrowed-replacement-owner-rollback-unwind-gold.log": {
+      "top_PASS": 1
+    },
+    "borrowed-replacement-owner-rollback-unwind-race.log": {
+      "top_PASS": 1
+    }
+  },
+  "credential_scan": "known shapes only",
+  "first_fails": "none (first-run pass)",
+  "historical": "95 prior groups preserved unrebound (tolerant schema check)",
+  "lane_new": "fd238aed339765aff0c013974557a813db0045a644ed4d892529a6c18a70a557",
+  "oracle_gate": "pending ora-19 rollback-unwind review (repair+extension+lane)",
+  "repair_after": "45f09896c65aa986dca827cfee10ba6dafc2f97f72d21d8502f5d346c9de5177",
+  "repair_before": "529c71c4b3e494988526e539e48472d4f80140149ca9cc51913e454a0731a30a",
+  "scope": "bounded owner rollback-response-loss unwind only; no manifest/admission/acceptance",
+  "six_tasks_T000P": "OPEN",
+  "traceability_note": "2026-10-04: targetlock-before.go snapshots renamed to *.go.archived to restore standard full-repo `go build ./...` (bytes unchanged, hash recorded). Original .go Key kept in git history; see RULING_record.json"
+}

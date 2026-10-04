@@ -1,0 +1,68 @@
+pg_restore (PostgreSQL) 18.6 (Debian 18.6-1.pgdg13+2)
+go version go1.26.5 linux/amd64
+2026/10/01 22:31:36 github.com/testcontainers/testcontainers-go - Connected to docker: 
+  Server Version: 29.6.1
+  API Version: 1.55
+  Operating System: Ubuntu 24.04.4 LTS
+  Total Memory: 15915 MB
+  Testcontainers for Go Version: v0.44.0
+  Resolved Docker Host: unix:///var/run/docker.sock
+  Resolved Docker Socket Path: /var/run/docker.sock
+  Test SessionID: 74027d1bff5b31b469620e5c112a35468a750f5e4da45f81da416f51d266de64
+  Test ProcessID: 4c1370f1-ad48-42f2-9d59-afb0ac640eae
+=== RUN   TestBorrowedReplacementOwnerRollbackUnwind
+2026/10/01 22:31:36 🐳 Creating container for image postgres@sha256:4ef4dbc939d61acea57712655ddb4b4ab27419c913f94cca0cd57cb3ea3c2280
+2026/10/01 22:31:36 🐳 Creating container for image testcontainers/ryuk:0.14.0
+2026/10/01 22:31:36 ✅ Container created: b6d453297b88
+2026/10/01 22:31:36 🐳 Starting container: b6d453297b88
+2026/10/01 22:31:37 ✅ Container started: b6d453297b88
+2026/10/01 22:31:37 ⏳ Waiting for container id b6d453297b88 image: testcontainers/ryuk:0.14.0. Waiting for: all of: [log message "Started", port 8080/tcp to be listening]
+2026/10/01 22:31:37 Shell not found in container
+2026/10/01 22:31:37 🔔 Container is ready: b6d453297b88
+2026/10/01 22:31:37 ✅ Container created: ff5f99136d1b
+2026/10/01 22:31:37 🐳 Starting container: ff5f99136d1b
+2026/10/01 22:31:38 ✅ Container started: ff5f99136d1b
+2026/10/01 22:31:38 ⏳ Waiting for container id ff5f99136d1b image: postgres@sha256:4ef4dbc939d61acea57712655ddb4b4ab27419c913f94cca0cd57cb3ea3c2280. Waiting for: log message "database system is ready to accept connections" (occurrence: 2)
+2026/10/01 22:31:39 🔔 Container is ready: ff5f99136d1b
+    borrowed-replacement-owner-rollback-unwind_linux_test.go:70: protected fixture actual HBA rules (all SCRAM, no trust fallback): line=1 type=local address="" auth=scram-sha-256; line=2 type=host address="127.0.0.1" auth=scram-sha-256; line=3 type=host address="::1" auth=scram-sha-256; line=4 type=host address="all" auth=scram-sha-256
+    borrowed-replacement-owner-rollback-unwind_linux_test.go:70: successor retired: backend PID 329 incarnation strictly gone, owner health retained, guard non-clean, acceptance zero
+    borrowed-replacement-owner-rollback-unwind_linux_test.go:70: guard-row window fixture: fixture original canonical key retained, disposition "rebuild_required" (deliberately unresolved), operation provenance matches the fixture original
+    borrowed-replacement-owner-rollback-unwind_linux_test.go:75: native-ready replacement attempt refused by the dirty guard: disposition "rebuild_required" -> "rebuild_required", no Started, no executable frames, no callbacks, replacement catalog unchanged (OID 16757)
+    borrowed-replacement-owner-rollback-unwind_linux_test.go:191: rollback-unwind positive: the ACTUAL rollback was dispatched after the caller cancellation, its validated ROLLBACK completion was withheld, the independent bounded rollback budget drove the return WITHOUT watchdog rescue (watchdog never fired), the uncertain rollback permanently retired the owner handle with a bounded disposal, no COMMIT was dispatched, the composite/eligibility were refused, the journal showed zero rows with the released guard row independently lockable and unchanged, and worker/pump/Use completion was proven before cleanup
+2026/10/01 22:32:04 🐳 Creating container for image postgres@sha256:4ef4dbc939d61acea57712655ddb4b4ab27419c913f94cca0cd57cb3ea3c2280
+2026/10/01 22:32:04 ✅ Container created: fc216f43b1cf
+2026/10/01 22:32:04 🐳 Starting container: fc216f43b1cf
+2026/10/01 22:32:05 ✅ Container started: fc216f43b1cf
+2026/10/01 22:32:05 ⏳ Waiting for container id fc216f43b1cf image: postgres@sha256:4ef4dbc939d61acea57712655ddb4b4ab27419c913f94cca0cd57cb3ea3c2280. Waiting for: log message "database system is ready to accept connections" (occurrence: 2)
+2026/10/01 22:32:04 🔔 Container is ready: fc216f43b1cf
+    borrowed-replacement-owner-rollback-unwind_linux_test.go:202: protected fixture actual HBA rules (all SCRAM, no trust fallback): line=1 type=local address="" auth=scram-sha-256; line=2 type=host address="127.0.0.1" auth=scram-sha-256; line=3 type=host address="::1" auth=scram-sha-256; line=4 type=host address="all" auth=scram-sha-256
+    borrowed-replacement-owner-rollback-unwind_linux_test.go:202: successor retired: backend PID 328 incarnation strictly gone, owner health retained, guard non-clean, acceptance zero
+    borrowed-replacement-owner-rollback-unwind_linux_test.go:202: guard-row window fixture: fixture original canonical key retained, disposition "rebuild_required" (deliberately unresolved), operation provenance matches the fixture original
+    borrowed-replacement-owner-rollback-unwind_linux_test.go:207: native-ready replacement attempt refused by the dirty guard: disposition "rebuild_required" -> "rebuild_required", no Started, no executable frames, no callbacks, replacement catalog unchanged (OID 16757)
+    borrowed-replacement-owner-rollback-unwind_linux_test.go:270: rollback-unwind unarmed control: the cancellation produced an acknowledged rollback with zero matching rows, the original owner session stayed healthy, the guard stayed unchanged and unresolved and the composite/eligibility were refused
+    borrowed-replacement-owner-rollback-unwind_linux_test.go:401: rollback-unwind completion negatives: missing, partial and malformed ROLLBACK completions plus a queued read error never publish a completion witness and remain UNKNOWN, with the partial bytes genuinely consumed
+    borrowed-replacement-owner-rollback-unwind_linux_test.go:488: rollback-unwind command-kind controls: conflicting re-arms were rejected with the kind sealed at the first arm, a wrong COMMIT frame while expecting ROLLBACK was observed independently but never dispatched, and concurrent arms sealed exactly one kind (rollback)
+2026/10/01 22:32:18 🐳 Creating container for image postgres@sha256:4ef4dbc939d61acea57712655ddb4b4ab27419c913f94cca0cd57cb3ea3c2280
+2026/10/01 22:32:18 ✅ Container created: 51d2bf880bff
+2026/10/01 22:32:18 🐳 Starting container: 51d2bf880bff
+2026/10/01 22:32:19 ✅ Container started: 51d2bf880bff
+2026/10/01 22:32:19 ⏳ Waiting for container id 51d2bf880bff image: postgres@sha256:4ef4dbc939d61acea57712655ddb4b4ab27419c913f94cca0cd57cb3ea3c2280. Waiting for: log message "database system is ready to accept connections" (occurrence: 2)
+2026/10/01 22:32:21 🔔 Container is ready: 51d2bf880bff
+    borrowed-replacement-owner-rollback-unwind_linux_test.go:496: protected fixture actual HBA rules (all SCRAM, no trust fallback): line=1 type=local address="" auth=scram-sha-256; line=2 type=host address="127.0.0.1" auth=scram-sha-256; line=3 type=host address="::1" auth=scram-sha-256; line=4 type=host address="all" auth=scram-sha-256
+    borrowed-replacement-owner-rollback-unwind_linux_test.go:537: rollback-unwind early-finalization control: a callback that committed the supplied transaction and still returned an error was conservatively treated as rollback uncertainty (ErrTxClosed, retirement without deadline/budget credit), the owner handle was permanently retired inside 1ms and the guard stayed unchanged and unresolved
+2026/10/01 22:32:26 🐳 Stopping container: 51d2bf880bff
+2026/10/01 22:32:26 ✅ Container stopped: 51d2bf880bff
+2026/10/01 22:32:26 🐳 Terminating container: 51d2bf880bff
+2026/10/01 22:32:26 🚫 Container terminated: 51d2bf880bff
+2026/10/01 22:32:26 🐳 Stopping container: fc216f43b1cf
+2026/10/01 22:32:27 ✅ Container stopped: fc216f43b1cf
+2026/10/01 22:32:27 🐳 Terminating container: fc216f43b1cf
+2026/10/01 22:32:27 🚫 Container terminated: fc216f43b1cf
+2026/10/01 22:32:27 🐳 Stopping container: ff5f99136d1b
+2026/10/01 22:32:27 ✅ Container stopped: ff5f99136d1b
+2026/10/01 22:32:27 🐳 Terminating container: ff5f99136d1b
+2026/10/01 22:32:27 🚫 Container terminated: ff5f99136d1b
+--- PASS: TestBorrowedReplacementOwnerRollbackUnwind (53.72s)
+PASS
+ok  	github.com/xtianxx/txharbor/internal/recovery	53.762s
+exit=0

@@ -1,0 +1,163 @@
+{
+  "task": "Bounded repair of ora-19 commit-ambiguity P1 + 5 P2s: targetlock.go seam opacity/reservation, gate completion validation/deadline/unwind safety, fresh evidence brackets",
+  "date": "2026-10-01",
+  "head": "e504462",
+  "worktree_tracked_modified": 22,
+  "scope": {
+    "modified_files": [
+      "internal/recovery/targetlock.go",
+      "internal/recovery/borrowed-replacement-owner-commit-ambiguity_linux_test.go"
+    ],
+    "new_files": [
+      "internal/recovery/targetlock_commitambiguity_hook_linux_test.go"
+    ],
+    "untouched": "journal ee880415, guard-row 264cbc81, owner-tail 819585c4, observation f1c7601a, window a11b33fc, autonomous d9fe63ee, prelaunch/session/binding/driver/successor/DDL/bridges"
+  },
+  "source_hashes": {
+    "targetlock_before": "b88b177b1481c45c2364d510836bb90498ee3b76d72fd0ccdb09bce0d6ceda3a",
+    "targetlock_after": "529c71c4b3e494988526e539e48472d4f80140149ca9cc51913e454a0731a30a",
+    "lane_before": "a9cfb8d6fbbb668679c17ab87322a4266c88de4933c9769aa34af93a244bdb0a",
+    "lane_after": "773b81351edb7260e10ed3b57f46d84825774d8be556c5f03172e26f5b7f2ecf",
+    "companion_new": "7b6532f88b4ad720e4d60928b4ffff581e8c6d9ec87e8f786f4c8b1db0392c23",
+    "companion_lines": 570
+  },
+  "fixes": {
+    "P1-A1": {
+      "change": "removed the exported ArmTargetLockSocketWrap(func(net.Conn) net.Conn) and its socket-callback surface; production retains ONLY the unexported nil-default seam (targetLockSocketWrap + reserve/consume). The fixed companion lives in the NEW drill-tagged _test.go file exposing opaque fault controls (ArmTargetLockCommitAmbiguityFault / NewTargetLockCommitAmbiguityControl + ArmGate/Break/Witness/WrappedCount/UnrecognizedFramingCount/ReadFailed/CleanupUncertain/Await*/Control*), never a caller-supplied socket callback; production default path unchanged, identity checks :89-123 untouched",
+      "hunks": "seam block replaced and connect helper consumes the reservation"
+    },
+    "P2-A2": {
+      "change": "reserveTargetLockSocketWrap atomically reserves ONE installation and rejects overlapping arms; consumeTargetLockSocketWrap consumes it for exactly ONE connection establishment; the reset is generation-conditional so a stale reset can never clear a newer installation",
+      "controls": "lane reservation block with actual PG: repeated acquisitions unwrapped and committed ordinarily, overlap rejection, stale resets, and a gated VALIDATED-completion withhold+break on the newer installation",
+      "targetlock_hunks": [
+        "@@ -11,7 +11,6 @@",
+        "@@ -433,40 +432,69 @@",
+        "@@ -480,7 +508,7 @@"
+      ]
+    },
+    "P2-B1": {
+      "change": "the gate no longer sets withheld from a bare read; it bounded-assembles and validates the REAL PostgreSQL COMMIT completion (CommandComplete('COMMIT') + ReadyForQuery) before publishing WITHHELD; EOF/error/partial/unrecognized framing mark the read failed and stay NOTESTABLISHED/UNCERTAIN",
+      "controls": "bare 'COMMIT\\0' text, failed read, partial frame + deadline error, unrecognized framing"
+    },
+    "P2-B2": {
+      "change": "the withheld wait honors tracked SetReadDeadline/SetDeadline changes, cancellation-driven deadlines and Close; a timeout fails closed without upgrading the witness",
+      "controls": "deadline change ends the withheld wait with os.ErrDeadlineExceeded while the witness stays WITHHELD"
+    },
+    "P2-B3": {
+      "change": "the fault worker installs cancel -> break -> bounded done-channel join IMMEDIATELY at construction; every worker wait is cancellation-aware; deterministic control readers register break + bounded join before assertions",
+      "controls": "unwind-safe cleanups on the worker and the control reader"
+    },
+    "P2-B4": {
+      "change": "fresh fix brackets include the reused journal source, the lane, the seam (before/after) and the new companion measured directly; the fix race build log measures lane + companion + targetlock seam + journal + all predecessors at build time",
+      "note": "the pre-fix bracket omitted the journal line (the only cross-check difference); historical logs untouched"
+    }
+  },
+  "gold": {
+    "log": "borrowed-replacement-owner-commit-ambiguity-fix-gold.log",
+    "sha256": "affc3ce53892290c9ec9772e82dc5b34dd99e4709380d6940e8893f1934f52f9",
+    "exit": 0,
+    "top_pass": 1,
+    "top_fail": 0,
+    "top_skip": 0,
+    "data_race": 0,
+    "warning": 0,
+    "duration": "66.38s",
+    "first_run": true,
+    "first_fail": null
+  },
+  "race": {
+    "log": "borrowed-replacement-owner-commit-ambiguity-fix-race.log",
+    "sha256": "5eab88b84f0662d001fb7b82db133ce59f57484ef7d7e4321d76cda1223163d6",
+    "exit": 0,
+    "top_pass": 1,
+    "top_fail": 0,
+    "top_skip": 0,
+    "data_race": 0,
+    "warning": 0,
+    "panic": 0,
+    "duration": "93.82s",
+    "binary": "borrowed-replacement-owner-commit-ambiguity-fix-race.test",
+    "binary_sha256": "1ea0c99bd0e9da513a2b7a94bfdc78ed07f1a7685af0f1529d217d74352acdce",
+    "build_log_sha256": "cf0a911e347b0c334641a8e2a2b79215161ce058ff0e510c92d33829e7873663",
+    "build_log_records": [
+      "commit-ambiguity 773b8135",
+      "commit-ambiguity-companion 7b6532f8",
+      "targetlock-seam 529c71c4",
+      "owner-journal-window ee880415",
+      "guard-row-window 264cbc81",
+      "plus all other predecessors directly"
+    ]
+  },
+  "container": {
+    "image": "postgres@sha256:4ef4dbc939d61acea57712655ddb4b4ab27419c913f94cca0cd57cb3ea3c2280",
+    "root": true,
+    "private_pid": true,
+    "init": true,
+    "hostnet": true,
+    "CI": "true",
+    "TXHARBOR_REQUIRE_DOCKER": "1",
+    "PGDATA_PG_MAJOR_PG_VERSION": "unset",
+    "test_regex": "^TestBorrowedReplacementOwnerCommitAmbiguity$"
+  },
+  "diffs": {
+    "targetlock": {
+      "file": "borrowed-replacement-owner-commit-ambiguity-fix-targetlock.diff",
+      "sha256": "c81b01e98b8c586c2f9b2c32e2927774756868fe2e234de803056d3a702996db",
+      "hunks": [
+        "@@ -11,7 +11,6 @@",
+        "@@ -433,40 +432,69 @@",
+        "@@ -480,7 +508,7 @@"
+      ]
+    },
+    "lane": {
+      "file": "borrowed-replacement-owner-commit-ambiguity-fix-lane.diff",
+      "sha256": "985d1ae681b5b382732208002e9f589110351c3edd69b7db97fe8f67f98e2b5b",
+      "hunk_count": 15
+    },
+    "companion_creation": {
+      "file": "borrowed-replacement-owner-commit-ambiguity-fix-companion.diff",
+      "sha256": "833fa5d24a44de1ce1e7b3ea5198ca9985b0323d711bd005d5b3a4642073391e",
+      "hunks": [
+        "@@ -0,0 +1,570 @@"
+      ]
+    }
+  },
+  "observed_evidence": {
+    "positive": "validated PostgreSQL COMMIT completion withheld before pgx; independent committed refused row + released guard row observed while withheld; transport break -> ACTUAL Commit error; composite refused; durable row; one-shot eligibility; guard unresolved; acceptance 0",
+    "unarmed_control": "no witness claimed; acknowledged COMMIT; exactly one genuine refused row; guarded retirement; replay/copy + ordinary dirty-guard refusal preserved",
+    "reservation_controls": "consume-once (later acquisitions unwrapped and committed ordinarily), overlapping arm rejected, stale resets no-op, gated newer installation withheld its validated completion and errored ambiguously after the break",
+    "pre_commit_cancel": "precise arbitration refusal, no COMMIT dispatch, clean rollback, zero rows, witness-timeout NOTESTABLISHED, owner session survived",
+    "gate_negatives": "unrecognized framing, bare COMMIT text, failed reads, partial frames, missing barriers, witness timeouts -> NOTESTABLISHED/UNCERTAIN; deadline change ended the withheld wait boundedly without upgrading the witness"
+  },
+  "brackets": {
+    "before": "borrowed-replacement-owner-commit-ambiguity-fix-hashes-before.txt",
+    "before_sha256": "f105a1f422e9f69e25a3cf223a4f3ed2bce75378353d248b805058bb9487514e",
+    "after": "borrowed-replacement-owner-commit-ambiguity-fix-hashes-after.txt",
+    "after_sha256": "63d51f6f106af0464d1494439625be4c4e5a5b7677a52756ca85af8ae6911284",
+    "after_runs": "borrowed-replacement-owner-commit-ambiguity-fix-hashes-after-runs.txt",
+    "after_runs_sha256": "d9e4ddc9fa0282dc9183eb2a5d7711ca316dc2cecc5a6c56acc3bcc2cfa5b9d0",
+    "source_stable": true,
+    "closed_predecessors_identical": true,
+    "journal_line_added_vs_pre_fix_bracket": true
+  },
+  "runners": {
+    "gold_runner_sha256": "f4028f5cacb2ab983c019e2ec2cb9c48d19d12290749c1f4c8b99937b02bfb74",
+    "race_runner_sha256": "c6961d75ea495b939a36c5dfad5d53a8bcef44ac726e382e0949a7b5f85da45e",
+    "race_build_sha256": "fac8d4bf8b3c2d919d8a834c7fce1060d9133d7ca443aca0512b65ddf20a98a2",
+    "bracket_sha256": "4ec8f2e050c43c17d0c72cf0547a48baebaf8b5f90d728e979dd9f4521a9115f",
+    "bracket_before_sha256": "0d85774481feda2208554491bdfe7e69211aabd8dc1fd6e01b0ebdb5bca44389"
+  },
+  "history_unrebound": {
+    "original_commit_ambiguity_summary_sha256": "16be4eff8858a33e6d3b7ee23a1d4e33dd05d7d834e8d78dd0620a6b1b936428",
+    "journal_fix_summary_sha256": "a17a3158ca1a4754764c2dc6cddd23224acb8bc6f989ae15397495a1981b3a89",
+    "original_journal_summary_sha256": "1c51fb393fbaaa8254f0a97b1406e3cbbd43acf6a355b9ddf3c67adaaafb5465",
+    "guard_row_summary_sha256": "c8bd708790da09fb39daf0e7af357647646c7088c622e235547769a593e9044f"
+  },
+  "notes": [
+    "No commit; HEAD e504462; 22 tracked modified files; one new untracked companion.",
+    "Production builds without the drill tag use the unchanged pgx.Connect path; the companion is drill-only (_test.go, linux && drill).",
+    "The seam exposes no raw connection or caller-supplied callback; the fixed companion never influences the endpoint/DSN/key/owner and retains actual addresses.",
+    "Gold and race were first-run passes; no first-fail artifact.",
+    "Never assert rollback where COMMIT may have occurred; ack-loss stays UNKNOWN; secrets/DSNs/verifiers unlogged."
+  ]
+}
