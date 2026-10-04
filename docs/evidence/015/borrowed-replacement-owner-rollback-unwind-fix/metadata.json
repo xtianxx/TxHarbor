@@ -28,7 +28,9 @@
     "borrowed-replacement-owner-rollback-unwind-fix-summary.json": "77dd6e76462f0249e9d85c820153f57794e77d87691af8ca5cf002a763c8a64e",
     "borrowed-replacement-owner-rollback-unwind-fix-targetlock-before.go": "45f09896c65aa986dca827cfee10ba6dafc2f97f72d21d8502f5d346c9de5177",
     "borrowed-replacement-owner-rollback-unwind-fix-targetlock.diff": "33d03c25416386b0f359301e0843484c213888ec5fb7cb24f67e7046ce2497a3",
-    "borrowed-replacement-owner-rollback-unwind-fix-targetlock-before.go.archived": "45f09896c65aa986dca827cfee10ba6dafc2f97f72d21d8502f5d346c9de5177"
+    "borrowed-replacement-owner-rollback-unwind-fix-targetlock-before.go.archived": "45f09896c65aa986dca827cfee10ba6dafc2f97f72d21d8502f5d346c9de5177",
+    "borrowed-replacement-owner-rollback-unwind-fix-lane-before.go.archived": "fd238aed339765aff0c013974557a813db0045a644ed4d892529a6c18a70a557",
+    "borrowed-replacement-owner-rollback-unwind-fix-companion-before.go.archived": "a42a4db9cc386c3bb129c84c300dacf5ced5e54b343d6e99947f08adced5b5cf"
   },
   "bracket": "repair+extension+lane changed, commit-ambiguity preserved, after==after_runs, source_stable, closed_predecessors_identical",
   "companion_after": "b1eec55085ee1f0cf75e191a18044170caa1eeb30655e37d2f97bf2069b33093",
@@ -54,5 +56,5 @@
   "six_tasks_T000P": "OPEN",
   "targetlock_after": "3bea2e24344a0cdce30ef7565b148191b7f81b28d362a3f9a088ce5e27e27661",
   "targetlock_before": "45f09896c65aa986dca827cfee10ba6dafc2f97f72d21d8502f5d346c9de5177",
-  "traceability_note": "2026-10-04: targetlock-before.go snapshots renamed to *.go.archived to restore standard full-repo `go build ./...` (bytes unchanged, hash recorded). Original .go Key kept in git history; see RULING_record.json"
+  "traceability_note": "2026-10-04 docsnap archive: remaining evidence-tree .go snapshots renamed to *.go.archived (bytes identical, hash recorded) to restore standard full-repo builds; see docs/evidence/015/r2-grant-inventory/README.md"
 }

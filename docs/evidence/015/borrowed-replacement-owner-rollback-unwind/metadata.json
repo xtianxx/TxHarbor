@@ -22,7 +22,8 @@
     "borrowed-replacement-owner-rollback-unwind-summary.json": "be1c8a0a2333a3cec98ba7c7914d28d04b54292bb03ca12c380436f47bca3e7b",
     "borrowed-replacement-owner-rollback-unwind-targetlock-before.go": "529c71c4b3e494988526e539e48472d4f80140149ca9cc51913e454a0731a30a",
     "borrowed-replacement-owner-rollback-unwind-targetlock.diff": "2c458a4b338e7fa8334034d5daa5c406c67dfe25ad086b2e573ab16e490c38b5",
-    "borrowed-replacement-owner-rollback-unwind-targetlock-before.go.archived": "529c71c4b3e494988526e539e48472d4f80140149ca9cc51913e454a0731a30a"
+    "borrowed-replacement-owner-rollback-unwind-targetlock-before.go.archived": "529c71c4b3e494988526e539e48472d4f80140149ca9cc51913e454a0731a30a",
+    "borrowed-replacement-owner-rollback-unwind-companion-before.go.archived": "ff2bb3527dda9a81999f15e41518a44db808e386766249ba2e4892288a3f9ebf"
   },
   "bracket": "repair+extension changed, new lane added, after==after_runs, source_stable, closed_predecessors_identical, commit_ambiguity preserved",
   "companion_after": "a42a4db9cc386c3bb129c84c300dacf5ced5e54b343d6e99947f08adced5b5cf",
@@ -44,5 +45,5 @@
   "repair_before": "529c71c4b3e494988526e539e48472d4f80140149ca9cc51913e454a0731a30a",
   "scope": "bounded owner rollback-response-loss unwind only; no manifest/admission/acceptance",
   "six_tasks_T000P": "OPEN",
-  "traceability_note": "2026-10-04: targetlock-before.go snapshots renamed to *.go.archived to restore standard full-repo `go build ./...` (bytes unchanged, hash recorded). Original .go Key kept in git history; see RULING_record.json"
+  "traceability_note": "2026-10-04 docsnap archive: remaining evidence-tree .go snapshots renamed to *.go.archived (bytes identical, hash recorded) to restore standard full-repo builds; see docs/evidence/015/r2-grant-inventory/README.md"
 }

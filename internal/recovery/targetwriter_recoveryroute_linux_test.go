@@ -50,4 +50,19 @@ func TestValidateRecoveryRouteRefusals(t *testing.T) {
 			t.Fatalf("valid peer route refused: %v", err)
 		}
 	})
+	t.Run("refusals_never_echo_route_material", func(t *testing.T) {
+		// T068 secrecy boundary: refusal strings are fixed classifications.
+		// They must never contain the route's secret, user or host material,
+		// so a refusal cannot leak the protected conninfo into logs/audit.
+		secretRoute := "postgres://recovery_r:topsecret@/txharbor?useroptions=whoami"
+		err := validateRecoveryRoute(secretRoute, trusted)
+		if err == nil {
+			t.Fatal("secret-bearing route was accepted")
+		}
+		for _, leak := range []string{"topsecret", "useroptions", "whoami"} {
+			if strings.Contains(err.Error(), leak) {
+				t.Fatalf("refusal %q leaks %q", err.Error(), leak)
+			}
+		}
+	})
 }

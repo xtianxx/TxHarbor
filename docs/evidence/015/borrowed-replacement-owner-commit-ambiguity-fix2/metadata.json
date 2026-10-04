@@ -23,7 +23,9 @@
     "borrowed-replacement-owner-commit-ambiguity-fix2-summary.json": "0d9955e99fbc976c95c3447296bce9983e48298fe4db18ab9a15567d8e623df3",
     "borrowed-replacement-owner-commit-ambiguity-fix2-targetlock-before.go": "529c71c4b3e494988526e539e48472d4f80140149ca9cc51913e454a0731a30a",
     "borrowed-replacement-owner-commit-ambiguity-fix2-targetlock.diff": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
-    "borrowed-replacement-owner-commit-ambiguity-fix2-targetlock-before.go.archived": "529c71c4b3e494988526e539e48472d4f80140149ca9cc51913e454a0731a30a"
+    "borrowed-replacement-owner-commit-ambiguity-fix2-targetlock-before.go.archived": "529c71c4b3e494988526e539e48472d4f80140149ca9cc51913e454a0731a30a",
+    "borrowed-replacement-owner-commit-ambiguity-fix2-companion-before.go.archived": "7b6532f88b4ad720e4d60928b4ffff581e8c6d9ec87e8f786f4c8b1db0392c23",
+    "borrowed-replacement-owner-commit-ambiguity-fix2-lane-before.go.archived": "773b81351edb7260e10ed3b57f46d84825774d8be556c5f03172e26f5b7f2ecf"
   },
   "bracket": "companion+lane changed seam preserved after==after_runs source_stable",
   "companion_after": "1fce8bb95279194a0f6b40e8e5cac14fc05558c89d6f583a2ac45fe136441d06",
@@ -45,5 +47,5 @@
   "scope": "commit-ambiguity residuals P2-A1/B1/B2/B3 only; seam preserved",
   "seam_preserved": "529c71c4b3e494988526e539e48472d4f80140149ca9cc51913e454a0731a30a",
   "six_tasks_T000P": "OPEN",
-  "traceability_note": "2026-10-04: targetlock-before.go snapshots renamed to *.go.archived to restore standard full-repo `go build ./...` (bytes unchanged, hash recorded). Original .go Key kept in git history; see RULING_record.json"
+  "traceability_note": "2026-10-04 docsnap archive: remaining evidence-tree .go snapshots renamed to *.go.archived (bytes identical, hash recorded) to restore standard full-repo builds; see docs/evidence/015/r2-grant-inventory/README.md"
 }

@@ -1,1 +1,48 @@
-{"Gate1": "HOLD", "archive_hashes": {"borrowed-replacement-owner-rollback-unwind-fix2-bracket-before.sh": "d236f43681e788202e206a81e77218b15b0f8b762a03d141dbd458787d336af4", "borrowed-replacement-owner-rollback-unwind-fix2-bracket.sh": "ccc197942c5ebd39291b22847660c8f453a67aeaea3bd0982fc69ca88b9e26b4", "borrowed-replacement-owner-rollback-unwind-fix2-companion-before.go": "b1eec55085ee1f0cf75e191a18044170caa1eeb30655e37d2f97bf2069b33093", "borrowed-replacement-owner-rollback-unwind-fix2-companion.diff": "214966392b40bbf137d9d6a4d27015284683fd0f605a804c50e188e57e471d79", "borrowed-replacement-owner-rollback-unwind-fix2-gold-console.txt": "73ba4788fbe14124c3bb3316d03076b211e8694b2dd2d10af5f5b2e5077c10f2", "borrowed-replacement-owner-rollback-unwind-fix2-gold-runner.sh": "f27d097671c6055ad50731fe3559f9a4d7ef41ea65b4946fb35b02899d319b16", "borrowed-replacement-owner-rollback-unwind-fix2-gold.log": "73ba4788fbe14124c3bb3316d03076b211e8694b2dd2d10af5f5b2e5077c10f2", "borrowed-replacement-owner-rollback-unwind-fix2-hashes-after-runs.txt": "c0bd43d16929b7e9e9ff63d5858fd9b6a0fee322197913ccb566e094bc99d98b", "borrowed-replacement-owner-rollback-unwind-fix2-hashes-after.txt": "001b5a6e91980506e4dd451e4af1198e13d1e8930797ef62b953268f2d074fcd", "borrowed-replacement-owner-rollback-unwind-fix2-hashes-before.txt": "63c9508f981364ecd11ff5446042072d8b97ced416698573dcc403bc10018f83", "borrowed-replacement-owner-rollback-unwind-fix2-lane-before.go": "8ec44864ac643ab92f08e44f5ffa01f87eea5451266344848c94f7d8ed0747e3", "borrowed-replacement-owner-rollback-unwind-fix2-lane.diff": "ad023a710e25e6f5afbda5c45778fe386ed8d12134a788b867764fc7148c315c", "borrowed-replacement-owner-rollback-unwind-fix2-race-build.log": "ed76bc19deea566c08734dd99a770f7bc41021bac33f8791bbffe22769fccd1a", "borrowed-replacement-owner-rollback-unwind-fix2-race-build.sh": "60ae2d2500fbb1e1709ec81eabb871d9df881255faf98c4a3fcb17c84264132b", "borrowed-replacement-owner-rollback-unwind-fix2-race-console.txt": "76172762c61082df5606b8efa0c64982cbe6bcc490ef35539aa3226d1133ef27", "borrowed-replacement-owner-rollback-unwind-fix2-race-runner.sh": "ffa504a51d76b2aa692d91cf85e7f027794a0e6343187e3a38beb3c733a4ac78", "borrowed-replacement-owner-rollback-unwind-fix2-race.log": "76172762c61082df5606b8efa0c64982cbe6bcc490ef35539aa3226d1133ef27", "borrowed-replacement-owner-rollback-unwind-fix2-race.test": "fff4dbc6d5ba0ed1755951b757d8371118a392e80b5502c26ec8ac06c8ab1019", "borrowed-replacement-owner-rollback-unwind-fix2-summary-hash.txt": "44333daabf6e55a0ade88f9696f97dd1d202de0c40955a35ebdcf513361ff2df", "borrowed-replacement-owner-rollback-unwind-fix2-summary.json": "b4df6ed6ff9578ebc09406af94f275d29825544ce2962da310d1e38e27dd550b"}, "bracket": "companion+lane changed, seam preserved, after==after_runs, source_stable, closed_predecessors_identical", "companion_after": "b68e3a2e2628fef3d2b07fe118be929b8ca7ae0fec2ac56e470388b7063168e0", "companion_before": "b1eec55085ee1f0cf75e191a18044170caa1eeb30655e37d2f97bf2069b33093", "counts": {"borrowed-replacement-owner-rollback-unwind-fix2-gold.log": {"top_PASS": 1}, "borrowed-replacement-owner-rollback-unwind-fix2-race.log": {"top_PASS": 1}}, "credential_scan": "known shapes only", "first_fails": "none (first-run pass)", "historical": "97 prior groups preserved unrebound (tolerant schema check)", "lane_after": "9692418e150874084a42e6c40b9c26ac44489a329a1c6745206d7536d7017f90", "lane_before": "8ec44864ac643ab92f08e44f5ffa01f87eea5451266344848c94f7d8ed0747e3", "oracle_gate": "pending ora-19 rollback-unwind-fix2 re-review (P2-B2/C4)", "scope": "rollback-unwind residuals P2-B2/C4 only; seam preserved", "seam_preserved": "3bea2e24344a0cdce30ef7565b148191b7f81b28d362a3f9a088ce5e27e27661", "six_tasks_T000P": "OPEN"}
+{
+  "Gate1": "HOLD",
+  "archive_hashes": {
+    "borrowed-replacement-owner-rollback-unwind-fix2-bracket-before.sh": "d236f43681e788202e206a81e77218b15b0f8b762a03d141dbd458787d336af4",
+    "borrowed-replacement-owner-rollback-unwind-fix2-bracket.sh": "ccc197942c5ebd39291b22847660c8f453a67aeaea3bd0982fc69ca88b9e26b4",
+    "borrowed-replacement-owner-rollback-unwind-fix2-companion-before.go": "b1eec55085ee1f0cf75e191a18044170caa1eeb30655e37d2f97bf2069b33093",
+    "borrowed-replacement-owner-rollback-unwind-fix2-companion.diff": "214966392b40bbf137d9d6a4d27015284683fd0f605a804c50e188e57e471d79",
+    "borrowed-replacement-owner-rollback-unwind-fix2-gold-console.txt": "73ba4788fbe14124c3bb3316d03076b211e8694b2dd2d10af5f5b2e5077c10f2",
+    "borrowed-replacement-owner-rollback-unwind-fix2-gold-runner.sh": "f27d097671c6055ad50731fe3559f9a4d7ef41ea65b4946fb35b02899d319b16",
+    "borrowed-replacement-owner-rollback-unwind-fix2-gold.log": "73ba4788fbe14124c3bb3316d03076b211e8694b2dd2d10af5f5b2e5077c10f2",
+    "borrowed-replacement-owner-rollback-unwind-fix2-hashes-after-runs.txt": "c0bd43d16929b7e9e9ff63d5858fd9b6a0fee322197913ccb566e094bc99d98b",
+    "borrowed-replacement-owner-rollback-unwind-fix2-hashes-after.txt": "001b5a6e91980506e4dd451e4af1198e13d1e8930797ef62b953268f2d074fcd",
+    "borrowed-replacement-owner-rollback-unwind-fix2-hashes-before.txt": "63c9508f981364ecd11ff5446042072d8b97ced416698573dcc403bc10018f83",
+    "borrowed-replacement-owner-rollback-unwind-fix2-lane-before.go": "8ec44864ac643ab92f08e44f5ffa01f87eea5451266344848c94f7d8ed0747e3",
+    "borrowed-replacement-owner-rollback-unwind-fix2-lane.diff": "ad023a710e25e6f5afbda5c45778fe386ed8d12134a788b867764fc7148c315c",
+    "borrowed-replacement-owner-rollback-unwind-fix2-race-build.log": "ed76bc19deea566c08734dd99a770f7bc41021bac33f8791bbffe22769fccd1a",
+    "borrowed-replacement-owner-rollback-unwind-fix2-race-build.sh": "60ae2d2500fbb1e1709ec81eabb871d9df881255faf98c4a3fcb17c84264132b",
+    "borrowed-replacement-owner-rollback-unwind-fix2-race-console.txt": "76172762c61082df5606b8efa0c64982cbe6bcc490ef35539aa3226d1133ef27",
+    "borrowed-replacement-owner-rollback-unwind-fix2-race-runner.sh": "ffa504a51d76b2aa692d91cf85e7f027794a0e6343187e3a38beb3c733a4ac78",
+    "borrowed-replacement-owner-rollback-unwind-fix2-race.log": "76172762c61082df5606b8efa0c64982cbe6bcc490ef35539aa3226d1133ef27",
+    "borrowed-replacement-owner-rollback-unwind-fix2-race.test": "fff4dbc6d5ba0ed1755951b757d8371118a392e80b5502c26ec8ac06c8ab1019",
+    "borrowed-replacement-owner-rollback-unwind-fix2-summary-hash.txt": "44333daabf6e55a0ade88f9696f97dd1d202de0c40955a35ebdcf513361ff2df",
+    "borrowed-replacement-owner-rollback-unwind-fix2-summary.json": "b4df6ed6ff9578ebc09406af94f275d29825544ce2962da310d1e38e27dd550b",
+    "borrowed-replacement-owner-rollback-unwind-fix2-companion-before.go.archived": "b1eec55085ee1f0cf75e191a18044170caa1eeb30655e37d2f97bf2069b33093",
+    "borrowed-replacement-owner-rollback-unwind-fix2-lane-before.go.archived": "8ec44864ac643ab92f08e44f5ffa01f87eea5451266344848c94f7d8ed0747e3"
+  },
+  "bracket": "companion+lane changed, seam preserved, after==after_runs, source_stable, closed_predecessors_identical",
+  "companion_after": "b68e3a2e2628fef3d2b07fe118be929b8ca7ae0fec2ac56e470388b7063168e0",
+  "companion_before": "b1eec55085ee1f0cf75e191a18044170caa1eeb30655e37d2f97bf2069b33093",
+  "counts": {
+    "borrowed-replacement-owner-rollback-unwind-fix2-gold.log": {
+      "top_PASS": 1
+    },
+    "borrowed-replacement-owner-rollback-unwind-fix2-race.log": {
+      "top_PASS": 1
+    }
+  },
+  "credential_scan": "known shapes only",
+  "first_fails": "none (first-run pass)",
+  "historical": "97 prior groups preserved unrebound (tolerant schema check)",
+  "lane_after": "9692418e150874084a42e6c40b9c26ac44489a329a1c6745206d7536d7017f90",
+  "lane_before": "8ec44864ac643ab92f08e44f5ffa01f87eea5451266344848c94f7d8ed0747e3",
+  "oracle_gate": "pending ora-19 rollback-unwind-fix2 re-review (P2-B2/C4)",
+  "scope": "rollback-unwind residuals P2-B2/C4 only; seam preserved",
+  "seam_preserved": "3bea2e24344a0cdce30ef7565b148191b7f81b28d362a3f9a088ce5e27e27661",
+  "six_tasks_T000P": "OPEN",
+  "traceability_note": "2026-10-04 docsnap archive: remaining evidence-tree .go snapshots renamed to *.go.archived (bytes identical, hash recorded) to restore standard full-repo builds; see docs/evidence/015/r2-grant-inventory/README.md"
+}

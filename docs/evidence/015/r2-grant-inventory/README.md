@@ -27,7 +27,22 @@ natively under R (+ optional deployment-lane ownership handover to W, with
 audited ALTER ... OWNER TO executed as W-or-admin, never through a session
 owned by R). --role based SET ROLE W is explicitly NOT a production approval
 path here; it remains a secdiscussable but implementation-open vector (see
-ADR-004 §2.1 R2 pending ruling).
+ADR-004 §2.1 R2 records).
+
+Additional artifacts (2026-10-04 implement round):
+- RULING_record.json — the user's limited R2 approval + implementation
+  authorization for T019/T020/T057/T058/T066/T068.
+- full_schema_toc.txt / full_schema_restore.sql — the full TxHarbor-schema
+  archive deliverable (69 tables/25 sequences/149 indexes via real repository
+  migrations; archive digest 2c5b1fa671f411ebe9642322e28c3d2dc1e4d64dfe396289eebfb588023a9167;
+  restored counts equal source; deployment-lane convergence to writer_owner
+  with zero errors; ACL replayed).
+- raw/protected-entry/README.md — zero-write protected-entry negatives (P1–P6)
+  on the disposable lane with writer-reject/recovery-peer HBA order.
+- raw/root-runner-owneddl-r2lane.log — confirmed PASS (110s) of
+  TestBorrowedOwnerDDLFeasibility under the pinned root container runner; the
+  borrowed-* fd-census family requires a root-equivalent runner (host uid 1000
+  cannot read /proc/1/fd).
 
 ## R5-consumption and stale-attempt clarification (unchanged from 2026-10-04 ruling; re-affirmed)
 
@@ -41,13 +56,16 @@ admission per R1, and controlled reconciliation only clears blocking records
 
 ## Bounded-validation disclaimers
 
-- The runs in evidence/ are the disposable isolated lane r2lab-pg only; they
-  never touched any production or personal database.
-- These runs do NOT check any of the six OPEN tasks (T019/T020/T057/T058/
-  T066/T068) and do not justify marking any of them complete; the drain T065/
-  T068 tasks remain managed by the parent.
-- The full-repo Go build failure over the archived evidence-tree .go snapshots
-  is recorded as an existing issue and stands untouched (go build ./internal/...
-  ./cmd/... exits 0; the failure is in docs/evidence snapshot files only).
+- The bounded lanes in this directory are the disposable r2lab containers
+  only; they never touched any production or personal database.
+- The 2026-10-04 first lane did not itself check any of the six tasks; the
+  implement round that followed wired R1/R3/R5 and the pinned vector into the
+  coordinator, and the six tasks' checkboxes remain governed by their own
+  acceptance runs (drill/PG) recorded in `docs/evidence/015/` and the tasks
+  file.
+- The documented `go build ./...` failure over archived evidence-tree `.go`
+  snapshots was fixed by renaming the seven snapshots to `.go.archived`
+  (bytes unchanged, hashes recorded in each directory's metadata.json);
+  standard full-repo `go build ./...` passes again (commit 8b51ff1).
 - When a command was intended as a run — not as a code-executed command —
   it is stated plainly in these notes; no command was silently skipped.
