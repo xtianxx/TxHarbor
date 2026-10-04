@@ -1,0 +1,32 @@
+;
+; Archive created at 2026-10-04 03:03:06 UTC
+;     dbname: srcdb
+;     TOC Entries: 21
+;     Compression: gzip
+;     Dump Version: 1.16-0
+;     Format: CUSTOM
+;     Integer: 4 bytes
+;     Offset: 8 bytes
+;     Dumped from database version: 18.6 (Debian 18.6-1.pgdg13+2)
+;     Dumped by pg_dump version: 18.6 (Debian 18.6-1.pgdg13+2)
+;
+;
+; Selected TOC Entries:
+;
+223; 1259 16409 TABLE public events_015 writer_owner
+222; 1259 16408 SEQUENCE public events_015_seq_seq writer_owner
+3462; 0 0 SEQUENCE OWNED BY public events_015_seq_seq writer_owner
+221; 1259 16402 TABLE public snapshot_probe_015 writer_owner
+3463; 0 0 ACL public TABLE snapshot_probe_015 writer_owner
+220; 1259 16393 TABLE public wallet_sequences_015 writer_owner
+219; 1259 16392 SEQUENCE public wallet_sequences_015_id_seq writer_owner
+3464; 0 0 SEQUENCE OWNED BY public wallet_sequences_015_id_seq writer_owner
+3299; 2604 16412 DEFAULT public events_015 seq writer_owner
+3298; 2604 16396 DEFAULT public wallet_sequences_015 id writer_owner
+3455; 0 16409 TABLE DATA public events_015 writer_owner
+3453; 0 16402 TABLE DATA public snapshot_probe_015 writer_owner
+3452; 0 16393 TABLE DATA public wallet_sequences_015 writer_owner
+3465; 0 0 SEQUENCE SET public events_015_seq_seq writer_owner
+3466; 0 0 SEQUENCE SET public wallet_sequences_015_id_seq writer_owner
+3303; 2606 16417 CONSTRAINT public events_015 events_015_seq_key writer_owner
+3301; 2606 16401 CONSTRAINT public wallet_sequences_015 wallet_sequences_015_pkey writer_owner

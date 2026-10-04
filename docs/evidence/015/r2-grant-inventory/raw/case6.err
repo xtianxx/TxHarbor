@@ -1,0 +1,16 @@
+pg_restore: error: could not execute query: ERROR:  permission denied for schema public
+Command was: ALTER TABLE public.events_015 OWNER TO writer_owner;
+
+pg_restore: error: could not execute query: ERROR:  permission denied for schema public
+Command was: ALTER SEQUENCE public.events_015_seq_seq OWNER TO writer_owner;
+
+pg_restore: error: could not execute query: ERROR:  permission denied for schema public
+Command was: ALTER TABLE public.snapshot_probe_015 OWNER TO writer_owner;
+
+pg_restore: error: could not execute query: ERROR:  permission denied for schema public
+Command was: ALTER TABLE public.wallet_sequences_015 OWNER TO writer_owner;
+
+pg_restore: error: could not execute query: ERROR:  permission denied for schema public
+Command was: ALTER SEQUENCE public.wallet_sequences_015_id_seq OWNER TO writer_owner;
+
+pg_restore: warning: errors ignored on restore: 5

@@ -25,7 +25,7 @@
 ## 2. 选择、完整性与兼容性规则
 
 - **选择**：只接受 `verification.state=verified` 且 manifest 校验通过的备份；多个候选必须经 manifest 字段确定性比较（`created_at` 仅作展示，用 `recovery_point.wal_lsn`/`backup_id` 决胜），可复核。
-- **完整性**：任一产物缺失/长度不符/`sha256` 不符/`pg_restore -l` 不可读 → `rejected`；完整性未知 = 不可用（FR-003）。
+- **完整性**：确定的产物缺失/长度不符/`sha256` 不符或确定不可读 → `rejected`；完整性未知/检查中断 → `unverified`（FR-003）。两类结果的依据/具体原因由 verify-backup 结果及命令审计记录，不扩展 manifest wire schema。
 - **兼容性**：manifest `schema` 与当前程序目标版本不一致，或版本集含未知迁移 → 明确拒绝恢复/复服；`MigrateOptions.Inspect/CheckCompatibility` 语义复用，不静默降级、不自动改写（FR-004）。
 - **依赖检查**：恢复前检查目标 DSN/权限、事实来源可达性、下游/中间件状态、Signer 边界可达性；缺失 → 阻塞状态 + 报告缺失项，不宣称恢复基本完成（FR-005）。
 
@@ -41,6 +41,9 @@
 | `verification_executable` | 015 核验工具可对目标执行 V1–V9 只读核验；不能证明的类别标 `unknown`，不计入通过（F9） |
 
 - 验证记录含 `verified_at`/`verifier`/`target=isolated`/`evidence_ref`；写回 manifest 与恢复控制库。
+- **恢复角色权限语义（ADR-004 §2.1 R2，2026-10-04 有界验证）**：恢复子进程以受限恢复角色运行 pinned 向量 `pg_restore --clean --if-exists --no-owner --no-privileges`；对象属主＝恢复角色，属主/ACL 向原 writer 身份收敛为部署 lane 独立审计步骤（归档 ACL 从 TOC 重放），恢复会话内禁 `SET ROLE`/`--role` 重写；破坏性替换 DDL（数据库建删）为独立授权部署管理动作。缺 schema `CREATE/USAGE`、越目标库、未授权身份 → 真实执行失败且零对象写入（证据 `docs/evidence/015/r2-grant-inventory/`）。R2 未批准前此条为设计材料，不构成既有行为改写。
+- **状态分类**：`rejected` 仅表示已确定的完整性或兼容性拒绝；探针结果 `unknown`、恢复/核验执行中断、控制库证据未接受或证据提交失败均为 `unverified`。两类结果的具体依据/原因由 verify-backup 结果及命令审计记录，绝不冒充已确定拒绝或通过。只有真实隔离恢复完成且四项检查全部通过、绑定证据被控制库接受后才可写 `verified`。
+- **重试失效**：每次新的 `verify-backup` 尝试先撤销当前 manifest 的旧 `verified` 结论；未完成的尝试不得继续沿用旧 manifest/证据绑定。写回或证据接受失败为非零退出；任何非 `verified` 状态均不可授权 restore。
 - **验证生命周期（F7/DG-2）**：备份级验证（manifest `verified`，绑定 backup_id/carrier/schema）≠ 目标实例级验证（`restore_probe`，绑定实例 + `data_target` 指纹）；复制 manifest、重建实例或更换目标后必须重跑实际恢复验证/探针，不得沿用旧 `verified`；`restore` 前置必须校验控制库存在绑定该 `backup_id` 的可验证证据行（无可验证证据 → 拒绝或重跑 `verify-backup`），不得只信 manifest 文件内的旗标。
 - `verify-backup` 先于实例开启时的证据绑定按 [data-model.md](../data-model.md) §1.4：先落 manifest 级结论，实例开启后经受控命令显式同步绑定并审计。
 - 未验证备份仅可标记 `unverified`，不得作为恢复或复服依据。
@@ -57,7 +60,8 @@
 | 条件 | 结果 |
 |---|---|
 | manifest 缺失/字段缺失/哈希不符/未知版本 | 拒绝使用；不尝试"尽力恢复" |
-| 产物损坏/截断/部分写入/完整性未知 | `rejected`；不得进入核验完成或复服 |
+| 已确定的产物损坏/截断/部分写入 | `rejected` 并记录拒绝依据；不得进入核验完成或复服 |
+| 完整性未知、探针 `unknown`、执行中断或证据未接受 | `unverified` 并记录具体原因；命令非零退出，不得进入核验完成或复服 |
 | schema/程序版本不兼容 | 拒绝恢复或拒绝复服；不静默降级 |
 | 依赖/配置缺失 | 阻塞在明确状态并报告；不宣称恢复完成 |
 | `verification.state != verified` | 不得用于恢复与复服 |

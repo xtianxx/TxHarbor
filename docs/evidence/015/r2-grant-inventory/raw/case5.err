@@ -1,0 +1,24 @@
+pg_restore: error: could not execute query: ERROR:  must be owner of table wallet_sequences_015
+Command was: ALTER TABLE IF EXISTS ONLY public.wallet_sequences_015 DROP CONSTRAINT IF EXISTS wallet_sequences_015_pkey;
+pg_restore: error: could not execute query: ERROR:  must be owner of table events_015
+Command was: ALTER TABLE IF EXISTS ONLY public.events_015 DROP CONSTRAINT IF EXISTS events_015_seq_key;
+pg_restore: error: could not execute query: ERROR:  must be owner of table wallet_sequences_015
+Command was: ALTER TABLE IF EXISTS public.wallet_sequences_015 ALTER COLUMN id DROP DEFAULT;
+pg_restore: error: could not execute query: ERROR:  must be owner of table events_015
+Command was: ALTER TABLE IF EXISTS public.events_015 ALTER COLUMN seq DROP DEFAULT;
+pg_restore: error: could not execute query: ERROR:  must be able to SET ROLE "writer_owner"
+Command was: ALTER TABLE public.events_015 OWNER TO writer_owner;
+
+pg_restore: error: could not execute query: ERROR:  must be able to SET ROLE "writer_owner"
+Command was: ALTER SEQUENCE public.events_015_seq_seq OWNER TO writer_owner;
+
+pg_restore: error: could not execute query: ERROR:  must be able to SET ROLE "writer_owner"
+Command was: ALTER TABLE public.snapshot_probe_015 OWNER TO writer_owner;
+
+pg_restore: error: could not execute query: ERROR:  must be able to SET ROLE "writer_owner"
+Command was: ALTER TABLE public.wallet_sequences_015 OWNER TO writer_owner;
+
+pg_restore: error: could not execute query: ERROR:  must be able to SET ROLE "writer_owner"
+Command was: ALTER SEQUENCE public.wallet_sequences_015_id_seq OWNER TO writer_owner;
+
+pg_restore: warning: errors ignored on restore: 9

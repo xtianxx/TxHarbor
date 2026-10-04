@@ -1,0 +1,86 @@
+pg_restore: connecting to database for restore
+pg_restore: executing SELECT pg_catalog.set_config('search_path', '', false);
+pg_restore: dropping CONSTRAINT wallet_sequences_015 wallet_sequences_015_pkey
+pg_restore: dropping CONSTRAINT events_015 events_015_seq_key
+pg_restore: dropping DEFAULT wallet_sequences_015 id
+pg_restore: dropping DEFAULT events_015 seq
+pg_restore: dropping SEQUENCE wallet_sequences_015_id_seq
+pg_restore: dropping TABLE wallet_sequences_015
+pg_restore: dropping TABLE snapshot_probe_015
+pg_restore: dropping SEQUENCE events_015_seq_seq
+pg_restore: dropping TABLE events_015
+pg_restore: creating TABLE "public.events_015"
+pg_restore: creating SEQUENCE "public.events_015_seq_seq"
+pg_restore: creating SEQUENCE OWNED BY "public.events_015_seq_seq"
+pg_restore: while PROCESSING TOC:
+pg_restore: from TOC entry 3462; 0 0 SEQUENCE OWNED BY events_015_seq_seq writer_owner
+pg_restore: error: could not execute query: ERROR:  must be owner of sequence events_015_seq_seq
+Command was: ALTER SEQUENCE public.events_015_seq_seq OWNED BY public.events_015.seq;
+
+
+pg_restore: creating TABLE "public.snapshot_probe_015"
+pg_restore: creating TABLE "public.wallet_sequences_015"
+pg_restore: creating SEQUENCE "public.wallet_sequences_015_id_seq"
+pg_restore: creating SEQUENCE OWNED BY "public.wallet_sequences_015_id_seq"
+pg_restore: from TOC entry 3464; 0 0 SEQUENCE OWNED BY wallet_sequences_015_id_seq writer_owner
+pg_restore: error: could not execute query: ERROR:  must be owner of sequence wallet_sequences_015_id_seq
+Command was: ALTER SEQUENCE public.wallet_sequences_015_id_seq OWNED BY public.wallet_sequences_015.id;
+
+
+pg_restore: creating DEFAULT "public.events_015 seq"
+pg_restore: from TOC entry 3299; 2604 16412 DEFAULT events_015 seq writer_owner
+pg_restore: error: could not execute query: ERROR:  must be owner of table events_015
+Command was: ALTER TABLE ONLY public.events_015 ALTER COLUMN seq SET DEFAULT nextval('public.events_015_seq_seq'::regclass);
+
+
+pg_restore: creating DEFAULT "public.wallet_sequences_015 id"
+pg_restore: from TOC entry 3298; 2604 16396 DEFAULT wallet_sequences_015 id writer_owner
+pg_restore: error: could not execute query: ERROR:  must be owner of table wallet_sequences_015
+Command was: ALTER TABLE ONLY public.wallet_sequences_015 ALTER COLUMN id SET DEFAULT nextval('public.wallet_sequences_015_id_seq'::regclass);
+
+
+pg_restore: processing data for table "public.events_015"
+pg_restore: from TOC entry 3455; 0 16409 TABLE DATA events_015 writer_owner
+pg_restore: error: could not execute query: ERROR:  permission denied for table events_015
+Command was: COPY public.events_015 (seq, payload) FROM stdin;
+pg_restore: processing data for table "public.snapshot_probe_015"
+pg_restore: from TOC entry 3453; 0 16402 TABLE DATA snapshot_probe_015 writer_owner
+pg_restore: error: could not execute query: ERROR:  permission denied for table snapshot_probe_015
+Command was: COPY public.snapshot_probe_015 (ref) FROM stdin;
+pg_restore: processing data for table "public.wallet_sequences_015"
+pg_restore: from TOC entry 3452; 0 16393 TABLE DATA wallet_sequences_015 writer_owner
+pg_restore: error: could not execute query: ERROR:  permission denied for table wallet_sequences_015
+Command was: COPY public.wallet_sequences_015 (id, note) FROM stdin;
+pg_restore: executing SEQUENCE SET events_015_seq_seq
+pg_restore: from TOC entry 3465; 0 0 SEQUENCE SET events_015_seq_seq writer_owner
+pg_restore: error: could not execute query: ERROR:  permission denied for sequence events_015_seq_seq
+Command was: SELECT pg_catalog.setval('public.events_015_seq_seq', 1, false);
+
+
+pg_restore: executing SEQUENCE SET wallet_sequences_015_id_seq
+pg_restore: from TOC entry 3466; 0 0 SEQUENCE SET wallet_sequences_015_id_seq writer_owner
+pg_restore: error: could not execute query: ERROR:  permission denied for sequence wallet_sequences_015_id_seq
+Command was: SELECT pg_catalog.setval('public.wallet_sequences_015_id_seq', 1, false);
+
+
+pg_restore: creating CONSTRAINT "public.events_015 events_015_seq_key"
+pg_restore: from TOC entry 3303; 2606 16417 CONSTRAINT events_015 events_015_seq_key writer_owner
+pg_restore: error: could not execute query: ERROR:  must be owner of table events_015
+Command was: ALTER TABLE ONLY public.events_015
+    ADD CONSTRAINT events_015_seq_key UNIQUE (seq);
+
+
+pg_restore: creating CONSTRAINT "public.wallet_sequences_015 wallet_sequences_015_pkey"
+pg_restore: from TOC entry 3301; 2606 16401 CONSTRAINT wallet_sequences_015 wallet_sequences_015_pkey writer_owner
+pg_restore: error: could not execute query: ERROR:  must be owner of table wallet_sequences_015
+Command was: ALTER TABLE ONLY public.wallet_sequences_015
+    ADD CONSTRAINT wallet_sequences_015_pkey PRIMARY KEY (id);
+
+
+pg_restore: creating ACL "public.TABLE snapshot_probe_015"
+pg_restore: from TOC entry 3463; 0 0 ACL TABLE snapshot_probe_015 writer_owner
+pg_restore: error: could not execute query: ERROR:  permission denied for table snapshot_probe_015
+Command was: GRANT SELECT ON TABLE public.snapshot_probe_015 TO PUBLIC;
+
+
+pg_restore: warning: errors ignored on restore: 12
