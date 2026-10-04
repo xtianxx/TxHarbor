@@ -190,6 +190,6 @@ PG/CLI 直连层范围：本轮 integration-PG 仅执行 §1 的 2 个具名入�
 | F6 gap 无法闭合 | PASS | `TestT059F6UnprovableGapStaysUnknownWithPackageAndEscalation` root PASS；`internal/...gaps` 哨兵优先级修复见提交 f98fb13。 |
 | F7 未经授权/过期审批 | PASS | 前 PASS；本轮 drill5 红 → 无 prove 失败项。 |
 
-**本轮尤其关闭的历史 FAIL/PARTIAL**：F2（恢复中断）、F4（Kafka offset）、T060（重入/ready 两向）。**本轮排除**：`keydown` migration-history 顶层 3 FAIL 因 runner `[pgfull2]` 缺 git（见 README §9）；恢复功能判定不含此项。
+**本轮尤其关闭的历史 FAIL/PARTIAL**：F2（恢复中断）、F4（Kafka offset）、T060（重入/ready 两向）。**runner-env 失败已闭环**：pgfull2 的 3 个 migration-history FAIL（runner 缺 git）与 9 个 `error obtaining VCS status` FAIL，已在 pgfull3b（git 修复 runner）真实复跑至全部 PASS（0 FAIL/1822 PASS/3 非 helper SKIP），不以"历史环境问题"口径留存。
 
 **S1 detail.** S1 context: `r2-grant-inventory/README.md`, `r2_grant_matrix.tsv`, `raw/`（case1–12/pos/neg），以及本轮 drill5/pgfull2 logs 引用为“verification runs”。
