@@ -1,6 +1,6 @@
 # Tasks: 015 Backup Recovery and Safe Service Resumption
 
-**Input**: Design documents from `/specs/015-backup-recovery-safe-resumption/` — spec.md（6 US：US1–US3 P1、US4–US6 P2；FR-001–036；SC-001–008；Clarifications 2026-09-28 三项裁决）, plan.md（Structure Decision、真实入口接线清单、FR/SC/澄清映射）, research.md（R1–R8）, data-model.md（控制库 11 实体、门禁公式、状态机、代次协议、V1–V9、INV-1–10）, contracts/（backup-manifest、resumption-gate、approval-matrix、verification-items）, adr/ADR-001、ADR-002, quickstart.md（S1–S12、F1–F7、分层）, checklists/requirements.md（16/16）, constitution v1.1.0
+**Input**: Design documents from `/specs/015-backup-recovery-safe-resumption/` — spec.md（6 US：US1–US3 P1、US4–US6 P2；FR-001–036；SC-001–008；Clarifications 2026-09-28 三项裁决）, plan.md（Structure Decision、真实入口接线清单、FR/SC/澄清映射）, research.md（R1–R8）, data-model.md（控制库 11 实体、门禁公式、状态机、代次协议、V1–V9、INV-1–10）, contracts/（backup-manifest、resumption-gate、approval-matrix、verification-items）, adr/ADR-001、ADR-002、ADR-004（proposed，选择性准入/排除设计）, quickstart.md（S1–S12、F1–F7、分层）, checklists/requirements.md（16/16）, constitution v1.1.0
 
 **Prerequisites**: plan.md（required）、spec.md（required for user stories）、research.md、data-model.md、contracts/、quickstart.md
 
