@@ -133,7 +133,7 @@ gunzip -c indexer.jsonl.gz | grep -n '"Test":"TestDepositCommitUnknownOutcomeRer
 - 测试未启动的旁证: `/tmp/r2lab/run_pgfix3/scratch/` 仅含空目录 `home/`、`tmp/`（无 `indexer.jsonl`）
 - 无 `go_test_exit` 行
 
-### 4.2 pgfix3b = 元数据命令遇 dubious-ownership 后以 safe.directory 补取且测试成功
+### 4.2 pgfix3b = 测试运行成功；safe.directory 树头补取发生在测试完成之后（事后核对，见 4.3）
 
 - `/tmp/r2lab/pgfix3b.log` 第 1–4 行与第 6–9 行: 两次 `fatal: detected dubious ownership in repository at '/workspace'`（附 safe.directory 提示），即元数据命令遇阻
 - 第 5 行 `tree_head=`（空）、第 10 行 `dirty_tracks=0`；第 12 行 `go_test_exit=0`

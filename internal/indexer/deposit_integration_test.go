@@ -1135,6 +1135,8 @@ func TestDepositCommitEmptyIntervalAdvances(t *testing.T) {
 // is [INFERENCE], not observed fact, and the local race is what the controlled
 // data prove. The read-side fixture removes the race instead of assuming it
 // away.
+// phase3 was the original write-side injector run 60 times on the production
+// path as a positive case (60/60 successes), not a failure reproduction.
 func TestDepositCommitUnknownOutcomeRereadsDB(t *testing.T) {
 	dsn := startIndexerPostgres(t)
 	pool, drop := logscanOpenCompletionDropPool(t, dsn)

@@ -72,17 +72,20 @@ failure=integration(PostgreSQL)/ci-required（受后者聚合）。
 - pinned PG 回归两次运行器尝试（全 `internal/indexer` 包，CI=true、pinned 18.6 客户端），分记如下：
   - **pgfix3 = 运行器前置失败，不计测试成败**：容器内无 git 二进制（`git: not found`）→ 树头取证等元数据
     前置步骤失败，**测试未启动**；完整日志归档 `archive/pgfix3.log`。
-  - **pgfix3b = 测试成功**：元数据命令遇 `dubious-ownership` → 以 `git -c safe.directory` 补取树头后测试正常
-    执行：**go_test_exit=0，test 级 674 pass / 0 fail / 0 skip**（单次运行，不循环追绿）。口径：674 = **312
-    顶层 + 362 子测试**（父/子分别计数，`Action∈{pass,fail,skip}`），独立重算见 `archive/indexer.jsonl.gz`
-    与 `archive/ARCHIVE.md`（来源/哈希/重算清单）。完整日志归档 `archive/pgfix3b.log`（含 `go_test_exit=0`）。
+  - **pgfix3b = 测试成功**：元数据命令遇 `dubious-ownership`（日志 `tree_head` 为空），该次测试完成：
+    **go_test_exit=0，test 级 674 pass / 0 fail / 0 skip**（单次运行，不循环追绿）。据历史报告，`safe.directory`
+    树头补取发生在测试完成后的另一个取证容器中（事后核对，输出未持久化，当时精确树快照缺失——见下方"运行树
+    对应"），**不能作为测试开始前或运行期间已取得精确树绑定的证明**。口径：674 = **312 顶层 + 362 子测试**
+    （父/子分别计数，`Action∈{pass,fail,skip}`），独立重算见 `archive/indexer.jsonl.gz` 与 `archive/ARCHIVE.md`
+    （来源/哈希/重算清单）。完整日志归档 `archive/pgfix3b.log`（末行 `go_test_exit=0`）。
 - 运行树对应（**事后核对边界**）：运行当时工作树 = HEAD `2fca0b05` + 1 个已跟踪修改（本修复的工作树副本，
   只读挂载），但**运行当时未持久化精确树快照**；现存绑定证据均为事后——`safe.directory` 取证（输出未持久化
   留存）与事后 diff blob 匹配 `7194719..e19dbd8`——属事后核对，不可当作运行当时快照。
 
 ## Review P2 回应（逐项收敛，共 6 项）
 - **P2-1（README 两次运行混写）**：已拆分为 pgfix3 = 容器内 `git: not found`、运行器前置失败、测试未启动、
-  不计测试成败；pgfix3b = 元数据 `dubious-ownership` → `safe.directory` 补取 → 测试成功（`go_test_exit=0`）。
+  不计测试成败；pgfix3b = 元数据 `dubious-ownership`（`tree_head` 空）→ 测试成功（`go_test_exit=0`）；
+  `safe.directory` 补取为测试完成后的另行取证（输出未持久化）。
 - **P2-2（pgfix3b 归档缺完成态 + 674 口径）**：完整日志已归档 `archive/pgfix3b.log`（含 `go_test_exit=0`）；
   674 = 312 顶层 + 362 子测试（父/子分别计数），重算清单见 `archive/ARCHIVE.md`、逐次 JSONL 见
   `archive/indexer.jsonl.gz`。
