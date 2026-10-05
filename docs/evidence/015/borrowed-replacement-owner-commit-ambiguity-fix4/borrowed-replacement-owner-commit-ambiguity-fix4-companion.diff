@@ -1,0 +1,275 @@
+--- borrowed-replacement-owner-commit-ambiguity-fix4-companion-before.go	2026-10-02 05:40:28.050942157 +0800
++++ /home/dream/product_env/TxHarbor/internal/recovery/targetlock_commitambiguity_hook_linux_test.go	2026-10-02 05:51:32.411139740 +0800
+@@ -333,6 +333,10 @@
+ 	f.core.controlMu.Lock()
+ 	f.core.controlServerErr = err
+ 	f.core.controlMu.Unlock()
++	select {
++	case f.core.controlWakeCh <- struct{}{}:
++	default:
++	}
+ 	return nil
+ }
+ 
+@@ -343,12 +347,7 @@
+ 	if err := f.controlAllowed(); err != nil {
+ 		return err
+ 	}
+-	f.core.deadlineMu.Lock()
+-	f.core.callerDeadline = t
+-	f.core.deadlineMu.Unlock()
+-	f.core.applyDeadlineToSocket()
+-	f.core.wakeDeadlineWaiters()
+-	return nil
++	return f.core.setReadDeadline(t)
+ }
+ 
+ // ControlStallAfterBytes arms the one-shot deterministic stall after n consumed
+@@ -569,16 +568,29 @@
+ 	return c.effectiveDeadlineLocked()
+ }
+ 
+-// applyDeadlineToSocket applies the CURRENT effective absolute deadline to the
+-// real socket without holding any lock across the application.
++// applyDeadlineToSocket serializes the minimum computation AND the absolute
++// SetReadDeadline application under the SAME deadline mutex, so a concurrent
++// cancellation can never be undone by a stale apply and a concurrent clear can
++// never remove the active assembly cap. The lock is never held across a Read.
+ func (c *targetLockCommitAmbiguityCore) applyDeadlineToSocket() {
+-	effective, set := c.effectiveDeadline()
+-	if real := c.realConn(); real != nil {
+-		if set {
+-			_ = real.SetReadDeadline(effective)
+-		} else {
+-			_ = real.SetReadDeadline(time.Time{})
+-		}
++	real := c.realConn()
++	c.deadlineMu.Lock()
++	c.applyEffectiveDeadlineLocked(real)
++	c.deadlineMu.Unlock()
++}
++
++// applyEffectiveDeadlineLocked computes the MINIMUM of the current caller
++// deadline and the active assembly cap and applies it as an ABSOLUTE timestamp;
++// the caller must hold the deadline mutex.
++func (c *targetLockCommitAmbiguityCore) applyEffectiveDeadlineLocked(real net.Conn) {
++	effective, set := c.effectiveDeadlineLocked()
++	if real == nil {
++		return
++	}
++	if set {
++		_ = real.SetReadDeadline(effective)
++	} else {
++		_ = real.SetReadDeadline(time.Time{})
+ 	}
+ }
+ 
+@@ -629,35 +641,46 @@
+ }
+ 
+ // stallWait waits until the armed deterministic stall is woken by an ACTUAL
+-// server feed (a stale wake without data keeps waiting) or the effective
+-// deadline expires.
+-func (c *targetLockCommitAmbiguityCore) stallWait() bool {
++// server feed or queued error (a stale wake without data keeps waiting), the
++// effective deadline expires, or the transport is broken; a break is observed
++// PROMPTLY and fails closed with a transport error.
++func (c *targetLockCommitAmbiguityCore) stallWait() error {
+ 	for {
++		select {
++		case <-c.brokenCh:
++			return net.ErrClosed
++		default:
++		}
+ 		effective, set := c.effectiveDeadline()
+ 		if set {
+ 			remaining := time.Until(effective)
+ 			if remaining <= 0 {
+-				return true
++				return os.ErrDeadlineExceeded
+ 			}
+ 			timer := time.NewTimer(remaining)
+ 			select {
++			case <-c.brokenCh:
++				timer.Stop()
++				return net.ErrClosed
+ 			case <-c.controlWakeCh:
+ 				timer.Stop()
+ 				if c.controlHasData() {
+-					return false
++					return nil
+ 				}
+ 				continue
+ 			case <-c.deadlineChanged:
+ 				timer.Stop()
+ 				continue
+ 			case <-timer.C:
+-				return true
++				return os.ErrDeadlineExceeded
+ 			}
+ 		}
+ 		select {
++		case <-c.brokenCh:
++			return net.ErrClosed
+ 		case <-c.controlWakeCh:
+ 			if c.controlHasData() {
+-				return false
++				return nil
+ 			}
+ 			continue
+ 		case <-c.deadlineChanged:
+@@ -690,12 +713,12 @@
+ 		default:
+ 		}
+ 		c.controlMu.Unlock()
+-		expired := c.stallWait()
++		stallErr := c.stallWait()
+ 		c.controlMu.Lock()
+ 		c.controlStallOngoing = false
+ 		c.controlMu.Unlock()
+-		if expired {
+-			return 0, os.ErrDeadlineExceeded
++		if stallErr != nil {
++			return 0, stallErr
+ 		}
+ 		return c.readRaw(p)
+ 	}
+@@ -741,10 +764,11 @@
+ }
+ 
+ func (c *targetLockCommitAmbiguityCore) setReadDeadline(t time.Time) error {
++	real := c.realConn()
+ 	c.deadlineMu.Lock()
+ 	c.callerDeadline = t
++	c.applyEffectiveDeadlineLocked(real)
+ 	c.deadlineMu.Unlock()
+-	c.applyDeadlineToSocket()
+ 	c.wakeDeadlineWaiters()
+ 	return nil
+ }
+@@ -786,6 +810,125 @@
+ 	return targetLockCommitAmbiguityAddr("fault-control-remote")
+ }
+ 
++// ---------------------------------------------------------------------------
++// Real-socket serialized deadline probe
++// ---------------------------------------------------------------------------
++
++// TargetLockCommitAmbiguityDeadlineProbe is the fixed opaque probe of the
++// serialized socket-deadline path over a REAL net.Pipe socket pair. It shares
++// the exact adapter/core deadline mechanism (wrap + serialized minimum apply)
++// and exposes only fixed probe operations; it is never installed into the
++// production seam.
++type TargetLockCommitAmbiguityDeadlineProbe struct {
++	core    *targetLockCommitAmbiguityCore
++	adapter net.Conn
++	peer    net.Conn
++
++	readMu   sync.Mutex
++	readDone chan struct{}
++	readErr  error
++}
++
++// NewTargetLockCommitAmbiguityDeadlineProbe builds the probe over a real
++// net.Pipe socket pair.
++func NewTargetLockCommitAmbiguityDeadlineProbe() *TargetLockCommitAmbiguityDeadlineProbe {
++	client, server := net.Pipe()
++	core := newTargetLockCommitAmbiguityCore()
++	adapter := core.wrap(client)
++	return &TargetLockCommitAmbiguityDeadlineProbe{core: core, adapter: adapter, peer: server}
++}
++
++// ArmGate arms the probe gate.
++func (p *TargetLockCommitAmbiguityDeadlineProbe) ArmGate() {
++	p.core.mu.Lock()
++	p.core.armed = true
++	p.core.mu.Unlock()
++}
++
++// Break closes the real socket pair and breaks the transport.
++func (p *TargetLockCommitAmbiguityDeadlineProbe) Break() {
++	p.core.breakTransport()
++	_ = p.peer.Close()
++}
++
++// Witness returns only the ordering actually established.
++func (p *TargetLockCommitAmbiguityDeadlineProbe) Witness() string {
++	p.core.mu.Lock()
++	defer p.core.mu.Unlock()
++	if p.core.withheld {
++		return TargetLockCommitWitnessWithheld
++	}
++	if p.core.dispatched {
++		return TargetLockCommitWitnessDispatched
++	}
++	return TargetLockCommitWitnessNotEstablished
++}
++
++// WriteClient drives the real adapter write path.
++func (p *TargetLockCommitAmbiguityDeadlineProbe) WriteClient(b []byte) error {
++	_, err := p.adapter.Write(b)
++	return err
++}
++
++// ProbeSetAssemblyCap installs the active assembly cap.
++func (p *TargetLockCommitAmbiguityDeadlineProbe) ProbeSetAssemblyCap(t time.Time) {
++	p.core.deadlineMu.Lock()
++	p.core.assemblyCap = t
++	p.core.deadlineMu.Unlock()
++	p.core.applyDeadlineToSocket()
++}
++
++// ProbeSetCallerDeadline updates the caller deadline through the serialized
++// setter.
++func (p *TargetLockCommitAmbiguityDeadlineProbe) ProbeSetCallerDeadline(t time.Time) {
++	_ = p.core.setReadDeadline(t)
++}
++
++// ProbeClearCallerDeadline clears the caller deadline through the serialized
++// setter.
++func (p *TargetLockCommitAmbiguityDeadlineProbe) ProbeClearCallerDeadline() {
++	_ = p.core.setReadDeadline(time.Time{})
++}
++
++// ProbeApplyEffectiveDeadline runs one serialized minimum apply.
++func (p *TargetLockCommitAmbiguityDeadlineProbe) ProbeApplyEffectiveDeadline() {
++	p.core.applyDeadlineToSocket()
++}
++
++// ProbeStartBlockedRead starts one blocked adapter read over the real socket.
++func (p *TargetLockCommitAmbiguityDeadlineProbe) ProbeStartBlockedRead() {
++	p.readMu.Lock()
++	p.readDone = make(chan struct{})
++	p.readErr = nil
++	done := p.readDone
++	p.readMu.Unlock()
++	go func() {
++		_, err := p.adapter.Read(make([]byte, 64))
++		p.readMu.Lock()
++		p.readErr = err
++		p.readMu.Unlock()
++		close(done)
++	}()
++}
++
++// ProbeAwaitRead waits boundedly for the started read and returns its error.
++func (p *TargetLockCommitAmbiguityDeadlineProbe) ProbeAwaitRead(bound time.Duration) error {
++	p.readMu.Lock()
++	done := p.readDone
++	p.readMu.Unlock()
++	if done == nil {
++		return errors.New("target-lock commit fault: no probe read was started")
++	}
++	select {
++	case <-done:
++		p.readMu.Lock()
++		defer p.readMu.Unlock()
++		return p.readErr
++	case <-time.After(bound):
++		return errors.New("target-lock commit fault: the probe read did not return within the bound")
++	}
++}
++
+ // classifyTargetLockCommitFrame recognizes the actual simple-protocol COMMIT
+ // query frame and never claims an establishment for unrecognized, partial or
+ // non-commit framing.

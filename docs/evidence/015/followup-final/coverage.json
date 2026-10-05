@@ -1,0 +1,126 @@
+{
+  "checker_exit_status": 1,
+  "checker_result": "FAIL",
+  "go_test_exit_status": 1,
+  "optional_skips": [],
+  "overall_result": "FAIL",
+  "package": "./...",
+  "required_cases": [
+    {
+      "name": "TestTargetWriterProductionExecutableDiscovery",
+      "package": "github.com/xtianxx/txharbor/internal/recovery",
+      "status": "PASS"
+    },
+    {
+      "name": "TestDrillTargetWitnessOldReconnectRejected",
+      "package": "github.com/xtianxx/txharbor/internal/recovery",
+      "status": "PASS"
+    },
+    {
+      "name": "TestDrillTargetWitnessOldRoleLoginDuringRestoreAcceptanceFailsClosed",
+      "package": "github.com/xtianxx/txharbor/internal/recovery",
+      "status": "PASS"
+    },
+    {
+      "name": "TestDrillTargetWitnessObserverTerminationDuringRestoreAcceptanceFailsClosed",
+      "package": "github.com/xtianxx/txharbor/internal/recovery",
+      "status": "PASS"
+    },
+    {
+      "name": "TestT058DrillE2EBackupAdvanceRestoreRefuseThenRelease",
+      "package": "github.com/xtianxx/txharbor/internal/recovery",
+      "status": "PASS"
+    },
+    {
+      "name": "TestT058DrillGapCannotBeClosedStaysPaused",
+      "package": "github.com/xtianxx/txharbor/internal/recovery",
+      "status": "PASS"
+    },
+    {
+      "name": "TestT058DrillEventLayerKafkaBrokerOffsetDivergence",
+      "package": "github.com/xtianxx/txharbor/internal/recovery",
+      "reason": "go test reported failure",
+      "status": "FAIL"
+    },
+    {
+      "name": "TestT058DrillEventEffectRecovery",
+      "package": "github.com/xtianxx/txharbor/internal/recovery",
+      "status": "PASS"
+    },
+    {
+      "name": "TestT058WithdrawalEffectRestoreRetry",
+      "package": "github.com/xtianxx/txharbor/internal/recovery",
+      "status": "PASS"
+    },
+    {
+      "name": "TestT059F1BackupUnusableCorruptTruncatedUnverified",
+      "package": "github.com/xtianxx/txharbor/internal/recovery",
+      "status": "PASS"
+    },
+    {
+      "name": "TestT059F2RestoreInterruptionNotRestoredRebuildRerunIdempotent",
+      "package": "github.com/xtianxx/txharbor/internal/recovery",
+      "reason": "go test reported failure",
+      "status": "FAIL"
+    },
+    {
+      "name": "TestT059F3IncompatibleProgramRefusedNoSilentDowngrade",
+      "package": "github.com/xtianxx/txharbor/internal/recovery",
+      "status": "PASS"
+    },
+    {
+      "name": "TestT059F4ExternalLeadZeroReplayZeroAuthorityWrites",
+      "package": "github.com/xtianxx/txharbor/internal/recovery",
+      "status": "PASS"
+    },
+    {
+      "name": "TestT059F5IsolationUnprovenRefusedAndNotInferred",
+      "package": "github.com/xtianxx/txharbor/internal/recovery",
+      "status": "PASS"
+    },
+    {
+      "name": "TestT059F6UnprovableGapStaysUnknownWithPackageAndEscalation",
+      "package": "github.com/xtianxx/txharbor/internal/recovery",
+      "status": "PASS"
+    },
+    {
+      "name": "TestT059F7UnauthorizedInsufficientStaleApprovalsRefused",
+      "package": "github.com/xtianxx/txharbor/internal/recovery",
+      "status": "PASS"
+    },
+    {
+      "name": "TestT060DrillRepeatedVerifyApproveReleaseCloseNoFlips",
+      "package": "github.com/xtianxx/txharbor/internal/recovery",
+      "status": "PASS"
+    },
+    {
+      "name": "TestT060DrillRestoreReentryConvergesWithSingleState",
+      "package": "github.com/xtianxx/txharbor/internal/recovery",
+      "reason": "go test reported failure",
+      "status": "FAIL"
+    },
+    {
+      "name": "TestT060DrillInstanceCloseOnlyWhenAllReleasedAndIdempotent",
+      "package": "github.com/xtianxx/txharbor/internal/recovery",
+      "status": "PASS"
+    },
+    {
+      "name": "TestT059F1BackupUnusableCorruptTruncatedUnverified/corrupt-verification",
+      "package": "github.com/xtianxx/txharbor/internal/recovery",
+      "status": "PASS"
+    },
+    {
+      "name": "TestT059F1BackupUnusableCorruptTruncatedUnverified/edited-verified-manifest",
+      "package": "github.com/xtianxx/txharbor/internal/recovery",
+      "status": "PASS"
+    },
+    {
+      "name": "TestT059F3IncompatibleProgramRefusedNoSilentDowngrade/incompatible-restore",
+      "package": "github.com/xtianxx/txharbor/internal/recovery",
+      "status": "PASS"
+    }
+  ],
+  "run_id": "run.mN1NOd",
+  "started_at": "2026-09-30T05:22:30Z",
+  "tree_fingerprint": "sha256:d761a4fa68d40e1eff40937ec466bdf2953664621b15d2aedabe8a942b6b552a"
+}

@@ -163,6 +163,85 @@ const (
 	EnvReconSettleLimit        = "TXHARBOR_RECON_SETTLE_LIMIT"
 	EnvReconWindowMaxProbes    = "TXHARBOR_RECON_WINDOW_MAX_PROBES"
 	EnvReconManagementTrust    = "TXHARBOR_RECON_MANAGEMENT_TRUST"
+	// 015 backup/recovery and safe service resumption (T003). Every knob is
+	// optional at Load and format-validated when present, so the serve/migrate
+	// flows keep their exact semantics; required-ness is enforced fail-closed
+	// by the recovery-admin command paths — a missing required value is refused
+	// by its exact key name ("not configured") and MUST NOT be replaced by an
+	// invented default (production RPO/RTO/frequency/retention thresholds are
+	// deployment rulings that remain pending; local values are test inputs
+	// only). The control store is an independent database with its own schema
+	// version sequence; the data DB gets zero schema changes this phase.
+	//
+	// The evidence-freshness family carries one tolerance per evidence category
+	// under the shared prefix. None of these names collides with the withdrawal
+	// kill-test keys (TXHARBOR_RECOVERY_KILL_CHILD/_DSN/_READY/_DISPATCH), and
+	// no existing key is renamed.
+	EnvRecoveryControlDSN = "TXHARBOR_RECOVERY_CONTROL_DSN"
+	// EnvRecoveryIsolatedTargetDSN is the deployment-owned disposable target
+	// used only for backup verification. It is distinct from the authoritative
+	// TXHARBOR_PG_DSN and must never come from operator input.
+	EnvRecoveryIsolatedTargetDSN = "TXHARBOR_RECOVERY_ISOLATED_TARGET_DSN"
+	// EnvRecoveryObserverDSN is a privileged observer connection to the same
+	// target endpoint, used to supervise and drain recovery child processes.
+	// It has no default and must never be included in audit data.
+	EnvRecoveryObserverDSN = "TXHARBOR_RECOVERY_OBSERVER_DSN"
+	// EnvRecoveryGateDSN is the R3 protected-lane recovery route: a
+	// passwordless local-socket conninfo naming the deployment's restricted
+	// recovery database role, used ONLY as the supervised restore child's
+	// peer-authenticated connection in the bound restore lane. It is never
+	// audited or logged, never falls back to another route, and refuses a
+	// password, TLS parameters or identity overrides (validated in
+	// internal/recovery).
+	EnvRecoveryGateDSN = "TXHARBOR_RECOVERY_GATE_DSN"
+	// EnvRecoveryDeploymentAdminDSN is the R2 deployment-lane ownership
+	// convergence identity: a privileged deployment-management connection to
+	// the same cluster as the restore target. It is used only for the
+	// convergence step that reassigns restored-object ownership to the
+	// original writer role and records the audited prerequisite; it never
+	// runs as the recovery role, and it is never audited or logged.
+	EnvRecoveryDeploymentAdminDSN = "TXHARBOR_RECOVERY_DEPLOYMENT_ADMIN_DSN"
+	EnvRecoveryPrincipal          = "TXHARBOR_RECOVERY_PRINCIPAL"
+	EnvRecoveryArtifactDir        = "TXHARBOR_RECOVERY_ARTIFACT_DIR"
+	// EnvRecoveryInstance binds an operator command to one recovery instance:
+	// a command invocation whose --instance disagrees with this deployment
+	// binding is refused (T022/T027 instance-bound execution).
+	EnvRecoveryInstance = "TXHARBOR_RECOVERY_INSTANCE"
+	EnvRecoveryGateTTL  = "TXHARBOR_RECOVERY_GATE_TTL"
+	// EnvRecoveryEntryChains is the deployment-controlled, complete inventory
+	// of chains served by this deployment. Its completeness is a deployment
+	// trust assumption: runtime code checks membership and binds an immutable
+	// snapshot, but must never infer completeness from releases or operator input.
+	EnvRecoveryEntryChains = "TXHARBOR_RECOVERY_ENTRY_CHAINS"
+	// EnvRecoveryEffectClassRuling carries the trusted deployment ruling of
+	// the real downstream effect classes (T050): a JSON object mapping
+	// effect-class tokens to "real_downstream" or
+	// "no_real_downstream_effect". It is deployment configuration, never an
+	// operator flag; an absent key means "not configured" and the two event
+	// capabilities stay conservatively dual. The recovery package parses and
+	// validates it (recovery.ParseEffectClassRuling); this package only checks
+	// that the value is a JSON object of string values.
+	EnvRecoveryEffectClassRuling = "TXHARBOR_RECOVERY_EFFECT_CLASS_RULING"
+	// EnvRecoveryEvidenceFreshnessPrefix prefixes the per-evidence-category
+	// freshness tolerance keys: TXHARBOR_RECOVERY_EVIDENCE_FRESHNESS_<CATEGORY>.
+	EnvRecoveryEvidenceFreshnessPrefix = "TXHARBOR_RECOVERY_EVIDENCE_FRESHNESS_"
+	EnvRecoveryRPOTarget               = "TXHARBOR_RECOVERY_RPO_TARGET"
+	EnvRecoveryRTOTarget               = "TXHARBOR_RECOVERY_RTO_TARGET"
+	EnvRecoveryBackupFrequency         = "TXHARBOR_RECOVERY_BACKUP_FREQUENCY"
+	EnvRecoveryRetention               = "TXHARBOR_RECOVERY_RETENTION"
+	// EnvRecoveryStatusTimeout/EnvRecoveryStatusMaxReads/EnvRecoveryStatusMaxRows
+	// bound one bounded read-only status review pass (FR-019/F13, T051): the
+	// wall-clock budget, the number of bounded reads one pass may issue and
+	// the number of rows one bounded read may return. They are optional at
+	// Load and must be positive when present; the `recovery-admin status`
+	// command refuses a missing or invalid value by exact key name (no
+	// default, no unbounded review) and a local test value is never a
+	// production threshold. None of these names collides with the withdrawal
+	// kill-test keys (TXHARBOR_RECOVERY_KILL_CHILD/_DSN/_READY/_DISPATCH), and
+	// no existing key is renamed.
+	EnvRecoveryStatusTimeout  = "TXHARBOR_RECOVERY_STATUS_TIMEOUT"
+	EnvRecoveryStatusMaxReads = "TXHARBOR_RECOVERY_STATUS_MAX_READS"
+	EnvRecoveryStatusMaxRows  = "TXHARBOR_RECOVERY_STATUS_MAX_ROWS"
 )
 const (
 	DefaultHTTPAddr           = "127.0.0.1:8080"
@@ -251,6 +330,10 @@ const (
 
 // Config is the validated application configuration.
 type Config struct {
+	// PGDSN is the deployment-owned data target. Recovery administration
+	// derives its immutable endpoint/role identity from this value; operator
+	// command input never supplies a target DSN. Deployment completeness and
+	// protection from alternate network aliases remain deployment assumptions.
 	PGDSN              string
 	RPCURL             string
 	ChainID            uint64
@@ -338,6 +421,11 @@ type Config struct {
 	// TXHARBOR_RECON_* knobs are set; the reconcile-admin command refuses
 	// missing/invalid values fail-closed (no defaults are invented here).
 	Recon ReconConfig
+	// 015 recovery operator surface (T003). Zero-valued until the
+	// TXHARBOR_RECOVERY_* knobs are set; the recovery-admin command paths
+	// refuse missing/invalid values fail-closed (no defaults are invented
+	// here).
+	Recovery RecoveryConfig
 }
 
 // ReconConfig is the 014 reconcile-admin configuration: the authenticated
@@ -382,6 +470,75 @@ type ReconConfig struct {
 	// through only in this batch: grant/revoke/query management commands are
 	// T023 and are deliberately not delivered here.
 	ManagementTrustRaw string
+}
+
+// RecoveryConfig is the 015 recovery configuration: the independent control
+// store, the authenticated principal binding, the artifact directory and the
+// configurable recovery objectives (FR-036). None of these values has a
+// default: a missing required value is refused by its exact key name ("not
+// configured") at the command path that needs it, and the production
+// RPO/RTO/frequency/retention thresholds remain deployment rulings (local test
+// values are never production thresholds). The per-category evidence freshness
+// tolerances live under EnvRecoveryEvidenceFreshnessPrefix and are resolved by
+// the verification layer (T038); a missing tolerance keeps the conclusion
+// conservative (unknown), never a pass.
+type RecoveryConfig struct {
+	// ControlDSN is the independent control-store DSN. It is never part of the
+	// data-DB backup/restore set, and it must never equal the data DSN (that
+	// equality is refused by the recovery-admin migrate/trust-boundary check).
+	ControlDSN string
+	// IsolatedTargetDSN is the explicitly configured disposable verification
+	// database. It is optional for ordinary runtime commands and required by
+	// recovery-admin verify-backup. Never include it in logs or audit records.
+	IsolatedTargetDSN string
+	// ObserverDSN is the privileged observer connection to the same PostgreSQL
+	// target endpoint used by verify-backup supervision. It is optional for
+	// ordinary commands and required by verify-backup. Never audit or log it.
+	ObserverDSN string
+	// GateDSN is the R3 protected-lane recovery route (passwordless local
+	// socket, restricted recovery role). Empty means not configured; the
+	// bound restore lane may use the historical TargetDSN route only when
+	// this stays empty AND no admission handle is in force (ADR-004 §2.1).
+	// Never audit or log it.
+	GateDSN string
+	// DeploymentAdminDSN is the R2 deployment-lane convergence identity for
+	// bound restores. Empty means not configured: a bound restore refuses at
+	// the coordinator when it reaches acceptance without a convergence step.
+	// Never audit or log it.
+	DeploymentAdminDSN string
+	// Principal is the authenticated caller identity binding ("<kind>:<id>",
+	// controlled deployment config; free text never authorizes).
+	Principal string
+	// ArtifactDir is the backup artifact and manifest directory.
+	ArtifactDir string
+	// GateTTL bounds the gate-evaluation cache (required by the gate; no
+	// default).
+	GateTTL time.Duration
+	// EntryChains is the sorted, unique complete deployment entry-chain set.
+	// Empty means it was not configured; lifecycle entry points refuse that.
+	EntryChains []uint64
+	// EffectClassRulingJSON is the raw JSON object of the trusted effect-class
+	// ruling (EnvRecoveryEffectClassRuling). Empty means "not configured"; the
+	// recovery package parses and validates the closed impact vocabulary
+	// (recovery.ParseEffectClassRuling) at assembly, where a malformed ruling
+	// refuses the command by key name.
+	EffectClassRulingJSON string
+	// RPOTarget is the configured recovery-point objective.
+	RPOTarget time.Duration
+	// RTOTarget is the configured recovery-time objective.
+	RTOTarget time.Duration
+	// BackupFrequency is the configured backup cadence.
+	BackupFrequency time.Duration
+	// Retention is the configured backup retention period.
+	Retention time.Duration
+	// StatusTimeout/StatusMaxReads/StatusMaxRows bound one bounded read-only
+	// status review pass (FR-019/F13, T051). The zero value means "not
+	// configured": the status command refuses a missing value by exact key
+	// name and never invents a bound, so an unconfigured review would scan
+	// unbounded.
+	StatusTimeout  time.Duration
+	StatusMaxReads int
+	StatusMaxRows  int
 }
 
 // EventsConfig is the 013 events runtime configuration. Technical cadence
@@ -661,6 +818,7 @@ func Load(getenv Getenv) (*Config, error) {
 	c.loadWorker(getenv, &errs)
 	c.loadEvents013(getenv, &errs)
 	c.loadRecon014(getenv, &errs)
+	c.loadRecovery015(getenv, &errs)
 	// Nonce read API (008 FR-19): the bearer token passes through verbatim
 	// and is never formatted into an error. Unset or empty leaves the read
 	// endpoints fail-closed (the read provider authenticates against it).
@@ -1408,6 +1566,143 @@ func (c *Config) loadRecon014(getenv Getenv, errs *[]error) {
 	positiveInt(EnvReconMaxEventRows, &c.Recon.MaxEventRows)
 	positiveInt(EnvReconSettleLimit, &c.Recon.SettleLimit)
 	positiveInt(EnvReconWindowMaxProbes, &c.Recon.WindowMaxProbes)
+}
+
+// loadRecovery015 parses the 015 recovery knobs (T003). Every knob is optional
+// at Load and format-validated when present, so the serve/migrate flows keep
+// their exact semantics. Required-ness is enforced fail-closed by the
+// recovery-admin command paths: a missing required value is refused by name
+// ("not configured") and MUST NOT be replaced by an invented default —
+// production RPO/RTO/frequency/retention thresholds are deployment rulings that
+// are still pending, and a local test value is never a production threshold.
+// The per-category TXHARBOR_RECOVERY_EVIDENCE_FRESHNESS_<CATEGORY> family is
+// resolved by the verification layer (T038) through
+// EnvRecoveryEvidenceFreshnessPrefix; a missing tolerance keeps a conclusion
+// conservative (unknown), never a pass.
+func (c *Config) loadRecovery015(getenv Getenv, errs *[]error) {
+	if raw, ok := getenv(EnvRecoveryEntryChains); ok {
+		chains, err := ParseRecoveryEntryChains(raw)
+		if err != nil {
+			*errs = append(*errs, invalid(EnvRecoveryEntryChains, "%v", err))
+		} else {
+			c.Recovery.EntryChains = chains
+		}
+	}
+	if raw, ok := getenv(EnvRecoveryControlDSN); ok && raw != "" {
+		if err := validateDSN(raw); err != nil {
+			*errs = append(*errs, invalid(EnvRecoveryControlDSN, "%v", err))
+		} else {
+			c.Recovery.ControlDSN = raw
+		}
+	}
+	if raw, ok := getenv(EnvRecoveryIsolatedTargetDSN); ok && raw != "" {
+		if err := validateDSN(raw); err != nil {
+			*errs = append(*errs, invalid(EnvRecoveryIsolatedTargetDSN, "%v", err))
+		} else {
+			c.Recovery.IsolatedTargetDSN = raw
+		}
+	}
+	if raw, ok := getenv(EnvRecoveryObserverDSN); ok && raw != "" {
+		if err := validateDSN(raw); err != nil {
+			*errs = append(*errs, invalid(EnvRecoveryObserverDSN, "%v", err))
+		} else {
+			c.Recovery.ObserverDSN = raw
+		}
+	}
+	if raw, ok := getenv(EnvRecoveryGateDSN); ok && raw != "" {
+		if err := validateDSN(raw); err != nil {
+			*errs = append(*errs, invalid(EnvRecoveryGateDSN, "%v", err))
+		} else {
+			c.Recovery.GateDSN = raw
+		}
+	}
+	if raw, ok := getenv(EnvRecoveryDeploymentAdminDSN); ok && raw != "" {
+		if err := validateDSN(raw); err != nil {
+			*errs = append(*errs, invalid(EnvRecoveryDeploymentAdminDSN, "%v", err))
+		} else {
+			c.Recovery.DeploymentAdminDSN = raw
+		}
+	}
+	if raw, ok := getenv(EnvRecoveryPrincipal); ok && raw != "" {
+		if strings.TrimSpace(raw) != raw {
+			*errs = append(*errs, invalid(EnvRecoveryPrincipal, "must not carry surrounding whitespace"))
+		} else {
+			c.Recovery.Principal = raw
+		}
+	}
+	if raw, ok := getenv(EnvRecoveryArtifactDir); ok && raw != "" {
+		c.Recovery.ArtifactDir = raw
+	}
+	if raw, ok := getenv(EnvRecoveryEffectClassRuling); ok && strings.TrimSpace(raw) != "" {
+		trimmed := strings.TrimSpace(raw)
+		var ruling map[string]string
+		if err := json.Unmarshal([]byte(trimmed), &ruling); err != nil {
+			*errs = append(*errs, invalid(EnvRecoveryEffectClassRuling,
+				"must be a JSON object mapping effect-class tokens to impacts: %v", err))
+		} else {
+			c.Recovery.EffectClassRulingJSON = trimmed
+		}
+	}
+	positiveDuration := func(name string, dest *time.Duration) {
+		raw, ok := getenv(name)
+		if !ok || raw == "" {
+			return
+		}
+		d, err := time.ParseDuration(raw)
+		if err != nil || d <= 0 {
+			*errs = append(*errs, invalid(name, "%q is not a positive duration", raw))
+			return
+		}
+		*dest = d
+	}
+	positiveInt := func(name string, dest *int) {
+		raw, ok := getenv(name)
+		if !ok || raw == "" {
+			return
+		}
+		n, err := strconv.Atoi(raw)
+		if err != nil || n <= 0 {
+			*errs = append(*errs, invalid(name, "%q is not a positive decimal integer", raw))
+			return
+		}
+		*dest = n
+	}
+	positiveDuration(EnvRecoveryGateTTL, &c.Recovery.GateTTL)
+	positiveDuration(EnvRecoveryRPOTarget, &c.Recovery.RPOTarget)
+	positiveDuration(EnvRecoveryRTOTarget, &c.Recovery.RTOTarget)
+	positiveDuration(EnvRecoveryBackupFrequency, &c.Recovery.BackupFrequency)
+	positiveDuration(EnvRecoveryRetention, &c.Recovery.Retention)
+	// The bounded read-only status review bounds are optional at Load and
+	// positive when present (T051/F13); the status command refuses a missing
+	// value by exact key name and never performs an unbounded review.
+	positiveDuration(EnvRecoveryStatusTimeout, &c.Recovery.StatusTimeout)
+	positiveInt(EnvRecoveryStatusMaxReads, &c.Recovery.StatusMaxReads)
+	positiveInt(EnvRecoveryStatusMaxRows, &c.Recovery.StatusMaxRows)
+}
+
+// ParseRecoveryEntryChains parses a canonical, nonempty comma-separated list
+// of positive chain IDs in strictly ascending order. Requiring canonical
+// ordering makes the exact deployment inventory stable for instance binding.
+func ParseRecoveryEntryChains(raw string) ([]uint64, error) {
+	if strings.TrimSpace(raw) != raw || raw == "" {
+		return nil, errors.New("must be a nonempty comma-separated list of positive chain IDs")
+	}
+	parts := strings.Split(raw, ",")
+	chains := make([]uint64, 0, len(parts))
+	for i, part := range parts {
+		if part == "" || strings.TrimSpace(part) != part {
+			return nil, errors.New("chain IDs must be nonempty canonical decimal integers")
+		}
+		id, err := strconv.ParseUint(part, 10, 64)
+		if err != nil || id == 0 || strconv.FormatUint(id, 10) != part {
+			return nil, fmt.Errorf("%q is not a positive canonical chain ID", part)
+		}
+		if i > 0 && chains[i-1] >= id {
+			return nil, errors.New("chain IDs must be strictly ascending and unique")
+		}
+		chains = append(chains, id)
+	}
+	return chains, nil
 }
 
 // parseBrokerList splits a comma-separated Kafka bootstrap list and validates

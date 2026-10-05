@@ -1,0 +1,14 @@
+.git/
+.slim/
+.omo/
+.env
+.env.*
+!.env.example
+Dockerfile*
+.dockerignore
+*.log*
+coverage/
+*.test
+*.out
+dist/
+scripts/drillcoverage/__pycache__/

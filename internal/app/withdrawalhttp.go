@@ -22,6 +22,20 @@
 // logger of its own and rides the process logger the serve lifecycle already
 // runs, with every value funnelled through logx.Redact (FR-20/FR-21, zero
 // secrets).
+//
+// T031 adds the 015 resumption-gate admission to the same two entry points.
+// POST /withdrawals is the single action new_withdrawal_creation and GET
+// /withdrawals/{id} is the single action query (contracts/resumption-gate.md
+// §1). The mounted /withdrawals chain is wrapped by withdrawalRecoveryGate, so
+// the admission runs OUTSIDE guardRoute and before the 007 decode/auth order;
+// the wrapper consumes T030's shared serve recovery wiring, so there is one
+// gate assembly and one admission per action. A deployment with no control DSN
+// leaves the pre-015 runtime unchanged (FR-023); a configured but unusable
+// control store refuses startup/the entry points fail-closed with the closed
+// refusal_class in the refusal body. The admission never replaces the 007/013
+// gates: a released action still passes decode/auth, the authorization checks,
+// CapacityGate and the rate limiter in their original order (FR-025/F20
+// two-phase authority).
 package app
 
 import (
@@ -37,6 +51,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/xtianxx/txharbor/internal/metrics"
+	"github.com/xtianxx/txharbor/internal/recovery"
 	"github.com/xtianxx/txharbor/internal/withdrawal"
 )
 
@@ -277,6 +292,67 @@ func (h *WithdrawalHandler) ServeGET(w http.ResponseWriter, r *http.Request) {
 			Execution: view.Recovery.Execution,
 		},
 	})
+}
+
+// ---------------------------------------------------------------------------
+// 015 resumption-gate admission (T031)
+// ---------------------------------------------------------------------------
+
+// withdrawalRecoveryGate installs the T031 admission in front of the mounted
+// /withdrawals chain. It runs OUTSIDE guardRoute and therefore before the 013
+// degradation/rate-limit middleware and before the 007 decode/auth order: the
+// single write action POST /withdrawals is admitted as
+// new_withdrawal_creation, and the single read action GET /withdrawals/{id}
+// falls through to the read-side query gate (T030's recoveryQueryGate), which
+// admits it as query. A refusal is rendered with the closed refusal_class and
+// the route handler (and guardRoute) never runs. Requests that are not one of
+// those two single actions keep the original 007 path unchanged (for example
+// the collection GET still answers its 405), so no admission is spent on a
+// non-action. The wrapper is a no-op when recovery mode is not configured (nil
+// wiring), and it never replaces the original gates: a released request still
+// runs the full 013/007 chain (FR-025/F20).
+func withdrawalRecoveryGate(wiring *serveRecoveryWiring, next http.Handler) http.Handler {
+	if wiring == nil {
+		return next
+	}
+	readGated := recoveryQueryGate(wiring, next)
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case withdrawalCreateAction(r):
+			dec, err := wiring.admit(r.Context(), recovery.CapabilityNewWithdrawalCreation, "serve_withdrawal_create")
+			if err != nil || !dec.Allowed {
+				writeRecoveryRefusal(w, recovery.CapabilityNewWithdrawalCreation, dec)
+				return
+			}
+			next.ServeHTTP(w, r)
+		case withdrawalReadAction(r):
+			readGated.ServeHTTP(w, r)
+		default:
+			next.ServeHTTP(w, r)
+		}
+	})
+}
+
+// withdrawalCreateAction reports whether the request is the single write
+// action of the /withdrawals collection (contracts/resumption-gate.md §1 row
+// 5). Anything else — a read, a method mismatch, another route shape — is not
+// this action and is left to the read gate and the original handlers.
+func withdrawalCreateAction(r *http.Request) bool {
+	if r.Method != http.MethodPost {
+		return false
+	}
+	return r.URL.Path == "/withdrawals" || r.URL.Path == "/withdrawals/"
+}
+
+// withdrawalReadAction reports whether the request is the single read action
+// GET /withdrawals/{id} (contracts/resumption-gate.md §1 row 1). A GET on the
+// collection is the original 405 method-mismatch path, not a query, and is
+// left untouched.
+func withdrawalReadAction(r *http.Request) bool {
+	if r.Method != http.MethodGet {
+		return false
+	}
+	return r.URL.Path != "/withdrawals" && r.URL.Path != "/withdrawals/"
 }
 
 // withdrawalBearerToken extracts the "Bearer <txh_…>" credential. A missing,

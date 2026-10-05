@@ -5,6 +5,13 @@
 // COMMIT), the persisted delivery-unknown basis, and same-identity re-gate
 // recovery by re-reading the durable result.
 //
+// T070 adds the 015 resumption-gate process-internal check point: every
+// attempt must pass the injected DeliveryGate before the delivery transaction
+// opens (zero bytes on refusal; a missing gate refuses, never pass-through).
+// The supported signer-serve assembly provides it; an in-process caller
+// outside that assembly that fabricates the checkpoint cannot be automatically
+// detected (contracts/resumption-gate.md §1.2, DG-1 family).
+//
 // 009 never broadcasts: the response bytes leave only through the caller's
 // DeliverySink, which is the local transport (HTTP response writer). This file
 // imports no RPC/dial package, and delivery never re-signs — the persisted
@@ -102,6 +109,31 @@ type DeliveryDeps struct {
 	DB        DB
 	Binding   BindingReader
 	ScopeLock ScopeLocker
+	// RecoveryGate is the 015 resumption-gate checkpoint (T070). The supported
+	// signer-serve assembly always provides it; a missing function refuses
+	// every delivery (fail-closed) and is never interpreted as pass-through.
+	RecoveryGate DeliveryGate
+}
+
+// DeliveryGate is the injected 015 resumption-gate checkpoint of delivery
+// (T070). It runs once per delivery attempt before the delivery transaction
+// opens, so a refusal writes zero signature bytes and inserts no admission
+// row. The checkpoint is phase one only (F20): the 009 gates inside
+// deliverGated — 006 recovery gate, 008 binding, 007 grant, can_sign and the
+// T-deliver authorization — stay independently enforced and are never
+// replaced, merged or short-circuited.
+type DeliveryGate func(ctx context.Context, req DeliveryGateRequest) error
+
+// DeliveryGateRequest is the delivery fact set the injected checkpoint judges:
+// identity and scope references only, never signature bytes or credentials.
+type DeliveryGateRequest struct {
+	SigningRequestID string
+	IntentID         string
+	AttemptID        string
+	CallerID         int64
+	ChainID          int64
+	Sender           string
+	AuthorizationID  string
 }
 
 // DeliveryResult is the outcome of one delivery attempt: the recorded verdict,
@@ -171,12 +203,40 @@ func Deliver(ctx context.Context, deps DeliveryDeps, caller Caller, signingReque
 	if deps.DB == nil || deps.Binding == nil || sink == nil {
 		return nil, refuse(ClassStorageUnavailable, "", "delivery dependencies incomplete")
 	}
+	// T070: the 015 resumption gate is a required delivery dependency. A
+	// missing checkpoint function is fail-closed, never pass-through: the
+	// caller must wire the supported admission (app-layer signerDeliveryRecoveryGate).
+	if deps.RecoveryGate == nil {
+		return nil, refuse(ClassSignatureWithheld, "",
+			"delivery refuses: the 015 recovery gate checkpoint is not wired (fail-closed)")
+	}
 	row, err := readDeliveryRow(ctx, deps.DB, caller.ID, signingRequestID)
 	if err != nil {
 		return nil, refuse(ClassStorageUnavailable, "", "storage unavailable")
 	}
 	if row == nil {
 		return nil, refuse(ClassOutcomeNotYetVisible, "", "no durable result for this identity; retry the same identity")
+	}
+
+	// T070 process-internal check point: every delivery attempt — first
+	// response, same-identity retransmit, or a replay of an already-delivered
+	// request — passes the 015 existing_withdrawal_recovery admission before
+	// the delivery transaction opens. A refusal writes zero signature bytes,
+	// inserts no admission row and never re-signs; the same identity can be
+	// retried once the capability is released. 009's replay and unknown
+	// discipline is untouched: the checkpoint only gates the attempt, it never
+	// turns history into a retransmit permit.
+	if err := deps.RecoveryGate(ctx, DeliveryGateRequest{
+		SigningRequestID: row.signingRequestID,
+		IntentID:         row.intentID,
+		AttemptID:        row.attemptID,
+		CallerID:         row.callerID,
+		ChainID:          row.chainID,
+		Sender:           row.sender,
+		AuthorizationID:  row.authorizationID,
+	}); err != nil {
+		return nil, refuse(ClassSignatureWithheld, "",
+			"delivery blocked: recovery gate: "+boundedDeliveryGateDetail(err.Error()))
 	}
 
 	// Every delivery — first response, same-identity retransmit, or a replay of
@@ -358,6 +418,18 @@ func renderDeliveryPayload(row *deliveryRow) ([]byte, error) {
 		TxHash:           row.txHash,
 		Delivery:         string(VerdictDelivered),
 	})
+}
+
+// boundedDeliveryGateDetail renders the injected checkpoint's error on one
+// bounded line for the refusal message. The supported assembly returns only
+// the closed refusal class here; the bound keeps any future cause from
+// spilling into the wire body.
+func boundedDeliveryGateDetail(msg string) string {
+	msg = strings.ReplaceAll(msg, "\n", " ")
+	if len(msg) > 256 {
+		return msg[:256]
+	}
+	return msg
 }
 
 // readDeliveryRow loads the own request + persisted result snapshot.

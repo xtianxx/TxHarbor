@@ -2,6 +2,13 @@
 // serve listener (contracts/api.md §1-§2): POST admission and (T035) GET view
 // under /withdrawals/{request_id}/execution. The handler is the transport
 // boundary; the domain decisions live in internal/execution.
+//
+// T032 adds the 015 existing_withdrawal_recovery admission of the write path
+// (servePOST): it is this HTTP funnel's own checkpoint — independent of the
+// CLI `withdrawal-exec` execOperatorOp funnel — installed before
+// execution.Admit, and it never replaces the 011 can_execute/execution gates
+// (two-phase authority, F20/FR-025). The GET view stays on serve's query gate
+// (T030); this file only gates the write path.
 package app
 
 import (
@@ -10,14 +17,18 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"os"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/xtianxx/txharbor/internal/execution"
+	"github.com/xtianxx/txharbor/internal/logx"
 	"github.com/xtianxx/txharbor/internal/metrics"
+	"github.com/xtianxx/txharbor/internal/recovery"
 	"github.com/xtianxx/txharbor/internal/withdrawal"
 )
 
@@ -28,11 +39,45 @@ const codeForbidden = "forbidden"
 
 // WithdrawalExecutionHandler serves the 011 execution routes on the shared
 // probe listener. Pool is the shared pool; ChainID is unused by the admission
-// route but kept for symmetry with the view route.
+// route but kept for symmetry with the view route (it scopes the 015 admission
+// of the write path).
+//
+// The write path carries its own 015 existing_withdrawal_recovery admission
+// (T032): the CLI `withdrawal-exec` funnel (execOperatorOp) is not this one,
+// so the admission is installed here, before execution.Admit. It is assembled
+// lazily from the process environment on first use — the handler's
+// construction site is shared with the serve process, which does not pass its
+// wiring — via withdrawalExecutionRecoveryLoad; tests may replace that seam.
 type WithdrawalExecutionHandler struct {
 	Pool    *pgxpool.Pool
 	ChainID int64
 	Metrics *metrics.Metrics
+
+	recoveryOnce   sync.Once
+	recoveryWiring *existingWithdrawalRecoveryWiring
+	recoveryErr    error
+}
+
+// withdrawalExecutionRecoveryLoad assembles the 015 admission of the execution
+// write path from the process environment. It is a seam for tests; production
+// uses the process environment (the same environment the serve process
+// started with).
+var withdrawalExecutionRecoveryLoad = func(ctx context.Context, chainID uint64, getenv func(string) (string, bool)) (*existingWithdrawalRecoveryWiring, error) {
+	cfg, err := existingWithdrawalRecoveryConfigFromEnv(getenv, chainID)
+	if err != nil {
+		return nil, err
+	}
+	return assembleExistingWithdrawalRecovery(ctx, cfg, getenv)
+}
+
+// recoveryAdmission returns the lazily assembled admission. A nil wiring with
+// a nil error is normal mode (no control store configured, FR-023); a non-nil
+// error is a fail-closed assembly refusal the caller must surface.
+func (h *WithdrawalExecutionHandler) recoveryAdmission(ctx context.Context) (*existingWithdrawalRecoveryWiring, error) {
+	h.recoveryOnce.Do(func() {
+		h.recoveryWiring, h.recoveryErr = withdrawalExecutionRecoveryLoad(ctx, uint64(h.ChainID), os.LookupEnv)
+	})
+	return h.recoveryWiring, h.recoveryErr
 }
 
 // ServeHTTP dispatches by method; the mux registers the method-qualified
@@ -63,11 +108,21 @@ type executionAdmissionResponse struct {
 	AuthorizationVersion int64  `json:"authorization_version"`
 }
 
-// servePOST runs the §1 order: body shape (400, no DB), Bearer authentication
-// (401), fixed can_execute permission (403, fail-closed, before any domain
-// read), then the admission core. A refused admission is 422 with the recorded
-// class; a storage failure is 503 and is never rendered as a false refusal.
+// servePOST runs the §1 order: 015 recovery admission (T032, fail-closed,
+// before any body/auth/domain work), body shape (400, no DB), Bearer
+// authentication (401), fixed can_execute permission (403, fail-closed, before
+// any domain read), then the admission core. A refused admission is 422 with
+// the recorded class; a storage failure is 503 and is never rendered as a
+// false refusal.
+//
+// The 015 admission is a distinct funnel from the CLI `withdrawal-exec`
+// (execOperatorOp): a refusal here produces no claim, no intent and no
+// progress, and the allowed case still runs every 011 can_execute/execution
+// gate unchanged (two-phase authority, FR-025).
 func (h *WithdrawalExecutionHandler) servePOST(w http.ResponseWriter, r *http.Request) {
+	if code := h.admitExecutionRecovery(w, r); code != 0 {
+		return
+	}
 	if !emptyOrJSONBody(r.Body) {
 		withdrawalWriteError(w, http.StatusBadRequest, string(withdrawal.CodeMalformedRequest), "request body is not valid JSON", "", "", newWithdrawalTraceID())
 		return
@@ -129,6 +184,65 @@ func (h *WithdrawalExecutionHandler) servePOST(w http.ResponseWriter, r *http.Re
 		}
 		withdrawalWriteError(w, http.StatusUnprocessableEntity, code, "execution admission refused", requestID, "", newWithdrawalTraceID())
 	}
+}
+
+// executionRecoveryRefusalBody is the 015 refusal shape of the execution write
+// path: the closed refusal_class is always exposed and the gate audits the
+// refusal itself. It never carries credentials or signature bytes.
+type executionRecoveryRefusalBody struct {
+	Error        string `json:"error"`
+	Capability   string `json:"capability"`
+	RefusalClass string `json:"refusal_class"`
+	Reason       string `json:"reason,omitempty"`
+	InstanceID   string `json:"instance_id,omitempty"`
+	TraceID      string `json:"trace_id"`
+}
+
+// admitExecutionRecovery evaluates the 015 existing_withdrawal_recovery
+// admission before the write path acts (T032). It returns 0 when the action
+// may proceed (normal mode included) and non-zero after writing the refusal
+// (503, closed refusal_class) when the gate denies or the admission cannot be
+// evaluated — there is no degraded pass-through. A refusal is a no-op for the
+// 011 state: no claim, no intent admission, no progress, and the retry stays
+// available for when the capability is released.
+func (h *WithdrawalExecutionHandler) admitExecutionRecovery(w http.ResponseWriter, r *http.Request) int {
+	wiring, err := h.recoveryAdmission(r.Context())
+	if err != nil {
+		writeExecutionRecoveryRefusal(w, recovery.CapabilityExistingWithdrawalRecovery,
+			recovery.GateDecision{RefusalClass: recovery.RefusalControlStoreUnavailable, Reason: logx.Redact(err.Error())})
+		return 1
+	}
+	if wiring == nil {
+		return 0
+	}
+	dec, aerr := wiring.admit(r.Context(), recovery.CapabilityExistingWithdrawalRecovery,
+		"execution_http_admit", executionRequestID(r))
+	if aerr == nil && dec.Allowed {
+		return 0
+	}
+	if aerr != nil && dec.Reason == "" {
+		dec.Reason = logx.Redact(aerr.Error())
+	}
+	writeExecutionRecoveryRefusal(w, recovery.CapabilityExistingWithdrawalRecovery, dec)
+	return 1
+}
+
+// writeExecutionRecoveryRefusal renders one 015 gate refusal as a bounded JSON
+// 503. A decision without a known closed-set class is surfaced as
+// control_store_unavailable: the response never invents a class and never a
+// 2xx for a refused admission.
+func writeExecutionRecoveryRefusal(w http.ResponseWriter, capability recovery.Capability, dec recovery.GateDecision) {
+	class := existingWithdrawalRecoveryRefusalClass(dec)
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusServiceUnavailable)
+	_ = json.NewEncoder(w).Encode(executionRecoveryRefusalBody{
+		Error:        "recovery_gate_refused",
+		Capability:   string(capability),
+		RefusalClass: string(class),
+		Reason:       dec.Reason,
+		InstanceID:   dec.InstanceID,
+		TraceID:      newWithdrawalTraceID(),
+	})
 }
 
 // executionRequestID extracts {request_id} from the path, tolerating both a

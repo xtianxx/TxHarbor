@@ -15,6 +15,7 @@ import (
 	"github.com/xtianxx/txharbor/internal/events"
 	"github.com/xtianxx/txharbor/internal/indexer"
 	"github.com/xtianxx/txharbor/internal/logx"
+	"github.com/xtianxx/txharbor/internal/recovery"
 )
 
 // Event publisher loop initial values (to be calibrated after measurement).
@@ -31,6 +32,13 @@ const (
 // bounded claim/publish loop, the periodic reconciliation audit (T035) and a
 // graceful stop (stop claiming, finish the in-flight batch, release what was
 // not confirmed).
+//
+// 015 wiring (T033): when TXHARBOR_RECOVERY_CONTROL_DSN is configured, the
+// entry admits event_publishing before any broker contact and before every
+// claim batch and settle phase; a refusal stops the entry and surfaces the
+// closed refusal_class (the gate audits it). The outbox is never claimed,
+// settled or progressed while the capability is not released, and no real
+// downstream event is published.
 //
 // Guarantee statement (global, MUST NOT be weakened): delivery is
 // at-least-once and processing is idempotent; this command never claims a
@@ -61,6 +69,27 @@ func EventPublisher(ctx context.Context, args []string, d Deps) int {
 		return 1
 	}
 	fmt.Fprintf(stdout, "txharbor event-publisher: config %s\n", cfg.Summary())
+
+	// 015 resumption-gate assembly (T033). Recovery mode is armed by
+	// configuring TXHARBOR_RECOVERY_CONTROL_DSN: the entry then admits
+	// event_publishing before its first action (here, and again before every
+	// claim and settle) and refuses before any broker contact. Not configured
+	// means normal mode (FR-023); once configured, a missing gate TTL, an
+	// unreachable control store or an unknown/incompatible schema refuses
+	// startup — no degraded pass-through.
+	wiring, err := assembleEventsRecovery(ctx, cfg, d.getenv(), recovery.CapabilityEventPublishing)
+	if err != nil {
+		fmt.Fprintf(stderr, "txharbor event-publisher: %s\n", logx.Redact(err.Error()))
+		return 1
+	}
+	defer wiring.close()
+	// Startup admission before any broker contact: while a recovery instance
+	// is open and event_publishing is not released, the entry must not reach
+	// the broker, claim a row or attempt a topic call at all.
+	if err := wiring.require(ctx, recovery.CapabilityEventPublishing, "startup"); err != nil {
+		fmt.Fprintf(stderr, "txharbor event-publisher: refused: %s\n", err.Error())
+		return 1
+	}
 
 	pool, err := db.OpenPool(ctx, cfg.PGDSN, cfg.ProbeTimeout)
 	if err != nil {
@@ -110,12 +139,19 @@ func EventPublisher(ctx context.Context, args []string, d Deps) int {
 
 	fmt.Fprintf(stdout, "txharbor event-publisher: owner=%s topic=%s batch=%d lease=%s\n",
 		owner, cfg.Kafka.Topic, cfg.Events.Publisher.Batch, cfg.Events.Publisher.LeaseTTL)
-	runEventPublisherLoop(ctx, pub, eventPublisherLoopOptions{
+	var runnable outboxPublisher = pub
+	if wiring != nil {
+		runnable = &gatedOutboxPublisher{inner: pub, observer: pub.Observer, gate: wiring}
+	}
+	if err := runEventPublisherLoop(ctx, runnable, eventPublisherLoopOptions{
 		PollInterval:  cfg.Events.Publisher.PollInterval,
 		AuditInterval: eventPublisherAuditInterval,
 		Audit:         audit,
 		Log:           log,
-	})
+	}); err != nil {
+		fmt.Fprintf(stderr, "txharbor event-publisher: refused: %s\n", err.Error())
+		return 1
+	}
 	fmt.Fprintln(stdout, "txharbor event-publisher: stopped")
 	return 0
 }
@@ -124,6 +160,62 @@ func EventPublisher(ctx context.Context, args []string, d Deps) int {
 type outboxPublisher interface {
 	PublishOnce(ctx context.Context) (events.PublishOutcome, error)
 	RefreshGauges(ctx context.Context) error
+}
+
+// outboxPhasePublisher is the exported two-phase publisher surface the gated
+// wrapper drives. events.Publisher exposes ClaimBatch and PublishClaimed
+// precisely so a caller can slot a checkpoint between claim and settle; the
+// wrapper never re-derives claim/settle semantics.
+type outboxPhasePublisher interface {
+	ClaimBatch(ctx context.Context) ([]events.OutboxRecord, error)
+	PublishClaimed(ctx context.Context, records []events.OutboxRecord) (events.PublishOutcome, error)
+	RefreshGauges(ctx context.Context) error
+}
+
+// gatedOutboxPublisher is the T033 wiring of the two checkpoints of
+// contracts/resumption-gate.md §1: one admission of event_publishing before
+// the claim batch and one before the settle phase. A refusal at either point
+// returns a *eventsGateRefusedError and stops the loop; nothing was claimed by
+// the refused admission, nothing was published or settled, and no outbox
+// progress advanced. Rows already claimed by an allowed admission stay leased
+// (no release/settle, so the outbox is untouched) until the bounded lease
+// returns them to pending — the at-least-once delivery semantics are
+// unchanged.
+//
+// The settle admission is taken before the publish+settle phase of
+// PublishClaimed: a refusal there also suppresses the publish, so no real
+// downstream event is emitted (FR-009/012).
+type gatedOutboxPublisher struct {
+	inner    outboxPhasePublisher
+	observer events.PublishObserver
+	gate     *eventsRecoveryWiring
+}
+
+// PublishOnce runs one gated claim -> publish -> settle cycle.
+func (p *gatedOutboxPublisher) PublishOnce(ctx context.Context) (events.PublishOutcome, error) {
+	if err := p.gate.require(ctx, recovery.CapabilityEventPublishing, "claim_batch"); err != nil {
+		return events.PublishOutcome{}, err
+	}
+	records, err := p.inner.ClaimBatch(ctx)
+	if err != nil {
+		return events.PublishOutcome{}, err
+	}
+	if len(records) == 0 {
+		return events.PublishOutcome{}, nil
+	}
+	if p.observer != nil {
+		p.observer.ObserveOutboxAttempts(len(records))
+	}
+	if err := p.gate.require(ctx, recovery.CapabilityEventPublishing, "settle_batch"); err != nil {
+		return events.PublishOutcome{Claimed: len(records)}, err
+	}
+	return p.inner.PublishClaimed(ctx, records)
+}
+
+// RefreshGauges delegates the read-only backlog observation. Gauges are
+// observations only; they never admit an action and never advance the outbox.
+func (p *gatedOutboxPublisher) RefreshGauges(ctx context.Context) error {
+	return p.inner.RefreshGauges(ctx)
 }
 
 // auditEntry is the periodic reconciliation entry (T035).
@@ -143,8 +235,11 @@ type eventPublisherLoopOptions struct {
 // cancelled: at most one bounded batch per poll interval (the drain rate is
 // bounded by batch/poll, never an unbounded broker/PG burst), a periodic
 // reconciliation pass, gauge refresh, and a graceful stop — the in-flight
-// batch settles and nothing new is claimed.
-func runEventPublisherLoop(ctx context.Context, pub outboxPublisher, opts eventPublisherLoopOptions) {
+// batch settles and nothing new is claimed. A 015 gate refusal is terminal:
+// the loop stops immediately and returns the refusal so the caller can surface
+// the closed refusal_class. Every other cycle error is logged and the loop
+// keeps running (the daily runtime semantics are unchanged).
+func runEventPublisherLoop(ctx context.Context, pub outboxPublisher, opts eventPublisherLoopOptions) error {
 	log := opts.Log
 	if log == nil {
 		log = slog.Default()
@@ -161,11 +256,19 @@ func runEventPublisherLoop(ctx context.Context, pub outboxPublisher, opts eventP
 	var lastAudit time.Time
 	for {
 		if ctx.Err() != nil {
-			return
+			return nil
 		}
 		outcome, err := pub.PublishOnce(ctx)
-		if err != nil && ctx.Err() == nil {
-			log.Warn("publish cycle failed", "error", logx.Redact(err.Error()))
+		if err != nil {
+			var refused *eventsGateRefusedError
+			if errors.As(err, &refused) {
+				// The gate denied an action (claim or settle): nothing was
+				// claimed/settled by it and nothing further may be attempted.
+				return refused
+			}
+			if ctx.Err() == nil {
+				log.Warn("publish cycle failed", "error", logx.Redact(err.Error()))
+			}
 		}
 		if err == nil && outcome.Claimed > 0 {
 			log.Info("publish cycle", "claimed", outcome.Claimed, "acked", outcome.Acked,
@@ -180,7 +283,7 @@ func runEventPublisherLoop(ctx context.Context, pub outboxPublisher, opts eventP
 		}
 		select {
 		case <-ctx.Done():
-			return
+			return nil
 		case <-poll.C:
 		}
 	}

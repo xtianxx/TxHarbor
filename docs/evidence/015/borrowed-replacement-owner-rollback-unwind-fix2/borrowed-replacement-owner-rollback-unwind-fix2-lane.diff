@@ -1,0 +1,64 @@
+--- borrowed-replacement-owner-rollback-unwind-fix2-lane-before.go	2026-10-02 06:31:19.465901884 +0800
++++ /home/dream/product_env/TxHarbor/internal/recovery/borrowed-replacement-owner-rollback-unwind_linux_test.go	2026-10-02 06:43:15.876768998 +0800
+@@ -488,6 +488,61 @@
+ 		t.Logf("rollback-unwind command-kind controls: conflicting re-arms were rejected with the kind sealed at the first arm, a wrong COMMIT frame while expecting ROLLBACK was observed independently but never dispatched, and concurrent arms sealed exactly one kind (%s)", kind)
+ 	}()
+ 
++	// N5 (P2-B2/C4): independent observation ordering in BOTH modes: a wrong
++	// COMMIT forwarded AFTER the selected ROLLBACK dispatch must still be
++	// observed, and symmetric wrong-ROLLBACK-after-selected-COMMIT coverage
++	// proves the same for commit mode; the sealed kind never relabels.
++	func() {
++		afterRollback := recovery.NewTargetLockCommitAmbiguityControl()
++		if err := afterRollback.ArmRollbackGate(); err != nil {
++			t.Fatalf("rollback-unwind after-rollback arm refused: %v", err)
++		}
++		if err := afterRollback.ControlWriteClientBytes(recovery.TargetLockRollbackRequestFrame()); err != nil {
++			t.Fatalf("rollback-unwind selected rollback write refused: %v", err)
++		}
++		if !afterRollback.RollbackDispatched() || !afterRollback.RollbackObserved() {
++			t.Fatal("rollback-unwind selected rollback was not dispatched/observed")
++		}
++		if err := afterRollback.ControlWriteClientBytes(recovery.TargetLockCommitRequestFrame()); err != nil {
++			t.Fatalf("rollback-unwind post-dispatch wrong-commit write refused: %v", err)
++		}
++		if !afterRollback.CommitObserved() {
++			t.Fatal("rollback-unwind a COMMIT forwarded AFTER the selected ROLLBACK dispatch was not observed")
++		}
++		if afterRollback.CommitDispatched() {
++			t.Fatal("rollback-unwind sealed rollback kind was relabeled as a commit dispatch")
++		}
++		if !afterRollback.RollbackDispatched() || afterRollback.CommandKind() != "rollback" {
++			t.Fatal("rollback-unwind sealed rollback dispatch changed after the wrong command")
++		}
++		afterRollback.Break()
++		// Symmetric ordering in commit mode.
++		afterCommit := recovery.NewTargetLockCommitAmbiguityControl()
++		if err := afterCommit.ArmGate(); err != nil {
++			t.Fatalf("rollback-unwind after-commit arm refused: %v", err)
++		}
++		if err := afterCommit.ControlWriteClientBytes(recovery.TargetLockCommitRequestFrame()); err != nil {
++			t.Fatalf("rollback-unwind selected commit write refused: %v", err)
++		}
++		if !afterCommit.CommitDispatched() || !afterCommit.CommitObserved() {
++			t.Fatal("rollback-unwind selected commit was not dispatched/observed")
++		}
++		if err := afterCommit.ControlWriteClientBytes(recovery.TargetLockRollbackRequestFrame()); err != nil {
++			t.Fatalf("rollback-unwind post-dispatch wrong-rollback write refused: %v", err)
++		}
++		if !afterCommit.RollbackObserved() {
++			t.Fatal("rollback-unwind a ROLLBACK forwarded AFTER the selected COMMIT dispatch was not observed")
++		}
++		if afterCommit.RollbackDispatched() {
++			t.Fatal("rollback-unwind sealed commit kind was relabeled as a rollback dispatch")
++		}
++		if !afterCommit.CommitDispatched() || afterCommit.CommandKind() != "commit" {
++			t.Fatal("rollback-unwind sealed commit dispatch changed after the wrong command")
++		}
++		afterCommit.Break()
++		t.Logf("rollback-unwind observation-ordering controls: a wrong COMMIT after the selected ROLLBACK dispatch and a wrong ROLLBACK after the selected COMMIT dispatch were both independently observed while the sealed kind's dispatch stayed unchanged")
++	}()
++
+ 	// N3: early finalization control: a callback that COMMITS the supplied
+ 	// transaction and still returns an error must be conservatively treated as
+ 	// rollback uncertainty (ErrTxClosed is NOT an acknowledged rollback of that

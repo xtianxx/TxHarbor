@@ -616,6 +616,15 @@ var (
 // Production SQL lives in raw string literals; the per-statement window ends
 // at the closing backtick (capped at 1500 bytes), so a window can never bleed
 // into neighboring Go code.
+//
+// The repo-wide half is read-only outside internal/indexer: a code mention
+// is allowed only in the 015 V1 verification adapter
+// (internal/recovery/sources/chain.go), only in the two pinned read-only
+// forms (depositObservationReadAllow/depositObservationReadForms), and only
+// while that adapter stays on the txlifecycle read-only accessor whitelist.
+// Write statements against the table stay loud failures in every external
+// file, and the known write-path calls stay loud failures in the allowed
+// adapter (negative controls).
 var (
 	depositConfirmUpdateFile = "confirmcommit.go"
 	// Approved 006 write path (T011, specs/006-reorg-recovery FR-05/06/08):
@@ -661,6 +670,52 @@ var (
 		// (readOrphanCandidatesSQL, same predicate as orphanObservationsSQL).
 		"reorgcommit.go": 6,
 		"confirmscan.go": 2, // read-only candidate + count WHERE filters
+	}
+
+	// The only non-indexer file allowed to mention deposit_observations is
+	// the 015 T039 read-only V1 verification adapter. The read privilege is
+	// granted only while every mention is one of the pinned read-only forms
+	// below (the pending-count SELECT of the V1 coverage observation plus its
+	// evidence reference), no write statement against the table appears in
+	// any file outside internal/indexer, and the adapter holds no
+	// txlifecycle write-path call. Keyed by repo-relative slash path; a new
+	// mention, a changed statement or a new file fails the gate loudly.
+	depositObservationReadAllow = map[string]int{
+		"internal/recovery/sources/chain.go": 2,
+	}
+	depositObservationReadForms = []*regexp.Regexp{
+		// The one pinned SELECT: the V1 coverage check's pending count.
+		regexp.MustCompile(`(?is)\bSELECT\s+count\(\*\)\s+FROM\s+deposit_observations\b`),
+		// Its evidence reference; a data: reference names the read range and
+		// is never executed as SQL.
+		regexp.MustCompile(`"data:deposit_observations\?[^"]*"`),
+	}
+	// Write statements against the observed-deposit table stay forbidden
+	// outside internal/indexer — allowlisted or not. This is the negative
+	// control that keeps a real write bypass (a new INSERT/UPDATE/DELETE/
+	// TRUNCATE masquerading behind the read allowance) a loud failure.
+	depositObservationWriteRes = []*regexp.Regexp{
+		regexp.MustCompile(`(?i)\bINSERT\s+INTO\s+deposit_observations\b`),
+		depositUpdateObsRe,
+		depositDeleteObsRe,
+		regexp.MustCompile(`(?i)\bTRUNCATE\s+(TABLE\s+)?deposit_observations\b`),
+	}
+	// An allowlisted adapter file must also stay read-only at the Go call
+	// boundary (F4, contracts/verification-items.md §1 V4): the txlifecycle
+	// accessors are the frozen read-only whitelist
+	// (AttemptByID / Status / UnknownRecovery), and the known write paths
+	// (Reconcile / Release / Send / applyReceipt), raw Exec and explicit
+	// transactions must never be reachable from it.
+	depositAdapterAccessorRe    = regexp.MustCompile(`\btxl\.([A-Za-z_]\w*)\(`)
+	depositAdapterAccessorAllow = map[string]bool{
+		"AttemptByID":     true,
+		"Status":          true,
+		"UnknownRecovery": true,
+	}
+	depositAdapterWriteCallRes = []*regexp.Regexp{
+		regexp.MustCompile(`\.(Reconcile|Release|Send|applyReceipt)\s*\(`),
+		regexp.MustCompile(`\.Exec\s*\(`),
+		regexp.MustCompile(`\bBegin(Tx)?\s*\(`),
 	}
 )
 
@@ -811,7 +866,13 @@ func TestDepositWritePathConfinement(t *testing.T) {
 			t.Errorf(`%s: unexpected 'pending' literals = %d, want 0`, name, got)
 		}
 	}
-	// Outside internal/indexer only the metrics name may mention the table.
+	// Outside internal/indexer the table is read-only. The metrics name is
+	// always allowed; otherwise (a) no file may carry a write statement
+	// against the table, (b) only the pinned read-only forms of the 015 V1
+	// verification adapter may mention it, and (c) that adapter must stay on
+	// the txlifecycle read-only accessor whitelist. Everything else still
+	// fails loudly, so a real write bypass remains caught even though the
+	// read side was widened for the T039 adapter.
 	root := filepath.Join(pkgDir, "..", "..")
 	prefix := "internal" + string(filepath.Separator) + "indexer" + string(filepath.Separator)
 	if err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
@@ -827,18 +888,70 @@ func TestDepositWritePathConfinement(t *testing.T) {
 		if !strings.HasSuffix(path, ".go") || strings.HasSuffix(path, "_test.go") {
 			return nil
 		}
-		if rel, err := filepath.Rel(root, path); err != nil || strings.HasPrefix(rel, prefix) {
+		rel, err := filepath.Rel(root, path)
+		if err != nil {
 			return err
+		}
+		if strings.HasPrefix(rel, prefix) {
+			return nil
 		}
 		raw, err := os.ReadFile(path)
 		if err != nil {
 			return err
 		}
-		for _, line := range strings.Split(string(raw), "\n") {
-			if strings.Contains(line, "deposit_observations") &&
-				!strings.Contains(line, "txharbor_deposit_observations_total") {
-				rel, _ := filepath.Rel(root, path)
-				t.Errorf("%s: references deposit_observations outside internal/indexer", rel)
+		relSlash := filepath.ToSlash(rel)
+		body := depositStripGoComments(string(raw))
+		// Write negative control: the allowlisted read privilege never
+		// widens into a write path, anywhere outside internal/indexer.
+		for _, re := range depositObservationWriteRes {
+			if re.MatchString(body) {
+				t.Errorf("%s: write statement against deposit_observations outside internal/indexer", relSlash)
+			}
+		}
+		want, allowedFile := depositObservationReadAllow[relSlash]
+		if !allowedFile {
+			for _, line := range strings.Split(string(raw), "\n") {
+				if strings.Contains(line, "deposit_observations") &&
+					!strings.Contains(line, "txharbor_deposit_observations_total") {
+					t.Errorf("%s: references deposit_observations outside internal/indexer", relSlash)
+				}
+			}
+			return nil
+		}
+		// The allowlisted adapter: every code mention must fall inside one of
+		// the pinned read-only forms, counted exactly.
+		occurrences := regexp.MustCompile(`deposit_observations`).FindAllStringIndex(body, -1)
+		if len(occurrences) != want {
+			t.Errorf("%s: deposit_observations mentions = %d, want the %d pinned read-only form(s)",
+				relSlash, len(occurrences), want)
+		}
+		covered := make([]bool, len(occurrences))
+		for _, form := range depositObservationReadForms {
+			for _, m := range form.FindAllStringIndex(body, -1) {
+				for i, o := range occurrences {
+					if o[0] >= m[0] && o[1] <= m[1] {
+						covered[i] = true
+					}
+				}
+			}
+		}
+		for i, o := range occurrences {
+			if !covered[i] {
+				t.Errorf("%s: deposit_observations mention at byte %d is not one of the pinned read-only forms",
+					relSlash, o[0])
+			}
+		}
+		// Read-only call boundary: only the frozen txlifecycle accessors may
+		// be called, and the known write paths must never appear.
+		for _, m := range depositAdapterAccessorRe.FindAllStringSubmatch(body, -1) {
+			if !depositAdapterAccessorAllow[m[1]] {
+				t.Errorf("%s: txlifecycle accessor %s is outside the read-only whitelist (AttemptByID/Status/UnknownRecovery)",
+					relSlash, m[1])
+			}
+		}
+		for _, re := range depositAdapterWriteCallRes {
+			if match := re.FindString(body); match != "" {
+				t.Errorf("%s: read-only adapter reaches a write-path call %q", relSlash, match)
 			}
 		}
 		return nil

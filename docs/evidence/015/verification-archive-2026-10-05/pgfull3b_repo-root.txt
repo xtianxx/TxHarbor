@@ -1,0 +1,2 @@
+/workspace
+1a6779f test(015): P lane asserts the retained attempt_proof row itself (operation-scoped count/full-row digest, coordinator actor, attempt app/target/PID/startID/verifier binding, wait_terminal+drained, complete=true); helper scoped to the attempt operation

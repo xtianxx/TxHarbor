@@ -1,0 +1,70 @@
+--- borrowed-replacement-owner-rollback-unwind-fix-targetlock-before.go	2026-10-02 06:11:17.327880798 +0800
++++ /home/dream/product_env/TxHarbor/internal/recovery/targetlock.go	2026-10-02 06:28:14.119698300 +0800
+@@ -242,11 +242,17 @@
+ 		rollbackCtx, cancelRollback := context.WithTimeout(context.Background(), targetLockRollbackBudget)
+ 		rollbackErr := tx.Rollback(rollbackCtx)
+ 		cancelRollback()
+-		if rollbackErr != nil && !errors.Is(rollbackErr, pgx.ErrTxClosed) {
+-			// An uncertain rollback permanently retires the owner handle and
+-			// boundedly disposes its dedicated connection.
+-			l.retireOwnerAfterUncertainRollbackLocked()
+-			return errors.Join(cause, fmt.Errorf("rollback target-lock acceptance transaction: %w", rollbackErr))
++		if rollbackErr != nil {
++			// pgx.ErrTxClosed is NOT an acknowledged rollback of THIS exact
++			// transaction: a callback that finalized the transaction early (for
++			// example committed it through the supplied tx) and still returned
++			// an error lands here. Unless an acknowledged rollback of that exact
++			// transaction was separately established (it is not here), the
++			// uncertainty is conservatively reported and the owner is
++			// permanently retired with a bounded disposal whose errors are
++			// joined into the returned error.
++			disposalErr := l.retireOwnerAfterUncertainRollbackLocked()
++			return errors.Join(cause, fmt.Errorf("rollback target-lock acceptance transaction: %w", rollbackErr), disposalErr)
+ 		}
+ 		return cause
+ 	}
+@@ -528,24 +534,33 @@
+ }
+ 
+ // targetLockRollbackBudget is the independent bounded budget of the rollback
+-// cleanup and of the uncertain-rollback disposal. The caller context is never
+-// used for this cleanup: an already cancelled caller must not strand the owner
+-// transaction.
++// cleanup. The caller context is never used for this cleanup: an already
++// cancelled caller must not strand the owner transaction.
+ const targetLockRollbackBudget = 10 * time.Second
+ 
++// targetLockDisposalBudget is the independent bounded budget of the
++// uncertain-rollback connection disposal; it is SEPARATE from (never combined
++// with) the rollback budget.
++const targetLockDisposalBudget = 10 * time.Second
++
+ // retireOwnerAfterUncertainRollbackLocked permanently retires the owner handle
+-// after an uncertain rollback and boundedly disposes its dedicated connection.
+-// It deliberately does not use the Release SQL path and never performs an
+-// unbounded close; the caller must hold l.mu.
+-func (l *TargetLock) retireOwnerAfterUncertainRollbackLocked() {
++// after an uncertain rollback and boundedly disposes its dedicated connection,
++// returning any disposal error so the caller can join it. A nil return means
++// the bounded disposal was CONFIRMED, never merely attempted. It deliberately
++// does not use the Release SQL path and never performs an unbounded close; the
++// caller must hold l.mu.
++func (l *TargetLock) retireOwnerAfterUncertainRollbackLocked() error {
+ 	if l.closed {
+-		return
++		return nil
+ 	}
+ 	l.closed = true
+ 	if l.conn == nil {
+-		return
++		return nil
+ 	}
+-	disposeCtx, cancelDispose := context.WithTimeout(context.Background(), targetLockRollbackBudget)
++	disposeCtx, cancelDispose := context.WithTimeout(context.Background(), targetLockDisposalBudget)
+ 	defer cancelDispose()
+-	_ = l.conn.Close(disposeCtx)
++	if err := l.conn.Close(disposeCtx); err != nil {
++		return fmt.Errorf("dispose retired target-lock session (bounded disposal attempt, closure not confirmed): %w", err)
++	}
++	return nil
+ }

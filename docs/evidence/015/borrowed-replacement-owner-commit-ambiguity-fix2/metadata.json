@@ -1,0 +1,51 @@
+{
+  "Gate1": "HOLD",
+  "archive_hashes": {
+    "borrowed-replacement-owner-commit-ambiguity-fix2-bracket-before.sh": "215e355b550f79666b6f485f446462f21a60a12d29eeadd0cf6a7e8a65927280",
+    "borrowed-replacement-owner-commit-ambiguity-fix2-bracket.sh": "c18722c46892ecef655efb3d75810485a35be8d72bd77de99f5584e8985953e7",
+    "borrowed-replacement-owner-commit-ambiguity-fix2-companion-before.go": "7b6532f88b4ad720e4d60928b4ffff581e8c6d9ec87e8f786f4c8b1db0392c23",
+    "borrowed-replacement-owner-commit-ambiguity-fix2-companion.diff": "7b5565569d321b6a5b9b8c0719ecb8b9751cb7f7bafe0b7f16c81d2e32e95dcf",
+    "borrowed-replacement-owner-commit-ambiguity-fix2-gold-console.txt": "828c1ee341200eee7b2b66f69a643ab69c5dff3cab1f66064ceb269f9d6db846",
+    "borrowed-replacement-owner-commit-ambiguity-fix2-gold-runner.sh": "1fdff42f724b7cd62e3d41634fdedfcb729205bb3a0e53531230fecca0cb69da",
+    "borrowed-replacement-owner-commit-ambiguity-fix2-gold.log": "828c1ee341200eee7b2b66f69a643ab69c5dff3cab1f66064ceb269f9d6db846",
+    "borrowed-replacement-owner-commit-ambiguity-fix2-hashes-after-runs.txt": "fbc961799b31d25a3e8806bcf5792200d8c1404264494bf475a7a5a9bc10966b",
+    "borrowed-replacement-owner-commit-ambiguity-fix2-hashes-after.txt": "ab9ed696260820848730095ef163b280c43f1207bbd1eb9acc9e253898bf8901",
+    "borrowed-replacement-owner-commit-ambiguity-fix2-hashes-before.txt": "f627cd4b16fe6c0f5d7eaf8bfd6282ec7933d95a3287d306fdfc57ccc61fa4fe",
+    "borrowed-replacement-owner-commit-ambiguity-fix2-lane-before.go": "773b81351edb7260e10ed3b57f46d84825774d8be556c5f03172e26f5b7f2ecf",
+    "borrowed-replacement-owner-commit-ambiguity-fix2-lane.diff": "5d3498874b864e052c7ea50465f94834c854ef4d63b45ba60e7ccecc731d6f99",
+    "borrowed-replacement-owner-commit-ambiguity-fix2-race-build.log": "ada240b89c08e8bcf3e44d36a99a9797271fdc8769ef0bd63c49b81863c276e8",
+    "borrowed-replacement-owner-commit-ambiguity-fix2-race-build.sh": "69018e8d826e2d446ee900fa62b0bb7c002534f4dc6d07e217124bc2754c026c",
+    "borrowed-replacement-owner-commit-ambiguity-fix2-race-console.txt": "1928f17c3b867aee332ac06ce902d5c0aca194f5840e308650dca40fc0851e18",
+    "borrowed-replacement-owner-commit-ambiguity-fix2-race-runner.sh": "e18cd07a9dd2899f8a6da0a0816c84ead364d888c7e28490e9f74b5fc35db4dd",
+    "borrowed-replacement-owner-commit-ambiguity-fix2-race.log": "1928f17c3b867aee332ac06ce902d5c0aca194f5840e308650dca40fc0851e18",
+    "borrowed-replacement-owner-commit-ambiguity-fix2-race.test": "d581cd97a979f502c66db0a6e502bf59b8b05090844a18ee4c6282f16ea4e8bb",
+    "borrowed-replacement-owner-commit-ambiguity-fix2-summary-hash.txt": "8e15dd3aaa3e1f8286d1ff383608abbc2c19897ae18562983e7208e7bc25c726",
+    "borrowed-replacement-owner-commit-ambiguity-fix2-summary.json": "0d9955e99fbc976c95c3447296bce9983e48298fe4db18ab9a15567d8e623df3",
+    "borrowed-replacement-owner-commit-ambiguity-fix2-targetlock-before.go": "529c71c4b3e494988526e539e48472d4f80140149ca9cc51913e454a0731a30a",
+    "borrowed-replacement-owner-commit-ambiguity-fix2-targetlock.diff": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "borrowed-replacement-owner-commit-ambiguity-fix2-targetlock-before.go.archived": "529c71c4b3e494988526e539e48472d4f80140149ca9cc51913e454a0731a30a",
+    "borrowed-replacement-owner-commit-ambiguity-fix2-companion-before.go.archived": "7b6532f88b4ad720e4d60928b4ffff581e8c6d9ec87e8f786f4c8b1db0392c23",
+    "borrowed-replacement-owner-commit-ambiguity-fix2-lane-before.go.archived": "773b81351edb7260e10ed3b57f46d84825774d8be556c5f03172e26f5b7f2ecf"
+  },
+  "bracket": "companion+lane changed seam preserved after==after_runs source_stable",
+  "companion_after": "1fce8bb95279194a0f6b40e8e5cac14fc05558c89d6f583a2ac45fe136441d06",
+  "companion_before": "7b6532f88b4ad720e4d60928b4ffff581e8c6d9ec87e8f786f4c8b1db0392c23",
+  "counts": {
+    "borrowed-replacement-owner-commit-ambiguity-fix2-gold.log": {
+      "top_PASS": 1
+    },
+    "borrowed-replacement-owner-commit-ambiguity-fix2-race.log": {
+      "top_PASS": 1
+    }
+  },
+  "credential_scan": "known shapes only",
+  "first_fails": "none (first-run pass)",
+  "historical": "92 prior groups preserved unrebound (tolerant schema check)",
+  "lane_after": "3b445db457f35b93977a8351ac120798dff9c28cd672702ca627642eb8e51d30",
+  "lane_before": "773b81351edb7260e10ed3b57f46d84825774d8be556c5f03172e26f5b7f2ecf",
+  "oracle_gate": "pending ora-19 commit-ambiguity-fix2 re-review (P2-A1/B1/B2/B3)",
+  "scope": "commit-ambiguity residuals P2-A1/B1/B2/B3 only; seam preserved",
+  "seam_preserved": "529c71c4b3e494988526e539e48472d4f80140149ca9cc51913e454a0731a30a",
+  "six_tasks_T000P": "OPEN",
+  "traceability_note": "2026-10-04 docsnap archive: remaining evidence-tree .go snapshots renamed to *.go.archived (bytes identical, hash recorded) to restore standard full-repo builds; see docs/evidence/015/r2-grant-inventory/README.md"
+}

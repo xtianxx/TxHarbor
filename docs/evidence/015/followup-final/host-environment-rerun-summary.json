@@ -1,0 +1,13 @@
+{
+  "exit_status": 0,
+  "result": "5 PASS / 0 SKIP / 0 FAIL",
+  "scope": "environment-only rerun; no source edits",
+  "source": "/tmp/opencode/015-resumed-final/host-environment-rerun.log",
+  "tests": [
+    "TestServeDurablePauseKeepsServiceAliveAndPaused",
+    "TestReadyzFlipsAndRecoversWithRealDependencies",
+    "TestNonceMigrationHistoryUntouched",
+    "TestSignerMigrationHistoryUntouched",
+    "TestWithdrawalMigrationHistoryUntouched"
+  ]
+}

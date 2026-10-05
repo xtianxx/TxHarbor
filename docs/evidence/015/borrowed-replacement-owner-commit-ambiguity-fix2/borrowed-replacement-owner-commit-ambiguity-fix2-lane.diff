@@ -1,0 +1,277 @@
+--- borrowed-replacement-owner-commit-ambiguity-fix2-lane-before.go	2026-10-02 05:08:29.611824346 +0800
++++ /home/dream/product_env/TxHarbor/internal/recovery/borrowed-replacement-owner-commit-ambiguity_linux_test.go	2026-10-02 05:25:20.394183071 +0800
+@@ -33,11 +33,13 @@
+ 
+ import (
+ 	"context"
++	"encoding/binary"
+ 	"errors"
+ 	"fmt"
+ 	"io"
+ 	"os"
+ 	"strings"
++	"sync"
+ 	"sync/atomic"
+ 	"testing"
+ 	"time"
+@@ -86,7 +88,7 @@
+ 	doneCh   chan struct{}
+ }
+ 
+-func newBorrowedReplacementCommitAmbiguityFaultWorker(ctx context.Context, t *testing.T, b *borrowedSuccessorBaseline, fault *recovery.TargetLockCommitAmbiguityFault) *borrowedReplacementCommitAmbiguityFaultWorker {
++func newBorrowedReplacementCommitAmbiguityFaultWorker(ctx context.Context, t *testing.T, b *borrowedSuccessorBaseline, fault *recovery.TargetLockCommitAmbiguityFault) (*borrowedReplacementCommitAmbiguityFaultWorker, func() error) {
+ 	t.Helper()
+ 	workerCtx, cancel := context.WithCancel(ctx)
+ 	worker := &borrowedReplacementCommitAmbiguityFaultWorker{
+@@ -95,20 +97,31 @@
+ 		resultCh: make(chan *borrowedReplacementCommitAmbiguityResult, 1),
+ 		doneCh:   make(chan struct{}),
+ 	}
+-	// P2-B3: the unwind-safe cleanup is installed IMMEDIATELY at construction:
+-	// cancel -> break/release -> bounded wait on the ACTUAL goroutine-done
+-	// channel, so a fatal can never leave the worker up to 90s unproven.
++	// P2-B3: the idempotent unwind-safe cleanup (cancel -> break/release ->
++	// bounded wait on the ACTUAL goroutine-done channel) is RETURNED so the
++	// calling scope can defer it immediately BEFORE the composed flow runs.
++	var cleanupOnce sync.Once
++	cleanup := func() error {
++		var cleanupErr error
++		cleanupOnce.Do(func() {
++			cancel()
++			fault.Break()
++			select {
++			case <-worker.doneCh:
++			case <-time.After(10 * time.Second):
++				cleanupErr = errors.New("commit-ambiguity fault worker did not exit within the bounded unwind join")
++			}
++		})
++		return cleanupErr
++	}
++	// Fallback ONLY: the calling scope defers cleanup before invoking the flow.
+ 	t.Cleanup(func() {
+-		cancel()
+-		fault.Break()
+-		select {
+-		case <-worker.doneCh:
+-		case <-time.After(10 * time.Second):
+-			t.Errorf("commit-ambiguity fault worker did not exit within the bounded unwind join")
++		if cleanupErr := cleanup(); cleanupErr != nil {
++			t.Errorf("commit-ambiguity fault worker cleanup fallback: %v", cleanupErr)
+ 		}
+ 	})
+ 	go worker.run()
+-	return worker
++	return worker, cleanup
+ }
+ 
+ // publish hands the immutable tuple to the worker through a synchronized
+@@ -120,11 +133,18 @@
+ 
+ func (w *borrowedReplacementCommitAmbiguityFaultWorker) join(t *testing.T) *borrowedReplacementCommitAmbiguityResult {
+ 	t.Helper()
++	// P2-B3: the normal post-release proof uses the SAME actual completion
++	// channel (the goroutine-done channel) as the unwind-safe cleanup.
+ 	select {
+-	case res := <-w.resultCh:
+-		return res
++	case <-w.doneCh:
+ 	case <-time.After(120 * time.Second):
+ 		t.Fatal("commit-ambiguity fault worker did not finish within the bounded join")
++	}
++	select {
++	case res := <-w.resultCh:
++		return res
++	default:
++		t.Fatal("commit-ambiguity fault worker completed without publishing a result")
+ 		return nil
+ 	}
+ }
+@@ -230,6 +250,14 @@
+ 	}
+ }
+ 
++// borrowedReplacementCommitAmbiguityFrame appends one backend protocol frame
++// for the deterministic malformed-completion controls.
++func borrowedReplacementCommitAmbiguityFrame(dst []byte, messageType byte, body []byte) []byte {
++	dst = append(dst, messageType)
++	dst = binary.BigEndian.AppendUint32(dst, uint32(4+len(body)))
++	return append(dst, body...)
++}
++
+ // TestBorrowedReplacementOwnerCommitAmbiguity is the bounded real owner COMMIT
+ // acknowledgement-loss lane described in the file header.
+ func TestBorrowedReplacementOwnerCommitAmbiguity(t *testing.T) {
+@@ -254,7 +282,16 @@
+ 		beforeDisposition, beforeOperation := borrowedReplacementGuardRowRead(t, ctx, b.fixture.controlPool, b.fixture.guardKey)
+ 		attemptID := borrowedReplacementOwnerJournalActualRefusal(t, ctx, b, fresh, "commit-ambiguity", &probeCalls, &acceptanceCalls)
+ 		facts := &borrowedReplacementOwnerJournalFacts{}
+-		worker := newBorrowedReplacementCommitAmbiguityFaultWorker(ctx, t, b, fault)
++		worker, workerCleanup := newBorrowedReplacementCommitAmbiguityFaultWorker(ctx, t, b, fault)
++		// P2-B3: cancel -> break -> bounded done-channel join deferred
++		// IMMEDIATELY at the calling scope, BEFORE the composed flow runs, so a
++		// Fatal/Goexit inside the flow proves worker completion before any
++		// later-registered flow cleanup.
++		defer func() {
++			if cleanupErr := workerCleanup(); cleanupErr != nil {
++				t.Errorf("commit-ambiguity fault worker cleanup refused: %v", cleanupErr)
++			}
++		}()
+ 		outcome := borrowedReplacementOwnerJournalRun(ctx, t, b, fresh, &borrowedReplacementOwnerJournalStage{
+ 			key: b.fixture.guardKey, expectedOperation: b.fixture.operation,
+ 			insert: true, attemptID: attemptID, contenderProof: true,
+@@ -272,6 +309,20 @@
+ 		if res.err != nil {
+ 			t.Fatalf("commit-ambiguity fault worker refused: %v", res.err)
+ 		}
++		// P2-A1: the exported handle has no live Read/Write capability and the
++		// deterministic controls reject the live-socket instance.
++		if ctrlErr := fault.ControlWriteClientBytes([]byte("x")); ctrlErr == nil {
++			t.Fatal("commit-ambiguity live-socket fault accepted a control byte feed")
++		}
++		if _, ctrlErr := fault.ControlRead(make([]byte, 8)); ctrlErr == nil {
++			t.Fatal("commit-ambiguity live-socket fault accepted a control read")
++		}
++		if ctrlErr := fault.ControlFeedServerBytes([]byte("x")); ctrlErr == nil {
++			t.Fatal("commit-ambiguity live-socket fault accepted a control server feed")
++		}
++		if ctrlErr := fault.ControlSetReadDeadline(time.Now()); ctrlErr == nil {
++			t.Fatal("commit-ambiguity live-socket fault accepted a control deadline")
++		}
+ 		if !res.dispatch || !res.withheld || !res.broken {
+ 			t.Fatalf("commit-ambiguity witnesses: dispatch=%t withheld=%t broken=%t", res.dispatch, res.withheld, res.broken)
+ 		}
+@@ -569,7 +620,9 @@
+ 		if err := bare.ControlWriteClientBytes(recovery.TargetLockCommitRequestFrame()); err != nil {
+ 			t.Fatalf("commit-ambiguity bare-completion request refused: %v", err)
+ 		}
+-		bare.ControlFeedServerBytes([]byte("COMMIT\x00"))
++		if err := bare.ControlFeedServerBytes([]byte("COMMIT\x00")); err != nil {
++			t.Fatalf("commit-ambiguity bare-completion feed refused: %v", err)
++		}
+ 		if _, err := bare.ControlRead(make([]byte, 64)); err == nil {
+ 			t.Fatal("commit-ambiguity bare COMMIT text was accepted as a completion")
+ 		}
+@@ -586,7 +639,9 @@
+ 		if err := failedRead.ControlWriteClientBytes(recovery.TargetLockCommitRequestFrame()); err != nil {
+ 			t.Fatalf("commit-ambiguity failed-read request refused: %v", err)
+ 		}
+-		failedRead.ControlFeedServerError(io.EOF)
++		if err := failedRead.ControlFeedServerError(io.EOF); err != nil {
++			t.Fatalf("commit-ambiguity failed-read feed refused: %v", err)
++		}
+ 		if _, err := failedRead.ControlRead(make([]byte, 64)); err == nil {
+ 			t.Fatal("commit-ambiguity failed read was accepted as a completion")
+ 		}
+@@ -603,18 +658,88 @@
+ 		if err := partial.ControlWriteClientBytes(recovery.TargetLockCommitRequestFrame()); err != nil {
+ 			t.Fatalf("commit-ambiguity partial-frame request refused: %v", err)
+ 		}
+-		partial.ControlFeedServerBytes(recovery.TargetLockCommitCompletionFrames()[:6])
+-		partial.ControlFeedServerError(os.ErrDeadlineExceeded)
++		if err := partial.ControlFeedServerBytes(recovery.TargetLockCommitCompletionFrames()[:6]); err != nil {
++			t.Fatalf("commit-ambiguity partial-frame feed refused: %v", err)
++		}
++		if err := partial.ControlFeedServerError(os.ErrDeadlineExceeded); err != nil {
++			t.Fatalf("commit-ambiguity partial-frame error feed refused: %v", err)
++		}
+ 		if _, err := partial.ControlRead(make([]byte, 64)); err == nil {
+ 			t.Fatal("commit-ambiguity partial frame was accepted as a completion")
+ 		}
+ 		if partial.Witness() == recovery.TargetLockCommitWitnessWithheld || !partial.ReadFailed() {
+ 			t.Fatal("commit-ambiguity partial frame published WITHHELD")
+ 		}
++		// P2-B1: the partial bytes were ACTUALLY consumed before the failure.
++		if got := partial.AssembledBytes(); got != 6 {
++			t.Fatalf("commit-ambiguity partial frame consumed %d bytes, want the 6 partial bytes", got)
++		}
+ 		partial.Break()
+ 		if !partial.CleanupUncertain() {
+ 			t.Fatal("commit-ambiguity partial-frame cleanup was not uncertain")
+ 		}
++		// P2-B1: malformed completions are never accepted: missing terminating
++		// NUL, ReadyForQuery without the status byte, wrong status, wrong tag and
++		// a CommandComplete without ReadyForQuery.
++		validCompletion := recovery.TargetLockCommitCompletionFrames()
++		ccFrames := validCompletion[:12]
++		zFrames := validCompletion[12:]
++		malformedCases := []struct {
++			label  string
++			frames []byte
++		}{
++			{"missing-NUL", append(append([]byte{}, borrowedReplacementCommitAmbiguityFrame(nil, 'C', []byte("COMMIT"))...), zFrames...)},
++			{"short-ready", append(append([]byte{}, ccFrames...), borrowedReplacementCommitAmbiguityFrame(nil, 'Z', nil)...)},
++			{"wrong-status", append(append([]byte{}, ccFrames...), borrowedReplacementCommitAmbiguityFrame(nil, 'Z', []byte{'T'})...)},
++			{"wrong-tag", append(append([]byte{}, borrowedReplacementCommitAmbiguityFrame(nil, 'C', []byte("ROLLBACK\x00"))...), zFrames...)},
++			{"command-only", append([]byte{}, ccFrames...)},
++		}
++		for _, malformedCase := range malformedCases {
++			malformedGate := recovery.NewTargetLockCommitAmbiguityControl()
++			malformedGate.ArmGate()
++			if err := malformedGate.ControlWriteClientBytes(recovery.TargetLockCommitRequestFrame()); err != nil {
++				t.Fatalf("commit-ambiguity malformed (%s) request refused: %v", malformedCase.label, err)
++			}
++			if err := malformedGate.ControlFeedServerBytes(malformedCase.frames); err != nil {
++				t.Fatalf("commit-ambiguity malformed (%s) feed refused: %v", malformedCase.label, err)
++			}
++			if _, err := malformedGate.ControlRead(make([]byte, 64)); err == nil {
++				t.Fatalf("commit-ambiguity malformed completion (%s) was accepted", malformedCase.label)
++			}
++			if malformedGate.Witness() == recovery.TargetLockCommitWitnessWithheld || !malformedGate.ReadFailed() {
++				t.Fatalf("commit-ambiguity malformed completion (%s) published WITHHELD", malformedCase.label)
++			}
++			malformedGate.Break()
++			if !malformedGate.CleanupUncertain() {
++				t.Fatalf("commit-ambiguity malformed completion (%s) cleanup was not uncertain", malformedCase.label)
++			}
++		}
++		// P2-B2: an earlier caller deadline is enforced over the assembly limit
++		// even with VALID frames queued, and no bytes are consumed after expiry.
++		earlyDeadline := recovery.NewTargetLockCommitAmbiguityControl()
++		earlyDeadline.ArmGate()
++		if err := earlyDeadline.ControlWriteClientBytes(recovery.TargetLockCommitRequestFrame()); err != nil {
++			t.Fatalf("commit-ambiguity early-deadline request refused: %v", err)
++		}
++		if err := earlyDeadline.ControlFeedServerBytes(recovery.TargetLockCommitCompletionFrames()); err != nil {
++			t.Fatalf("commit-ambiguity early-deadline feed refused: %v", err)
++		}
++		if err := earlyDeadline.ControlSetReadDeadline(time.Now().Add(-time.Second)); err != nil {
++			t.Fatalf("commit-ambiguity early-deadline set refused: %v", err)
++		}
++		if _, err := earlyDeadline.ControlRead(make([]byte, 64)); !errors.Is(err, os.ErrDeadlineExceeded) {
++			t.Fatalf("commit-ambiguity early-deadline read=%v, want the bounded deadline", err)
++		}
++		if earlyDeadline.Witness() == recovery.TargetLockCommitWitnessWithheld || !earlyDeadline.ReadFailed() {
++			t.Fatal("commit-ambiguity early deadline published WITHHELD")
++		}
++		if got := earlyDeadline.AssembledBytes(); got != 0 {
++			t.Fatalf("commit-ambiguity early deadline consumed %d bytes before failing closed", got)
++		}
++		earlyDeadline.Break()
++		if !earlyDeadline.CleanupUncertain() {
++			t.Fatal("commit-ambiguity early-deadline cleanup was not uncertain")
++		}
+ 		// Missing barriers: a break before any establishment.
+ 		missingBarriers := recovery.NewTargetLockCommitAmbiguityControl()
+ 		missingBarriers.ArmGate()
+@@ -640,7 +765,9 @@
+ 		if err := recognized.ControlWriteClientBytes(recovery.TargetLockCommitRequestFrame()); err != nil {
+ 			t.Fatalf("commit-ambiguity recognized request refused: %v", err)
+ 		}
+-		recognized.ControlFeedServerBytes(recovery.TargetLockCommitCompletionFrames())
++		if err := recognized.ControlFeedServerBytes(recovery.TargetLockCommitCompletionFrames()); err != nil {
++			t.Fatalf("commit-ambiguity recognized feed refused: %v", err)
++		}
+ 		readDone := make(chan struct{})
+ 		var readErr error
+ 		t.Cleanup(func() {
+@@ -664,7 +791,9 @@
+ 		if recognized.CleanupUncertain() {
+ 			t.Fatal("commit-ambiguity validated completion was reported uncertain")
+ 		}
+-		recognized.SetReadDeadline(time.Now().Add(100 * time.Millisecond))
++		if err := recognized.ControlSetReadDeadline(time.Now().Add(100 * time.Millisecond)); err != nil {
++			t.Fatalf("commit-ambiguity recognized deadline refused: %v", err)
++		}
+ 		select {
+ 		case <-readDone:
+ 		case <-time.After(5 * time.Second):

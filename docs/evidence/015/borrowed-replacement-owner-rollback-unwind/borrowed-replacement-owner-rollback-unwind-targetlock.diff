@@ -1,0 +1,47 @@
+--- borrowed-replacement-owner-rollback-unwind-targetlock-before.go	2026-10-02 05:06:31.631808070 +0800
++++ /home/dream/product_env/TxHarbor/internal/recovery/targetlock.go	2026-10-02 06:11:17.327880798 +0800
+@@ -236,7 +236,16 @@
+ 		return fmt.Errorf("begin target-lock acceptance transaction: %w", err)
+ 	}
+ 	rollback := func(cause error) error {
+-		if rollbackErr := tx.Rollback(context.Background()); rollbackErr != nil && !errors.Is(rollbackErr, pgx.ErrTxClosed) {
++		// Independent bounded rollback context: an already cancelled caller
++		// must not strand the owner transaction, and the cleanup never uses the
++		// unbounded background close of Release.
++		rollbackCtx, cancelRollback := context.WithTimeout(context.Background(), targetLockRollbackBudget)
++		rollbackErr := tx.Rollback(rollbackCtx)
++		cancelRollback()
++		if rollbackErr != nil && !errors.Is(rollbackErr, pgx.ErrTxClosed) {
++			// An uncertain rollback permanently retires the owner handle and
++			// boundedly disposes its dedicated connection.
++			l.retireOwnerAfterUncertainRollbackLocked()
+ 			return errors.Join(cause, fmt.Errorf("rollback target-lock acceptance transaction: %w", rollbackErr))
+ 		}
+ 		return cause
+@@ -517,3 +526,26 @@
+ 	}
+ 	return pgx.ConnectConfig(ctx, config)
+ }
++
++// targetLockRollbackBudget is the independent bounded budget of the rollback
++// cleanup and of the uncertain-rollback disposal. The caller context is never
++// used for this cleanup: an already cancelled caller must not strand the owner
++// transaction.
++const targetLockRollbackBudget = 10 * time.Second
++
++// retireOwnerAfterUncertainRollbackLocked permanently retires the owner handle
++// after an uncertain rollback and boundedly disposes its dedicated connection.
++// It deliberately does not use the Release SQL path and never performs an
++// unbounded close; the caller must hold l.mu.
++func (l *TargetLock) retireOwnerAfterUncertainRollbackLocked() {
++	if l.closed {
++		return
++	}
++	l.closed = true
++	if l.conn == nil {
++		return
++	}
++	disposeCtx, cancelDispose := context.WithTimeout(context.Background(), targetLockRollbackBudget)
++	defer cancelDispose()
++	_ = l.conn.Close(disposeCtx)
++}

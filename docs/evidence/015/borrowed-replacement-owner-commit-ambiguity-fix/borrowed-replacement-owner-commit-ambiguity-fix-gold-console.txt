@@ -1,0 +1,73 @@
+pg_restore (PostgreSQL) 18.6 (Debian 18.6-1.pgdg13+2)
+go version go1.26.5 linux/amd64
+2026/10/01 21:09:47 github.com/testcontainers/testcontainers-go - Connected to docker: 
+  Server Version: 29.6.1
+  API Version: 1.55
+  Operating System: Ubuntu 24.04.4 LTS
+  Total Memory: 15915 MB
+  Testcontainers for Go Version: v0.44.0
+  Resolved Docker Host: unix:///var/run/docker.sock
+  Resolved Docker Socket Path: /var/run/docker.sock
+  Test SessionID: fe1299bac3cbab524d66f48d9b64b9efc3436b64dff2997d4f7cae57f3fa9716
+  Test ProcessID: 186e575f-592c-4abe-a359-a3231d29ad0d
+=== RUN   TestBorrowedReplacementOwnerCommitAmbiguity
+2026/10/01 21:09:47 🐳 Creating container for image postgres@sha256:4ef4dbc939d61acea57712655ddb4b4ab27419c913f94cca0cd57cb3ea3c2280
+2026/10/01 21:09:47 🐳 Creating container for image testcontainers/ryuk:0.14.0
+2026/10/01 21:09:47 ✅ Container created: 17b7817a21fe
+2026/10/01 21:09:47 🐳 Starting container: 17b7817a21fe
+2026/10/01 21:09:48 ✅ Container started: 17b7817a21fe
+2026/10/01 21:09:48 ⏳ Waiting for container id 17b7817a21fe image: testcontainers/ryuk:0.14.0. Waiting for: all of: [log message "Started", port 8080/tcp to be listening]
+2026/10/01 21:09:48 Shell not found in container
+2026/10/01 21:09:48 🔔 Container is ready: 17b7817a21fe
+2026/10/01 21:09:48 ✅ Container created: 8c6747182b47
+2026/10/01 21:09:48 🐳 Starting container: 8c6747182b47
+2026/10/01 21:09:49 ✅ Container started: 8c6747182b47
+2026/10/01 21:09:49 ⏳ Waiting for container id 8c6747182b47 image: postgres@sha256:4ef4dbc939d61acea57712655ddb4b4ab27419c913f94cca0cd57cb3ea3c2280. Waiting for: log message "database system is ready to accept connections" (occurrence: 2)
+2026/10/01 21:09:50 🔔 Container is ready: 8c6747182b47
+    borrowed-replacement-owner-commit-ambiguity_linux_test.go:250: protected fixture actual HBA rules (all SCRAM, no trust fallback): line=1 type=local address="" auth=scram-sha-256; line=2 type=host address="127.0.0.1" auth=scram-sha-256; line=3 type=host address="::1" auth=scram-sha-256; line=4 type=host address="all" auth=scram-sha-256
+    borrowed-replacement-owner-commit-ambiguity_linux_test.go:250: successor retired: backend PID 330 incarnation strictly gone, owner health retained, guard non-clean, acceptance zero
+    borrowed-replacement-owner-commit-ambiguity_linux_test.go:250: guard-row window fixture: fixture original canonical key retained, disposition "rebuild_required" (deliberately unresolved), operation provenance matches the fixture original
+    borrowed-replacement-owner-commit-ambiguity_linux_test.go:255: native-ready replacement attempt refused by the dirty guard: disposition "rebuild_required" -> "rebuild_required", no Started, no executable frames, no callbacks, replacement catalog unchanged (OID 16757)
+    borrowed-replacement-owner-commit-ambiguity_linux_test.go:333: commit-ambiguity positive: the fixed drill fault established that the ACTUAL COMMIT was sent and withheld its VALIDATED PostgreSQL completion before pgx saw it (audit_id=1), the independent bounded read observed exactly ONE committed refused non-instance-bound row and the released guard row while withheld, the transport break made the ACTUAL Commit call return an error (never an injected acknowledgement error), the composite refused, the durable row remained, the provisional eligibility was one-shot and non-reusable, and the guard stayed unresolved with acceptance zero
+2026/10/01 21:10:11 🐳 Creating container for image postgres@sha256:4ef4dbc939d61acea57712655ddb4b4ab27419c913f94cca0cd57cb3ea3c2280
+2026/10/01 21:10:11 ✅ Container created: c3237afa7f70
+2026/10/01 21:10:11 🐳 Starting container: c3237afa7f70
+2026/10/01 21:10:12 ✅ Container started: c3237afa7f70
+2026/10/01 21:10:12 ⏳ Waiting for container id c3237afa7f70 image: postgres@sha256:4ef4dbc939d61acea57712655ddb4b4ab27419c913f94cca0cd57cb3ea3c2280. Waiting for: log message "database system is ready to accept connections" (occurrence: 2)
+2026/10/01 21:10:14 🔔 Container is ready: c3237afa7f70
+    borrowed-replacement-owner-commit-ambiguity_linux_test.go:348: protected fixture actual HBA rules (all SCRAM, no trust fallback): line=1 type=local address="" auth=scram-sha-256; line=2 type=host address="127.0.0.1" auth=scram-sha-256; line=3 type=host address="::1" auth=scram-sha-256; line=4 type=host address="all" auth=scram-sha-256
+    borrowed-replacement-owner-commit-ambiguity_linux_test.go:348: successor retired: backend PID 329 incarnation strictly gone, owner health retained, guard non-clean, acceptance zero
+    borrowed-replacement-owner-commit-ambiguity_linux_test.go:348: guard-row window fixture: fixture original canonical key retained, disposition "rebuild_required" (deliberately unresolved), operation provenance matches the fixture original
+    borrowed-replacement-owner-commit-ambiguity_linux_test.go:353: native-ready replacement attempt refused by the dirty guard: disposition "rebuild_required" -> "rebuild_required", no Started, no executable frames, no callbacks, replacement catalog unchanged (OID 16757)
+    borrowed-replacement-owner-commit-ambiguity_linux_test.go:384: replacement session retired: backend PID 591 incarnation strictly gone, owner health retained, guard non-clean, acceptance zero
+    borrowed-replacement-owner-commit-ambiguity_linux_test.go:396: native-ready replacement attempt refused by the dirty guard: disposition "rebuild_required" -> "rebuild_required", no Started, no executable frames, no callbacks, replacement catalog unchanged (OID 16757)
+    borrowed-replacement-owner-commit-ambiguity_linux_test.go:397: commit-ambiguity unarmed control: the UNARMED fixed fault passed all ordinary traffic (no witness claimed), the COMMIT was acknowledged with exactly ONE genuine refused row (audit_id=1, attempt borrowed-replacement-owner-journal-ordinary-1790889029471061465), the guard stayed unchanged, guarded retirement ran, replay/copy refused and the ordinary native-ready attempt was still refused by the dirty guard
+    borrowed-replacement-owner-commit-ambiguity_linux_test.go:475: commit-ambiguity reservation controls: the reserved installation was consumed by exactly ONE real acquisition (repeated acquisitions unwrapped and committed ordinarily), overlapping reservations were rejected, stale resets never cleared the newer installation, and the newer installation's armed gate actually withheld its VALIDATED COMMIT completion until the transport break made the ACTUAL commit return an ambiguous-COMMIT error
+2026/10/01 21:10:30 🐳 Creating container for image postgres@sha256:4ef4dbc939d61acea57712655ddb4b4ab27419c913f94cca0cd57cb3ea3c2280
+2026/10/01 21:10:30 ✅ Container created: f5d3a662f053
+2026/10/01 21:10:30 🐳 Starting container: f5d3a662f053
+2026/10/01 21:10:30 ✅ Container started: f5d3a662f053
+2026/10/01 21:10:30 ⏳ Waiting for container id f5d3a662f053 image: postgres@sha256:4ef4dbc939d61acea57712655ddb4b4ab27419c913f94cca0cd57cb3ea3c2280. Waiting for: log message "database system is ready to accept connections" (occurrence: 2)
+2026/10/01 21:10:32 🔔 Container is ready: f5d3a662f053
+    borrowed-replacement-owner-commit-ambiguity_linux_test.go:488: protected fixture actual HBA rules (all SCRAM, no trust fallback): line=1 type=local address="" auth=scram-sha-256; line=2 type=host address="127.0.0.1" auth=scram-sha-256; line=3 type=host address="::1" auth=scram-sha-256; line=4 type=host address="all" auth=scram-sha-256
+    borrowed-replacement-owner-commit-ambiguity_linux_test.go:488: successor retired: backend PID 329 incarnation strictly gone, owner health retained, guard non-clean, acceptance zero
+    borrowed-replacement-owner-commit-ambiguity_linux_test.go:488: guard-row window fixture: fixture original canonical key retained, disposition "rebuild_required" (deliberately unresolved), operation provenance matches the fixture original
+    borrowed-replacement-owner-commit-ambiguity_linux_test.go:492: native-ready replacement attempt refused by the dirty guard: disposition "rebuild_required" -> "rebuild_required", no Started, no executable frames, no callbacks, replacement catalog unchanged (OID 16757)
+    borrowed-replacement-owner-commit-ambiguity_linux_test.go:545: commit-ambiguity pre-COMMIT cancellation: the committed rollback was confirmed clean, NO COMMIT was dispatched (witness-timeout stayed not-established, never inferred as a rollback), zero journal rows were durable and the owner session survived
+    borrowed-replacement-owner-commit-ambiguity_linux_test.go:680: commit-ambiguity gate negatives: unrecognized framing, bare COMMIT text, failed reads, partial frames, missing barriers and witness timeouts all stayed NOTESTABLISHED/UNCERTAIN and were never inferred as a rollback; the REAL PostgreSQL COMMIT completion frames were validated and withheld, and a deadline change ended the withheld wait boundedly without upgrading the witness
+2026/10/01 21:10:47 🐳 Stopping container: f5d3a662f053
+2026/10/01 21:10:48 ✅ Container stopped: f5d3a662f053
+2026/10/01 21:10:48 🐳 Terminating container: f5d3a662f053
+2026/10/01 21:10:48 🚫 Container terminated: f5d3a662f053
+2026/10/01 21:10:48 🐳 Stopping container: c3237afa7f70
+2026/10/01 21:10:48 ✅ Container stopped: c3237afa7f70
+2026/10/01 21:10:48 🐳 Terminating container: c3237afa7f70
+2026/10/01 21:10:48 🚫 Container terminated: c3237afa7f70
+2026/10/01 21:10:48 🐳 Stopping container: 8c6747182b47
+2026/10/01 21:10:49 ✅ Container stopped: 8c6747182b47
+2026/10/01 21:10:49 🐳 Terminating container: 8c6747182b47
+2026/10/01 21:10:49 🚫 Container terminated: 8c6747182b47
+--- PASS: TestBorrowedReplacementOwnerCommitAmbiguity (66.38s)
+PASS
+ok  	github.com/xtianxx/txharbor/internal/recovery	66.415s
+exit=0

@@ -1,0 +1,45 @@
+pg_restore: error: could not execute query: ERROR:  must be owner of sequence events_015_seq_seq
+Command was: ALTER SEQUENCE public.events_015_seq_seq OWNED BY public.events_015.seq;
+
+
+pg_restore: error: could not execute query: ERROR:  must be owner of sequence wallet_sequences_015_id_seq
+Command was: ALTER SEQUENCE public.wallet_sequences_015_id_seq OWNED BY public.wallet_sequences_015.id;
+
+
+pg_restore: error: could not execute query: ERROR:  must be owner of table events_015
+Command was: ALTER TABLE ONLY public.events_015 ALTER COLUMN seq SET DEFAULT nextval('public.events_015_seq_seq'::regclass);
+
+
+pg_restore: error: could not execute query: ERROR:  must be owner of table wallet_sequences_015
+Command was: ALTER TABLE ONLY public.wallet_sequences_015 ALTER COLUMN id SET DEFAULT nextval('public.wallet_sequences_015_id_seq'::regclass);
+
+
+pg_restore: error: could not execute query: ERROR:  permission denied for table events_015
+Command was: COPY public.events_015 (seq, payload) FROM stdin;
+pg_restore: error: could not execute query: ERROR:  permission denied for table snapshot_probe_015
+Command was: COPY public.snapshot_probe_015 (ref) FROM stdin;
+pg_restore: error: could not execute query: ERROR:  permission denied for table wallet_sequences_015
+Command was: COPY public.wallet_sequences_015 (id, note) FROM stdin;
+pg_restore: error: could not execute query: ERROR:  permission denied for sequence events_015_seq_seq
+Command was: SELECT pg_catalog.setval('public.events_015_seq_seq', 1, false);
+
+
+pg_restore: error: could not execute query: ERROR:  permission denied for sequence wallet_sequences_015_id_seq
+Command was: SELECT pg_catalog.setval('public.wallet_sequences_015_id_seq', 1, false);
+
+
+pg_restore: error: could not execute query: ERROR:  must be owner of table events_015
+Command was: ALTER TABLE ONLY public.events_015
+    ADD CONSTRAINT events_015_seq_key UNIQUE (seq);
+
+
+pg_restore: error: could not execute query: ERROR:  must be owner of table wallet_sequences_015
+Command was: ALTER TABLE ONLY public.wallet_sequences_015
+    ADD CONSTRAINT wallet_sequences_015_pkey PRIMARY KEY (id);
+
+
+pg_restore: error: could not execute query: ERROR:  permission denied for table snapshot_probe_015
+Command was: GRANT SELECT ON TABLE public.snapshot_probe_015 TO PUBLIC;
+
+
+pg_restore: warning: errors ignored on restore: 12

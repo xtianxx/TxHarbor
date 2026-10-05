@@ -1,4 +1,4 @@
-.PHONY: test test-race test-integration test-integration-redis test-integration-kafka test-contract test-e2e test-fault test-perf db-reset lint build
+.PHONY: test test-race test-integration test-integration-redis test-integration-kafka test-contract test-e2e test-fault test-perf test-drill db-reset lint build
 
 # require_tagged_tests guards a layered target: when no test file carries the
 # build tag yet, the layer reports NOT RUN and exits non-zero instead of
@@ -40,7 +40,7 @@ test-integration-kafka:
 # verification.md §3). Contract cases arrive with T014/T051/T058.
 test-contract:
 	$(call require_tagged_tests,contract,test-contract)
-	go test -tags contract -count=1 -timeout 10m ./internal/events ./internal/reconciliation
+	go test -tags contract -count=1 -timeout 10m ./internal/events ./internal/reconciliation ./internal/recovery
 
 # End-to-end core deposit/withdrawal flows (full stack + Anvil). Independent
 # layer, never part of a plain unit run.
@@ -48,8 +48,9 @@ test-e2e:
 	$(call require_tagged_tests,e2e,test-e2e)
 	go test -tags e2e -count=1 -timeout 30m ./internal/app
 
-# Fault injection and performance layers run independently (scheduled/manual/
-# release gate) and never block ordinary PRs (FR-28; verification.md §4).
+# Fault injection, performance and full-drill layers run independently
+# (scheduled/manual/release gate) and never block ordinary PRs (FR-28/FR-33;
+# verification.md §4).
 test-fault:
 	$(call require_tagged_tests,fault,test-fault)
 	go test -tags fault -count=1 -timeout 60m ./...
@@ -57,6 +58,36 @@ test-fault:
 test-perf:
 	$(call require_tagged_tests,perf,test-perf)
 	go test -tags perf -count=1 -timeout 60m ./...
+
+# Full disaster-recovery drill layer (quickstart S1-S12 + failure matrix F1-F7;
+# real PG/Anvil and, for the event scenarios, Kafka). Independent channel only
+# (scheduled/manual/release gate, see .github/workflows/drill.yml): it never
+# runs on ordinary pull requests and never blocks them (quickstart.md §3;
+# verification.md §4).
+#
+# NOT RUN discipline: in addition to requiring drill-tagged tests, the JSON
+# checker requires every named S1-S12/F1-F7/effect/reentry scenario (and the
+# restore-dependent F1/F3 subtests) to PASS. Missing or skipped cases fail this
+# target, while unrelated optional skips remain allowed.
+# Raw Go events and a per-run coverage report archive to the configured evidence
+# directory. Each invocation gets a unique subdirectory; prior runs are untouched.
+test-drill:
+	$(call require_tagged_tests,drill,test-drill)
+	@set +e; \
+	if [ -n "$${TXHARBOR_DRILL_EVIDENCE_DIR:-}" ]; then \
+		mkdir -p "$$TXHARBOR_DRILL_EVIDENCE_DIR" || exit 1; \
+		run_dir="$$(mktemp -d "$$TXHARBOR_DRILL_EVIDENCE_DIR/run.XXXXXX")" || exit 1; \
+		keep=1; \
+	else \
+		run_dir="$$(mktemp -d)" || exit 1; keep=0; \
+	fi; \
+	trap '[ "$$keep" -eq 1 ] || rm -rf -- "$$run_dir"' EXIT; \
+	events="$$run_dir/go-test.json"; report="$$run_dir/coverage.json"; \
+	started="$$(date -u +%Y-%m-%dT%H:%M:%SZ)"; run_id="$$(basename "$$run_dir")"; \
+	go test -json -tags drill -count=1 -timeout 120m ./... > "$$events"; go_status=$$?; \
+	if [ $$go_status -ne 0 ]; then cat "$$events"; fi; \
+	go run scripts/drillcoverage/check.go "$$events" "$$report" "$$go_status" ./... "$$run_id" "$$started"; check_status=$$?; \
+	if [ $$go_status -ne 0 ]; then exit $$go_status; fi; exit $$check_status
 
 # Explicit database wipe: removes the named volume (data is kept otherwise).
 db-reset:

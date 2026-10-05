@@ -1,0 +1,177 @@
+--- borrowed-replacement-owner-rollback-unwind-companion-before.go	2026-10-02 05:51:32.411139740 +0800
++++ /home/dream/product_env/TxHarbor/internal/recovery/targetlock_commitambiguity_hook_linux_test.go	2026-10-02 06:11:33.377585581 +0800
+@@ -56,6 +56,7 @@
+ 	mu             sync.Mutex
+ 	live           bool
+ 	armed          bool
++	rollbackOnly   bool
+ 	dispatched     bool
+ 	withheld       bool
+ 	broken         bool
+@@ -219,6 +220,43 @@
+ 	f.core.mu.Unlock()
+ }
+ 
++// TargetLockRollbackRequestFrame is the exact simple-protocol rollback query
++// frame pgx sends for tx.Rollback.
++func TargetLockRollbackRequestFrame() []byte {
++	sql := "rollback"
++	frame := make([]byte, 5+len(sql)+1)
++	frame[0] = 'Q'
++	binary.BigEndian.PutUint32(frame[1:5], uint32(4+len(sql)+1))
++	copy(frame[5:], sql)
++	return frame
++}
++
++// TargetLockRollbackCompletionFrames is the REAL PostgreSQL ROLLBACK
++// completion: CommandComplete with the exact body "ROLLBACK\0" followed by
++// ReadyForQuery with the idle transaction status.
++func TargetLockRollbackCompletionFrames() []byte {
++	tag := []byte("ROLLBACK\x00")
++	frames := make([]byte, 0, 32)
++	frames = append(frames, 'C')
++	frames = binary.BigEndian.AppendUint32(frames, uint32(4+len(tag)))
++	frames = append(frames, tag...)
++	frames = append(frames, 'Z')
++	frames = binary.BigEndian.AppendUint32(frames, 5)
++	frames = append(frames, 'I')
++	return frames
++}
++
++// ArmRollbackGate arms the FIXED rollback-only gate: the ACTUAL rollback
++// request is recognized, forwarded (the server really rolls back) and its
++// strictly validated completion withheld before pgx receives it. No SQL,
++// connector or socket callback authority is added.
++func (f *TargetLockCommitAmbiguityFault) ArmRollbackGate() {
++	f.core.mu.Lock()
++	f.core.armed = true
++	f.core.rollbackOnly = true
++	f.core.mu.Unlock()
++}
++
+ // Break breaks the owner transport so the ACTUAL Commit call returns an error.
+ func (f *TargetLockCommitAmbiguityFault) Break() {
+ 	f.core.breakTransport()
+@@ -277,6 +315,34 @@
+ 	return (f.core.broken || f.core.readFailure) && !f.core.withheld
+ }
+ 
++// RollbackMode reports the fixed rollback-only gate mode.
++func (f *TargetLockCommitAmbiguityFault) RollbackMode() bool {
++	f.core.mu.Lock()
++	defer f.core.mu.Unlock()
++	return f.core.rollbackOnly
++}
++
++// RollbackDispatched reports the ACTUAL rollback dispatch witness.
++func (f *TargetLockCommitAmbiguityFault) RollbackDispatched() bool {
++	f.core.mu.Lock()
++	defer f.core.mu.Unlock()
++	return f.core.dispatched && f.core.rollbackOnly
++}
++
++// RollbackWithheld reports the strictly validated withheld rollback completion.
++func (f *TargetLockCommitAmbiguityFault) RollbackWithheld() bool {
++	f.core.mu.Lock()
++	defer f.core.mu.Unlock()
++	return f.core.withheld && f.core.rollbackOnly
++}
++
++// CommitDispatched reports the ACTUAL commit dispatch witness.
++func (f *TargetLockCommitAmbiguityFault) CommitDispatched() bool {
++	f.core.mu.Lock()
++	defer f.core.mu.Unlock()
++	return f.core.dispatched && !f.core.rollbackOnly
++}
++
+ // AwaitDispatched waits boundedly for the actual COMMIT dispatch witness.
+ func (f *TargetLockCommitAmbiguityFault) AwaitDispatched(ctx context.Context) bool {
+ 	select {
+@@ -448,7 +514,11 @@
+ 		return
+ 	}
+ 	c.mu.Unlock()
+-	commit, recognized := classifyTargetLockCommitFrame(p)
++	expected := "commit"
++	if c.rollbackOnly {
++		expected = "rollback"
++	}
++	match, recognized := classifyTargetLockCommandFrame(p, expected)
+ 	c.mu.Lock()
+ 	defer c.mu.Unlock()
+ 	if !c.armed || c.dispatched {
+@@ -458,7 +528,7 @@
+ 		c.unrecognized++
+ 		return
+ 	}
+-	if commit {
++	if match {
+ 		c.dispatched = true
+ 		close(c.dispatchedCh)
+ 	}
+@@ -537,7 +607,11 @@
+ 			c.markReadFailure()
+ 			return readErr
+ 		}
+-		if targetLockCommitCompletionAssembled(assembled) {
++		completionTag := "COMMIT\x00"
++		if c.rollbackOnly {
++			completionTag = "ROLLBACK\x00"
++		}
++		if targetLockCommandCompletionAssembled(assembled, completionTag) {
+ 			return nil
+ 		}
+ 	}
+@@ -929,10 +1003,10 @@
+ 	}
+ }
+ 
+-// classifyTargetLockCommitFrame recognizes the actual simple-protocol COMMIT
+-// query frame and never claims an establishment for unrecognized, partial or
+-// non-commit framing.
+-func classifyTargetLockCommitFrame(p []byte) (commit, recognized bool) {
++// classifyTargetLockCommandFrame recognizes the actual simple-protocol command
++// query frame (commit or rollback) and never claims an establishment for
++// unrecognized, partial or non-command framing.
++func classifyTargetLockCommandFrame(p []byte, expected string) (match, recognized bool) {
+ 	for len(p) > 0 {
+ 		if len(p) < 5 {
+ 			return false, false
+@@ -946,7 +1020,7 @@
+ 		if messageType == 'Q' {
+ 			sql := string(bytes.TrimRight(body, "\x00"))
+ 			sql = string(trimASCIIWhitespace(sql))
+-			if equalFoldASCII(sql, "commit") {
++			if equalFoldASCII(sql, expected) {
+ 				return true, true
+ 			}
+ 		}
+@@ -955,12 +1029,13 @@
+ 	return false, true
+ }
+ 
+-// targetLockCommitCompletionAssembled STRICTLY validates the REAL COMMIT
+-// completion: a CommandComplete whose body is exactly "COMMIT\0" followed by a
+-// ReadyForQuery of exactly length 5 carrying the idle status. Anything else
+-// (missing NUL, wrong tag, missing/short/long/unknown status frame, unknown
+-// frame, partial framing) is not a completion.
+-func targetLockCommitCompletionAssembled(buf []byte) bool {
++// targetLockCommandCompletionAssembled STRICTLY validates the REAL command
++// completion: a CommandComplete whose body is exactly the expected tag (for
++// example "COMMIT\0" or "ROLLBACK\0") followed by a ReadyForQuery of exactly
++// length 5 carrying the idle status. Anything else (missing NUL, wrong tag,
++// missing/short/long/unknown status frame, unknown frame, partial framing) is
++// not a completion.
++func targetLockCommandCompletionAssembled(buf []byte, expectedTag string) bool {
+ 	commitComplete := false
+ 	for len(buf) >= 5 {
+ 		messageType := buf[0]
+@@ -971,7 +1046,7 @@
+ 		body := buf[5 : 1+length]
+ 		switch messageType {
+ 		case 'C':
+-			if string(body) != "COMMIT\x00" {
++			if string(body) != expectedTag {
+ 				return false
+ 			}
+ 			commitComplete = true

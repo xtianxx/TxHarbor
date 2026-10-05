@@ -1,0 +1,224 @@
+--- borrowed-replacement-owner-rollback-unwind-fix-companion-before.go	2026-10-02 06:11:33.377585581 +0800
++++ /home/dream/product_env/TxHarbor/internal/recovery/targetlock_commitambiguity_hook_linux_test.go	2026-10-02 06:28:28.999091160 +0800
+@@ -49,22 +49,45 @@
+ 	targetLockCommitAmbiguityControlMode
+ )
+ 
++// Sealed wire-gate command kind: fixed at the FIRST arm and never relabeled.
++const (
++	targetLockCommandUnset = iota
++	targetLockCommandCommit
++	targetLockCommandRollback
++)
++
++// armCommand seals the command kind at the first arm and rejects a conflicting
++// re-arm; the same kind is idempotent.
++func (c *targetLockCommitAmbiguityCore) armCommand(kind int) error {
++	c.mu.Lock()
++	defer c.mu.Unlock()
++	if c.commandKind == targetLockCommandUnset {
++		c.commandKind = kind
++	} else if c.commandKind != kind {
++		return errors.New("target-lock commit fault: conflicting command kind (the command kind is sealed at first arm)")
++	}
++	c.armed = true
++	return nil
++}
++
+ // targetLockCommitAmbiguityCore is the unexported shared state of one fault.
+ type targetLockCommitAmbiguityCore struct {
+ 	real net.Conn
+ 
+-	mu             sync.Mutex
+-	live           bool
+-	armed          bool
+-	rollbackOnly   bool
+-	dispatched     bool
+-	withheld       bool
+-	broken         bool
+-	readFailure    bool
+-	unrecognized   int
+-	wrapped        int
+-	withholdErr    error
+-	assembledBytes int
++	mu               sync.Mutex
++	live             bool
++	armed            bool
++	commandKind      int
++	commitObserved   bool
++	rollbackObserved bool
++	dispatched       bool
++	withheld         bool
++	broken           bool
++	readFailure      bool
++	unrecognized     int
++	wrapped          int
++	withholdErr      error
++	assembledBytes   int
+ 
+ 	dispatchedCh chan struct{}
+ 	withheldCh   chan struct{}
+@@ -214,10 +237,8 @@
+ // ArmGate arms the wire gate: the ACTUAL commit request is then recognized,
+ // forwarded (the server really commits) and its strictly validated completion
+ // withheld before pgx receives it.
+-func (f *TargetLockCommitAmbiguityFault) ArmGate() {
+-	f.core.mu.Lock()
+-	f.core.armed = true
+-	f.core.mu.Unlock()
++func (f *TargetLockCommitAmbiguityFault) ArmGate() error {
++	return f.core.armCommand(targetLockCommandCommit)
+ }
+ 
+ // TargetLockRollbackRequestFrame is the exact simple-protocol rollback query
+@@ -250,11 +271,8 @@
+ // request is recognized, forwarded (the server really rolls back) and its
+ // strictly validated completion withheld before pgx receives it. No SQL,
+ // connector or socket callback authority is added.
+-func (f *TargetLockCommitAmbiguityFault) ArmRollbackGate() {
+-	f.core.mu.Lock()
+-	f.core.armed = true
+-	f.core.rollbackOnly = true
+-	f.core.mu.Unlock()
++func (f *TargetLockCommitAmbiguityFault) ArmRollbackGate() error {
++	return f.core.armCommand(targetLockCommandRollback)
+ }
+ 
+ // Break breaks the owner transport so the ACTUAL Commit call returns an error.
+@@ -315,32 +333,66 @@
+ 	return (f.core.broken || f.core.readFailure) && !f.core.withheld
+ }
+ 
+-// RollbackMode reports the fixed rollback-only gate mode.
++// CommandKind reports the SEALED command kind ("unset", "commit" or
++// "rollback").
++func (f *TargetLockCommitAmbiguityFault) CommandKind() string {
++	f.core.mu.Lock()
++	defer f.core.mu.Unlock()
++	switch f.core.commandKind {
++	case targetLockCommandCommit:
++		return "commit"
++	case targetLockCommandRollback:
++		return "rollback"
++	default:
++		return "unset"
++	}
++}
++
++// RollbackMode reports the sealed rollback gate mode.
+ func (f *TargetLockCommitAmbiguityFault) RollbackMode() bool {
+ 	f.core.mu.Lock()
+ 	defer f.core.mu.Unlock()
+-	return f.core.rollbackOnly
++	return f.core.commandKind == targetLockCommandRollback
+ }
+ 
+-// RollbackDispatched reports the ACTUAL rollback dispatch witness.
++// CommitObserved reports an ACTUAL commit frame forwarded during the armed
++// interval, independently of the selected command kind.
++func (f *TargetLockCommitAmbiguityFault) CommitObserved() bool {
++	f.core.mu.Lock()
++	defer f.core.mu.Unlock()
++	return f.core.commitObserved
++}
++
++// RollbackObserved reports an ACTUAL rollback frame forwarded during the armed
++// interval, independently of the selected command kind.
++func (f *TargetLockCommitAmbiguityFault) RollbackObserved() bool {
++	f.core.mu.Lock()
++	defer f.core.mu.Unlock()
++	return f.core.rollbackObserved
++}
++
++// RollbackDispatched reports the ACTUAL rollback dispatch witness of the
++// sealed rollback kind.
+ func (f *TargetLockCommitAmbiguityFault) RollbackDispatched() bool {
+ 	f.core.mu.Lock()
+ 	defer f.core.mu.Unlock()
+-	return f.core.dispatched && f.core.rollbackOnly
++	return f.core.dispatched && f.core.commandKind == targetLockCommandRollback
+ }
+ 
+ // RollbackWithheld reports the strictly validated withheld rollback completion.
+ func (f *TargetLockCommitAmbiguityFault) RollbackWithheld() bool {
+ 	f.core.mu.Lock()
+ 	defer f.core.mu.Unlock()
+-	return f.core.withheld && f.core.rollbackOnly
++	return f.core.withheld && f.core.commandKind == targetLockCommandRollback
+ }
+ 
+-// CommitDispatched reports the ACTUAL commit dispatch witness.
++// CommitDispatched reports the ACTUAL commit dispatch witness of the sealed
++// commit kind; a COMMIT observed while expecting ROLLBACK is reported through
++// CommitObserved instead.
+ func (f *TargetLockCommitAmbiguityFault) CommitDispatched() bool {
+ 	f.core.mu.Lock()
+ 	defer f.core.mu.Unlock()
+-	return f.core.dispatched && !f.core.rollbackOnly
++	return f.core.dispatched && f.core.commandKind == targetLockCommandCommit
+ }
+ 
+ // AwaitDispatched waits boundedly for the actual COMMIT dispatch witness.
+@@ -514,21 +566,31 @@
+ 		return
+ 	}
+ 	c.mu.Unlock()
+-	expected := "commit"
+-	if c.rollbackOnly {
+-		expected = "rollback"
++	c.mu.Lock()
++	if !c.armed {
++		c.mu.Unlock()
++		return
+ 	}
+-	match, recognized := classifyTargetLockCommandFrame(p, expected)
++	kind := c.commandKind
++	c.mu.Unlock()
++	commitMatch, commitRecognized := classifyTargetLockCommandFrame(p, "commit")
++	rollbackMatch, rollbackRecognized := classifyTargetLockCommandFrame(p, "rollback")
+ 	c.mu.Lock()
+ 	defer c.mu.Unlock()
+-	if !c.armed || c.dispatched {
++	if !c.armed {
+ 		return
+ 	}
+-	if !recognized {
++	if commitMatch {
++		c.commitObserved = true
++	}
++	if rollbackMatch {
++		c.rollbackObserved = true
++	}
++	if !commitRecognized || !rollbackRecognized {
+ 		c.unrecognized++
+ 		return
+ 	}
+-	if match {
++	if !c.dispatched && ((kind == targetLockCommandCommit && commitMatch) || (kind == targetLockCommandRollback && rollbackMatch)) {
+ 		c.dispatched = true
+ 		close(c.dispatchedCh)
+ 	}
+@@ -607,8 +669,11 @@
+ 			c.markReadFailure()
+ 			return readErr
+ 		}
++		c.mu.Lock()
++		kind := c.commandKind
++		c.mu.Unlock()
+ 		completionTag := "COMMIT\x00"
+-		if c.rollbackOnly {
++		if kind == targetLockCommandRollback {
+ 			completionTag = "ROLLBACK\x00"
+ 		}
+ 		if targetLockCommandCompletionAssembled(assembled, completionTag) {
+@@ -914,9 +979,7 @@
+ 
+ // ArmGate arms the probe gate.
+ func (p *TargetLockCommitAmbiguityDeadlineProbe) ArmGate() {
+-	p.core.mu.Lock()
+-	p.core.armed = true
+-	p.core.mu.Unlock()
++	_ = p.core.armCommand(targetLockCommandCommit)
+ }
+ 
+ // Break closes the real socket pair and breaks the transport.

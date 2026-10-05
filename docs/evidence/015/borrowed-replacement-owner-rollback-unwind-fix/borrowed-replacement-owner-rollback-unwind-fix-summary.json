@@ -1,0 +1,155 @@
+{
+  "task": "Bounded repair of 7 rollback-unwind residuals: targetlock ErrTxClosed uncertainty + joined disposal errors; companion sealed command kind + independent observed dispatches; lane sentinel/deadline/boundary assertions, encoded frame boundaries, early-finalization control",
+  "date": "2026-10-01",
+  "head": "e504462",
+  "worktree_tracked_modified": 22,
+  "scope": {
+    "modified_files": [
+      "internal/recovery/targetlock.go",
+      "internal/recovery/targetlock_commitambiguity_hook_linux_test.go",
+      "internal/recovery/borrowed-replacement-owner-rollback-unwind_linux_test.go"
+    ],
+    "untouched": "journal ee880415, guard-row 264cbc81, owner-tail 819585c4, observation f1c7601a, window a11b33fc, autonomous d9fe63ee, prelaunch/session/binding/driver/successor/DDL/bridges, commit-ambiguity lane 7e613d18"
+  },
+  "source_hashes": {
+    "targetlock_before": "45f09896c65aa986dca827cfee10ba6dafc2f97f72d21d8502f5d346c9de5177",
+    "targetlock_after": "3bea2e24344a0cdce30ef7565b148191b7f81b28d362a3f9a088ce5e27e27661",
+    "companion_before": "a42a4db9cc386c3bb129c84c300dacf5ced5e54b343d6e99947f08adced5b5cf",
+    "companion_after": "b1eec55085ee1f0cf75e191a18044170caa1eeb30655e37d2f97bf2069b33093",
+    "lane_before": "fd238aed339765aff0c013974557a813db0045a644ed4d892529a6c18a70a557",
+    "lane_after": "8ec44864ac643ab92f08e44f5ffa01f87eea5451266344848c94f7d8ed0747e3"
+  },
+  "fixes": {
+    "P2-A1": {
+      "change": "ErrTxClosed is NO LONGER treated as a clean rollback: any rollback error (including ErrTxClosed from an early-finalized transaction such as a callback commit followed by an error) is conservatively reported as uncertainty and permanently retires the owner unless an acknowledged rollback of that exact transaction was separately established",
+      "control": "early-finalization control: a callback commits the supplied transaction and returns an error -> ErrTxClosed uncertainty path, owner retired in ~1ms with NO deadline/budget credit, guard unchanged"
+    },
+    "P2-A2": {
+      "change": "disposal errors are returned and JOINED with the original refusal/rollback error; a nil return means a CONFIRMED bounded disposal, an error distinguishes a bounded disposal ATTEMPT whose closure was not confirmed; rollback budget 10s and disposal budget 10s are separate (never combined)",
+      "hunks": [
+        "@@ -242,11 +242,17 @@",
+        "@@ -528,24 +534,33 @@"
+      ]
+    },
+    "P2-B1": {
+      "change": "the command kind is SEALED at the first arm (idempotent same-kind re-arm, conflicting re-arm rejected with an error) and snapshotted under the mutex in the dispatch path; witnesses are bound to the sealed kind",
+      "controls": "commit-then-rollback and rollback-then-commit re-arm rejection, same-kind idempotence, concurrent arm race sealing exactly one kind"
+    },
+    "P2-B2": {
+      "change": "actual COMMIT and ROLLBACK frames are recorded INDEPENDENTLY during the armed interval (CommitObserved/RollbackObserved) regardless of the selected completion; CommitDispatched/RollbackDispatched reflect only the sealed kind's dispatch",
+      "control": "wrong-command control: a COMMIT frame while expecting ROLLBACK is observed but never dispatched as the sealed kind; the later ROLLBACK frame dispatches while the COMMIT observation persists"
+    },
+    "P2-C1": {
+      "change": "the lane requires the ACTUAL arbitration sentinel (errors.Is(ownerErr, errOwnerTailArbitration)), preserves the independent-cleanup deadline cause (context/os deadline), and measures the unwind from the recorded decisive boundary (<=25s); the early-finalization control proves uncertainty without budget credit",
+      "hunks": "lane"
+    },
+    "P2-C2": {
+      "change": "frame boundaries derive from ENCODED lengths (CC=14 bytes with the header, RFQ=6) instead of the hard-coded 12; added a wrong-status malformed ReadyForQuery case with a valid ROLLBACK CommandComplete"
+    },
+    "P2-C3": {
+      "change": "the redundant pre-insertion arming case was REMOVED; the rollback gate is armed in atArbitration only, after the insertion and the successful final facts verification"
+    }
+  },
+  "gold": {
+    "log": "borrowed-replacement-owner-rollback-unwind-fix-gold.log",
+    "sha256": "23242d6db2d711f4d6d1280b4c2afb49aa2d32528aa0f940c64cac9bca563863",
+    "exit": 0,
+    "top_pass": 1,
+    "top_fail": 0,
+    "top_skip": 0,
+    "data_race": 0,
+    "warning": 0,
+    "duration": "53.76s",
+    "first_run": true,
+    "first_fail": null,
+    "superseded_pass": {
+      "log": "borrowed-replacement-owner-rollback-unwind-fix-gold-pass1.log",
+      "sha256": "fddc58719e89dcdfcc4dcc975f6513cc06eee88e5b68b1c60f9eba608f4c9f72",
+      "note": "pass for the a3bd537b revision before the required B1/B2 command-kind controls were added; preserved unrebound"
+    }
+  },
+  "race": {
+    "log": "borrowed-replacement-owner-rollback-unwind-fix-race.log",
+    "sha256": "a622ffbcf04b75e713c9899306ade90985880683fa70f9149dba7611fdbb36bc",
+    "exit": 0,
+    "top_pass": 1,
+    "top_fail": 0,
+    "top_skip": 0,
+    "data_race": 0,
+    "warning": 0,
+    "panic": 0,
+    "duration": "86.85s",
+    "binary": "borrowed-replacement-owner-rollback-unwind-fix-race.test",
+    "binary_sha256": "8db852b157b9bb5a34e4ac689053d5cae3c4e05694ff3b1db266c9a4022b99ac",
+    "build_log_sha256": "6ab7a2eca9aec3b0c7e54a3321050a9d134303939c5433c5544b54980ca09f64",
+    "build_log_note": "the first fix build log carries an empty rollback-unwind provenance line (sed-adapted lane path); superseded by the corrected rebuild",
+    "corrected_rebuild": {
+      "log": "borrowed-replacement-owner-rollback-unwind-fix-race-build2.log",
+      "log_sha256": "4e1ce79b3bc322e4ca61e47403771f7fa199e512b79bc49bf82e3f249408d194",
+      "binary_sha256": "8db852b157b9bb5a34e4ac689053d5cae3c4e05694ff3b1db266c9a4022b99ac",
+      "rebuild_identical": true,
+      "records": "rollback-unwind 8ec44864, commit-ambiguity 7e613d18, companion b1eec550, seam 3bea2e24, journal ee880415 and all other predecessors directly"
+    }
+  },
+  "container": {
+    "image": "postgres@sha256:4ef4dbc939d61acea57712655ddb4b4ab27419c913f94cca0cd57cb3ea3c2280",
+    "root": true,
+    "private_pid": true,
+    "init": true,
+    "hostnet": true,
+    "CI": "true",
+    "TXHARBOR_REQUIRE_DOCKER": "1",
+    "PGDATA_PG_MAJOR_PG_VERSION": "unset",
+    "test_regex": "^TestBorrowedReplacementOwnerRollbackUnwind$"
+  },
+  "diffs": {
+    "targetlock": {
+      "file": "borrowed-replacement-owner-rollback-unwind-fix-targetlock.diff",
+      "sha256": "33d03c25416386b0f359301e0843484c213888ec5fb7cb24f67e7046ce2497a3",
+      "hunks": [
+        "@@ -242,11 +242,17 @@",
+        "@@ -528,24 +534,33 @@"
+      ]
+    },
+    "companion": {
+      "file": "borrowed-replacement-owner-rollback-unwind-fix-companion.diff",
+      "sha256": "e754e0711ba33268a93d8b2f46f6c90df5b28189aebd66343047dfe29383ce5c",
+      "hunk_count": 7
+    },
+    "lane": {
+      "file": "borrowed-replacement-owner-rollback-unwind-fix-lane.diff",
+      "sha256": "cdffa619921d26f8ba4e4b4012e6680ae2007d688c750da3ce9b2571c2210cc3",
+      "hunk_count": 8
+    }
+  },
+  "brackets": {
+    "before": "borrowed-replacement-owner-rollback-unwind-fix-hashes-before.txt",
+    "before_sha256": "bbda8e3a18347bf9926a32639fc706c5afb346ee075f200d49de7e8d38ec9444",
+    "after": "borrowed-replacement-owner-rollback-unwind-fix-hashes-after.txt",
+    "after_sha256": "1d8cf8c3b98648473493b6a1bc08d5be7227bf325574808df1ce6df3233c0463",
+    "after_runs": "borrowed-replacement-owner-rollback-unwind-fix-hashes-after-runs.txt",
+    "after_runs_sha256": "dd4240c47346e8b225339a8e836e290f931ca2e54331ccea5fb7a63f940fffd2",
+    "preN4_after": "borrowed-replacement-owner-rollback-unwind-fix-hashes-after-preN4.txt (pre-N4 revision, preserved)",
+    "source_stable": true,
+    "closed_predecessors_identical": true,
+    "commit_ambiguity_lane_preserved": true
+  },
+  "runners": {
+    "gold_runner_sha256": "d5076e682b3ab4781e649bdd4d55e0d06810416f5e6524a1f67f985a93695a1b",
+    "race_runner_sha256": "ea2b3efec4a722ac3fd92e5fa5c7e4fbd3652f251ff0d7b43e90b070402fb864",
+    "race_build_sha256": "a06a45804098bdfde98db5d146f7254e9c60e13fe8ddef60debcb4e098a16c2a",
+    "race_build2_sha256": "121ca7922e1a038089216deb01b56dca61f115c2ec997de2ae55162df8d1d452",
+    "bracket_sha256": "a67a2f786d25424172bdbd2056186467c0f37b409c770c3fa1c1e00d3b2269e1",
+    "bracket_before_sha256": "b4ad0509512663d332dc4ce977f9be305621bf4843ac161167bda38d8583ff30"
+  },
+  "history_unrebound": {
+    "rollback_unwind_summary_sha256": "be1c8a0a2333a3cec98ba7c7914d28d04b54292bb03ca12c380436f47bca3e7b",
+    "commit_ambiguity_fix4_summary_sha256": "47d530946d52f8cf85aae6d437292ebef5cbb2309195af733d6aaca45523d3af",
+    "changed_sources_note": "the production seam and companion carry new provenance; separate re-review remains required as authorized"
+  },
+  "notes": [
+    "No commit; HEAD e504462; 22 tracked modified files.",
+    "Gold and race were first-run passes after the repairs; the pre-N4 pass is preserved as pass1; the first fix build log's empty provenance line is superseded by a byte-identical corrected rebuild.",
+    "Never assert rollback where COMMIT may have occurred; ErrTxClosed is uncertainty, not acknowledged rollback; zero rows alone is never an acknowledged rollback; ack-loss stays UNKNOWN; secrets unlogged."
+  ]
+}

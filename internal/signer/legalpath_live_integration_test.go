@@ -355,7 +355,8 @@ func lpSeed(t *testing.T, ctx context.Context, pool *pgxpool.Pool, alloc *nonce.
 		t.Fatalf("provider bound to %s, want the fixture sender %s", provider.Address(), f.sender)
 	}
 	f.submit = signer.SubmitDeps{DB: pool, Policy: policy, Provider: provider, Binding: live, ScopeLock: live}
-	f.deliver = signer.DeliveryDeps{DB: pool, Binding: live, ScopeLock: live}
+	f.deliver = signer.DeliveryDeps{DB: pool, Binding: live, ScopeLock: live,
+		RecoveryGate: func(context.Context, signer.DeliveryGateRequest) error { return nil }}
 	return f
 }
 

@@ -24,6 +24,7 @@ import (
 	"github.com/ethereum/go-ethereum"
 	"github.com/ethereum/go-ethereum/core/types"
 	gethrpc "github.com/ethereum/go-ethereum/rpc"
+	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/redis/go-redis/v9"
 	"github.com/twmb/franz-go/pkg/kgo"
 
@@ -37,6 +38,8 @@ import (
 	"github.com/xtianxx/txharbor/internal/metrics"
 	"github.com/xtianxx/txharbor/internal/nonce"
 	"github.com/xtianxx/txharbor/internal/ratelimit"
+	"github.com/xtianxx/txharbor/internal/recovery"
+	"github.com/xtianxx/txharbor/internal/recovery/controlstore"
 )
 
 // Deps carries process dependencies so commands are testable in-process.
@@ -445,6 +448,26 @@ func Serve(ctx context.Context, d Deps) int {
 		return nonce.VerifyRebuild(ctx, pool, chainID)
 	})
 
+	// 015 resumption-gate assembly (T030). Recovery mode is armed by
+	// configuring TXHARBOR_RECOVERY_CONTROL_DSN: every gated serve action then
+	// evaluates the derived release before it acts. Not configured means no
+	// recovery instance can exist and every entry keeps its pre-015 behavior
+	// (FR-023); once configured, a missing gate TTL, an unreachable control
+	// store or an unknown/incompatible schema refuses startup — there is no
+	// degraded pass-through. A process bound to a recovery instance without
+	// the control store is a contradiction and refuses as well.
+	recoveryWiring, err := assembleServeRecovery(startupCtx, cfg, d.getenv())
+	if err != nil {
+		ethClient.Close()
+		pool.Close()
+		return fail("startup failed (recovery gate): %s", logx.Redact(err.Error()))
+	}
+	// T063: the non-critical status surface reports the recovery posture
+	// honestly. It holds deployment binding facts only and performs no
+	// control-store read and no state claim; the derived per-capability review
+	// stays with the bounded `recovery-admin status` (F13).
+	degradation.recovery = newRecoveryStatusPosture(recoveryWiring)
+
 	// 007 withdrawal routes mount on the same probe listener: the parent mux
 	// takes precedence over the health handler's "/" subtree, and health/metrics
 	// stay unchanged on the child mux. No new listener or address. The FR-05
@@ -469,15 +492,22 @@ func Serve(ctx context.Context, d Deps) int {
 	// T018/T063: the 013 middleware wraps every funding/query route — the
 	// limiter admission (PD-1 fail-closed for new withdrawal creation) outside
 	// the degradation annotation; handlers and their gate order are untouched.
+	// T031 (015): the /withdrawals chain carries the combined recovery
+	// admission outside guardRoute — POST /withdrawals as
+	// new_withdrawal_creation, GET /withdrawals/{id} as query — so an isolated
+	// serve refuses both before the 013 middleware and the 007 decode/auth
+	// order; the original gates keep their order and semantics (FR-025).
 	mux := http.NewServeMux()
-	mux.Handle("/withdrawals", guardRoute(degradation.policy, degradation, ratelimit.ClassNewWithdrawal, ratelimit.ClassQuery, withdrawH))
-	mux.Handle("/withdrawals/", guardRoute(degradation.policy, degradation, ratelimit.ClassNewWithdrawal, ratelimit.ClassQuery, withdrawH))
+	mux.Handle("/withdrawals", withdrawalRecoveryGate(recoveryWiring, guardRoute(degradation.policy, degradation, ratelimit.ClassNewWithdrawal, ratelimit.ClassQuery, withdrawH)))
+	mux.Handle("/withdrawals/", withdrawalRecoveryGate(recoveryWiring, guardRoute(degradation.policy, degradation, ratelimit.ClassNewWithdrawal, ratelimit.ClassQuery, withdrawH)))
 	// 011 execution routes mount on the same listener: the method+pattern
 	// registrations are more specific than the /withdrawals/ subtree and win
-	// without touching 007's handler (contracts/api.md §1-§2).
+	// without touching 007's handler (contracts/api.md §1-§2). The read route
+	// carries the query gate; the POST write route is wired by its own entry
+	// point (T032).
 	executionH := &WithdrawalExecutionHandler{Pool: pool, ChainID: chainID, Metrics: m}
 	mux.Handle("POST /withdrawals/{request_id}/execution", guardRoute(degradation.policy, degradation, ratelimit.ClassWrite, ratelimit.ClassQuery, executionH))
-	mux.Handle("GET /withdrawals/{request_id}/execution", guardRoute(degradation.policy, degradation, ratelimit.ClassWrite, ratelimit.ClassQuery, executionH))
+	mux.Handle("GET /withdrawals/{request_id}/execution", recoveryQueryGate(recoveryWiring, guardRoute(degradation.policy, degradation, ratelimit.ClassWrite, ratelimit.ClassQuery, executionH)))
 	// 008 read endpoints mount on the same listener next to /withdrawals: no
 	// new listener or address. The bearer credential comes from config and is
 	// never logged; an unconfigured token admits nothing (fail closed).
@@ -485,11 +515,15 @@ func Serve(ctx context.Context, d Deps) int {
 	// the two contract routes. The startup rebuild gate rides the provider so
 	// a gate that is not open fails every read closed as `unavailable`.
 	nonceReadH := &nonceReadHandler{provider: nonce.NewReadProvider(pool, cfg.NonceReadToken, rebuildGate)}
-	mux.Handle("/nonce/bindings/", guardRoute(degradation.policy, degradation, ratelimit.ClassQuery, ratelimit.ClassQuery, nonceReadH))
+	mux.Handle("/nonce/bindings/", recoveryQueryGate(recoveryWiring, guardRoute(degradation.policy, degradation, ratelimit.ClassQuery, ratelimit.ClassQuery, nonceReadH)))
 	// Non-critical status surface: dependency availability and event delivery
 	// posture, annotated honestly (never a readiness or funding signal).
 	mux.Handle("GET /status/degradation", &degradationStatusHandler{state: degradation, pool: pool})
-	mux.Handle("/", health.NewServer(agg, m.Handler()).Handler())
+	// T063: probe responses carry the recovery-mode annotation while recovery
+	// mode is configured, so readiness is never read as an attestation of
+	// recovered data (it stays a reachability/version signal; status codes are
+	// unchanged and no capability state is claimed).
+	mux.Handle("/", recoveryHealthAnnotation(recoveryWiring, health.NewServer(agg, m.Handler()).Handler()))
 
 	srv := &http.Server{
 		Handler:           mux,
@@ -509,6 +543,7 @@ func Serve(ctx context.Context, d Deps) int {
 	// before the port ever accepts a connection.
 	reconcileRPC, err := gethrpc.DialContext(runCtx, cfg.RPCURL)
 	if err != nil {
+		recoveryWiring.close()
 		ethClient.Close()
 		pool.Close()
 		return fail("startup failed (nonce reconcile rpc): %s", logx.Redact(err.Error()))
@@ -518,8 +553,10 @@ func Serve(ctx context.Context, d Deps) int {
 		RetryInitial: cfg.IndexRetryInitial,
 		RetryMax:     cfg.IndexRetryMax,
 	}), chainID, cfg.IndexPollInterval, slog.Default(), m)
+
 	listener, err := net.Listen("tcp", cfg.HTTPAddr)
 	if err != nil {
+		recoveryWiring.close()
 		reconcileRPC.Close()
 		ethClient.Close()
 		pool.Close()
@@ -606,13 +643,31 @@ func Serve(ctx context.Context, d Deps) int {
 		// deposit, confirmation and recovery loops adapt to the shared
 		// ServeFunc shape with the coordinator-held lease; authorization
 		// stays out of loop.
-		depositServe := func(loopCtx context.Context, checkLost func() error) error {
-			return depositScanner.ServeLoop(loopCtx, lease, checkLost)
+		var (
+			headerServe  indexer.ServeFunc = scanner.ServeLoop
+			logServe     indexer.ServeFunc = logScanner.ServeLoop
+			depositServe indexer.ServeFunc = func(loopCtx context.Context, checkLost func() error) error {
+				return depositScanner.ServeLoop(loopCtx, lease, checkLost)
+			}
+			confirmServe indexer.ServeFunc = func(loopCtx context.Context, checkLost func() error) error {
+				return confirmationScanner.ServeLoop(loopCtx, lease, checkLost)
+			}
+			recoveryStream indexer.ServeFunc = recoveryServe
+		)
+		if recoveryWiring != nil {
+			// 015 T030: chain_scan gates the header/log scanners;
+			// deposit_confirmation gates the deposit scanner, the
+			// confirmation scanner and the 006 recovery loop. Each wrapper
+			// checks at loop start and wraps the scanner's own per-step
+			// checkLost callback (F12); the scanners keep their
+			// indexer_pause/version/lease gates untouched.
+			headerServe = recoveryWiring.gateServeLoop(recovery.CapabilityChainScan, "chain_scan", headerServe)
+			logServe = recoveryWiring.gateServeLoop(recovery.CapabilityChainScan, "chain_scan", logServe)
+			depositServe = recoveryWiring.gateServeLoop(recovery.CapabilityDepositConfirmation, "deposit_confirmation", depositServe)
+			confirmServe = recoveryWiring.gateServeLoop(recovery.CapabilityDepositConfirmation, "deposit_confirmation", confirmServe)
+			recoveryStream = recoveryWiring.gateServeLoop(recovery.CapabilityDepositConfirmation, "deposit_confirmation", recoveryStream)
 		}
-		confirmServe := func(loopCtx context.Context, checkLost func() error) error {
-			return confirmationScanner.ServeLoop(loopCtx, lease, checkLost)
-		}
-		indexerErr <- runServiceStreams(runCtx, lease, scanner.ServeLoop, logScanner.ServeLoop, depositServe, confirmServe, recoveryServe)
+		indexerErr <- runServiceStreams(runCtx, lease, headerServe, logServe, depositServe, confirmServe, recoveryStream)
 		close(indexerDone)
 	}()
 	fmt.Fprintf(stdout, "txharbor serve: listening on %s\n", listener.Addr())
@@ -690,6 +745,7 @@ serveLoop:
 			}
 			reconcileRPC.Close()
 			ethClient.Close()
+			recoveryWiring.close()
 			return nil
 		},
 		func(context.Context) error { pool.Close(); return nil },
@@ -698,6 +754,318 @@ serveLoop:
 		exitCode = 1
 	}
 	return exitCode
+}
+
+// ---------------------------------------------------------------------------
+// 015 resumption gate wiring (T030)
+// ---------------------------------------------------------------------------
+
+// recoveryGateRetryInterval bounds how long a refused serve entry waits before
+// re-reading the control store. It is an observation cadence only: every retry
+// re-evaluates the authoritative state and nothing is admitted in between.
+const recoveryGateRetryInterval = time.Second
+
+// recoveryAdmitter is the single admission surface serve consumes; the T012
+// gate is the only implementation. The interface keeps the wiring testable
+// without a control store.
+type recoveryAdmitter interface {
+	Admit(ctx context.Context, req recovery.GateRequest) (recovery.GateDecision, error)
+}
+
+// serveRecoveryWiring is the serve-side 015 assembly. A nil wiring means
+// recovery mode is not configured (no TXHARBOR_RECOVERY_CONTROL_DSN): no
+// recovery instance can exist and every entry keeps its pre-015 behavior
+// (FR-023). A non-nil wiring evaluates every gated action against the control
+// store; the pool is owned by Serve and closed on shutdown.
+type serveRecoveryWiring struct {
+	gate recoveryAdmitter
+	pool *pgxpool.Pool
+	// scopes maps every capability of the closed seven to its canonical
+	// business scope on this deployment chain (T050). Entry identity is not a
+	// scope dimension: the serve read path, the scan loops and the withdrawal
+	// entry all derive their scope from the same constructor, so one release
+	// covers every entry that acts on that capability.
+	scopes map[recovery.Capability]string
+	// actor is the audit label of the deployment principal; it authorizes
+	// nothing by itself.
+	actor string
+	// instance is the TXHARBOR_RECOVERY_INSTANCE binding ("" = unbound). An
+	// unbound process refuses while any recovery instance is open.
+	instance string
+	// retry overrides the refusal re-check cadence (test seam; 0 = the
+	// package cadence).
+	retry time.Duration
+}
+
+// close releases the control-store pool. Nil-safe.
+func (w *serveRecoveryWiring) close() {
+	if w != nil && w.pool != nil {
+		w.pool.Close()
+	}
+}
+
+// admit evaluates one single action of capability through the gate at the
+// canonical scope of that capability (T050). It is the only call point: no
+// admission logic is re-derived or copied here — T012's derived evaluation is
+// the single authority.
+func (w *serveRecoveryWiring) admit(ctx context.Context, capability recovery.Capability, action string) (recovery.GateDecision, error) {
+	scope, ok := w.scopes[capability]
+	if !ok {
+		// Unreachable: the assembly refuses a chain that cannot derive every
+		// capability scope, and capabilities come from the closed set. Fail
+		// closed with a closed-set class instead of admitting at a default.
+		return recovery.GateDecision{
+			Allowed:      false,
+			RefusalClass: recovery.RefusalScopeMismatch,
+			Reason:       fmt.Sprintf("capability %q has no canonical scope in this assembly; refusing", capability),
+			Capability:   capability,
+		}, nil
+	}
+	return w.gate.Admit(ctx, recovery.GateRequest{
+		InstanceID: w.instance,
+		Capability: capability,
+		ScopeHash:  scope,
+		Actor:      w.actor,
+		Action:     action,
+	})
+}
+
+// retryAfter returns the refusal re-check cadence of a refused entry.
+func (w *serveRecoveryWiring) retryAfter() time.Duration {
+	if w != nil && w.retry > 0 {
+		return w.retry
+	}
+	return recoveryGateRetryInterval
+}
+
+// assembleServeRecovery builds the serve-side gate wiring. It is fail-closed
+// in both directions: without TXHARBOR_RECOVERY_CONTROL_DSN the process is in
+// normal mode and returns (nil, nil) — a bound instance without the control
+// store refuses; with the control store configured, a missing gate TTL, an
+// unparsable effect-class ruling, an unusable deployment chain, an
+// unreachable store or an unknown/incompatible schema version refuses startup
+// instead of degrading to pass-through (INV-5/INV-11).
+func assembleServeRecovery(ctx context.Context, cfg *config.Config, getenv func(string) (string, bool)) (*serveRecoveryWiring, error) {
+	var instance string
+	if raw, ok := getenv(config.EnvRecoveryInstance); ok {
+		instance = strings.TrimSpace(raw)
+	}
+	if strings.TrimSpace(cfg.Recovery.ControlDSN) == "" {
+		if instance != "" {
+			return nil, fmt.Errorf(
+				"%s binds this process to instance %s but %s is not configured; a bound recovery process cannot be evaluated (fail-closed)",
+				config.EnvRecoveryInstance, instance, config.EnvRecoveryControlDSN)
+		}
+		return nil, nil // normal mode: no recovery instance can exist
+	}
+	if cfg.Recovery.GateTTL <= 0 {
+		return nil, fmt.Errorf(
+			"%s is required when %s is configured and must be a positive duration; the resumption gate has no default TTL",
+			config.EnvRecoveryGateTTL, config.EnvRecoveryControlDSN)
+	}
+	ruling, err := recoveryEffectClassRuling(cfg)
+	if err != nil {
+		return nil, fmt.Errorf("gate assembly: %s", logx.Redact(err.Error()))
+	}
+	trustedTarget, err := recovery.GateTargetBindingFromDSN(cfg.PGDSN)
+	if err != nil {
+		return nil, fmt.Errorf("%s is required to bind the recovery gate target: %s", config.EnvPGDSN, logx.Redact(err.Error()))
+	}
+	scopes, err := recoveryCapabilityScopes(cfg.ChainID)
+	if err != nil {
+		return nil, fmt.Errorf("recovery capability scopes: %s", logx.Redact(err.Error()))
+	}
+	pool, err := db.OpenPool(ctx, cfg.Recovery.ControlDSN, cfg.ProbeTimeout)
+	if err != nil {
+		return nil, fmt.Errorf("control store unavailable: %s", logx.Redact(err.Error()))
+	}
+	store, err := controlstore.NewStore(ctx, pool)
+	if err != nil {
+		pool.Close()
+		return nil, fmt.Errorf("control store unavailable: %s", logx.Redact(err.Error()))
+	}
+	gate, err := recovery.NewGate(store, recovery.GateOptions{TTL: cfg.Recovery.GateTTL, EffectClassRuling: ruling, TrustedTarget: trustedTarget})
+	if err != nil {
+		pool.Close()
+		return nil, fmt.Errorf("gate assembly: %s", logx.Redact(err.Error()))
+	}
+	return &serveRecoveryWiring{
+		gate:     gate,
+		pool:     pool,
+		scopes:   scopes,
+		actor:    cfg.Recovery.Principal,
+		instance: instance,
+	}, nil
+}
+
+// recoveryRefusalBody is the HTTP refusal shape of a gated read path.
+// refusal_class is always a member of the closed set (data-model §3.3); the
+// gate audits the refusal itself, this body only surfaces it.
+type recoveryRefusalBody struct {
+	Error        string `json:"error"`
+	Capability   string `json:"capability"`
+	RefusalClass string `json:"refusal_class"`
+	Reason       string `json:"reason,omitempty"`
+	InstanceID   string `json:"instance_id,omitempty"`
+}
+
+// writeRecoveryRefusal renders one gate refusal as a bounded JSON 503. A
+// decision without a known closed-set class is surfaced as
+// control_store_unavailable: the response never invents a class and never a
+// 2xx for a refused admission.
+func writeRecoveryRefusal(w http.ResponseWriter, capability recovery.Capability, dec recovery.GateDecision) {
+	class := dec.RefusalClass
+	if class == recovery.RefusalNoInstance || !class.Known() {
+		class = recovery.RefusalControlStoreUnavailable
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusServiceUnavailable)
+	_ = json.NewEncoder(w).Encode(recoveryRefusalBody{
+		Error:        "recovery_gate_refused",
+		Capability:   string(capability),
+		RefusalClass: string(class),
+		Reason:       dec.Reason,
+		InstanceID:   dec.InstanceID,
+	})
+}
+
+// recoveryHealthAnnotation marks probe responses while recovery mode is
+// configured (T063/FR-026): readiness and liveness stay reachability/version
+// signals and are never presented as an attestation of restored, verified or
+// released data. It changes no status code and claims no capability state; a
+// nil wiring (normal mode) returns next unchanged.
+func recoveryHealthAnnotation(wiring *serveRecoveryWiring, next http.Handler) http.Handler {
+	if wiring == nil {
+		return next
+	}
+	mode := recoveryStatusModeConfigured
+	if strings.TrimSpace(wiring.instance) != "" {
+		mode = recoveryStatusModeBound
+	}
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("X-TXHarbor-Recovery-Mode", mode)
+		w.Header().Set("X-TXHarbor-Recovery-Attestation",
+			"probe reachability only; never attests restored/verified/released data or the fund gates")
+		next.ServeHTTP(w, r)
+	})
+}
+
+// recoveryQueryGate installs the query admission in front of one read-path
+// route. It runs before guardRoute and therefore before authentication,
+// degradation annotation and rate limiting: the refusal is the HTTP admission
+// point of contracts/resumption-gate.md §1.1. Non-GET requests pass through —
+// the write paths are gated by their own entries (T031/T032). A nil wiring
+// (normal mode) returns next unchanged.
+func recoveryQueryGate(wiring *serveRecoveryWiring, next http.Handler) http.Handler {
+	if wiring == nil {
+		return next
+	}
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			next.ServeHTTP(w, r)
+			return
+		}
+		dec, err := wiring.admit(r.Context(), recovery.CapabilityQuery, "serve_read")
+		if err != nil || !dec.Allowed {
+			writeRecoveryRefusal(w, recovery.CapabilityQuery, dec)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+// errRecoveryStepRefused marks one scan step stopped by the gate before any
+// write. The stream wrapper maps it back to a wait-and-re-admit; it never
+// escapes to the coordinator as a stop condition.
+var errRecoveryStepRefused = errors.New("recovery gate refused this scan step")
+
+// gateServeLoop wraps one indexer serve loop with the 015 gate (F12): the loop
+// does not start before an admission, and every step consults the gate through
+// the wrapped checkLost callback the scanner already calls before each step.
+// While refused the wrapper stays resident and retries, so an open recovery
+// instance stops chain progress without stopping the process or bypassing the
+// original scanner gates (indexer_pause, version captures, lease/fencing all
+// stay inside the scanner). Lease-loss and every original stop error pass
+// through unchanged.
+func (w *serveRecoveryWiring) gateServeLoop(capability recovery.Capability, action string, inner indexer.ServeFunc) indexer.ServeFunc {
+	if w == nil {
+		return inner
+	}
+	return func(ctx context.Context, checkLost func() error) error {
+		if checkLost == nil {
+			checkLost = func() error { return nil }
+		}
+		warned := false
+		for {
+			if ctx.Err() != nil {
+				return nil
+			}
+			dec, err := w.admit(ctx, capability, action+"_start")
+			if err != nil || !dec.Allowed {
+				if !warned {
+					slog.Warn("recovery gate refused scan start; the loop stays stopped",
+						"capability", string(capability),
+						"refusal_class", string(dec.RefusalClass),
+						"reason", logx.Redact(dec.Reason))
+					warned = true
+				}
+				if !recoveryWait(ctx, w.retryAfter()) {
+					return nil
+				}
+				continue
+			}
+			warned = false
+			err = inner(ctx, w.stepGate(ctx, capability, action, checkLost))
+			switch {
+			case err == nil:
+				return nil
+			case ctx.Err() != nil:
+				return nil
+			case errors.Is(err, errRecoveryStepRefused):
+				if !warned {
+					slog.Warn("recovery gate refused a scan step; the loop stays stopped",
+						"capability", string(capability))
+					warned = true
+				}
+				if !recoveryWait(ctx, w.retryAfter()) {
+					return nil
+				}
+			default:
+				return err
+			}
+		}
+	}
+}
+
+// stepGate composes the coordinator's lease/lost check with one gate
+// admission, so every scan step re-evaluates the gate immediately before its
+// work. A refusal stops the step (errRecoveryStepRefused) without touching the
+// scanner's own pause/version state; a lost lease keeps its original error and
+// priority.
+func (w *serveRecoveryWiring) stepGate(ctx context.Context, capability recovery.Capability, action string, checkLost func() error) func() error {
+	return func() error {
+		if err := checkLost(); err != nil {
+			return err
+		}
+		dec, err := w.admit(ctx, capability, action+"_step")
+		if err != nil || !dec.Allowed {
+			return errRecoveryStepRefused
+		}
+		return nil
+	}
+}
+
+// recoveryWait sleeps for d and reports false when ctx is done, so shutdown
+// aborts a refused entry's wait immediately.
+func recoveryWait(ctx context.Context, d time.Duration) bool {
+	timer := time.NewTimer(d)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return false
+	case <-timer.C:
+		return true
+	}
 }
 
 // runRebuildGate executes the R5 startup rebuild verification and applies its

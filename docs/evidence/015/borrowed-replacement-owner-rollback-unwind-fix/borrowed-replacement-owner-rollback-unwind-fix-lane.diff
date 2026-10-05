@@ -1,0 +1,311 @@
+--- borrowed-replacement-owner-rollback-unwind-fix-lane-before.go	2026-10-02 06:12:37.372149246 +0800
++++ /home/dream/product_env/TxHarbor/internal/recovery/borrowed-replacement-owner-rollback-unwind_linux_test.go	2026-10-02 06:31:19.465901884 +0800
+@@ -31,9 +31,11 @@
+ import (
+ 	"context"
+ 	"errors"
++	"fmt"
+ 	"io"
+ 	"os"
+ 	"strings"
++	"sync"
+ 	"sync/atomic"
+ 	"testing"
+ 	"time"
+@@ -73,6 +75,7 @@
+ 		attemptID := borrowedReplacementOwnerJournalActualRefusal(t, ctx, b, fresh, "rollback-unwind", &probeCalls, &acceptanceCalls)
+ 		facts := &borrowedReplacementOwnerJournalFacts{}
+ 		var canceled atomic.Bool
++		var decisiveAt time.Time
+ 		watchdogFired := atomic.Bool{}
+ 		watchdog := time.AfterFunc(borrowedReplacementOwnerRollbackWatchdogBound, func() {
+ 			watchdogFired.Store(true)
+@@ -87,7 +90,10 @@
+ 				if !facts.inserted || facts.auditID <= 0 {
+ 					return errors.New("rollback-unwind arm refused: the insertion was not confirmed")
+ 				}
+-				fault.ArmRollbackGate()
++				if armErr := fault.ArmRollbackGate(); armErr != nil {
++					return fmt.Errorf("rollback-unwind arm refused: %w", armErr)
++				}
++				decisiveAt = time.Now()
+ 				canceled.Store(true)
+ 				cancelLane()
+ 				return nil
+@@ -99,27 +105,39 @@
+ 		if !canceled.Load() || !facts.inserted || facts.auditID <= 0 {
+ 			t.Fatalf("rollback-unwind control: canceled=%t inserted=%t auditID=%d", canceled.Load(), facts.inserted, facts.auditID)
+ 		}
+-		if !fault.RollbackMode() || !fault.RollbackDispatched() {
++		if !fault.RollbackMode() || !fault.RollbackDispatched() || !fault.RollbackObserved() {
+ 			t.Fatal("rollback-unwind did not dispatch the ACTUAL rollback request")
+ 		}
+ 		if !fault.RollbackWithheld() {
+ 			t.Fatal("rollback-unwind did not withhold the validated ROLLBACK completion")
+ 		}
+-		if fault.CommitDispatched() {
+-			t.Fatal("rollback-unwind dispatched a COMMIT")
++		if fault.CommitDispatched() || fault.CommitObserved() {
++			t.Fatal("rollback-unwind dispatched or observed a COMMIT")
+ 		}
+ 		if outcome.flow.ownerErr == nil {
+ 			t.Fatal("rollback-unwind uncertain rollback was reported as success")
+ 		}
++		if !errors.Is(outcome.flow.ownerErr, errOwnerTailArbitration) {
++			t.Fatalf("rollback-unwind refusal was not the ACTUAL arbitration sentinel: %v", outcome.flow.ownerErr)
++		}
+ 		if !strings.Contains(outcome.flow.ownerErr.Error(), "target-lock acceptance callback") {
+ 			t.Fatalf("rollback-unwind owner error was not the callback refusal path: %v", outcome.flow.ownerErr)
+ 		}
+ 		if !strings.Contains(outcome.flow.ownerErr.Error(), "rollback target-lock acceptance transaction") {
+ 			t.Fatalf("rollback-unwind owner error was not the uncertain rollback path: %v", outcome.flow.ownerErr)
+ 		}
++		if !errors.Is(outcome.flow.ownerErr, context.DeadlineExceeded) && !errors.Is(outcome.flow.ownerErr, os.ErrDeadlineExceeded) {
++			t.Fatalf("rollback-unwind did not preserve the independent-cleanup deadline cause: %v", outcome.flow.ownerErr)
++		}
+ 		if strings.Contains(outcome.flow.ownerErr.Error(), "commit target-lock acceptance transaction") {
+ 			t.Fatalf("rollback-unwind owner error must never be an ambiguous COMMIT: %v", outcome.flow.ownerErr)
+ 		}
++		if decisiveAt.IsZero() {
++			t.Fatal("rollback-unwind decisive boundary was never recorded")
++		}
++		if elapsed := time.Since(decisiveAt); elapsed > 25*time.Second {
++			t.Fatalf("rollback-unwind unwind from the decisive boundary exceeded the explicit budget bound: %v", elapsed)
++		}
+ 		// Uncertain rollback: the owner handle is permanently retired and its
+ 		// connection was disposed boundedly.
+ 		healthCtx, cancelHealth := context.WithTimeout(ctx, borrowedOwnerRotationHealthBudget)
+@@ -208,11 +226,14 @@
+ 		if outcome.flow.ownerErr == nil || !strings.Contains(outcome.flow.ownerErr.Error(), "target-lock acceptance callback") {
+ 			t.Fatalf("rollback-unwind unarmed control was not the callback refusal path: %v", outcome.flow.ownerErr)
+ 		}
++		if !errors.Is(outcome.flow.ownerErr, errOwnerTailArbitration) {
++			t.Fatalf("rollback-unwind unarmed refusal was not the ACTUAL arbitration sentinel: %v", outcome.flow.ownerErr)
++		}
+ 		if strings.Contains(outcome.flow.ownerErr.Error(), "rollback target-lock acceptance transaction") {
+ 			t.Fatalf("rollback-unwind unarmed rollback was not acknowledged: %v", outcome.flow.ownerErr)
+ 		}
+-		if fault.RollbackDispatched() || fault.RollbackWithheld() {
+-			t.Fatal("rollback-unwind UNARMED gate claimed a rollback witness")
++		if fault.RollbackDispatched() || fault.RollbackWithheld() || fault.RollbackObserved() || fault.CommitObserved() {
++			t.Fatal("rollback-unwind UNARMED gate claimed a rollback or commit witness")
+ 		}
+ 		healthCtx, cancelHealth := context.WithTimeout(ctx, borrowedOwnerRotationHealthBudget)
+ 		healthErr := b.fixture.lock.Health(healthCtx)
+@@ -254,8 +275,11 @@
+ 	func() {
+ 		request := recovery.TargetLockRollbackRequestFrame()
+ 		completion := recovery.TargetLockRollbackCompletionFrames()
+-		ccFrames := completion[:12]
+-		zFrames := completion[12:]
++		// Boundaries derive from the ENCODED lengths: the ROLLBACK
++		// CommandComplete body is "ROLLBACK\0" (14 bytes including the header),
++		// not 12.
++		ccFrames := completion[:1+4+len("ROLLBACK\x00")]
++		zFrames := completion[1+4+len("ROLLBACK\x00"):]
+ 		// Missing completion.
+ 		missing := recovery.NewTargetLockCommitAmbiguityControl()
+ 		missing.ArmRollbackGate()
+@@ -308,6 +332,7 @@
+ 			{"commit-tag", recovery.TargetLockCommitCompletionFrames()},
+ 			{"missing-NUL", append(append([]byte{}, borrowedReplacementCommitAmbiguityFrame(nil, 'C', []byte("ROLLBACK"))...), zFrames...)},
+ 			{"short-ready", append(append([]byte{}, ccFrames...), borrowedReplacementCommitAmbiguityFrame(nil, 'Z', nil)...)},
++			{"wrong-status", append(append([]byte{}, ccFrames...), borrowedReplacementCommitAmbiguityFrame(nil, 'Z', []byte{'T'})...)},
+ 		}
+ 		for _, malformedCase := range malformedCases {
+ 			malformed := recovery.NewTargetLockCommitAmbiguityControl()
+@@ -376,78 +401,140 @@
+ 		t.Logf("rollback-unwind completion negatives: missing, partial and malformed ROLLBACK completions plus a queued read error never publish a completion witness and remain UNKNOWN, with the partial bytes genuinely consumed")
+ 	}()
+ 
+-	// N3: caller already cancelled: the rollback gate is armed before the
+-	// decisive boundary and the caller is cancelled there; the ACTUAL rollback
+-	// is still dispatched through the independent bounded rollback context and
+-	// the unwind stays well inside the explicit budget.
++	// N4 (P2-B1/B2): sealed command-kind controls: conflicting re-arms are
++	// rejected (the kind is sealed at the first arm), a wrong COMMIT frame while
++	// expecting ROLLBACK is observed independently but never dispatched as the
++	// selected kind, and concurrent arms seal exactly one kind.
+ 	func() {
+-		fault, reset, err := recovery.ArmTargetLockCommitAmbiguityFault()
+-		if err != nil {
+-			t.Fatalf("rollback-unwind pre-cancel fault reservation refused: %v", err)
++		commitFirst := recovery.NewTargetLockCommitAmbiguityControl()
++		if err := commitFirst.ArmGate(); err != nil {
++			t.Fatalf("rollback-unwind commit-first arm refused: %v", err)
+ 		}
+-		defer reset()
+-		b, fresh := borrowedReplacementGuardRowFixtures(t, ctx)
+-		if got := fault.WrappedCount(); got != 1 {
+-			t.Fatalf("rollback-unwind pre-cancel fault wrapped %d owner sockets, want exactly 1", got)
++		if commitFirst.CommandKind() != "commit" {
++			t.Fatalf("rollback-unwind commit-first kind=%s", commitFirst.CommandKind())
+ 		}
+-		attemptID := borrowedReplacementOwnerJournalActualRefusal(t, ctx, b, fresh, "rollback-precancel", &probeCalls, &acceptanceCalls)
+-		facts := &borrowedReplacementOwnerJournalFacts{}
+-		var canceled atomic.Bool
+-		watchdogFired := atomic.Bool{}
+-		watchdog := time.AfterFunc(borrowedReplacementOwnerRollbackWatchdogBound, func() {
+-			watchdogFired.Store(true)
+-			fault.Break()
+-		})
+-		defer watchdog.Stop()
++		if err := commitFirst.ArmRollbackGate(); err == nil {
++			t.Fatal("rollback-unwind conflicting rollback re-arm was accepted after a commit arm")
++		}
++		if err := commitFirst.ArmGate(); err != nil {
++			t.Fatalf("rollback-unwind same-kind re-arm was not idempotent: %v", err)
++		}
++		if commitFirst.CommandKind() != "commit" {
++			t.Fatal("rollback-unwind command kind was relabeled by a re-arm")
++		}
++		commitFirst.Break()
++		rollbackFirst := recovery.NewTargetLockCommitAmbiguityControl()
++		if err := rollbackFirst.ArmRollbackGate(); err != nil {
++			t.Fatalf("rollback-unwind rollback-first arm refused: %v", err)
++		}
++		if err := rollbackFirst.ArmGate(); err == nil {
++			t.Fatal("rollback-unwind conflicting commit re-arm was accepted after a rollback arm")
++		}
++		if rollbackFirst.CommandKind() != "rollback" {
++			t.Fatalf("rollback-unwind rollback-first kind=%s", rollbackFirst.CommandKind())
++		}
++		// Wrong command: a COMMIT frame while expecting ROLLBACK.
++		if err := rollbackFirst.ControlWriteClientBytes(recovery.TargetLockCommitRequestFrame()); err != nil {
++			t.Fatalf("rollback-unwind wrong-command write refused: %v", err)
++		}
++		if rollbackFirst.RollbackDispatched() || rollbackFirst.CommitDispatched() {
++			t.Fatal("rollback-unwind wrong command was dispatched as the sealed kind")
++		}
++		if !rollbackFirst.CommitObserved() || rollbackFirst.RollbackObserved() {
++			t.Fatal("rollback-unwind wrong-command observation was not independently recorded")
++		}
++		if rollbackFirst.Witness() != recovery.TargetLockCommitWitnessNotEstablished {
++			t.Fatal("rollback-unwind wrong command claimed a dispatch witness")
++		}
++		if err := rollbackFirst.ControlWriteClientBytes(recovery.TargetLockRollbackRequestFrame()); err != nil {
++			t.Fatalf("rollback-unwind sealed rollback write refused: %v", err)
++		}
++		if !rollbackFirst.RollbackDispatched() || !rollbackFirst.RollbackObserved() || !rollbackFirst.CommitObserved() {
++			t.Fatal("rollback-unwind sealed rollback kind was not dispatched after the wrong command")
++		}
++		rollbackFirst.Break()
++		// Concurrent arms seal exactly one kind.
++		concurrent := recovery.NewTargetLockCommitAmbiguityControl()
++		start := make(chan struct{})
++		var wait sync.WaitGroup
++		wait.Add(2)
++		var commitErr, rollbackErr error
++		go func() {
++			defer wait.Done()
++			<-start
++			commitErr = concurrent.ArmGate()
++		}()
++		go func() {
++			defer wait.Done()
++			<-start
++			rollbackErr = concurrent.ArmRollbackGate()
++		}()
++		close(start)
++		wait.Wait()
++		kind := concurrent.CommandKind()
++		if (commitErr == nil) == (rollbackErr == nil) {
++			t.Fatalf("rollback-unwind concurrent arms did not seal exactly one kind: commitErr=%v rollbackErr=%v kind=%s", commitErr, rollbackErr, kind)
++		}
++		if kind != "commit" && kind != "rollback" {
++			t.Fatalf("rollback-unwind concurrent arms sealed kind=%s", kind)
++		}
++		if commitErr == nil && kind != "commit" {
++			t.Fatal("rollback-unwind commit arm succeeded but the sealed kind is not commit")
++		}
++		if rollbackErr == nil && kind != "rollback" {
++			t.Fatal("rollback-unwind rollback arm succeeded but the sealed kind is not rollback")
++		}
++		concurrent.Break()
++		t.Logf("rollback-unwind command-kind controls: conflicting re-arms were rejected with the kind sealed at the first arm, a wrong COMMIT frame while expecting ROLLBACK was observed independently but never dispatched, and concurrent arms sealed exactly one kind (%s)", kind)
++	}()
++
++	// N3: early finalization control: a callback that COMMITS the supplied
++	// transaction and still returns an error must be conservatively treated as
++	// rollback uncertainty (ErrTxClosed is NOT an acknowledged rollback of that
++	// transaction), retiring the owner WITHOUT any deadline/budget credit.
++	func() {
++		b := newBorrowedSuccessorBaseline(t, ctx)
++		beforeDisposition, beforeOperation := borrowedReplacementGuardRowRead(t, ctx, b.fixture.controlPool, b.fixture.guardKey)
+ 		started := time.Now()
+-		outcome := borrowedReplacementOwnerJournalRun(ctx, t, b, fresh, &borrowedReplacementOwnerJournalStage{
+-			key: b.fixture.guardKey, expectedOperation: b.fixture.operation,
+-			insert: true, attemptID: attemptID, contenderProof: true,
+-		}, facts, &borrowedReplacementOwnerTailHooks{
+-			atTail: func(_ context.Context, _ *borrowedReplacementAutonomousPump, _ func(), _ pgx.Tx) error {
+-				fault.ArmRollbackGate()
+-				return nil
+-			},
+-			atArbitration: func(_ context.Context, _ *borrowedReplacementAutonomousPump, cancelLane func(), _ pgx.Tx) error {
+-				canceled.Store(true)
+-				cancelLane()
+-				return nil
+-			},
++		txCtx, cancelTx := context.WithTimeout(ctx, borrowedOwnerRotationQueryBudget)
++		txErr := b.fixture.lock.WithTransaction(txCtx, func(callbackCtx context.Context, tx pgx.Tx) error {
++			if err := tx.Commit(callbackCtx); err != nil {
++				return fmt.Errorf("rollback-unwind early finalization commit refused: %w", err)
++			}
++			return errors.New("rollback-unwind early finalization refusal after the supplied transaction was committed")
+ 		})
++		cancelTx()
+ 		elapsed := time.Since(started)
+-		if watchdogFired.Load() {
+-			t.Fatal("NOTESTABLISHED: the pre-cancelled rollback unwind required the watchdog break")
++		if txErr == nil {
++			t.Fatal("rollback-unwind early finalization was reported as success")
+ 		}
+-		if !canceled.Load() || !facts.inserted {
+-			t.Fatalf("rollback-unwind pre-cancel control canceled=%t inserted=%t", canceled.Load(), facts.inserted)
++		if !strings.Contains(txErr.Error(), "target-lock acceptance callback") {
++			t.Fatalf("rollback-unwind early finalization was not the callback path: %v", txErr)
+ 		}
+-		if !fault.RollbackDispatched() || !fault.RollbackWithheld() {
+-			t.Fatal("rollback-unwind pre-cancel did not dispatch and withhold the ACTUAL rollback")
++		if !strings.Contains(txErr.Error(), "rollback target-lock acceptance transaction") {
++			t.Fatalf("rollback-unwind early finalization did not report rollback uncertainty: %v", txErr)
+ 		}
+-		if !strings.Contains(outcome.flow.ownerErr.Error(), "rollback target-lock acceptance transaction") {
+-			t.Fatalf("rollback-unwind pre-cancel was not the uncertain rollback path: %v", outcome.flow.ownerErr)
++		if !errors.Is(txErr, pgx.ErrTxClosed) {
++			t.Fatalf("rollback-unwind early finalization was not the ErrTxClosed uncertainty path: %v", txErr)
++		}
++		if errors.Is(txErr, context.DeadlineExceeded) || errors.Is(txErr, os.ErrDeadlineExceeded) {
++			t.Fatal("rollback-unwind early finalization must not get budget credit (deadline cause)")
+ 		}
+-		if elapsed > 25*time.Second {
+-			t.Fatalf("rollback-unwind pre-cancel exceeded the explicit rollback/disposal budget bound: %v", elapsed)
++		if elapsed > 5*time.Second {
++			t.Fatalf("rollback-unwind early finalization waited on the rollback budget: %v", elapsed)
+ 		}
+ 		healthCtx, cancelHealth := context.WithTimeout(ctx, borrowedOwnerRotationHealthBudget)
+ 		healthErr := b.fixture.lock.Health(healthCtx)
+ 		cancelHealth()
+ 		if healthErr == nil || !strings.Contains(healthErr.Error(), "closed") {
+-			t.Fatalf("rollback-unwind pre-cancel uncertain rollback did not retire the owner handle: %v", healthErr)
++			t.Fatalf("rollback-unwind early finalization did not retire the owner handle: %v", healthErr)
+ 		}
+-		if count := borrowedReplacementOwnerJournalCount(t, ctx, b.fixture.controlPool, attemptID); count != 0 {
+-			t.Fatalf("rollback-unwind pre-cancel left %d durable journal rows", count)
+-		}
+-		if outcome.flow.state.compositePublished() || outcome.state.eligibleNow() {
+-			t.Fatal("rollback-unwind pre-cancel produced a composite or eligibility")
++		postDisposition, postOperation := borrowedReplacementGuardRowRead(t, ctx, b.fixture.controlPool, b.fixture.guardKey)
++		if postDisposition != beforeDisposition || postOperation != beforeOperation {
++			t.Fatal("rollback-unwind early finalization changed the guard contents")
+ 		}
+ 		borrowedOwnerDDLGuard(t, ctx, b)
+-		if outcome.pumpJoinErr != nil {
+-			t.Fatalf("rollback-unwind pre-cancel pump join was UNKNOWN: %v", outcome.pumpJoinErr)
+-		}
+-		borrowedSuccessorCloseConn(t, outcome.flow.conn)
+-		t.Logf("rollback-unwind pre-cancel negative: the gate was armed before the decisive boundary and the caller was cancelled there, yet the ACTUAL rollback was still dispatched and withheld through the independent bounded rollback context and the uncertain unwind completed inside %v (watchdog never fired), retiring the owner handle", elapsed.Round(time.Millisecond))
++		t.Logf("rollback-unwind early-finalization control: a callback that committed the supplied transaction and still returned an error was conservatively treated as rollback uncertainty (ErrTxClosed, retirement without deadline/budget credit), the owner handle was permanently retired inside %v and the guard stayed unchanged and unresolved", elapsed.Round(time.Millisecond))
+ 	}()
+ 
+ 	if got := atomic.LoadInt32(&probeCalls); got != 0 {

@@ -1,0 +1,11 @@
+--- borrowed-replacement-owner-rollback-unwind-fix2-companion-before.go	2026-10-02 06:28:28.999091160 +0800
++++ /home/dream/product_env/TxHarbor/internal/recovery/targetlock_commitambiguity_hook_linux_test.go	2026-10-02 06:43:15.876425058 +0800
+@@ -561,7 +561,7 @@
+ 
+ func (c *targetLockCommitAmbiguityCore) maybeEstablishDispatch(p []byte) {
+ 	c.mu.Lock()
+-	if !c.armed || c.dispatched {
++	if !c.armed {
+ 		c.mu.Unlock()
+ 		return
+ 	}

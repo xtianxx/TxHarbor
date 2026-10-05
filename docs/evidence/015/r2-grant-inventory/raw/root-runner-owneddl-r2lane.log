@@ -1,0 +1,121 @@
+pg_restore (PostgreSQL) 18.6 (Debian 18.6-1.pgdg13+2)
+go version go1.26.5 linux/amd64
+2026/10/04 05:15:00 github.com/testcontainers/testcontainers-go - Connected to docker: 
+  Server Version: 29.6.1
+  API Version: 1.55
+  Operating System: Ubuntu 24.04.4 LTS
+  Total Memory: 15915 MB
+  Testcontainers for Go Version: v0.44.0
+  Resolved Docker Host: unix:///var/run/docker.sock
+  Resolved Docker Socket Path: /var/run/docker.sock
+  Test SessionID: 0fc8b5c1df0047a9143adbed9e147a8d470135c4fdec4fd7d524ac9484719d30
+  Test ProcessID: 66dfc353-84c9-4315-aaa7-6f37c12a4f37
+=== RUN   TestBorrowedOwnerDDLFeasibility
+2026/10/04 05:15:00 🐳 Creating container for image postgres@sha256:4ef4dbc939d61acea57712655ddb4b4ab27419c913f94cca0cd57cb3ea3c2280
+2026/10/04 05:15:00 🐳 Creating container for image testcontainers/ryuk:0.14.0
+2026/10/04 05:15:00 ✅ Container created: cb806c71fb00
+2026/10/04 05:15:00 🐳 Starting container: cb806c71fb00
+2026/10/04 05:15:01 ✅ Container started: cb806c71fb00
+2026/10/04 05:15:01 ⏳ Waiting for container id cb806c71fb00 image: testcontainers/ryuk:0.14.0. Waiting for: all of: [log message "Started", port 8080/tcp to be listening]
+2026/10/04 05:15:01 Shell not found in container
+2026/10/04 05:15:01 🔔 Container is ready: cb806c71fb00
+2026/10/04 05:15:01 ✅ Container created: 0fe261a2b1a1
+2026/10/04 05:15:01 🐳 Starting container: 0fe261a2b1a1
+2026/10/04 05:15:02 ✅ Container started: 0fe261a2b1a1
+2026/10/04 05:15:02 ⏳ Waiting for container id 0fe261a2b1a1 image: postgres@sha256:4ef4dbc939d61acea57712655ddb4b4ab27419c913f94cca0cd57cb3ea3c2280. Waiting for: log message "database system is ready to accept connections" (occurrence: 2)
+2026/10/04 05:15:04 🔔 Container is ready: 0fe261a2b1a1
+    borrowed-owner-ddl-feasibility_linux_test.go:691: protected fixture actual HBA rules (all SCRAM, no trust fallback): line=1 type=local address="" auth=scram-sha-256; line=2 type=host address="127.0.0.1" auth=scram-sha-256; line=3 type=host address="::1" auth=scram-sha-256; line=4 type=host address="all" auth=scram-sha-256
+    borrowed-owner-ddl-feasibility_linux_test.go:699: successor retired: backend PID 329 incarnation strictly gone, owner health retained, guard non-clean, acceptance zero
+    borrowed-owner-ddl-feasibility_linux_test.go:772: owner DDL feasibility: DROP/CREATE committed old OID 16396 -> new OID 16757 with a whole-catalog pristine W-owned replacement; old prefix/entry refused with the retained old OID
+2026/10/04 05:15:14 🐳 Creating container for image postgres@sha256:4ef4dbc939d61acea57712655ddb4b4ab27419c913f94cca0cd57cb3ea3c2280
+2026/10/04 05:15:14 ✅ Container created: 12b28f1e1879
+2026/10/04 05:15:14 🐳 Starting container: 12b28f1e1879
+2026/10/04 05:15:15 ✅ Container started: 12b28f1e1879
+2026/10/04 05:15:15 ⏳ Waiting for container id 12b28f1e1879 image: postgres@sha256:4ef4dbc939d61acea57712655ddb4b4ab27419c913f94cca0cd57cb3ea3c2280. Waiting for: log message "database system is ready to accept connections" (occurrence: 2)
+2026/10/04 05:15:17 🔔 Container is ready: 12b28f1e1879
+    borrowed-owner-ddl-feasibility_linux_test.go:775: protected fixture actual HBA rules (all SCRAM, no trust fallback): line=1 type=local address="" auth=scram-sha-256; line=2 type=host address="127.0.0.1" auth=scram-sha-256; line=3 type=host address="::1" auth=scram-sha-256; line=4 type=host address="all" auth=scram-sha-256
+    borrowed-owner-ddl-feasibility_linux_test.go:775: held/contamination negative: the retained session was refused pre-DDL with zero seam invocations; the seam's no-FORCE DROP refused with 55006 and no CREATE; the relations/schema-contaminated replacement was non-pristine
+2026/10/04 05:15:30 🐳 Creating container for image postgres@sha256:4ef4dbc939d61acea57712655ddb4b4ab27419c913f94cca0cd57cb3ea3c2280
+2026/10/04 05:15:30 ✅ Container created: 668e2ca794a3
+2026/10/04 05:15:30 🐳 Starting container: 668e2ca794a3
+2026/10/04 05:15:31 ✅ Container started: 668e2ca794a3
+2026/10/04 05:15:31 ⏳ Waiting for container id 668e2ca794a3 image: postgres@sha256:4ef4dbc939d61acea57712655ddb4b4ab27419c913f94cca0cd57cb3ea3c2280. Waiting for: log message "database system is ready to accept connections" (occurrence: 2)
+2026/10/04 05:15:33 🔔 Container is ready: 668e2ca794a3
+    borrowed-owner-ddl-feasibility_linux_test.go:776: protected fixture actual HBA rules (all SCRAM, no trust fallback): line=1 type=local address="" auth=scram-sha-256; line=2 type=host address="127.0.0.1" auth=scram-sha-256; line=3 type=host address="::1" auth=scram-sha-256; line=4 type=host address="all" auth=scram-sha-256
+    borrowed-owner-ddl-feasibility_linux_test.go:776: rename/wrong-identity negative: the renamed target was refused by the seam pre-DDL with the OID preserved and no DROP; the wrong control OID and the real stale target OID were refused by the orchestration preflight with zero seam invocations
+2026/10/04 05:15:41 🐳 Creating container for image postgres@sha256:4ef4dbc939d61acea57712655ddb4b4ab27419c913f94cca0cd57cb3ea3c2280
+2026/10/04 05:15:41 ✅ Container created: d41c4bf6f9ea
+2026/10/04 05:15:41 🐳 Starting container: d41c4bf6f9ea
+2026/10/04 05:15:39 ✅ Container started: d41c4bf6f9ea
+2026/10/04 05:15:39 ⏳ Waiting for container id d41c4bf6f9ea image: postgres@sha256:4ef4dbc939d61acea57712655ddb4b4ab27419c913f94cca0cd57cb3ea3c2280. Waiting for: log message "database system is ready to accept connections" (occurrence: 2)
+2026/10/04 05:15:41 🔔 Container is ready: d41c4bf6f9ea
+    borrowed-owner-ddl-feasibility_linux_test.go:777: protected fixture actual HBA rules (all SCRAM, no trust fallback): line=1 type=local address="" auth=scram-sha-256; line=2 type=host address="127.0.0.1" auth=scram-sha-256; line=3 type=host address="::1" auth=scram-sha-256; line=4 type=host address="all" auth=scram-sha-256
+    borrowed-owner-ddl-feasibility_linux_test.go:777: cancel/owner-loss negative: an ended caller context and real owner loss were each refused by the orchestration preflight with zero seam invocations, no DDL, no replacement owner and no retry
+2026/10/04 05:15:48 🐳 Creating container for image postgres@sha256:4ef4dbc939d61acea57712655ddb4b4ab27419c913f94cca0cd57cb3ea3c2280
+2026/10/04 05:15:48 ✅ Container created: 9f428ab41bf3
+2026/10/04 05:15:48 🐳 Starting container: 9f428ab41bf3
+2026/10/04 05:15:49 ✅ Container started: 9f428ab41bf3
+2026/10/04 05:15:49 ⏳ Waiting for container id 9f428ab41bf3 image: postgres@sha256:4ef4dbc939d61acea57712655ddb4b4ab27419c913f94cca0cd57cb3ea3c2280. Waiting for: log message "database system is ready to accept connections" (occurrence: 2)
+2026/10/04 05:15:52 🔔 Container is ready: 9f428ab41bf3
+    borrowed-owner-ddl-feasibility_linux_test.go:778: protected fixture actual HBA rules (all SCRAM, no trust fallback): line=1 type=local address="" auth=scram-sha-256; line=2 type=host address="127.0.0.1" auth=scram-sha-256; line=3 type=host address="::1" auth=scram-sha-256; line=4 type=host address="all" auth=scram-sha-256
+    borrowed-owner-ddl-feasibility_linux_test.go:778: drift/inventory negative: committed verifier drift was refused by the fenced check with the drift classification and a retained foreign target session by the inventory, both with zero seam invocations and no DDL
+2026/10/04 05:16:00 🐳 Creating container for image postgres@sha256:4ef4dbc939d61acea57712655ddb4b4ab27419c913f94cca0cd57cb3ea3c2280
+2026/10/04 05:16:00 ✅ Container created: 372cb36a8ef3
+2026/10/04 05:16:00 🐳 Starting container: 372cb36a8ef3
+2026/10/04 05:16:01 ✅ Container started: 372cb36a8ef3
+2026/10/04 05:16:01 ⏳ Waiting for container id 372cb36a8ef3 image: postgres@sha256:4ef4dbc939d61acea57712655ddb4b4ab27419c913f94cca0cd57cb3ea3c2280. Waiting for: log message "database system is ready to accept connections" (occurrence: 2)
+2026/10/04 05:16:03 🔔 Container is ready: 372cb36a8ef3
+    borrowed-owner-ddl-feasibility_linux_test.go:779: protected fixture actual HBA rules (all SCRAM, no trust fallback): line=1 type=local address="" auth=scram-sha-256; line=2 type=host address="127.0.0.1" auth=scram-sha-256; line=3 type=host address="::1" auth=scram-sha-256; line=4 type=host address="all" auth=scram-sha-256
+    borrowed-owner-ddl-feasibility_linux_test.go:779: post-DROP failure negative: CREATE failed after the committed DROP, target absent, partial/UNKNOWN outcome recorded, guard non-clean, no auto-repair
+2026/10/04 05:16:15 🐳 Creating container for image postgres@sha256:4ef4dbc939d61acea57712655ddb4b4ab27419c913f94cca0cd57cb3ea3c2280
+2026/10/04 05:16:15 ✅ Container created: 623fd0ec73dd
+2026/10/04 05:16:15 🐳 Starting container: 623fd0ec73dd
+2026/10/04 05:16:15 ✅ Container started: 623fd0ec73dd
+2026/10/04 05:16:15 ⏳ Waiting for container id 623fd0ec73dd image: postgres@sha256:4ef4dbc939d61acea57712655ddb4b4ab27419c913f94cca0cd57cb3ea3c2280. Waiting for: log message "database system is ready to accept connections" (occurrence: 2)
+2026/10/04 05:16:18 🔔 Container is ready: 623fd0ec73dd
+    borrowed-owner-ddl-feasibility_linux_test.go:780: protected fixture actual HBA rules (all SCRAM, no trust fallback): line=1 type=local address="" auth=scram-sha-256; line=2 type=host address="127.0.0.1" auth=scram-sha-256; line=3 type=host address="::1" auth=scram-sha-256; line=4 type=host address="all" auth=scram-sha-256
+    borrowed-owner-ddl-feasibility_linux_test.go:780: unconfirmed-DROP negative: cancellation at the pre-DROP pause produced an unconfirmed DROP (Unknown=true, Dropped=false, no SQLSTATE) and no CREATE replacement exists
+2026/10/04 05:16:26 🐳 Creating container for image postgres@sha256:4ef4dbc939d61acea57712655ddb4b4ab27419c913f94cca0cd57cb3ea3c2280
+2026/10/04 05:16:26 ✅ Container created: c52cab5acc7d
+2026/10/04 05:16:26 🐳 Starting container: c52cab5acc7d
+2026/10/04 05:16:27 ✅ Container started: c52cab5acc7d
+2026/10/04 05:16:27 ⏳ Waiting for container id c52cab5acc7d image: postgres@sha256:4ef4dbc939d61acea57712655ddb4b4ab27419c913f94cca0cd57cb3ea3c2280. Waiting for: log message "database system is ready to accept connections" (occurrence: 2)
+2026/10/04 05:16:29 🔔 Container is ready: c52cab5acc7d
+    borrowed-owner-ddl-feasibility_linux_test.go:781: protected fixture actual HBA rules (all SCRAM, no trust fallback): line=1 type=local address="" auth=scram-sha-256; line=2 type=host address="127.0.0.1" auth=scram-sha-256; line=3 type=host address="::1" auth=scram-sha-256; line=4 type=host address="all" auth=scram-sha-256
+    borrowed-owner-ddl-feasibility_linux_test.go:781: function-contamination negative: the base whole-catalog predicate alone accepted a function-only contamination; the lane-side function scan refused the replacement as non-pristine
+2026/10/04 05:16:36 🐳 Stopping container: c52cab5acc7d
+2026/10/04 05:16:37 ✅ Container stopped: c52cab5acc7d
+2026/10/04 05:16:37 🐳 Terminating container: c52cab5acc7d
+2026/10/04 05:16:37 🚫 Container terminated: c52cab5acc7d
+2026/10/04 05:16:37 🐳 Stopping container: 623fd0ec73dd
+2026/10/04 05:16:37 ✅ Container stopped: 623fd0ec73dd
+2026/10/04 05:16:37 🐳 Terminating container: 623fd0ec73dd
+2026/10/04 05:16:37 🚫 Container terminated: 623fd0ec73dd
+2026/10/04 05:16:37 🐳 Stopping container: 372cb36a8ef3
+2026/10/04 05:16:38 ✅ Container stopped: 372cb36a8ef3
+2026/10/04 05:16:38 🐳 Terminating container: 372cb36a8ef3
+2026/10/04 05:16:38 🚫 Container terminated: 372cb36a8ef3
+2026/10/04 05:16:38 🐳 Stopping container: 9f428ab41bf3
+2026/10/04 05:16:38 ✅ Container stopped: 9f428ab41bf3
+2026/10/04 05:16:38 🐳 Terminating container: 9f428ab41bf3
+2026/10/04 05:16:38 🚫 Container terminated: 9f428ab41bf3
+2026/10/04 05:16:38 🐳 Stopping container: d41c4bf6f9ea
+2026/10/04 05:16:39 ✅ Container stopped: d41c4bf6f9ea
+2026/10/04 05:16:39 🐳 Terminating container: d41c4bf6f9ea
+2026/10/04 05:16:39 🚫 Container terminated: d41c4bf6f9ea
+2026/10/04 05:16:39 🐳 Stopping container: 668e2ca794a3
+2026/10/04 05:16:39 ✅ Container stopped: 668e2ca794a3
+2026/10/04 05:16:39 🐳 Terminating container: 668e2ca794a3
+2026/10/04 05:16:39 🚫 Container terminated: 668e2ca794a3
+2026/10/04 05:16:39 🐳 Stopping container: 12b28f1e1879
+2026/10/04 05:16:40 ✅ Container stopped: 12b28f1e1879
+2026/10/04 05:16:40 🐳 Terminating container: 12b28f1e1879
+2026/10/04 05:16:40 🚫 Container terminated: 12b28f1e1879
+2026/10/04 05:16:40 🐳 Stopping container: 0fe261a2b1a1
+2026/10/04 05:16:40 ✅ Container stopped: 0fe261a2b1a1
+2026/10/04 05:16:40 🐳 Terminating container: 0fe261a2b1a1
+2026/10/04 05:16:40 🚫 Container terminated: 0fe261a2b1a1
+--- PASS: TestBorrowedOwnerDDLFeasibility (110.44s)
+PASS
+ok  	github.com/xtianxx/txharbor/internal/recovery	110.485s
+exit=0

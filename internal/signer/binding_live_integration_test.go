@@ -571,7 +571,7 @@ func TestSignerBindingLive008Delivery(t *testing.T) {
 	provider := blProvider(pool)
 	live := NewLiveBindingReader(provider)
 	deps := func(binding BindingReader, scope ScopeLocker) DeliveryDeps {
-		return DeliveryDeps{DB: pool, Binding: binding, ScopeLock: scope}
+		return DeliveryDeps{DB: pool, Binding: binding, ScopeLock: scope, RecoveryGate: testDeliveryGateAllow}
 	}
 	n := 100
 	next := func() *blFixture { n++; return blSeed(t, pool, alloc, n) }

@@ -1,0 +1,148 @@
+{
+  "task": "NEW bounded lane: owner rollback-response-loss unwind + companion rollback-only fixed controls + production repair (independent bounded rollback context, uncertain-rollback retirement with bounded disposal)",
+  "date": "2026-10-01",
+  "head": "e504462",
+  "worktree_tracked_modified": 22,
+  "scope": {
+    "new_files": [
+      "internal/recovery/borrowed-replacement-owner-rollback-unwind_linux_test.go"
+    ],
+    "modified_files": [
+      "internal/recovery/targetlock_commitambiguity_hook_linux_test.go",
+      "internal/recovery/targetlock.go"
+    ],
+    "untouched": "journal ee880415, guard-row 264cbc81, owner-tail 819585c4, observation f1c7601a, window a11b33fc, autonomous d9fe63ee, prelaunch/session/binding/driver/successor/DDL/bridges, commit-ambiguity lane 7e613d18"
+  },
+  "source_hashes": {
+    "targetlock_before": "529c71c4b3e494988526e539e48472d4f80140149ca9cc51913e454a0731a30a",
+    "targetlock_after": "45f09896c65aa986dca827cfee10ba6dafc2f97f72d21d8502f5d346c9de5177",
+    "companion_before": "ff2bb3527dda9a81999f15e41518a44db808e386766249ba2e4892288a3f9ebf",
+    "companion_after": "a42a4db9cc386c3bb129c84c300dacf5ced5e54b343d6e99947f08adced5b5cf",
+    "lane_new": "fd238aed339765aff0c013974557a813db0045a644ed4d892529a6c18a70a557",
+    "lane_lines": 459,
+    "commit_ambiguity_lane_preserved": "7e613d18329334ef5c6a4237ec2d339328636f1d4d49200de5ea87c0699e7b08"
+  },
+  "production_repair": {
+    "target": "internal/recovery/targetlock.go rollback helper + appended bounded-retirement helper",
+    "change": "the rollback closure now uses an INDEPENDENT bounded rollback context (targetLockRollbackBudget=10s derived from context.Background(), never the caller context) and, on an UNCERTAIN rollback (error other than pgx.ErrTxClosed), permanently retires the owner handle (closed=true) and boundedly disposes its dedicated connection via conn.Close(disposeCtx) - never the Release SQL path (pg_advisory_unlock) and never an unbounded close; default path, identity checks :89-123, atomic reserve/consume and generation-conditional reset preserved",
+    "hunks": [
+      "@@ -236,7 +236,16 @@",
+      "@@ -517,3 +526,26 @@"
+    ]
+  },
+  "companion_extension": {
+    "change": "append fixed ROLLBACK-only fault controls: ArmRollbackGate, RollbackMode/RollbackDispatched/RollbackWithheld/CommitDispatched queries, TargetLockRollbackRequestFrame/TargetLockRollbackCompletionFrames; the classifier and the strict completion validator were parameterized (exact COMMIT\\0 or ROLLBACK\\0 + length-5 idle ReadyForQuery) with the commit default unchanged; immutable native/control separation retained; deterministic byte-feed/read/stall controls remain fixed; no arbitrary SQL/connector/socket callback",
+    "hunks": 10
+  },
+  "lane": {
+    "test": "TestBorrowedReplacementOwnerRollbackUnwind",
+    "cases": {
+      "P_withheld_rollback": "real ordinary dirty-guard refusal; journal tx locks the exact guard row, inserts the refused non-instance-bound row, supplied-tx readback, pending invisibility, contender 55P03; atArbitration (after insertion + successful final facts verification) arms the rollback-only gate and cancels the lane; the ACTUAL rollback is dispatched and its validated completion withheld BEFORE pgx; the independent bounded rollback budget drives the return with NO watchdog rescue; the uncertain rollback permanently retires the owner handle (Health and fresh WithTransaction report closed); no COMMIT dispatch; no composite/eligibility; replay/copy refused; zero durable rows with the released guard row independently lockable and unchanged; guard unresolved, acceptance 0; pump join and channel-confirmed Use completion proven before cleanup",
+      "N1_unarmed_cancellation": "acknowledged rollback (no rollback-failure suffix), zero matching rows, original owner remains HEALTHY, unarmed gate claims no rollback witness, guard unchanged/unresolved, no composite/eligibility, replay refused",
+      "N2_completion_negatives": "missing, partial (6 bytes genuinely consumed) and malformed (commit-tag, missing-NUL, short-ready) ROLLBACK completions plus a queued read error never publish a completion witness and remain UNKNOWN; stalled reader woken promptly by the queued error",
+      "N3_caller_cancelled_budget": "gate armed before the decisive boundary, caller cancelled there; the ACTUAL rollback is still dispatched and withheld through the independent bounded context and the uncertain unwind completes inside 16.47s (watchdog never fired), retiring the owner handle"
+    }
+  },
+  "gold": {
+    "log": "borrowed-replacement-owner-rollback-unwind-gold.log",
+    "sha256": "e449ca5764e87121bbfa8110c25978698b897108c402da38bf3d9cf4db3d545e",
+    "exit": 0,
+    "top_pass": 1,
+    "top_fail": 0,
+    "top_skip": 0,
+    "data_race": 0,
+    "warning": 0,
+    "duration": "79.83s",
+    "first_run": true,
+    "first_fail": null
+  },
+  "race": {
+    "log": "borrowed-replacement-owner-rollback-unwind-race.log",
+    "sha256": "fc78a135eef987dc272b9e2b81b0d8581b8dfb5b75e72a234f3252d3fb2abf76",
+    "exit": 0,
+    "top_pass": 1,
+    "top_fail": 0,
+    "top_skip": 0,
+    "data_race": 0,
+    "warning": 0,
+    "panic": 0,
+    "duration": "106.09s",
+    "binary": "borrowed-replacement-owner-rollback-unwind-race.test",
+    "binary_sha256": "37d84dda4a2a30cb0fb5d920e953557136302278fb5c4c1272a3f24738309e81",
+    "build_log_sha256": "62cf97a71a9c0dbf6af610a6c52c596fb14cbada9ea1719b833ed289afab7016",
+    "build_log_records": [
+      "rollback-unwind fd238aed",
+      "commit-ambiguity 7e613d18 (preserved)",
+      "commit-ambiguity-companion a42a4db9",
+      "targetlock-seam 45f09896",
+      "owner-journal-window ee880415",
+      "guard-row-window 264cbc81",
+      "plus all other predecessors directly"
+    ]
+  },
+  "container": {
+    "image": "postgres@sha256:4ef4dbc939d61acea57712655ddb4b4ab27419c913f94cca0cd57cb3ea3c2280",
+    "root": true,
+    "private_pid": true,
+    "init": true,
+    "hostnet": true,
+    "CI": "true",
+    "TXHARBOR_REQUIRE_DOCKER": "1",
+    "PGDATA_PG_MAJOR_PG_VERSION": "unset",
+    "test_regex": "^TestBorrowedReplacementOwnerRollbackUnwind$"
+  },
+  "diffs": {
+    "targetlock": {
+      "file": "borrowed-replacement-owner-rollback-unwind-targetlock.diff",
+      "sha256": "2c458a4b338e7fa8334034d5daa5c406c67dfe25ad086b2e573ab16e490c38b5",
+      "hunks": [
+        "@@ -236,7 +236,16 @@",
+        "@@ -517,3 +526,26 @@"
+      ]
+    },
+    "companion": {
+      "file": "borrowed-replacement-owner-rollback-unwind-companion.diff",
+      "sha256": "22e3549cb14e274fb0cc951dd01fca0506f780d71d2a1452810c64bc40549766",
+      "hunk_count": 10
+    },
+    "lane_creation": {
+      "file": "borrowed-replacement-owner-rollback-unwind-lane.diff",
+      "sha256": "3836464fa2d5f6aef9aed2a0b0aa0e5d528df6f32593bfb5905dd45b5a92f089",
+      "hunks": [
+        "@@ -0,0 +1,459 @@"
+      ]
+    }
+  },
+  "brackets": {
+    "before": "borrowed-replacement-owner-rollback-unwind-hashes-before.txt",
+    "before_sha256": "0436f7d33414af10951649ddd80b87097570b1bc469caa4cabb71e53eafb3666",
+    "after": "borrowed-replacement-owner-rollback-unwind-hashes-after.txt",
+    "after_sha256": "e759545790e44e7033ec15e411cbe1d7504497c8ecace70e2295d7baf6fe1809",
+    "after_runs": "borrowed-replacement-owner-rollback-unwind-hashes-after-runs.txt",
+    "after_runs_sha256": "ccec8cc2ddc2521e34a37715133691cc42a97890a28419a78671630bada9efc9",
+    "source_stable": true,
+    "closed_predecessors_identical": true,
+    "commit_ambiguity_lane_preserved": true
+  },
+  "runners": {
+    "gold_runner_sha256": "51f11d9feaa38ae4ad9f0da015505311b8d85d6d47826297f587b5408c45f6f1",
+    "race_runner_sha256": "4a1f4c223af87824ad9b74a0232d5305065cb8c67201153715e42097697420d7",
+    "race_build_sha256": "f6c44fc806322f799991dd69d2eb5354547700a443d065b4d67b267e6456b868",
+    "bracket_sha256": "0a69abcb0b01253a8d4bc5bd79e6f901d0bbc0553f716759108a71aaeb7955c9",
+    "bracket_before_sha256": "7b29dfac832d285f6d2828419ab823517138144db891ac7eccf7d57b9ad3ce8c"
+  },
+  "history_unrebound": {
+    "commit_ambiguity_fix4_summary_sha256": "47d530946d52f8cf85aae6d437292ebef5cbb2309195af733d6aaca45523d3af",
+    "commit_ambiguity_fix3_summary_sha256": "e864fc4b0b2f7ce601f53a5f2061347dad6d11809ac56a11da91f7e14bb7d75b",
+    "commit_ambiguity_fix2_summary_sha256": "0d9955e99fbc976c95c3447296bce9983e48298fe4db18ab9a15567d8e623df3",
+    "background": "changed sources (targetlock.go seam/repair, companion extension) require new provenance and separate re-review as authorized by the parent"
+  },
+  "notes": [
+    "No commit; HEAD e504462; 22 tracked modified files; one new untracked lane file.",
+    "The production repair is limited to the rollback helper and the appended bounded-retirement helper; default path, identity checks, atomic reserve/consume and generation-conditional reset preserved.",
+    "The watchdog break is cleanup-only and turns a case NOTESTABLISHED (never a pass); the positive and pre-cancel cases prove the deadline-driven unwind without it.",
+    "Zero rows is never taken alone as an acknowledged rollback: the actual dispatch + withheld completion + retirement state are asserted.",
+    "Closed acknowledged-COMMIT and COMMIT-ack-loss controls are preserved in meaning (commit default mode unchanged); they were not re-run here per the single-test instruction.",
+    "Never assert rollback where COMMIT may have occurred; ack-loss stays UNKNOWN; secrets/DSNs/verifiers unlogged."
+  ]
+}
