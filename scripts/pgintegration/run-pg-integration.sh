@@ -1,4 +1,17 @@
 #!/usr/bin/env bash
+# -----------------------------------------------------------------------------
+# 015 持久复现入口：本脚本即 pgfull3b 类全仓 PG 集成运行的仓内复现入口
+# （git 挂载：只读挂载真实仓库 /workspace 与真实 .git，并挂载宿主 git 二进制及
+# 其共享库；pgfull3b 轮次的一次性 runner 以 root + safe.directory=/workspace 等价运行）。
+# 与 /tmp/r2lab/run_suite.sh 的关系：run_suite.sh 为当轮一次性临时变体（LABEL 目录 +
+# 固定 drill/focus 命令，不入仓）；本脚本为持久入口（--smoke/--focused/full、
+# 源指纹前后校验、证据写入 TXHARBOR_PG_EVIDENCE_DIR）。
+# focus 定向运行（drill 标签）可用如下等价形式：
+#   docker run ... --entrypoint /bin/sh 'postgres@sha256:4ef4dbc9...' -ec \
+#     'cd /workspace && go test -tags "linux,drill" -count=1 -run REGEX -v ./internal/recovery/'
+# 归档与命令细节见 docs/evidence/015/verification-archive-2026-10-05/INDEX.md。
+# 本注释块不改变任何执行逻辑。
+# -----------------------------------------------------------------------------
 set -euo pipefail
 
 # Pinned PostgreSQL client tools plus host Go/Docker. Use host networking so

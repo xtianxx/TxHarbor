@@ -1,0 +1,844 @@
+2026/10/04 19:26:48 github.com/testcontainers/testcontainers-go - Connected to docker: 
+  Server Version: 29.6.1
+  API Version: 1.55
+  Operating System: Ubuntu 24.04.4 LTS
+  Total Memory: 15915 MB
+  Testcontainers for Go Version: v0.44.0
+  Resolved Docker Host: unix:///var/run/docker.sock
+  Resolved Docker Socket Path: /var/run/docker.sock
+  Test SessionID: 3dc50ce04cd481915ee2fceac5d3133d4a4ec3a54961e5b06720430e5dfb54ad
+  Test ProcessID: 65d0b399-6da0-413c-9b47-90d7a11f1c9d
+=== RUN   TestBorrowedReplacementBoundBaselineCommit
+2026/10/04 19:26:48 🐳 Creating container for image postgres@sha256:4ef4dbc939d61acea57712655ddb4b4ab27419c913f94cca0cd57cb3ea3c2280
+2026/10/04 19:26:48 🐳 Creating container for image testcontainers/ryuk:0.14.0
+2026/10/04 19:26:49 ✅ Container created: d1b64df6bdeb
+2026/10/04 19:26:49 🐳 Starting container: d1b64df6bdeb
+2026/10/04 19:26:49 ✅ Container started: d1b64df6bdeb
+2026/10/04 19:26:49 ⏳ Waiting for container id d1b64df6bdeb image: testcontainers/ryuk:0.14.0. Waiting for: all of: [log message "Started", port 8080/tcp to be listening]
+2026/10/04 19:26:50 Shell not found in container
+2026/10/04 19:26:50 🔔 Container is ready: d1b64df6bdeb
+2026/10/04 19:26:50 ✅ Container created: b7c64f6b2fb9
+2026/10/04 19:26:50 🐳 Starting container: b7c64f6b2fb9
+2026/10/04 19:26:50 ✅ Container started: b7c64f6b2fb9
+2026/10/04 19:26:50 ⏳ Waiting for container id b7c64f6b2fb9 image: postgres@sha256:4ef4dbc939d61acea57712655ddb4b4ab27419c913f94cca0cd57cb3ea3c2280. Waiting for: log message "database system is ready to accept connections" (occurrence: 2)
+2026/10/04 19:26:54 🔔 Container is ready: b7c64f6b2fb9
+    borrowed-successor-probe-registration_linux_test.go:693: protected fixture actual HBA rules (all SCRAM, no trust fallback): line=1 type=local address="" auth=scram-sha-256; line=2 type=host address="127.0.0.1" auth=scram-sha-256; line=3 type=host address="::1" auth=scram-sha-256; line=4 type=host address="all" auth=scram-sha-256
+    borrowed-replacement-bound-baseline-commit_linux_test.go:1036: successor retired: backend PID 330 incarnation strictly gone, owner health retained, guard non-clean, acceptance zero
+    borrowed-replacement-bound-baseline-commit_linux_test.go:1104: replacement session retired: backend PID 591 incarnation strictly gone, owner health retained, guard non-clean, acceptance zero
+    borrowed-replacement-bound-baseline-commit_linux_test.go:1204: bound baseline commit positive: owner tx pid 109 distinct from prep tx pid 104; authentic instance and original guard provenance locked; truthful fixture-scoped preparation evidence written via the production audit hook and the unchanged controlled resolution committed; durable delta independently proven (clean guard op=bound-baseline-commit-1791142038508684745, exactly one instance-bound preparation audit, row lockable, owner healthy, clean teardown, no continuing isolation); all other instance/evidence/catalog/journal state unchanged; no admission handle, reusable preparation capability or post-commit restore dispatch
+2026/10/04 19:27:18 🐳 Creating container for image postgres@sha256:4ef4dbc939d61acea57712655ddb4b4ab27419c913f94cca0cd57cb3ea3c2280
+2026/10/04 19:27:19 ✅ Container created: 2f23af0a670d
+2026/10/04 19:27:19 🐳 Starting container: 2f23af0a670d
+2026/10/04 19:27:19 ✅ Container started: 2f23af0a670d
+2026/10/04 19:27:19 ⏳ Waiting for container id 2f23af0a670d image: postgres@sha256:4ef4dbc939d61acea57712655ddb4b4ab27419c913f94cca0cd57cb3ea3c2280. Waiting for: log message "database system is ready to accept connections" (occurrence: 2)
+2026/10/04 19:27:21 🔔 Container is ready: 2f23af0a670d
+    borrowed-successor-probe-registration_linux_test.go:693: protected fixture actual HBA rules (all SCRAM, no trust fallback): line=1 type=local address="" auth=scram-sha-256; line=2 type=host address="127.0.0.1" auth=scram-sha-256; line=3 type=host address="::1" auth=scram-sha-256; line=4 type=host address="all" auth=scram-sha-256
+    borrowed-replacement-bound-baseline-commit_linux_test.go:1211: successor retired: backend PID 329 incarnation strictly gone, owner health retained, guard non-clean, acceptance zero
+    borrowed-replacement-bound-baseline-commit_linux_test.go:1212: replacement session retired: backend PID 531 incarnation strictly gone, owner health retained, guard non-clean, acceptance zero
+    borrowed-replacement-bound-baseline-commit_linux_test.go:1230: bound baseline commit historical/disposed-fence negative: the fresh effective-coverage verification refused before any transaction, the one-shot preparation was consumed and its replay refused; durable state classification: complete baseline equality, no transaction, no authorizing output
+2026/10/04 19:27:30 🐳 Creating container for image postgres@sha256:4ef4dbc939d61acea57712655ddb4b4ab27419c913f94cca0cd57cb3ea3c2280
+2026/10/04 19:27:30 ✅ Container created: 8e442cd4a4c1
+2026/10/04 19:27:30 🐳 Starting container: 8e442cd4a4c1
+2026/10/04 19:27:30 ✅ Container started: 8e442cd4a4c1
+2026/10/04 19:27:30 ⏳ Waiting for container id 8e442cd4a4c1 image: postgres@sha256:4ef4dbc939d61acea57712655ddb4b4ab27419c913f94cca0cd57cb3ea3c2280. Waiting for: log message "database system is ready to accept connections" (occurrence: 2)
+2026/10/04 19:27:32 🔔 Container is ready: 8e442cd4a4c1
+    borrowed-successor-probe-registration_linux_test.go:693: protected fixture actual HBA rules (all SCRAM, no trust fallback): line=1 type=local address="" auth=scram-sha-256; line=2 type=host address="127.0.0.1" auth=scram-sha-256; line=3 type=host address="::1" auth=scram-sha-256; line=4 type=host address="all" auth=scram-sha-256
+    borrowed-replacement-bound-baseline-commit_linux_test.go:1237: successor retired: backend PID 329 incarnation strictly gone, owner health retained, guard non-clean, acceptance zero
+    borrowed-replacement-bound-baseline-commit_linux_test.go:1238: replacement session retired: backend PID 532 incarnation strictly gone, owner health retained, guard non-clean, acceptance zero
+    borrowed-replacement-bound-baseline-commit_linux_test.go:1286: bound baseline commit incomplete-coverage negative: the partial fence left the container-address route admitting a genuine P1 and the fresh coverage verification refused; durable state classification: complete baseline equality, no transaction, no authorizing output
+2026/10/04 19:27:41 🐳 Creating container for image postgres@sha256:4ef4dbc939d61acea57712655ddb4b4ab27419c913f94cca0cd57cb3ea3c2280
+2026/10/04 19:27:41 ✅ Container created: acaddadde1d3
+2026/10/04 19:27:41 🐳 Starting container: acaddadde1d3
+2026/10/04 19:27:42 ✅ Container started: acaddadde1d3
+2026/10/04 19:27:42 ⏳ Waiting for container id acaddadde1d3 image: postgres@sha256:4ef4dbc939d61acea57712655ddb4b4ab27419c913f94cca0cd57cb3ea3c2280. Waiting for: log message "database system is ready to accept connections" (occurrence: 2)
+2026/10/04 19:27:44 🔔 Container is ready: acaddadde1d3
+    borrowed-successor-probe-registration_linux_test.go:693: protected fixture actual HBA rules (all SCRAM, no trust fallback): line=1 type=local address="" auth=scram-sha-256; line=2 type=host address="127.0.0.1" auth=scram-sha-256; line=3 type=host address="::1" auth=scram-sha-256; line=4 type=host address="all" auth=scram-sha-256
+    borrowed-replacement-bound-baseline-commit_linux_test.go:1293: successor retired: backend PID 330 incarnation strictly gone, owner health retained, guard non-clean, acceptance zero
+    borrowed-replacement-bound-baseline-commit_linux_test.go:1294: replacement session retired: backend PID 532 incarnation strictly gone, owner health retained, guard non-clean, acceptance zero
+    borrowed-replacement-bound-baseline-commit_linux_test.go:1311: bound baseline commit failed-route negative: complete effective coverage with one transport admitting P1 refused at the real route stage before any transaction; durable state classification: complete baseline equality, no transaction, no authorizing output
+2026/10/04 19:27:53 🐳 Creating container for image postgres@sha256:4ef4dbc939d61acea57712655ddb4b4ab27419c913f94cca0cd57cb3ea3c2280
+2026/10/04 19:27:53 ✅ Container created: ea4dadb7c0fd
+2026/10/04 19:27:53 🐳 Starting container: ea4dadb7c0fd
+2026/10/04 19:27:53 ✅ Container started: ea4dadb7c0fd
+2026/10/04 19:27:53 ⏳ Waiting for container id ea4dadb7c0fd image: postgres@sha256:4ef4dbc939d61acea57712655ddb4b4ab27419c913f94cca0cd57cb3ea3c2280. Waiting for: log message "database system is ready to accept connections" (occurrence: 2)
+2026/10/04 19:27:55 🔔 Container is ready: ea4dadb7c0fd
+    borrowed-successor-probe-registration_linux_test.go:693: protected fixture actual HBA rules (all SCRAM, no trust fallback): line=1 type=local address="" auth=scram-sha-256; line=2 type=host address="127.0.0.1" auth=scram-sha-256; line=3 type=host address="::1" auth=scram-sha-256; line=4 type=host address="all" auth=scram-sha-256
+    borrowed-replacement-bound-baseline-commit_linux_test.go:1317: successor retired: backend PID 330 incarnation strictly gone, owner health retained, guard non-clean, acceptance zero
+    borrowed-replacement-bound-baseline-commit_linux_test.go:1318: replacement session retired: backend PID 532 incarnation strictly gone, owner health retained, guard non-clean, acceptance zero
+    borrowed-replacement-bound-baseline-commit_linux_test.go:1336: bound baseline commit retained-writer negative: the pre-existing genuine P1 session made the fresh census refuse before any transaction; durable state classification: complete baseline equality, no transaction, no authorizing output
+2026/10/04 19:28:04 🐳 Creating container for image postgres@sha256:4ef4dbc939d61acea57712655ddb4b4ab27419c913f94cca0cd57cb3ea3c2280
+2026/10/04 19:28:05 ✅ Container created: 34981006d094
+2026/10/04 19:28:05 🐳 Starting container: 34981006d094
+2026/10/04 19:28:05 ✅ Container started: 34981006d094
+2026/10/04 19:28:05 ⏳ Waiting for container id 34981006d094 image: postgres@sha256:4ef4dbc939d61acea57712655ddb4b4ab27419c913f94cca0cd57cb3ea3c2280. Waiting for: log message "database system is ready to accept connections" (occurrence: 2)
+2026/10/04 19:28:07 🔔 Container is ready: 34981006d094
+    borrowed-successor-probe-registration_linux_test.go:693: protected fixture actual HBA rules (all SCRAM, no trust fallback): line=1 type=local address="" auth=scram-sha-256; line=2 type=host address="127.0.0.1" auth=scram-sha-256; line=3 type=host address="::1" auth=scram-sha-256; line=4 type=host address="all" auth=scram-sha-256
+    borrowed-replacement-bound-baseline-commit_linux_test.go:1343: successor retired: backend PID 331 incarnation strictly gone, owner health retained, guard non-clean, acceptance zero
+    borrowed-replacement-bound-baseline-commit_linux_test.go:1344: replacement session retired: backend PID 533 incarnation strictly gone, owner health retained, guard non-clean, acceptance zero
+    borrowed-replacement-bound-baseline-commit_linux_test.go:1366: bound baseline commit wrong-key/missing-row negative: the real different canonical key was proven absent and the supplied-tx fence refused at the real no-row stage with the acknowledged rollback and complete baseline equality; no authorizing output
+2026/10/04 19:28:16 🐳 Creating container for image postgres@sha256:4ef4dbc939d61acea57712655ddb4b4ab27419c913f94cca0cd57cb3ea3c2280
+2026/10/04 19:28:16 ✅ Container created: db10873ee828
+2026/10/04 19:28:16 🐳 Starting container: db10873ee828
+2026/10/04 19:28:17 ✅ Container started: db10873ee828
+2026/10/04 19:28:17 ⏳ Waiting for container id db10873ee828 image: postgres@sha256:4ef4dbc939d61acea57712655ddb4b4ab27419c913f94cca0cd57cb3ea3c2280. Waiting for: log message "database system is ready to accept connections" (occurrence: 2)
+2026/10/04 19:28:19 🔔 Container is ready: db10873ee828
+    borrowed-successor-probe-registration_linux_test.go:693: protected fixture actual HBA rules (all SCRAM, no trust fallback): line=1 type=local address="" auth=scram-sha-256; line=2 type=host address="127.0.0.1" auth=scram-sha-256; line=3 type=host address="::1" auth=scram-sha-256; line=4 type=host address="all" auth=scram-sha-256
+    borrowed-replacement-bound-baseline-commit_linux_test.go:1372: successor retired: backend PID 330 incarnation strictly gone, owner health retained, guard non-clean, acceptance zero
+    borrowed-replacement-bound-baseline-commit_linux_test.go:1373: replacement session retired: backend PID 533 incarnation strictly gone, owner health retained, guard non-clean, acceptance zero
+    borrowed-replacement-bound-baseline-commit_linux_test.go:1388: bound baseline commit wrong-operation negative: the real mismatched operation provenance refused the supplied-tx fence at the real operation-provenance stage with the acknowledged rollback and complete baseline equality; no authorizing output
+2026/10/04 19:28:28 🐳 Creating container for image postgres@sha256:4ef4dbc939d61acea57712655ddb4b4ab27419c913f94cca0cd57cb3ea3c2280
+2026/10/04 19:28:28 ✅ Container created: b050c627acc2
+2026/10/04 19:28:28 🐳 Starting container: b050c627acc2
+2026/10/04 19:28:28 ✅ Container started: b050c627acc2
+2026/10/04 19:28:28 ⏳ Waiting for container id b050c627acc2 image: postgres@sha256:4ef4dbc939d61acea57712655ddb4b4ab27419c913f94cca0cd57cb3ea3c2280. Waiting for: log message "database system is ready to accept connections" (occurrence: 2)
+2026/10/04 19:28:30 🔔 Container is ready: b050c627acc2
+    borrowed-successor-probe-registration_linux_test.go:693: protected fixture actual HBA rules (all SCRAM, no trust fallback): line=1 type=local address="" auth=scram-sha-256; line=2 type=host address="127.0.0.1" auth=scram-sha-256; line=3 type=host address="::1" auth=scram-sha-256; line=4 type=host address="all" auth=scram-sha-256
+    borrowed-replacement-bound-baseline-commit_linux_test.go:1394: successor retired: backend PID 329 incarnation strictly gone, owner health retained, guard non-clean, acceptance zero
+    borrowed-replacement-bound-baseline-commit_linux_test.go:1395: replacement session retired: backend PID 531 incarnation strictly gone, owner health retained, guard non-clean, acceptance zero
+    borrowed-replacement-bound-baseline-commit_linux_test.go:1418: bound baseline commit wrong-role negative: the observer role's real fingerprint refused the authentic instance binding at the real stage with the acknowledged rollback and complete baseline equality; no authorizing output
+2026/10/04 19:28:40 🐳 Creating container for image postgres@sha256:4ef4dbc939d61acea57712655ddb4b4ab27419c913f94cca0cd57cb3ea3c2280
+2026/10/04 19:28:40 ✅ Container created: d02a2a2b127b
+2026/10/04 19:28:40 🐳 Starting container: d02a2a2b127b
+2026/10/04 19:28:40 ✅ Container started: d02a2a2b127b
+2026/10/04 19:28:40 ⏳ Waiting for container id d02a2a2b127b image: postgres@sha256:4ef4dbc939d61acea57712655ddb4b4ab27419c913f94cca0cd57cb3ea3c2280. Waiting for: log message "database system is ready to accept connections" (occurrence: 2)
+2026/10/04 19:28:42 🔔 Container is ready: d02a2a2b127b
+    borrowed-successor-probe-registration_linux_test.go:693: protected fixture actual HBA rules (all SCRAM, no trust fallback): line=1 type=local address="" auth=scram-sha-256; line=2 type=host address="127.0.0.1" auth=scram-sha-256; line=3 type=host address="::1" auth=scram-sha-256; line=4 type=host address="all" auth=scram-sha-256
+    borrowed-replacement-bound-baseline-commit_linux_test.go:1424: successor retired: backend PID 329 incarnation strictly gone, owner health retained, guard non-clean, acceptance zero
+    borrowed-replacement-bound-baseline-commit_linux_test.go:1425: replacement session retired: backend PID 531 incarnation strictly gone, owner health retained, guard non-clean, acceptance zero
+    borrowed-replacement-bound-baseline-commit_linux_test.go:1440: bound baseline commit wrong-instance negative: the valid-format non-existent instance UUID refused the real LockInstance no-row stage (no second instance opened) with the acknowledged rollback and complete baseline equality; no authorizing output
+2026/10/04 19:28:51 🐳 Creating container for image postgres@sha256:4ef4dbc939d61acea57712655ddb4b4ab27419c913f94cca0cd57cb3ea3c2280
+2026/10/04 19:28:51 ✅ Container created: bb2549bcc243
+2026/10/04 19:28:51 🐳 Starting container: bb2549bcc243
+2026/10/04 19:28:52 ✅ Container started: bb2549bcc243
+2026/10/04 19:28:52 ⏳ Waiting for container id bb2549bcc243 image: postgres@sha256:4ef4dbc939d61acea57712655ddb4b4ab27419c913f94cca0cd57cb3ea3c2280. Waiting for: log message "database system is ready to accept connections" (occurrence: 2)
+2026/10/04 19:28:54 🔔 Container is ready: bb2549bcc243
+    borrowed-successor-probe-registration_linux_test.go:693: protected fixture actual HBA rules (all SCRAM, no trust fallback): line=1 type=local address="" auth=scram-sha-256; line=2 type=host address="127.0.0.1" auth=scram-sha-256; line=3 type=host address="::1" auth=scram-sha-256; line=4 type=host address="all" auth=scram-sha-256
+    borrowed-replacement-bound-baseline-commit_linux_test.go:1446: successor retired: backend PID 332 incarnation strictly gone, owner health retained, guard non-clean, acceptance zero
+    borrowed-replacement-bound-baseline-commit_linux_test.go:1447: replacement session retired: backend PID 534 incarnation strictly gone, owner health retained, guard non-clean, acceptance zero
+    borrowed-replacement-bound-baseline-commit_linux_test.go:1467: bound baseline commit row-holder-first negative: the independent holder produced the structured 55P03 at the supplied-tx fence with the acknowledged rollback and complete baseline equality; no authorizing output
+2026/10/04 19:29:03 🐳 Creating container for image postgres@sha256:4ef4dbc939d61acea57712655ddb4b4ab27419c913f94cca0cd57cb3ea3c2280
+2026/10/04 19:29:03 ✅ Container created: 4994857e5886
+2026/10/04 19:29:03 🐳 Starting container: 4994857e5886
+2026/10/04 19:29:04 ✅ Container started: 4994857e5886
+2026/10/04 19:29:04 ⏳ Waiting for container id 4994857e5886 image: postgres@sha256:4ef4dbc939d61acea57712655ddb4b4ab27419c913f94cca0cd57cb3ea3c2280. Waiting for: log message "database system is ready to accept connections" (occurrence: 2)
+2026/10/04 19:29:06 🔔 Container is ready: 4994857e5886
+    borrowed-successor-probe-registration_linux_test.go:693: protected fixture actual HBA rules (all SCRAM, no trust fallback): line=1 type=local address="" auth=scram-sha-256; line=2 type=host address="127.0.0.1" auth=scram-sha-256; line=3 type=host address="::1" auth=scram-sha-256; line=4 type=host address="all" auth=scram-sha-256
+    borrowed-replacement-bound-baseline-commit_linux_test.go:1473: successor retired: backend PID 330 incarnation strictly gone, owner health retained, guard non-clean, acceptance zero
+    borrowed-replacement-bound-baseline-commit_linux_test.go:1474: replacement session retired: backend PID 532 incarnation strictly gone, owner health retained, guard non-clean, acceptance zero
+    borrowed-replacement-bound-baseline-commit_linux_test.go:1486: bound baseline commit replacement-change negative: the actual replacement catalog identity mismatch refused at the real catalog stage before any transaction; durable state classification: complete baseline equality, no transaction, no authorizing output
+2026/10/04 19:29:15 🐳 Creating container for image postgres@sha256:4ef4dbc939d61acea57712655ddb4b4ab27419c913f94cca0cd57cb3ea3c2280
+2026/10/04 19:29:15 ✅ Container created: 4926c466af05
+2026/10/04 19:29:15 🐳 Starting container: 4926c466af05
+2026/10/04 19:29:16 ✅ Container started: 4926c466af05
+2026/10/04 19:29:16 ⏳ Waiting for container id 4926c466af05 image: postgres@sha256:4ef4dbc939d61acea57712655ddb4b4ab27419c913f94cca0cd57cb3ea3c2280. Waiting for: log message "database system is ready to accept connections" (occurrence: 2)
+2026/10/04 19:29:18 🔔 Container is ready: 4926c466af05
+    borrowed-successor-probe-registration_linux_test.go:693: protected fixture actual HBA rules (all SCRAM, no trust fallback): line=1 type=local address="" auth=scram-sha-256; line=2 type=host address="127.0.0.1" auth=scram-sha-256; line=3 type=host address="::1" auth=scram-sha-256; line=4 type=host address="all" auth=scram-sha-256
+    borrowed-replacement-bound-baseline-commit_linux_test.go:1492: successor retired: backend PID 329 incarnation strictly gone, owner health retained, guard non-clean, acceptance zero
+    borrowed-replacement-bound-baseline-commit_linux_test.go:1493: replacement session retired: backend PID 531 incarnation strictly gone, owner health retained, guard non-clean, acceptance zero
+    borrowed-replacement-bound-baseline-commit_linux_test.go:1505: bound baseline commit observer-failure negative: the suspended protected observer role refused the real observer stage before any transaction; durable state classification: complete baseline equality, no transaction, no authorizing output
+2026/10/04 19:29:27 🐳 Creating container for image postgres@sha256:4ef4dbc939d61acea57712655ddb4b4ab27419c913f94cca0cd57cb3ea3c2280
+2026/10/04 19:29:27 ✅ Container created: 0bbc91d21bb1
+2026/10/04 19:29:27 🐳 Starting container: 0bbc91d21bb1
+2026/10/04 19:29:28 ✅ Container started: 0bbc91d21bb1
+2026/10/04 19:29:28 ⏳ Waiting for container id 0bbc91d21bb1 image: postgres@sha256:4ef4dbc939d61acea57712655ddb4b4ab27419c913f94cca0cd57cb3ea3c2280. Waiting for: log message "database system is ready to accept connections" (occurrence: 2)
+2026/10/04 19:29:29 🔔 Container is ready: 0bbc91d21bb1
+    borrowed-successor-probe-registration_linux_test.go:693: protected fixture actual HBA rules (all SCRAM, no trust fallback): line=1 type=local address="" auth=scram-sha-256; line=2 type=host address="127.0.0.1" auth=scram-sha-256; line=3 type=host address="::1" auth=scram-sha-256; line=4 type=host address="all" auth=scram-sha-256
+    borrowed-replacement-bound-baseline-commit_linux_test.go:1511: successor retired: backend PID 329 incarnation strictly gone, owner health retained, guard non-clean, acceptance zero
+    borrowed-replacement-bound-baseline-commit_linux_test.go:1512: replacement session retired: backend PID 532 incarnation strictly gone, owner health retained, guard non-clean, acceptance zero
+    borrowed-replacement-bound-baseline-commit_linux_test.go:1527: bound baseline commit early shared-prefix-loss negative: the real copied-prefix loss refused at the real prefix stage before any transaction; durable state classification: complete baseline equality, no transaction, no authorizing output
+2026/10/04 19:29:39 🐳 Creating container for image postgres@sha256:4ef4dbc939d61acea57712655ddb4b4ab27419c913f94cca0cd57cb3ea3c2280
+2026/10/04 19:29:39 ✅ Container created: 436d915106c2
+2026/10/04 19:29:39 🐳 Starting container: 436d915106c2
+2026/10/04 19:29:40 ✅ Container started: 436d915106c2
+2026/10/04 19:29:40 ⏳ Waiting for container id 436d915106c2 image: postgres@sha256:4ef4dbc939d61acea57712655ddb4b4ab27419c913f94cca0cd57cb3ea3c2280. Waiting for: log message "database system is ready to accept connections" (occurrence: 2)
+2026/10/04 19:29:41 🔔 Container is ready: 436d915106c2
+    borrowed-successor-probe-registration_linux_test.go:693: protected fixture actual HBA rules (all SCRAM, no trust fallback): line=1 type=local address="" auth=scram-sha-256; line=2 type=host address="127.0.0.1" auth=scram-sha-256; line=3 type=host address="::1" auth=scram-sha-256; line=4 type=host address="all" auth=scram-sha-256
+    borrowed-replacement-bound-baseline-commit_linux_test.go:1534: successor retired: backend PID 330 incarnation strictly gone, owner health retained, guard non-clean, acceptance zero
+    borrowed-replacement-bound-baseline-commit_linux_test.go:1535: replacement session retired: backend PID 532 incarnation strictly gone, owner health retained, guard non-clean, acceptance zero
+    borrowed-replacement-bound-baseline-commit_linux_test.go:1559: bound baseline commit between-writes negative: the rebuild audit executed, the controlled resolution refused at its real validation stage and the acknowledged rollback left NEITHER write; durable state classification: complete baseline equality, zero preparation rows, no authorizing output
+2026/10/04 19:29:51 🐳 Creating container for image postgres@sha256:4ef4dbc939d61acea57712655ddb4b4ab27419c913f94cca0cd57cb3ea3c2280
+2026/10/04 19:29:51 ✅ Container created: 9e303994148f
+2026/10/04 19:29:51 🐳 Starting container: 9e303994148f
+2026/10/04 19:29:51 ✅ Container started: 9e303994148f
+2026/10/04 19:29:51 ⏳ Waiting for container id 9e303994148f image: postgres@sha256:4ef4dbc939d61acea57712655ddb4b4ab27419c913f94cca0cd57cb3ea3c2280. Waiting for: log message "database system is ready to accept connections" (occurrence: 2)
+2026/10/04 19:29:53 🔔 Container is ready: 9e303994148f
+    borrowed-successor-probe-registration_linux_test.go:693: protected fixture actual HBA rules (all SCRAM, no trust fallback): line=1 type=local address="" auth=scram-sha-256; line=2 type=host address="127.0.0.1" auth=scram-sha-256; line=3 type=host address="::1" auth=scram-sha-256; line=4 type=host address="all" auth=scram-sha-256
+    borrowed-replacement-bound-baseline-commit_linux_test.go:1569: successor retired: backend PID 329 incarnation strictly gone, owner health retained, guard non-clean, acceptance zero
+    borrowed-replacement-bound-baseline-commit_linux_test.go:1570: replacement session retired: backend PID 530 incarnation strictly gone, owner health retained, guard non-clean, acceptance zero
+    borrowed-replacement-bound-baseline-commit_linux_test.go:1635: bound baseline commit before-mutation cancellation negative: the real cancellation sentinel was observed at the distinct before-mutation stage with the actual canceled context, no rollback acknowledgment was recorded before callback entry, no pending transition survived and the one-shot preparation is finished; durable state classification: complete baseline equality, zero preparation rows, no authorizing output
+2026/10/04 19:30:02 🐳 Creating container for image postgres@sha256:4ef4dbc939d61acea57712655ddb4b4ab27419c913f94cca0cd57cb3ea3c2280
+2026/10/04 19:30:02 ✅ Container created: efb25dbc2563
+2026/10/04 19:30:02 🐳 Starting container: efb25dbc2563
+2026/10/04 19:30:03 ✅ Container started: efb25dbc2563
+2026/10/04 19:30:03 ⏳ Waiting for container id efb25dbc2563 image: postgres@sha256:4ef4dbc939d61acea57712655ddb4b4ab27419c913f94cca0cd57cb3ea3c2280. Waiting for: log message "database system is ready to accept connections" (occurrence: 2)
+2026/10/04 19:30:05 🔔 Container is ready: efb25dbc2563
+    borrowed-successor-probe-registration_linux_test.go:693: protected fixture actual HBA rules (all SCRAM, no trust fallback): line=1 type=local address="" auth=scram-sha-256; line=2 type=host address="127.0.0.1" auth=scram-sha-256; line=3 type=host address="::1" auth=scram-sha-256; line=4 type=host address="all" auth=scram-sha-256
+    borrowed-replacement-bound-baseline-commit_linux_test.go:1569: successor retired: backend PID 330 incarnation strictly gone, owner health retained, guard non-clean, acceptance zero
+    borrowed-replacement-bound-baseline-commit_linux_test.go:1570: replacement session retired: backend PID 533 incarnation strictly gone, owner health retained, guard non-clean, acceptance zero
+    borrowed-replacement-bound-baseline-commit_linux_test.go:1635: bound baseline commit between-writes cancellation negative: the real cancellation sentinel was observed at the distinct between-writes stage with the actual canceled context, no rollback acknowledgment was recorded before callback entry, no pending transition survived and the one-shot preparation is finished; durable state classification: complete baseline equality, zero preparation rows, no authorizing output
+2026/10/04 19:30:14 🐳 Creating container for image postgres@sha256:4ef4dbc939d61acea57712655ddb4b4ab27419c913f94cca0cd57cb3ea3c2280
+2026/10/04 19:30:14 ✅ Container created: f6180521412c
+2026/10/04 19:30:14 🐳 Starting container: f6180521412c
+2026/10/04 19:30:15 ✅ Container started: f6180521412c
+2026/10/04 19:30:15 ⏳ Waiting for container id f6180521412c image: postgres@sha256:4ef4dbc939d61acea57712655ddb4b4ab27419c913f94cca0cd57cb3ea3c2280. Waiting for: log message "database system is ready to accept connections" (occurrence: 2)
+2026/10/04 19:30:17 🔔 Container is ready: f6180521412c
+    borrowed-successor-probe-registration_linux_test.go:693: protected fixture actual HBA rules (all SCRAM, no trust fallback): line=1 type=local address="" auth=scram-sha-256; line=2 type=host address="127.0.0.1" auth=scram-sha-256; line=3 type=host address="::1" auth=scram-sha-256; line=4 type=host address="all" auth=scram-sha-256
+    borrowed-replacement-bound-baseline-commit_linux_test.go:1569: successor retired: backend PID 329 incarnation strictly gone, owner health retained, guard non-clean, acceptance zero
+    borrowed-replacement-bound-baseline-commit_linux_test.go:1570: replacement session retired: backend PID 533 incarnation strictly gone, owner health retained, guard non-clean, acceptance zero
+    borrowed-replacement-bound-baseline-commit_linux_test.go:1635: bound baseline commit after-resolution cancellation negative: the real cancellation sentinel was observed at the distinct after-resolution stage with the actual canceled context, no rollback acknowledgment was recorded before callback entry, no pending transition survived and the one-shot preparation is finished; durable state classification: complete baseline equality, zero preparation rows, no authorizing output
+2026/10/04 19:30:26 🐳 Creating container for image postgres@sha256:4ef4dbc939d61acea57712655ddb4b4ab27419c913f94cca0cd57cb3ea3c2280
+2026/10/04 19:30:27 ✅ Container created: 37f523008bbe
+2026/10/04 19:30:27 🐳 Starting container: 37f523008bbe
+2026/10/04 19:30:27 ✅ Container started: 37f523008bbe
+2026/10/04 19:30:27 ⏳ Waiting for container id 37f523008bbe image: postgres@sha256:4ef4dbc939d61acea57712655ddb4b4ab27419c913f94cca0cd57cb3ea3c2280. Waiting for: log message "database system is ready to accept connections" (occurrence: 2)
+2026/10/04 19:30:29 🔔 Container is ready: 37f523008bbe
+    borrowed-successor-probe-registration_linux_test.go:693: protected fixture actual HBA rules (all SCRAM, no trust fallback): line=1 type=local address="" auth=scram-sha-256; line=2 type=host address="127.0.0.1" auth=scram-sha-256; line=3 type=host address="::1" auth=scram-sha-256; line=4 type=host address="all" auth=scram-sha-256
+    borrowed-replacement-bound-baseline-commit_linux_test.go:1644: successor retired: backend PID 330 incarnation strictly gone, owner health retained, guard non-clean, acceptance zero
+    borrowed-replacement-bound-baseline-commit_linux_test.go:1645: replacement session retired: backend PID 533 incarnation strictly gone, owner health retained, guard non-clean, acceptance zero
+    borrowed-replacement-bound-baseline-commit_linux_test.go:1681: bound baseline commit pre-callback negative: the cancelled lane context made the unchanged transaction entry refuse before the callback ran, so no transaction was rolled back, no acknowledgment was recorded and the complete baseline stayed unchanged; no authorizing output
+2026/10/04 19:30:39 🐳 Creating container for image postgres@sha256:4ef4dbc939d61acea57712655ddb4b4ab27419c913f94cca0cd57cb3ea3c2280
+2026/10/04 19:30:39 ✅ Container created: 221b0ad081d3
+2026/10/04 19:30:39 🐳 Starting container: 221b0ad081d3
+2026/10/04 19:30:39 ✅ Container started: 221b0ad081d3
+2026/10/04 19:30:39 ⏳ Waiting for container id 221b0ad081d3 image: postgres@sha256:4ef4dbc939d61acea57712655ddb4b4ab27419c913f94cca0cd57cb3ea3c2280. Waiting for: log message "database system is ready to accept connections" (occurrence: 2)
+2026/10/04 19:30:43 🔔 Container is ready: 221b0ad081d3
+    borrowed-successor-probe-registration_linux_test.go:693: protected fixture actual HBA rules (all SCRAM, no trust fallback): line=1 type=local address="" auth=scram-sha-256; line=2 type=host address="127.0.0.1" auth=scram-sha-256; line=3 type=host address="::1" auth=scram-sha-256; line=4 type=host address="all" auth=scram-sha-256
+    borrowed-replacement-bound-baseline-commit_linux_test.go:1690: successor retired: backend PID 331 incarnation strictly gone, owner health retained, guard non-clean, acceptance zero
+    borrowed-replacement-bound-baseline-commit_linux_test.go:1692: replacement session retired: backend PID 534 incarnation strictly gone, owner health retained, guard non-clean, acceptance zero
+    borrowed-replacement-bound-baseline-commit_linux_test.go:1726: bound baseline commit owner-loss negative: the owner connection loss before the commit produced the authentic rollback-acknowledgement failure with NO commit, the guard stayed unresolved, the complete baseline and zero preparation rows were verified and the owner was retired with no owner reuse; durable state classification: rollback uncertainty, no authorizing output
+2026/10/04 19:30:53 🐳 Creating container for image postgres@sha256:4ef4dbc939d61acea57712655ddb4b4ab27419c913f94cca0cd57cb3ea3c2280
+2026/10/04 19:30:53 ✅ Container created: dc0e0bab5cfd
+2026/10/04 19:30:53 🐳 Starting container: dc0e0bab5cfd
+2026/10/04 19:30:53 ✅ Container started: dc0e0bab5cfd
+2026/10/04 19:30:53 ⏳ Waiting for container id dc0e0bab5cfd image: postgres@sha256:4ef4dbc939d61acea57712655ddb4b4ab27419c913f94cca0cd57cb3ea3c2280. Waiting for: log message "database system is ready to accept connections" (occurrence: 2)
+2026/10/04 19:30:55 🔔 Container is ready: dc0e0bab5cfd
+    borrowed-successor-probe-registration_linux_test.go:693: protected fixture actual HBA rules (all SCRAM, no trust fallback): line=1 type=local address="" auth=scram-sha-256; line=2 type=host address="127.0.0.1" auth=scram-sha-256; line=3 type=host address="::1" auth=scram-sha-256; line=4 type=host address="all" auth=scram-sha-256
+    borrowed-replacement-bound-baseline-commit_linux_test.go:1733: successor retired: backend PID 329 incarnation strictly gone, owner health retained, guard non-clean, acceptance zero
+    borrowed-replacement-bound-baseline-commit_linux_test.go:1734: replacement session retired: backend PID 531 incarnation strictly gone, owner health retained, guard non-clean, acceptance zero
+    borrowed-replacement-bound-baseline-commit_linux_test.go:1755: bound baseline commit late-prefix-loss negative: the shared prefix was invalidated after the initial check and the in-transaction recheck immediately before the production writes refused with the acknowledged rollback; durable state classification: complete baseline equality, NEITHER production write reached, zero preparation rows, no authorizing output
+2026/10/04 19:31:05 🐳 Creating container for image postgres@sha256:4ef4dbc939d61acea57712655ddb4b4ab27419c913f94cca0cd57cb3ea3c2280
+2026/10/04 19:31:05 ✅ Container created: dce74843d85b
+2026/10/04 19:31:05 🐳 Starting container: dce74843d85b
+2026/10/04 19:31:05 ✅ Container started: dce74843d85b
+2026/10/04 19:31:05 ⏳ Waiting for container id dce74843d85b image: postgres@sha256:4ef4dbc939d61acea57712655ddb4b4ab27419c913f94cca0cd57cb3ea3c2280. Waiting for: log message "database system is ready to accept connections" (occurrence: 2)
+2026/10/04 19:31:07 🔔 Container is ready: dce74843d85b
+    borrowed-successor-probe-registration_linux_test.go:693: protected fixture actual HBA rules (all SCRAM, no trust fallback): line=1 type=local address="" auth=scram-sha-256; line=2 type=host address="127.0.0.1" auth=scram-sha-256; line=3 type=host address="::1" auth=scram-sha-256; line=4 type=host address="all" auth=scram-sha-256
+    borrowed-replacement-bound-baseline-commit_linux_test.go:1765: successor retired: backend PID 330 incarnation strictly gone, owner health retained, guard non-clean, acceptance zero
+    borrowed-replacement-bound-baseline-commit_linux_test.go:1766: replacement session retired: backend PID 533 incarnation strictly gone, owner health retained, guard non-clean, acceptance zero
+    borrowed-replacement-bound-baseline-commit_linux_test.go:1885: baseline commit acknowledgement-loss negative: the ACTUAL COMMIT was dispatched and its validated completion withheld before pgx saw it, the committed delta (audit=1, guard="clean"/"bound-baseline-commit-ackloss-1791142276198282439") was independently observed while withheld, the transport break made the ACTUAL Commit call return the ambiguous error (never an injected acknowledgement), the UNKNOWN acknowledgement was never relabeled success, the one-shot attempt was consumed, the uncertain owner session was not reusable, the original retained owner stayed healthy and the fence was disposed cleanly; durable state classification: commit-uncertain with independently observed committed delta, no authorizing output
+2026/10/04 19:31:19 🐳 Creating container for image postgres@sha256:4ef4dbc939d61acea57712655ddb4b4ab27419c913f94cca0cd57cb3ea3c2280
+2026/10/04 19:31:19 ✅ Container created: 13b458163e05
+2026/10/04 19:31:19 🐳 Starting container: 13b458163e05
+2026/10/04 19:31:20 ✅ Container started: 13b458163e05
+2026/10/04 19:31:20 ⏳ Waiting for container id 13b458163e05 image: postgres@sha256:4ef4dbc939d61acea57712655ddb4b4ab27419c913f94cca0cd57cb3ea3c2280. Waiting for: log message "database system is ready to accept connections" (occurrence: 2)
+2026/10/04 19:31:21 🔔 Container is ready: 13b458163e05
+    borrowed-successor-probe-registration_linux_test.go:693: protected fixture actual HBA rules (all SCRAM, no trust fallback): line=1 type=local address="" auth=scram-sha-256; line=2 type=host address="127.0.0.1" auth=scram-sha-256; line=3 type=host address="::1" auth=scram-sha-256; line=4 type=host address="all" auth=scram-sha-256
+    borrowed-replacement-bound-baseline-commit_linux_test.go:1892: successor retired: backend PID 329 incarnation strictly gone, owner health retained, guard non-clean, acceptance zero
+    borrowed-replacement-bound-baseline-commit_linux_test.go:1894: replacement session retired: backend PID 531 incarnation strictly gone, owner health retained, guard non-clean, acceptance zero
+    borrowed-replacement-bound-baseline-commit_linux_test.go:1934: baseline commit post-commit owner-loss negative: the acknowledged commit left the committed guard clean and exactly ONE durable preparation audit row, the owner loss refused any positive continuation (no success, no admission), the committed guard/audit were preserved and never repaired by deleting the audit or reversing the committed transition; durable state classification: committed preparation delta retained, owner unusable, no authorizing output
+2026/10/04 19:31:33 🐳 Creating container for image postgres@sha256:4ef4dbc939d61acea57712655ddb4b4ab27419c913f94cca0cd57cb3ea3c2280
+2026/10/04 19:31:33 ✅ Container created: cc8b32a22724
+2026/10/04 19:31:33 🐳 Starting container: cc8b32a22724
+2026/10/04 19:31:34 ✅ Container started: cc8b32a22724
+2026/10/04 19:31:34 ⏳ Waiting for container id cc8b32a22724 image: postgres@sha256:4ef4dbc939d61acea57712655ddb4b4ab27419c913f94cca0cd57cb3ea3c2280. Waiting for: log message "database system is ready to accept connections" (occurrence: 2)
+2026/10/04 19:31:36 🔔 Container is ready: cc8b32a22724
+    borrowed-successor-probe-registration_linux_test.go:693: protected fixture actual HBA rules (all SCRAM, no trust fallback): line=1 type=local address="" auth=scram-sha-256; line=2 type=host address="127.0.0.1" auth=scram-sha-256; line=3 type=host address="::1" auth=scram-sha-256; line=4 type=host address="all" auth=scram-sha-256
+    borrowed-replacement-bound-baseline-commit_linux_test.go:1941: successor retired: backend PID 331 incarnation strictly gone, owner health retained, guard non-clean, acceptance zero
+    borrowed-replacement-bound-baseline-commit_linux_test.go:1943: replacement session retired: backend PID 534 incarnation strictly gone, owner health retained, guard non-clean, acceptance zero
+    borrowed-replacement-bound-baseline-commit_linux_test.go:1990: baseline commit post-commit teardown-failure negative: the acknowledged commit left the committed guard/audit delta intact while the fixture teardown could not complete (restored=false err=bound writer isolation: the HBA reload/effective-rule verification refused: pg_reload_conf refused (err=FATAL: terminating connection due to administrator command (SQLSTATE 57P01))), the flow refused any positive continuation and the single-use isolation publication refused; committed history was never repaired; durable state classification: committed preparation delta retained, teardown failed, no authorizing output
+2026/10/04 19:31:48 🐳 Creating container for image postgres@sha256:4ef4dbc939d61acea57712655ddb4b4ab27419c913f94cca0cd57cb3ea3c2280
+2026/10/04 19:31:48 ✅ Container created: 8ae44ab42ffa
+2026/10/04 19:31:48 🐳 Starting container: 8ae44ab42ffa
+2026/10/04 19:31:49 ✅ Container started: 8ae44ab42ffa
+2026/10/04 19:31:49 ⏳ Waiting for container id 8ae44ab42ffa image: postgres@sha256:4ef4dbc939d61acea57712655ddb4b4ab27419c913f94cca0cd57cb3ea3c2280. Waiting for: log message "database system is ready to accept connections" (occurrence: 2)
+2026/10/04 19:31:50 🔔 Container is ready: 8ae44ab42ffa
+    borrowed-successor-probe-registration_linux_test.go:693: protected fixture actual HBA rules (all SCRAM, no trust fallback): line=1 type=local address="" auth=scram-sha-256; line=2 type=host address="127.0.0.1" auth=scram-sha-256; line=3 type=host address="::1" auth=scram-sha-256; line=4 type=host address="all" auth=scram-sha-256
+    borrowed-replacement-bound-baseline-commit_linux_test.go:1997: successor retired: backend PID 329 incarnation strictly gone, owner health retained, guard non-clean, acceptance zero
+    borrowed-replacement-bound-baseline-commit_linux_test.go:1998: replacement session retired: backend PID 532 incarnation strictly gone, owner health retained, guard non-clean, acceptance zero
+    borrowed-replacement-bound-baseline-commit_linux_test.go:2021: bound baseline commit replay negative: the one-shot preparation refused a second run and a copy of the preparation shared the same refusal; no second preparation transaction or audit exists and the complete baseline is unchanged; no authorizing output
+2026/10/04 19:32:00 🐳 Stopping container: 8ae44ab42ffa
+2026/10/04 19:32:00 ✅ Container stopped: 8ae44ab42ffa
+2026/10/04 19:32:00 🐳 Terminating container: 8ae44ab42ffa
+2026/10/04 19:32:00 🚫 Container terminated: 8ae44ab42ffa
+2026/10/04 19:32:00 🐳 Stopping container: cc8b32a22724
+2026/10/04 19:32:00 ✅ Container stopped: cc8b32a22724
+2026/10/04 19:32:00 🐳 Terminating container: cc8b32a22724
+2026/10/04 19:32:01 🚫 Container terminated: cc8b32a22724
+2026/10/04 19:32:01 🐳 Stopping container: 13b458163e05
+2026/10/04 19:32:01 ✅ Container stopped: 13b458163e05
+2026/10/04 19:32:01 🐳 Terminating container: 13b458163e05
+2026/10/04 19:32:01 🚫 Container terminated: 13b458163e05
+2026/10/04 19:32:01 🐳 Stopping container: dce74843d85b
+2026/10/04 19:32:01 ✅ Container stopped: dce74843d85b
+2026/10/04 19:32:01 🐳 Terminating container: dce74843d85b
+2026/10/04 19:32:02 🚫 Container terminated: dce74843d85b
+2026/10/04 19:32:02 🐳 Stopping container: dc0e0bab5cfd
+2026/10/04 19:32:02 ✅ Container stopped: dc0e0bab5cfd
+2026/10/04 19:32:02 🐳 Terminating container: dc0e0bab5cfd
+2026/10/04 19:32:02 🚫 Container terminated: dc0e0bab5cfd
+2026/10/04 19:32:02 🐳 Stopping container: 221b0ad081d3
+2026/10/04 19:32:02 ✅ Container stopped: 221b0ad081d3
+2026/10/04 19:32:02 🐳 Terminating container: 221b0ad081d3
+2026/10/04 19:32:03 🚫 Container terminated: 221b0ad081d3
+2026/10/04 19:32:03 🐳 Stopping container: 37f523008bbe
+2026/10/04 19:32:03 ✅ Container stopped: 37f523008bbe
+2026/10/04 19:32:03 🐳 Terminating container: 37f523008bbe
+2026/10/04 19:32:03 🚫 Container terminated: 37f523008bbe
+2026/10/04 19:32:03 🐳 Stopping container: f6180521412c
+2026/10/04 19:32:03 ✅ Container stopped: f6180521412c
+2026/10/04 19:32:03 🐳 Terminating container: f6180521412c
+2026/10/04 19:32:04 🚫 Container terminated: f6180521412c
+2026/10/04 19:32:04 🐳 Stopping container: efb25dbc2563
+2026/10/04 19:32:04 ✅ Container stopped: efb25dbc2563
+2026/10/04 19:32:04 🐳 Terminating container: efb25dbc2563
+2026/10/04 19:32:04 🚫 Container terminated: efb25dbc2563
+2026/10/04 19:32:04 🐳 Stopping container: 9e303994148f
+2026/10/04 19:32:04 ✅ Container stopped: 9e303994148f
+2026/10/04 19:32:04 🐳 Terminating container: 9e303994148f
+2026/10/04 19:32:04 🚫 Container terminated: 9e303994148f
+2026/10/04 19:32:05 🐳 Stopping container: 436d915106c2
+2026/10/04 19:32:05 ✅ Container stopped: 436d915106c2
+2026/10/04 19:32:05 🐳 Terminating container: 436d915106c2
+2026/10/04 19:32:05 🚫 Container terminated: 436d915106c2
+2026/10/04 19:32:05 🐳 Stopping container: 0bbc91d21bb1
+2026/10/04 19:32:05 ✅ Container stopped: 0bbc91d21bb1
+2026/10/04 19:32:05 🐳 Terminating container: 0bbc91d21bb1
+2026/10/04 19:32:05 🚫 Container terminated: 0bbc91d21bb1
+2026/10/04 19:32:05 🐳 Stopping container: 4926c466af05
+2026/10/04 19:32:06 ✅ Container stopped: 4926c466af05
+2026/10/04 19:32:06 🐳 Terminating container: 4926c466af05
+2026/10/04 19:32:06 🚫 Container terminated: 4926c466af05
+2026/10/04 19:32:06 🐳 Stopping container: 4994857e5886
+2026/10/04 19:32:06 ✅ Container stopped: 4994857e5886
+2026/10/04 19:32:06 🐳 Terminating container: 4994857e5886
+2026/10/04 19:32:06 🚫 Container terminated: 4994857e5886
+2026/10/04 19:32:06 🐳 Stopping container: bb2549bcc243
+2026/10/04 19:32:07 ✅ Container stopped: bb2549bcc243
+2026/10/04 19:32:07 🐳 Terminating container: bb2549bcc243
+2026/10/04 19:32:07 🚫 Container terminated: bb2549bcc243
+2026/10/04 19:32:07 🐳 Stopping container: d02a2a2b127b
+2026/10/04 19:32:07 ✅ Container stopped: d02a2a2b127b
+2026/10/04 19:32:07 🐳 Terminating container: d02a2a2b127b
+2026/10/04 19:32:07 🚫 Container terminated: d02a2a2b127b
+2026/10/04 19:32:07 🐳 Stopping container: b050c627acc2
+2026/10/04 19:32:08 ✅ Container stopped: b050c627acc2
+2026/10/04 19:32:08 🐳 Terminating container: b050c627acc2
+2026/10/04 19:32:08 🚫 Container terminated: b050c627acc2
+2026/10/04 19:32:08 🐳 Stopping container: db10873ee828
+2026/10/04 19:32:08 ✅ Container stopped: db10873ee828
+2026/10/04 19:32:08 🐳 Terminating container: db10873ee828
+2026/10/04 19:32:08 🚫 Container terminated: db10873ee828
+2026/10/04 19:32:08 🐳 Stopping container: 34981006d094
+2026/10/04 19:32:09 ✅ Container stopped: 34981006d094
+2026/10/04 19:32:09 🐳 Terminating container: 34981006d094
+2026/10/04 19:32:09 🚫 Container terminated: 34981006d094
+2026/10/04 19:32:09 🐳 Stopping container: ea4dadb7c0fd
+2026/10/04 19:32:09 ✅ Container stopped: ea4dadb7c0fd
+2026/10/04 19:32:09 🐳 Terminating container: ea4dadb7c0fd
+2026/10/04 19:32:09 🚫 Container terminated: ea4dadb7c0fd
+2026/10/04 19:32:09 🐳 Stopping container: acaddadde1d3
+2026/10/04 19:32:10 ✅ Container stopped: acaddadde1d3
+2026/10/04 19:32:10 🐳 Terminating container: acaddadde1d3
+2026/10/04 19:32:10 🚫 Container terminated: acaddadde1d3
+2026/10/04 19:32:10 🐳 Stopping container: 8e442cd4a4c1
+2026/10/04 19:32:10 ✅ Container stopped: 8e442cd4a4c1
+2026/10/04 19:32:10 🐳 Terminating container: 8e442cd4a4c1
+2026/10/04 19:32:10 🚫 Container terminated: 8e442cd4a4c1
+2026/10/04 19:32:10 🐳 Stopping container: 2f23af0a670d
+2026/10/04 19:32:11 ✅ Container stopped: 2f23af0a670d
+2026/10/04 19:32:11 🐳 Terminating container: 2f23af0a670d
+2026/10/04 19:32:11 🚫 Container terminated: 2f23af0a670d
+2026/10/04 19:32:11 🐳 Stopping container: b7c64f6b2fb9
+2026/10/04 19:32:11 ✅ Container stopped: b7c64f6b2fb9
+2026/10/04 19:32:11 🐳 Terminating container: b7c64f6b2fb9
+2026/10/04 19:32:11 🚫 Container terminated: b7c64f6b2fb9
+--- PASS: TestBorrowedReplacementBoundBaselineCommit (326.84s)
+=== RUN   TestBorrowedReplacementBoundPostcommitAdmission
+=== RUN   TestBorrowedReplacementBoundPostcommitAdmission/P
+2026/10/04 19:32:11 🐳 Creating container for image postgres@sha256:4ef4dbc939d61acea57712655ddb4b4ab27419c913f94cca0cd57cb3ea3c2280
+2026/10/04 19:32:11 ✅ Container created: abdbe2b0464d
+2026/10/04 19:32:11 🐳 Starting container: abdbe2b0464d
+2026/10/04 19:32:12 ✅ Container started: abdbe2b0464d
+2026/10/04 19:32:12 ⏳ Waiting for container id abdbe2b0464d image: postgres@sha256:4ef4dbc939d61acea57712655ddb4b4ab27419c913f94cca0cd57cb3ea3c2280. Waiting for: log message "database system is ready to accept connections" (occurrence: 2)
+2026/10/04 19:32:14 🔔 Container is ready: abdbe2b0464d
+    borrowed-successor-probe-registration_linux_test.go:693: protected fixture actual HBA rules (all SCRAM, no trust fallback): line=1 type=local address="" auth=scram-sha-256; line=2 type=host address="127.0.0.1" auth=scram-sha-256; line=3 type=host address="::1" auth=scram-sha-256; line=4 type=host address="all" auth=scram-sha-256
+    borrowed-replacement-bound-postcommit-admission_linux_test.go:827: successor retired: backend PID 329 incarnation strictly gone, owner health retained, guard non-clean, acceptance zero
+    borrowed-replacement-bound-postcommit-admission_linux_test.go:894: replacement session retired: backend PID 591 incarnation strictly gone, owner health retained, guard non-clean, acceptance zero
+    borrowed-replacement-bound-postcommit-admission_linux_test.go:1015: bound postcommit admission positive: owner tx pid 109 distinct from prep tx pid 104; acknowledged baseline commit (guard clean op=bound-baseline-commit-1791142353353338797, one instance-bound preparation audit) handed off through the live fence; the one native attempt admission committed its transactional restore_started marker (generation 2) and durable launch intent (op=bound-postcommit-admission-native-1791142349868753644 app="txh015_37de0fea050639b19155dd85cad3c86c", launched_at NULL) while the baseline preparation audit stayed byte-identical and unrelabelled; endpoint loss AFTER preflight produced the actual launch-stage endpoint-capability refusal with zero child start, absent receipt, zero probe/acceptance callbacks, no accepted output, unchanged catalog/data and a clean teardown with no continuing isolation; the terminal object/copies cannot redispatch
+2026/10/04 19:32:34 🐳 Stopping container: abdbe2b0464d
+2026/10/04 19:32:34 ✅ Container stopped: abdbe2b0464d
+2026/10/04 19:32:34 🐳 Terminating container: abdbe2b0464d
+2026/10/04 19:32:34 🚫 Container terminated: abdbe2b0464d
+=== RUN   TestBorrowedReplacementBoundPostcommitAdmission/N1-dirty-baseline
+2026/10/04 19:32:34 🐳 Creating container for image postgres@sha256:4ef4dbc939d61acea57712655ddb4b4ab27419c913f94cca0cd57cb3ea3c2280
+2026/10/04 19:32:34 ✅ Container created: 4dd3c4404fcb
+2026/10/04 19:32:34 🐳 Starting container: 4dd3c4404fcb
+2026/10/04 19:32:35 ✅ Container started: 4dd3c4404fcb
+2026/10/04 19:32:35 ⏳ Waiting for container id 4dd3c4404fcb image: postgres@sha256:4ef4dbc939d61acea57712655ddb4b4ab27419c913f94cca0cd57cb3ea3c2280. Waiting for: log message "database system is ready to accept connections" (occurrence: 2)
+2026/10/04 19:32:37 🔔 Container is ready: 4dd3c4404fcb
+    borrowed-successor-probe-registration_linux_test.go:693: protected fixture actual HBA rules (all SCRAM, no trust fallback): line=1 type=local address="" auth=scram-sha-256; line=2 type=host address="127.0.0.1" auth=scram-sha-256; line=3 type=host address="::1" auth=scram-sha-256; line=4 type=host address="all" auth=scram-sha-256
+    borrowed-replacement-bound-postcommit-admission_linux_test.go:1023: successor retired: backend PID 329 incarnation strictly gone, owner health retained, guard non-clean, acceptance zero
+    borrowed-replacement-bound-postcommit-admission_linux_test.go:1025: replacement session retired: backend PID 531 incarnation strictly gone, owner health retained, guard non-clean, acceptance zero
+    borrowed-replacement-bound-postcommit-admission_linux_test.go:1054: dirty/unacknowledged baseline negative: the gate refused without an acknowledged commit and the raw dispatch was refused by the exact dirty guard with exactly one rolled-back marker callback, no child, absent receipt, no probe/acceptance, no native intent and complete baseline equality
+2026/10/04 19:32:46 🐳 Stopping container: 4dd3c4404fcb
+2026/10/04 19:32:46 ✅ Container stopped: 4dd3c4404fcb
+2026/10/04 19:32:46 🐳 Terminating container: 4dd3c4404fcb
+2026/10/04 19:32:46 🚫 Container terminated: 4dd3c4404fcb
+=== RUN   TestBorrowedReplacementBoundPostcommitAdmission/N2-missing-preparation
+2026/10/04 19:32:47 🐳 Creating container for image postgres@sha256:4ef4dbc939d61acea57712655ddb4b4ab27419c913f94cca0cd57cb3ea3c2280
+2026/10/04 19:32:47 ✅ Container created: 66c6c1b80204
+2026/10/04 19:32:47 🐳 Starting container: 66c6c1b80204
+2026/10/04 19:32:47 ✅ Container started: 66c6c1b80204
+2026/10/04 19:32:47 ⏳ Waiting for container id 66c6c1b80204 image: postgres@sha256:4ef4dbc939d61acea57712655ddb4b4ab27419c913f94cca0cd57cb3ea3c2280. Waiting for: log message "database system is ready to accept connections" (occurrence: 2)
+2026/10/04 19:32:49 🔔 Container is ready: 66c6c1b80204
+    borrowed-successor-probe-registration_linux_test.go:693: protected fixture actual HBA rules (all SCRAM, no trust fallback): line=1 type=local address="" auth=scram-sha-256; line=2 type=host address="127.0.0.1" auth=scram-sha-256; line=3 type=host address="::1" auth=scram-sha-256; line=4 type=host address="all" auth=scram-sha-256
+    borrowed-replacement-bound-postcommit-admission_linux_test.go:1060: successor retired: backend PID 329 incarnation strictly gone, owner health retained, guard non-clean, acceptance zero
+    borrowed-replacement-bound-postcommit-admission_linux_test.go:1062: replacement session retired: backend PID 531 incarnation strictly gone, owner health retained, guard non-clean, acceptance zero
+    borrowed-replacement-bound-postcommit-admission_linux_test.go:1080: missing-preparation negative: the fresh coverage verification refused before any transaction, the gate stayed unarmed and no native outcome exists; durable state classification: complete baseline equality, no transaction, no authorizing output
+2026/10/04 19:32:58 🐳 Stopping container: 66c6c1b80204
+2026/10/04 19:32:58 ✅ Container stopped: 66c6c1b80204
+2026/10/04 19:32:58 🐳 Terminating container: 66c6c1b80204
+2026/10/04 19:32:58 🚫 Container terminated: 66c6c1b80204
+=== RUN   TestBorrowedReplacementBoundPostcommitAdmission/N3-rollback-uncertainty
+2026/10/04 19:32:59 🐳 Creating container for image postgres@sha256:4ef4dbc939d61acea57712655ddb4b4ab27419c913f94cca0cd57cb3ea3c2280
+2026/10/04 19:32:59 ✅ Container created: 8df3f8f18d3d
+2026/10/04 19:32:59 🐳 Starting container: 8df3f8f18d3d
+2026/10/04 19:32:59 ✅ Container started: 8df3f8f18d3d
+2026/10/04 19:32:59 ⏳ Waiting for container id 8df3f8f18d3d image: postgres@sha256:4ef4dbc939d61acea57712655ddb4b4ab27419c913f94cca0cd57cb3ea3c2280. Waiting for: log message "database system is ready to accept connections" (occurrence: 2)
+2026/10/04 19:33:01 🔔 Container is ready: 8df3f8f18d3d
+    borrowed-successor-probe-registration_linux_test.go:693: protected fixture actual HBA rules (all SCRAM, no trust fallback): line=1 type=local address="" auth=scram-sha-256; line=2 type=host address="127.0.0.1" auth=scram-sha-256; line=3 type=host address="::1" auth=scram-sha-256; line=4 type=host address="all" auth=scram-sha-256
+    borrowed-replacement-bound-postcommit-admission_linux_test.go:1087: successor retired: backend PID 330 incarnation strictly gone, owner health retained, guard non-clean, acceptance zero
+    borrowed-replacement-bound-postcommit-admission_linux_test.go:1089: replacement session retired: backend PID 532 incarnation strictly gone, owner health retained, guard non-clean, acceptance zero
+    borrowed-replacement-bound-postcommit-admission_linux_test.go:1133: rollback-uncertainty negative: the owner loss before the commit produced the authentic rollback-acknowledgement failure with NO commit, the gate refused, no native marker/intent/child exists, the complete baseline stayed unchanged and the owner was retired with no reuse
+2026/10/04 19:33:13 🐳 Stopping container: 8df3f8f18d3d
+2026/10/04 19:33:13 ✅ Container stopped: 8df3f8f18d3d
+2026/10/04 19:33:13 🐳 Terminating container: 8df3f8f18d3d
+2026/10/04 19:33:14 🚫 Container terminated: 8df3f8f18d3d
+=== RUN   TestBorrowedReplacementBoundPostcommitAdmission/N4-commit-ack-uncertainty
+2026/10/04 19:33:14 🐳 Creating container for image postgres@sha256:4ef4dbc939d61acea57712655ddb4b4ab27419c913f94cca0cd57cb3ea3c2280
+2026/10/04 19:33:14 ✅ Container created: d1a7f65f41a5
+2026/10/04 19:33:14 🐳 Starting container: d1a7f65f41a5
+2026/10/04 19:33:14 ✅ Container started: d1a7f65f41a5
+2026/10/04 19:33:14 ⏳ Waiting for container id d1a7f65f41a5 image: postgres@sha256:4ef4dbc939d61acea57712655ddb4b4ab27419c913f94cca0cd57cb3ea3c2280. Waiting for: log message "database system is ready to accept connections" (occurrence: 2)
+2026/10/04 19:33:16 🔔 Container is ready: d1a7f65f41a5
+    borrowed-successor-probe-registration_linux_test.go:693: protected fixture actual HBA rules (all SCRAM, no trust fallback): line=1 type=local address="" auth=scram-sha-256; line=2 type=host address="127.0.0.1" auth=scram-sha-256; line=3 type=host address="::1" auth=scram-sha-256; line=4 type=host address="all" auth=scram-sha-256
+    borrowed-replacement-bound-postcommit-admission_linux_test.go:1140: successor retired: backend PID 329 incarnation strictly gone, owner health retained, guard non-clean, acceptance zero
+    borrowed-replacement-bound-postcommit-admission_linux_test.go:1142: replacement session retired: backend PID 531 incarnation strictly gone, owner health retained, guard non-clean, acceptance zero
+    borrowed-replacement-bound-postcommit-admission_linux_test.go:1223: acknowledgement-loss negative: the ACTUAL COMMIT was dispatched and its validated completion withheld, the committed delta was independently observed while withheld, the handoff was NEVER armed from the visible rows, no native marker/intent/child exists and the fence was disposed cleanly
+2026/10/04 19:33:28 🐳 Stopping container: d1a7f65f41a5
+2026/10/04 19:33:29 ✅ Container stopped: d1a7f65f41a5
+2026/10/04 19:33:29 🐳 Terminating container: d1a7f65f41a5
+2026/10/04 19:33:29 🚫 Container terminated: d1a7f65f41a5
+=== RUN   TestBorrowedReplacementBoundPostcommitAdmission/N5-disposed-isolation
+2026/10/04 19:33:29 🐳 Creating container for image postgres@sha256:4ef4dbc939d61acea57712655ddb4b4ab27419c913f94cca0cd57cb3ea3c2280
+2026/10/04 19:33:29 ✅ Container created: fc13ca81975b
+2026/10/04 19:33:29 🐳 Starting container: fc13ca81975b
+2026/10/04 19:33:30 ✅ Container started: fc13ca81975b
+2026/10/04 19:33:30 ⏳ Waiting for container id fc13ca81975b image: postgres@sha256:4ef4dbc939d61acea57712655ddb4b4ab27419c913f94cca0cd57cb3ea3c2280. Waiting for: log message "database system is ready to accept connections" (occurrence: 2)
+2026/10/04 19:33:31 🔔 Container is ready: fc13ca81975b
+    borrowed-successor-probe-registration_linux_test.go:693: protected fixture actual HBA rules (all SCRAM, no trust fallback): line=1 type=local address="" auth=scram-sha-256; line=2 type=host address="127.0.0.1" auth=scram-sha-256; line=3 type=host address="::1" auth=scram-sha-256; line=4 type=host address="all" auth=scram-sha-256
+    borrowed-replacement-bound-postcommit-admission_linux_test.go:1230: successor retired: backend PID 329 incarnation strictly gone, owner health retained, guard non-clean, acceptance zero
+    borrowed-replacement-bound-postcommit-admission_linux_test.go:1232: replacement session retired: backend PID 531 incarnation strictly gone, owner health retained, guard non-clean, acceptance zero
+    borrowed-replacement-bound-postcommit-admission_linux_test.go:1289: disposed/stale-isolation negative: the completed flow state (HBA restored) could not hand off through the gate or any copy, no native marker/intent/child exists and the captured committed baseline audit digest/classification is preserved
+2026/10/04 19:33:44 🐳 Stopping container: fc13ca81975b
+2026/10/04 19:33:44 ✅ Container stopped: fc13ca81975b
+2026/10/04 19:33:44 🐳 Terminating container: fc13ca81975b
+2026/10/04 19:33:44 🚫 Container terminated: fc13ca81975b
+=== RUN   TestBorrowedReplacementBoundPostcommitAdmission/N6-incomplete-isolation
+2026/10/04 19:33:44 🐳 Creating container for image postgres@sha256:4ef4dbc939d61acea57712655ddb4b4ab27419c913f94cca0cd57cb3ea3c2280
+2026/10/04 19:33:44 ✅ Container created: 657b266ea67f
+2026/10/04 19:33:44 🐳 Starting container: 657b266ea67f
+2026/10/04 19:33:45 ✅ Container started: 657b266ea67f
+2026/10/04 19:33:45 ⏳ Waiting for container id 657b266ea67f image: postgres@sha256:4ef4dbc939d61acea57712655ddb4b4ab27419c913f94cca0cd57cb3ea3c2280. Waiting for: log message "database system is ready to accept connections" (occurrence: 2)
+2026/10/04 19:33:47 🔔 Container is ready: 657b266ea67f
+    borrowed-successor-probe-registration_linux_test.go:693: protected fixture actual HBA rules (all SCRAM, no trust fallback): line=1 type=local address="" auth=scram-sha-256; line=2 type=host address="127.0.0.1" auth=scram-sha-256; line=3 type=host address="::1" auth=scram-sha-256; line=4 type=host address="all" auth=scram-sha-256
+    borrowed-replacement-bound-postcommit-admission_linux_test.go:1295: successor retired: backend PID 329 incarnation strictly gone, owner health retained, guard non-clean, acceptance zero
+    borrowed-replacement-bound-postcommit-admission_linux_test.go:1298: replacement session retired: backend PID 531 incarnation strictly gone, owner health retained, guard non-clean, acceptance zero
+    borrowed-replacement-bound-postcommit-admission_linux_test.go:1353: incomplete-isolation negative: the partial fence left the container-address route admitting a genuine P1 and the fresh coverage verification refused; no native outcome, durable state classification: complete baseline equality, no transaction, no authorizing output
+2026/10/04 19:33:56 🐳 Stopping container: 657b266ea67f
+2026/10/04 19:33:57 ✅ Container stopped: 657b266ea67f
+2026/10/04 19:33:57 🐳 Terminating container: 657b266ea67f
+2026/10/04 19:33:57 🚫 Container terminated: 657b266ea67f
+=== RUN   TestBorrowedReplacementBoundPostcommitAdmission/N7-admitting-route
+2026/10/04 19:33:57 🐳 Creating container for image postgres@sha256:4ef4dbc939d61acea57712655ddb4b4ab27419c913f94cca0cd57cb3ea3c2280
+2026/10/04 19:33:57 ✅ Container created: 1c37bf5c95d0
+2026/10/04 19:33:57 🐳 Starting container: 1c37bf5c95d0
+2026/10/04 19:33:57 ✅ Container started: 1c37bf5c95d0
+2026/10/04 19:33:57 ⏳ Waiting for container id 1c37bf5c95d0 image: postgres@sha256:4ef4dbc939d61acea57712655ddb4b4ab27419c913f94cca0cd57cb3ea3c2280. Waiting for: log message "database system is ready to accept connections" (occurrence: 2)
+2026/10/04 19:33:59 🔔 Container is ready: 1c37bf5c95d0
+    borrowed-successor-probe-registration_linux_test.go:693: protected fixture actual HBA rules (all SCRAM, no trust fallback): line=1 type=local address="" auth=scram-sha-256; line=2 type=host address="127.0.0.1" auth=scram-sha-256; line=3 type=host address="::1" auth=scram-sha-256; line=4 type=host address="all" auth=scram-sha-256
+    borrowed-replacement-bound-postcommit-admission_linux_test.go:1359: successor retired: backend PID 329 incarnation strictly gone, owner health retained, guard non-clean, acceptance zero
+    borrowed-replacement-bound-postcommit-admission_linux_test.go:1361: replacement session retired: backend PID 532 incarnation strictly gone, owner health retained, guard non-clean, acceptance zero
+    borrowed-replacement-bound-postcommit-admission_linux_test.go:1387: admitting-route negative: complete effective coverage with one transport admitting P1 refused at the real route stage before any transaction; no native outcome
+2026/10/04 19:34:09 🐳 Stopping container: 1c37bf5c95d0
+2026/10/04 19:34:09 ✅ Container stopped: 1c37bf5c95d0
+2026/10/04 19:34:09 🐳 Terminating container: 1c37bf5c95d0
+2026/10/04 19:34:09 🚫 Container terminated: 1c37bf5c95d0
+=== RUN   TestBorrowedReplacementBoundPostcommitAdmission/N7-retained-p1
+2026/10/04 19:34:09 🐳 Creating container for image postgres@sha256:4ef4dbc939d61acea57712655ddb4b4ab27419c913f94cca0cd57cb3ea3c2280
+2026/10/04 19:34:09 ✅ Container created: 075460ead15a
+2026/10/04 19:34:09 🐳 Starting container: 075460ead15a
+2026/10/04 19:34:10 ✅ Container started: 075460ead15a
+2026/10/04 19:34:10 ⏳ Waiting for container id 075460ead15a image: postgres@sha256:4ef4dbc939d61acea57712655ddb4b4ab27419c913f94cca0cd57cb3ea3c2280. Waiting for: log message "database system is ready to accept connections" (occurrence: 2)
+2026/10/04 19:34:12 🔔 Container is ready: 075460ead15a
+    borrowed-successor-probe-registration_linux_test.go:693: protected fixture actual HBA rules (all SCRAM, no trust fallback): line=1 type=local address="" auth=scram-sha-256; line=2 type=host address="127.0.0.1" auth=scram-sha-256; line=3 type=host address="::1" auth=scram-sha-256; line=4 type=host address="all" auth=scram-sha-256
+    borrowed-replacement-bound-postcommit-admission_linux_test.go:1390: successor retired: backend PID 329 incarnation strictly gone, owner health retained, guard non-clean, acceptance zero
+    borrowed-replacement-bound-postcommit-admission_linux_test.go:1392: replacement session retired: backend PID 532 incarnation strictly gone, owner health retained, guard non-clean, acceptance zero
+    borrowed-replacement-bound-postcommit-admission_linux_test.go:1419: retained-genuine-P1 negative: the pre-existing genuine P1 session made the fresh census refuse before any transaction; no native outcome
+2026/10/04 19:34:21 🐳 Stopping container: 075460ead15a
+2026/10/04 19:34:22 ✅ Container stopped: 075460ead15a
+2026/10/04 19:34:22 🐳 Terminating container: 075460ead15a
+2026/10/04 19:34:22 🚫 Container terminated: 075460ead15a
+=== RUN   TestBorrowedReplacementBoundPostcommitAdmission/N8-observer-failure
+2026/10/04 19:34:22 🐳 Creating container for image postgres@sha256:4ef4dbc939d61acea57712655ddb4b4ab27419c913f94cca0cd57cb3ea3c2280
+2026/10/04 19:34:22 ✅ Container created: 378cfa9e8a38
+2026/10/04 19:34:22 🐳 Starting container: 378cfa9e8a38
+2026/10/04 19:34:23 ✅ Container started: 378cfa9e8a38
+2026/10/04 19:34:23 ⏳ Waiting for container id 378cfa9e8a38 image: postgres@sha256:4ef4dbc939d61acea57712655ddb4b4ab27419c913f94cca0cd57cb3ea3c2280. Waiting for: log message "database system is ready to accept connections" (occurrence: 2)
+2026/10/04 19:34:24 🔔 Container is ready: 378cfa9e8a38
+    borrowed-successor-probe-registration_linux_test.go:693: protected fixture actual HBA rules (all SCRAM, no trust fallback): line=1 type=local address="" auth=scram-sha-256; line=2 type=host address="127.0.0.1" auth=scram-sha-256; line=3 type=host address="::1" auth=scram-sha-256; line=4 type=host address="all" auth=scram-sha-256
+    borrowed-replacement-bound-postcommit-admission_linux_test.go:1425: successor retired: backend PID 329 incarnation strictly gone, owner health retained, guard non-clean, acceptance zero
+    borrowed-replacement-bound-postcommit-admission_linux_test.go:1427: replacement session retired: backend PID 531 incarnation strictly gone, owner health retained, guard non-clean, acceptance zero
+    borrowed-replacement-bound-postcommit-admission_linux_test.go:1448: observer-failure negative: the suspended protected observer role refused the real observer stage before any transaction; no native outcome
+2026/10/04 19:34:34 🐳 Stopping container: 378cfa9e8a38
+2026/10/04 19:34:34 ✅ Container stopped: 378cfa9e8a38
+2026/10/04 19:34:34 🐳 Terminating container: 378cfa9e8a38
+2026/10/04 19:34:34 🚫 Container terminated: 378cfa9e8a38
+=== RUN   TestBorrowedReplacementBoundPostcommitAdmission/N8-control-failure
+2026/10/04 19:34:34 🐳 Creating container for image postgres@sha256:4ef4dbc939d61acea57712655ddb4b4ab27419c913f94cca0cd57cb3ea3c2280
+2026/10/04 19:34:34 ✅ Container created: 098a62d957af
+2026/10/04 19:34:34 🐳 Starting container: 098a62d957af
+2026/10/04 19:34:35 ✅ Container started: 098a62d957af
+2026/10/04 19:34:35 ⏳ Waiting for container id 098a62d957af image: postgres@sha256:4ef4dbc939d61acea57712655ddb4b4ab27419c913f94cca0cd57cb3ea3c2280. Waiting for: log message "database system is ready to accept connections" (occurrence: 2)
+2026/10/04 19:34:36 🔔 Container is ready: 098a62d957af
+    borrowed-successor-probe-registration_linux_test.go:693: protected fixture actual HBA rules (all SCRAM, no trust fallback): line=1 type=local address="" auth=scram-sha-256; line=2 type=host address="127.0.0.1" auth=scram-sha-256; line=3 type=host address="::1" auth=scram-sha-256; line=4 type=host address="all" auth=scram-sha-256
+    borrowed-replacement-bound-postcommit-admission_linux_test.go:1451: successor retired: backend PID 329 incarnation strictly gone, owner health retained, guard non-clean, acceptance zero
+    borrowed-replacement-bound-postcommit-admission_linux_test.go:1453: replacement session retired: backend PID 532 incarnation strictly gone, owner health retained, guard non-clean, acceptance zero
+    borrowed-replacement-bound-postcommit-admission_linux_test.go:1499: control-failure negative: the suspended protected control route refused the handoff revalidation after the acknowledged baseline commit; the committed preparation delta is preserved, the gate never dispatched and no native marker/intent/child exists
+2026/10/04 19:34:49 🐳 Stopping container: 098a62d957af
+2026/10/04 19:34:50 ✅ Container stopped: 098a62d957af
+2026/10/04 19:34:50 🐳 Terminating container: 098a62d957af
+2026/10/04 19:34:50 🚫 Container terminated: 098a62d957af
+=== RUN   TestBorrowedReplacementBoundPostcommitAdmission/N9-anchor-loss
+2026/10/04 19:34:50 🐳 Creating container for image postgres@sha256:4ef4dbc939d61acea57712655ddb4b4ab27419c913f94cca0cd57cb3ea3c2280
+2026/10/04 19:34:50 ✅ Container created: 6cdc8bbcdfd1
+2026/10/04 19:34:50 🐳 Starting container: 6cdc8bbcdfd1
+2026/10/04 19:34:51 ✅ Container started: 6cdc8bbcdfd1
+2026/10/04 19:34:51 ⏳ Waiting for container id 6cdc8bbcdfd1 image: postgres@sha256:4ef4dbc939d61acea57712655ddb4b4ab27419c913f94cca0cd57cb3ea3c2280. Waiting for: log message "database system is ready to accept connections" (occurrence: 2)
+2026/10/04 19:34:52 🔔 Container is ready: 6cdc8bbcdfd1
+    borrowed-successor-probe-registration_linux_test.go:693: protected fixture actual HBA rules (all SCRAM, no trust fallback): line=1 type=local address="" auth=scram-sha-256; line=2 type=host address="127.0.0.1" auth=scram-sha-256; line=3 type=host address="::1" auth=scram-sha-256; line=4 type=host address="all" auth=scram-sha-256
+    borrowed-replacement-bound-postcommit-admission_linux_test.go:1506: successor retired: backend PID 328 incarnation strictly gone, owner health retained, guard non-clean, acceptance zero
+    borrowed-replacement-bound-postcommit-admission_linux_test.go:1508: replacement session retired: backend PID 530 incarnation strictly gone, owner health retained, guard non-clean, acceptance zero
+    borrowed-replacement-bound-postcommit-admission_linux_test.go:1548: anchor-loss negative: the terminated anchor refused the real owner/anchor stage before the fence; the handoff stayed unarmed and no native outcome exists
+2026/10/04 19:35:02 🐳 Stopping container: 6cdc8bbcdfd1
+2026/10/04 19:35:03 ✅ Container stopped: 6cdc8bbcdfd1
+2026/10/04 19:35:03 🐳 Terminating container: 6cdc8bbcdfd1
+2026/10/04 19:35:03 🚫 Container terminated: 6cdc8bbcdfd1
+=== RUN   TestBorrowedReplacementBoundPostcommitAdmission/N9-owner-loss-after-intent
+2026/10/04 19:35:03 🐳 Creating container for image postgres@sha256:4ef4dbc939d61acea57712655ddb4b4ab27419c913f94cca0cd57cb3ea3c2280
+2026/10/04 19:35:03 ✅ Container created: 892da17c19c2
+2026/10/04 19:35:03 🐳 Starting container: 892da17c19c2
+2026/10/04 19:35:04 ✅ Container started: 892da17c19c2
+2026/10/04 19:35:04 ⏳ Waiting for container id 892da17c19c2 image: postgres@sha256:4ef4dbc939d61acea57712655ddb4b4ab27419c913f94cca0cd57cb3ea3c2280. Waiting for: log message "database system is ready to accept connections" (occurrence: 2)
+2026/10/04 19:35:05 🔔 Container is ready: 892da17c19c2
+    borrowed-successor-probe-registration_linux_test.go:693: protected fixture actual HBA rules (all SCRAM, no trust fallback): line=1 type=local address="" auth=scram-sha-256; line=2 type=host address="127.0.0.1" auth=scram-sha-256; line=3 type=host address="::1" auth=scram-sha-256; line=4 type=host address="all" auth=scram-sha-256
+    borrowed-replacement-bound-postcommit-admission_linux_test.go:1551: successor retired: backend PID 329 incarnation strictly gone, owner health retained, guard non-clean, acceptance zero
+    borrowed-replacement-bound-postcommit-admission_linux_test.go:1553: replacement session retired: backend PID 531 incarnation strictly gone, owner health retained, guard non-clean, acceptance zero
+    borrowed-replacement-bound-postcommit-admission_linux_test.go:1606: owner-loss-after-committed-intent negative: the committed marker/intent and historical preparation audit were retained, the owner fell unusable, no positive continuation exists and the fence was disposed cleanly
+2026/10/04 19:35:18 🐳 Stopping container: 892da17c19c2
+2026/10/04 19:35:18 ✅ Container stopped: 892da17c19c2
+2026/10/04 19:35:18 🐳 Terminating container: 892da17c19c2
+2026/10/04 19:35:18 🚫 Container terminated: 892da17c19c2
+=== RUN   TestBorrowedReplacementBoundPostcommitAdmission/N10-catalog-mismatch
+2026/10/04 19:35:18 🐳 Creating container for image postgres@sha256:4ef4dbc939d61acea57712655ddb4b4ab27419c913f94cca0cd57cb3ea3c2280
+2026/10/04 19:35:18 ✅ Container created: 29ee690f7331
+2026/10/04 19:35:18 🐳 Starting container: 29ee690f7331
+2026/10/04 19:35:19 ✅ Container started: 29ee690f7331
+2026/10/04 19:35:19 ⏳ Waiting for container id 29ee690f7331 image: postgres@sha256:4ef4dbc939d61acea57712655ddb4b4ab27419c913f94cca0cd57cb3ea3c2280. Waiting for: log message "database system is ready to accept connections" (occurrence: 2)
+2026/10/04 19:35:21 🔔 Container is ready: 29ee690f7331
+    borrowed-successor-probe-registration_linux_test.go:693: protected fixture actual HBA rules (all SCRAM, no trust fallback): line=1 type=local address="" auth=scram-sha-256; line=2 type=host address="127.0.0.1" auth=scram-sha-256; line=3 type=host address="::1" auth=scram-sha-256; line=4 type=host address="all" auth=scram-sha-256
+    borrowed-replacement-bound-postcommit-admission_linux_test.go:1612: successor retired: backend PID 330 incarnation strictly gone, owner health retained, guard non-clean, acceptance zero
+    borrowed-replacement-bound-postcommit-admission_linux_test.go:1614: replacement session retired: backend PID 534 incarnation strictly gone, owner health retained, guard non-clean, acceptance zero
+    borrowed-replacement-bound-postcommit-admission_linux_test.go:1635: replacement-change negative: the actual replacement catalog identity mismatch refused at the real catalog stage before any transaction; no native outcome
+2026/10/04 19:35:31 🐳 Stopping container: 29ee690f7331
+2026/10/04 19:35:31 ✅ Container stopped: 29ee690f7331
+2026/10/04 19:35:31 🐳 Terminating container: 29ee690f7331
+2026/10/04 19:35:31 🚫 Container terminated: 29ee690f7331
+=== RUN   TestBorrowedReplacementBoundPostcommitAdmission/N11-wrong-provenance
+2026/10/04 19:35:31 🐳 Creating container for image postgres@sha256:4ef4dbc939d61acea57712655ddb4b4ab27419c913f94cca0cd57cb3ea3c2280
+2026/10/04 19:35:31 ✅ Container created: f85deb7f2915
+2026/10/04 19:35:31 🐳 Starting container: f85deb7f2915
+2026/10/04 19:35:32 ✅ Container started: f85deb7f2915
+2026/10/04 19:35:32 ⏳ Waiting for container id f85deb7f2915 image: postgres@sha256:4ef4dbc939d61acea57712655ddb4b4ab27419c913f94cca0cd57cb3ea3c2280. Waiting for: log message "database system is ready to accept connections" (occurrence: 2)
+2026/10/04 19:35:34 🔔 Container is ready: f85deb7f2915
+    borrowed-successor-probe-registration_linux_test.go:693: protected fixture actual HBA rules (all SCRAM, no trust fallback): line=1 type=local address="" auth=scram-sha-256; line=2 type=host address="127.0.0.1" auth=scram-sha-256; line=3 type=host address="::1" auth=scram-sha-256; line=4 type=host address="all" auth=scram-sha-256
+    borrowed-replacement-bound-postcommit-admission_linux_test.go:1644: successor retired: backend PID 330 incarnation strictly gone, owner health retained, guard non-clean, acceptance zero
+    borrowed-replacement-bound-postcommit-admission_linux_test.go:1646: replacement session retired: backend PID 533 incarnation strictly gone, owner health retained, guard non-clean, acceptance zero
+    borrowed-replacement-bound-postcommit-admission_linux_test.go:1706: wrong-key negative: the real mismatched provenance refused at its exact stage with the acknowledged rollback, the handoff stayed unarmed and no native outcome exists
+2026/10/04 19:35:43 🐳 Creating container for image postgres@sha256:4ef4dbc939d61acea57712655ddb4b4ab27419c913f94cca0cd57cb3ea3c2280
+2026/10/04 19:35:43 ✅ Container created: c6148e13aa26
+2026/10/04 19:35:43 🐳 Starting container: c6148e13aa26
+2026/10/04 19:35:44 ✅ Container started: c6148e13aa26
+2026/10/04 19:35:44 ⏳ Waiting for container id c6148e13aa26 image: postgres@sha256:4ef4dbc939d61acea57712655ddb4b4ab27419c913f94cca0cd57cb3ea3c2280. Waiting for: log message "database system is ready to accept connections" (occurrence: 2)
+2026/10/04 19:35:46 🔔 Container is ready: c6148e13aa26
+    borrowed-successor-probe-registration_linux_test.go:693: protected fixture actual HBA rules (all SCRAM, no trust fallback): line=1 type=local address="" auth=scram-sha-256; line=2 type=host address="127.0.0.1" auth=scram-sha-256; line=3 type=host address="::1" auth=scram-sha-256; line=4 type=host address="all" auth=scram-sha-256
+    borrowed-replacement-bound-postcommit-admission_linux_test.go:1644: successor retired: backend PID 331 incarnation strictly gone, owner health retained, guard non-clean, acceptance zero
+    borrowed-replacement-bound-postcommit-admission_linux_test.go:1646: replacement session retired: backend PID 534 incarnation strictly gone, owner health retained, guard non-clean, acceptance zero
+    borrowed-replacement-bound-postcommit-admission_linux_test.go:1706: wrong-operation negative: the real mismatched provenance refused at its exact stage with the acknowledged rollback, the handoff stayed unarmed and no native outcome exists
+2026/10/04 19:35:56 🐳 Creating container for image postgres@sha256:4ef4dbc939d61acea57712655ddb4b4ab27419c913f94cca0cd57cb3ea3c2280
+2026/10/04 19:35:56 ✅ Container created: 731a1e652299
+2026/10/04 19:35:56 🐳 Starting container: 731a1e652299
+2026/10/04 19:35:56 ✅ Container started: 731a1e652299
+2026/10/04 19:35:56 ⏳ Waiting for container id 731a1e652299 image: postgres@sha256:4ef4dbc939d61acea57712655ddb4b4ab27419c913f94cca0cd57cb3ea3c2280. Waiting for: log message "database system is ready to accept connections" (occurrence: 2)
+2026/10/04 19:35:58 🔔 Container is ready: 731a1e652299
+    borrowed-successor-probe-registration_linux_test.go:693: protected fixture actual HBA rules (all SCRAM, no trust fallback): line=1 type=local address="" auth=scram-sha-256; line=2 type=host address="127.0.0.1" auth=scram-sha-256; line=3 type=host address="::1" auth=scram-sha-256; line=4 type=host address="all" auth=scram-sha-256
+    borrowed-replacement-bound-postcommit-admission_linux_test.go:1644: successor retired: backend PID 329 incarnation strictly gone, owner health retained, guard non-clean, acceptance zero
+    borrowed-replacement-bound-postcommit-admission_linux_test.go:1646: replacement session retired: backend PID 532 incarnation strictly gone, owner health retained, guard non-clean, acceptance zero
+    borrowed-replacement-bound-postcommit-admission_linux_test.go:1706: wrong-role negative: the real mismatched provenance refused at its exact stage with the acknowledged rollback, the handoff stayed unarmed and no native outcome exists
+2026/10/04 19:36:08 🐳 Creating container for image postgres@sha256:4ef4dbc939d61acea57712655ddb4b4ab27419c913f94cca0cd57cb3ea3c2280
+2026/10/04 19:36:08 ✅ Container created: 3525541eae2f
+2026/10/04 19:36:08 🐳 Starting container: 3525541eae2f
+2026/10/04 19:36:08 ✅ Container started: 3525541eae2f
+2026/10/04 19:36:08 ⏳ Waiting for container id 3525541eae2f image: postgres@sha256:4ef4dbc939d61acea57712655ddb4b4ab27419c913f94cca0cd57cb3ea3c2280. Waiting for: log message "database system is ready to accept connections" (occurrence: 2)
+2026/10/04 19:36:10 🔔 Container is ready: 3525541eae2f
+    borrowed-successor-probe-registration_linux_test.go:693: protected fixture actual HBA rules (all SCRAM, no trust fallback): line=1 type=local address="" auth=scram-sha-256; line=2 type=host address="127.0.0.1" auth=scram-sha-256; line=3 type=host address="::1" auth=scram-sha-256; line=4 type=host address="all" auth=scram-sha-256
+    borrowed-replacement-bound-postcommit-admission_linux_test.go:1644: successor retired: backend PID 329 incarnation strictly gone, owner health retained, guard non-clean, acceptance zero
+    borrowed-replacement-bound-postcommit-admission_linux_test.go:1646: replacement session retired: backend PID 531 incarnation strictly gone, owner health retained, guard non-clean, acceptance zero
+    borrowed-replacement-bound-postcommit-admission_linux_test.go:1706: wrong-instance negative: the real mismatched provenance refused at its exact stage with the acknowledged rollback, the handoff stayed unarmed and no native outcome exists
+2026/10/04 19:36:20 🐳 Stopping container: 3525541eae2f
+2026/10/04 19:36:20 ✅ Container stopped: 3525541eae2f
+2026/10/04 19:36:20 🐳 Terminating container: 3525541eae2f
+2026/10/04 19:36:21 🚫 Container terminated: 3525541eae2f
+2026/10/04 19:36:21 🐳 Stopping container: 731a1e652299
+2026/10/04 19:36:21 ✅ Container stopped: 731a1e652299
+2026/10/04 19:36:21 🐳 Terminating container: 731a1e652299
+2026/10/04 19:36:21 🚫 Container terminated: 731a1e652299
+2026/10/04 19:36:21 🐳 Stopping container: c6148e13aa26
+2026/10/04 19:36:21 ✅ Container stopped: c6148e13aa26
+2026/10/04 19:36:21 🐳 Terminating container: c6148e13aa26
+2026/10/04 19:36:21 🚫 Container terminated: c6148e13aa26
+2026/10/04 19:36:22 🐳 Stopping container: f85deb7f2915
+2026/10/04 19:36:22 ✅ Container stopped: f85deb7f2915
+2026/10/04 19:36:22 🐳 Terminating container: f85deb7f2915
+2026/10/04 19:36:22 🚫 Container terminated: f85deb7f2915
+=== RUN   TestBorrowedReplacementBoundPostcommitAdmission/N12-early-prefix-loss
+2026/10/04 19:36:22 🐳 Creating container for image postgres@sha256:4ef4dbc939d61acea57712655ddb4b4ab27419c913f94cca0cd57cb3ea3c2280
+2026/10/04 19:36:22 ✅ Container created: 7cc2dedbf3bf
+2026/10/04 19:36:22 🐳 Starting container: 7cc2dedbf3bf
+2026/10/04 19:36:23 ✅ Container started: 7cc2dedbf3bf
+2026/10/04 19:36:23 ⏳ Waiting for container id 7cc2dedbf3bf image: postgres@sha256:4ef4dbc939d61acea57712655ddb4b4ab27419c913f94cca0cd57cb3ea3c2280. Waiting for: log message "database system is ready to accept connections" (occurrence: 2)
+2026/10/04 19:36:24 🔔 Container is ready: 7cc2dedbf3bf
+    borrowed-successor-probe-registration_linux_test.go:693: protected fixture actual HBA rules (all SCRAM, no trust fallback): line=1 type=local address="" auth=scram-sha-256; line=2 type=host address="127.0.0.1" auth=scram-sha-256; line=3 type=host address="::1" auth=scram-sha-256; line=4 type=host address="all" auth=scram-sha-256
+    borrowed-replacement-bound-postcommit-admission_linux_test.go:1715: successor retired: backend PID 330 incarnation strictly gone, owner health retained, guard non-clean, acceptance zero
+    borrowed-replacement-bound-postcommit-admission_linux_test.go:1717: replacement session retired: backend PID 533 incarnation strictly gone, owner health retained, guard non-clean, acceptance zero
+    borrowed-replacement-bound-postcommit-admission_linux_test.go:1738: early-prefix-loss negative: the real copied-prefix loss refused at the real prefix stage before any transaction; no native outcome
+2026/10/04 19:36:34 🐳 Stopping container: 7cc2dedbf3bf
+2026/10/04 19:36:35 ✅ Container stopped: 7cc2dedbf3bf
+2026/10/04 19:36:35 🐳 Terminating container: 7cc2dedbf3bf
+2026/10/04 19:36:35 🚫 Container terminated: 7cc2dedbf3bf
+=== RUN   TestBorrowedReplacementBoundPostcommitAdmission/N12-late-prefix-loss
+2026/10/04 19:36:35 🐳 Creating container for image postgres@sha256:4ef4dbc939d61acea57712655ddb4b4ab27419c913f94cca0cd57cb3ea3c2280
+2026/10/04 19:36:35 ✅ Container created: 75f27b04b951
+2026/10/04 19:36:35 🐳 Starting container: 75f27b04b951
+2026/10/04 19:36:36 ✅ Container started: 75f27b04b951
+2026/10/04 19:36:36 ⏳ Waiting for container id 75f27b04b951 image: postgres@sha256:4ef4dbc939d61acea57712655ddb4b4ab27419c913f94cca0cd57cb3ea3c2280. Waiting for: log message "database system is ready to accept connections" (occurrence: 2)
+2026/10/04 19:36:37 🔔 Container is ready: 75f27b04b951
+    borrowed-successor-probe-registration_linux_test.go:693: protected fixture actual HBA rules (all SCRAM, no trust fallback): line=1 type=local address="" auth=scram-sha-256; line=2 type=host address="127.0.0.1" auth=scram-sha-256; line=3 type=host address="::1" auth=scram-sha-256; line=4 type=host address="all" auth=scram-sha-256
+    borrowed-replacement-bound-postcommit-admission_linux_test.go:1741: successor retired: backend PID 330 incarnation strictly gone, owner health retained, guard non-clean, acceptance zero
+    borrowed-replacement-bound-postcommit-admission_linux_test.go:1743: replacement session retired: backend PID 533 incarnation strictly gone, owner health retained, guard non-clean, acceptance zero
+    borrowed-replacement-bound-postcommit-admission_linux_test.go:1789: late-shared-prefix-loss negative: the prefix was invalidated after the acknowledged baseline and before native admission; the prepared attempt refused at its real source stage, ZERO native marker/intent/child survives, the committed baseline preparation delta stayed byte-identical and the fence was disposed cleanly
+2026/10/04 19:36:50 🐳 Stopping container: 75f27b04b951
+2026/10/04 19:36:50 ✅ Container stopped: 75f27b04b951
+2026/10/04 19:36:50 🐳 Terminating container: 75f27b04b951
+2026/10/04 19:36:50 🚫 Container terminated: 75f27b04b951
+=== RUN   TestBorrowedReplacementBoundPostcommitAdmission/N13-cancel-before-handoff
+2026/10/04 19:36:50 🐳 Creating container for image postgres@sha256:4ef4dbc939d61acea57712655ddb4b4ab27419c913f94cca0cd57cb3ea3c2280
+2026/10/04 19:36:50 ✅ Container created: 02bce7d74355
+2026/10/04 19:36:50 🐳 Starting container: 02bce7d74355
+2026/10/04 19:36:51 ✅ Container started: 02bce7d74355
+2026/10/04 19:36:51 ⏳ Waiting for container id 02bce7d74355 image: postgres@sha256:4ef4dbc939d61acea57712655ddb4b4ab27419c913f94cca0cd57cb3ea3c2280. Waiting for: log message "database system is ready to accept connections" (occurrence: 2)
+2026/10/04 19:36:53 🔔 Container is ready: 02bce7d74355
+    borrowed-successor-probe-registration_linux_test.go:693: protected fixture actual HBA rules (all SCRAM, no trust fallback): line=1 type=local address="" auth=scram-sha-256; line=2 type=host address="127.0.0.1" auth=scram-sha-256; line=3 type=host address="::1" auth=scram-sha-256; line=4 type=host address="all" auth=scram-sha-256
+    borrowed-replacement-bound-postcommit-admission_linux_test.go:1797: successor retired: backend PID 330 incarnation strictly gone, owner health retained, guard non-clean, acceptance zero
+    borrowed-replacement-bound-postcommit-admission_linux_test.go:1799: replacement session retired: backend PID 532 incarnation strictly gone, owner health retained, guard non-clean, acceptance zero
+    borrowed-replacement-bound-postcommit-admission_linux_test.go:1837: cancel-before-handoff negative: the committed baseline classification was preserved, the prepared attempt refused at its real caller-context stage before any coordinator entry and ZERO native marker/intent/child exists
+2026/10/04 19:37:05 🐳 Stopping container: 02bce7d74355
+2026/10/04 19:37:06 ✅ Container stopped: 02bce7d74355
+2026/10/04 19:37:06 🐳 Terminating container: 02bce7d74355
+2026/10/04 19:37:06 🚫 Container terminated: 02bce7d74355
+=== RUN   TestBorrowedReplacementBoundPostcommitAdmission/N13-cancel-inside-marker
+2026/10/04 19:37:06 🐳 Creating container for image postgres@sha256:4ef4dbc939d61acea57712655ddb4b4ab27419c913f94cca0cd57cb3ea3c2280
+2026/10/04 19:37:06 ✅ Container created: 1bc78e165a11
+2026/10/04 19:37:06 🐳 Starting container: 1bc78e165a11
+2026/10/04 19:37:07 ✅ Container started: 1bc78e165a11
+2026/10/04 19:37:07 ⏳ Waiting for container id 1bc78e165a11 image: postgres@sha256:4ef4dbc939d61acea57712655ddb4b4ab27419c913f94cca0cd57cb3ea3c2280. Waiting for: log message "database system is ready to accept connections" (occurrence: 2)
+2026/10/04 19:37:08 🔔 Container is ready: 1bc78e165a11
+    borrowed-successor-probe-registration_linux_test.go:693: protected fixture actual HBA rules (all SCRAM, no trust fallback): line=1 type=local address="" auth=scram-sha-256; line=2 type=host address="127.0.0.1" auth=scram-sha-256; line=3 type=host address="::1" auth=scram-sha-256; line=4 type=host address="all" auth=scram-sha-256
+    borrowed-replacement-bound-postcommit-admission_linux_test.go:1840: successor retired: backend PID 329 incarnation strictly gone, owner health retained, guard non-clean, acceptance zero
+    borrowed-replacement-bound-postcommit-admission_linux_test.go:1842: replacement session retired: backend PID 532 incarnation strictly gone, owner health retained, guard non-clean, acceptance zero
+    borrowed-replacement-bound-postcommit-admission_linux_test.go:1893: inside-native-marker-cancellation negative: the marker ran its live/provenance checks on the genuine preparation transaction, the injected cancellation refused BEFORE success, the prelaunch transaction rolled back with NO committed marker/intent, the committed baseline stayed byte-identical and the fence was disposed cleanly
+2026/10/04 19:37:20 🐳 Stopping container: 1bc78e165a11
+2026/10/04 19:37:21 ✅ Container stopped: 1bc78e165a11
+2026/10/04 19:37:21 🐳 Terminating container: 1bc78e165a11
+2026/10/04 19:37:21 🚫 Container terminated: 1bc78e165a11
+=== RUN   TestBorrowedReplacementBoundPostcommitAdmission/N13-cancel-after-intent
+2026/10/04 19:37:21 🐳 Creating container for image postgres@sha256:4ef4dbc939d61acea57712655ddb4b4ab27419c913f94cca0cd57cb3ea3c2280
+2026/10/04 19:37:21 ✅ Container created: 065fc14a525b
+2026/10/04 19:37:21 🐳 Starting container: 065fc14a525b
+2026/10/04 19:37:22 ✅ Container started: 065fc14a525b
+2026/10/04 19:37:22 ⏳ Waiting for container id 065fc14a525b image: postgres@sha256:4ef4dbc939d61acea57712655ddb4b4ab27419c913f94cca0cd57cb3ea3c2280. Waiting for: log message "database system is ready to accept connections" (occurrence: 2)
+2026/10/04 19:37:23 🔔 Container is ready: 065fc14a525b
+    borrowed-successor-probe-registration_linux_test.go:693: protected fixture actual HBA rules (all SCRAM, no trust fallback): line=1 type=local address="" auth=scram-sha-256; line=2 type=host address="127.0.0.1" auth=scram-sha-256; line=3 type=host address="::1" auth=scram-sha-256; line=4 type=host address="all" auth=scram-sha-256
+    borrowed-replacement-bound-postcommit-admission_linux_test.go:1896: successor retired: backend PID 329 incarnation strictly gone, owner health retained, guard non-clean, acceptance zero
+    borrowed-replacement-bound-postcommit-admission_linux_test.go:1898: replacement session retired: backend PID 531 incarnation strictly gone, owner health retained, guard non-clean, acceptance zero
+    borrowed-replacement-bound-postcommit-admission_linux_test.go:1959: after-committed-intent cancellation negative: the caller context ended only after the committed native marker/intent and the live fence recheck; the flow refused at its real cancellation stage, the committed marker/genuine generation, conservative UNKNOWN launch intent and unchanged baseline audit were independently re-read, ZERO child/receipt/callbacks/accepted output exists, the fence was disposed cleanly and the terminal object/copies could not redispatch or publish
+2026/10/04 19:37:36 🐳 Stopping container: 065fc14a525b
+2026/10/04 19:37:36 ✅ Container stopped: 065fc14a525b
+2026/10/04 19:37:36 🐳 Terminating container: 065fc14a525b
+2026/10/04 19:37:37 🚫 Container terminated: 065fc14a525b
+=== RUN   TestBorrowedReplacementBoundPostcommitAdmission/N14-endpoint-before-preflight
+2026/10/04 19:37:37 🐳 Creating container for image postgres@sha256:4ef4dbc939d61acea57712655ddb4b4ab27419c913f94cca0cd57cb3ea3c2280
+2026/10/04 19:37:37 ✅ Container created: a373f7589ca0
+2026/10/04 19:37:37 🐳 Starting container: a373f7589ca0
+2026/10/04 19:37:37 ✅ Container started: a373f7589ca0
+2026/10/04 19:37:37 ⏳ Waiting for container id a373f7589ca0 image: postgres@sha256:4ef4dbc939d61acea57712655ddb4b4ab27419c913f94cca0cd57cb3ea3c2280. Waiting for: log message "database system is ready to accept connections" (occurrence: 2)
+2026/10/04 19:37:39 🔔 Container is ready: a373f7589ca0
+    borrowed-successor-probe-registration_linux_test.go:693: protected fixture actual HBA rules (all SCRAM, no trust fallback): line=1 type=local address="" auth=scram-sha-256; line=2 type=host address="127.0.0.1" auth=scram-sha-256; line=3 type=host address="::1" auth=scram-sha-256; line=4 type=host address="all" auth=scram-sha-256
+    borrowed-replacement-bound-postcommit-admission_linux_test.go:1964: successor retired: backend PID 329 incarnation strictly gone, owner health retained, guard non-clean, acceptance zero
+    borrowed-replacement-bound-postcommit-admission_linux_test.go:1966: replacement session retired: backend PID 531 incarnation strictly gone, owner health retained, guard non-clean, acceptance zero
+    borrowed-replacement-bound-postcommit-admission_linux_test.go:1984: endpoint-loss-before-preflight negative: the actual preflight hook refused (`target writer child transport refused at preflight: origin endpoint capability`) before any preparation transaction, marker callback, launch intent or child; durable state classification: complete baseline equality, no transaction, no authorizing output
+2026/10/04 19:37:48 🐳 Stopping container: a373f7589ca0
+2026/10/04 19:37:48 ✅ Container stopped: a373f7589ca0
+2026/10/04 19:37:48 🐳 Terminating container: a373f7589ca0
+2026/10/04 19:37:48 🚫 Container terminated: a373f7589ca0
+=== RUN   TestBorrowedReplacementBoundPostcommitAdmission/N15-row-holder-first
+2026/10/04 19:37:49 🐳 Creating container for image postgres@sha256:4ef4dbc939d61acea57712655ddb4b4ab27419c913f94cca0cd57cb3ea3c2280
+2026/10/04 19:37:49 ✅ Container created: 4f00507b86a7
+2026/10/04 19:37:49 🐳 Starting container: 4f00507b86a7
+2026/10/04 19:37:49 ✅ Container started: 4f00507b86a7
+2026/10/04 19:37:49 ⏳ Waiting for container id 4f00507b86a7 image: postgres@sha256:4ef4dbc939d61acea57712655ddb4b4ab27419c913f94cca0cd57cb3ea3c2280. Waiting for: log message "database system is ready to accept connections" (occurrence: 2)
+2026/10/04 19:37:51 🔔 Container is ready: 4f00507b86a7
+    borrowed-successor-probe-registration_linux_test.go:693: protected fixture actual HBA rules (all SCRAM, no trust fallback): line=1 type=local address="" auth=scram-sha-256; line=2 type=host address="127.0.0.1" auth=scram-sha-256; line=3 type=host address="::1" auth=scram-sha-256; line=4 type=host address="all" auth=scram-sha-256
+    borrowed-replacement-bound-postcommit-admission_linux_test.go:1990: successor retired: backend PID 330 incarnation strictly gone, owner health retained, guard non-clean, acceptance zero
+    borrowed-replacement-bound-postcommit-admission_linux_test.go:1992: replacement session retired: backend PID 532 incarnation strictly gone, owner health retained, guard non-clean, acceptance zero
+    borrowed-replacement-bound-postcommit-admission_linux_test.go:2021: row-holder-first negative: the independent holder produced the structured 55P03 at the supplied-tx fence with the acknowledged rollback; no native outcome
+2026/10/04 19:38:01 🐳 Stopping container: 4f00507b86a7
+2026/10/04 19:38:01 ✅ Container stopped: 4f00507b86a7
+2026/10/04 19:38:01 🐳 Terminating container: 4f00507b86a7
+2026/10/04 19:38:01 🚫 Container terminated: 4f00507b86a7
+=== RUN   TestBorrowedReplacementBoundPostcommitAdmission/N16-concurrent-reservation
+2026/10/04 19:38:02 🐳 Creating container for image postgres@sha256:4ef4dbc939d61acea57712655ddb4b4ab27419c913f94cca0cd57cb3ea3c2280
+2026/10/04 19:38:02 ✅ Container created: 68ff354e66f4
+2026/10/04 19:38:02 🐳 Starting container: 68ff354e66f4
+2026/10/04 19:38:02 ✅ Container started: 68ff354e66f4
+2026/10/04 19:38:02 ⏳ Waiting for container id 68ff354e66f4 image: postgres@sha256:4ef4dbc939d61acea57712655ddb4b4ab27419c913f94cca0cd57cb3ea3c2280. Waiting for: log message "database system is ready to accept connections" (occurrence: 2)
+2026/10/04 19:38:04 🔔 Container is ready: 68ff354e66f4
+    borrowed-successor-probe-registration_linux_test.go:693: protected fixture actual HBA rules (all SCRAM, no trust fallback): line=1 type=local address="" auth=scram-sha-256; line=2 type=host address="127.0.0.1" auth=scram-sha-256; line=3 type=host address="::1" auth=scram-sha-256; line=4 type=host address="all" auth=scram-sha-256
+    borrowed-replacement-bound-postcommit-admission_linux_test.go:2028: successor retired: backend PID 329 incarnation strictly gone, owner health retained, guard non-clean, acceptance zero
+    borrowed-replacement-bound-postcommit-admission_linux_test.go:2030: replacement session retired: backend PID 531 incarnation strictly gone, owner health retained, guard non-clean, acceptance zero
+    borrowed-replacement-bound-postcommit-admission_linux_test.go:2128: concurrent-reservation negative: exactly ONE of two concurrent dispatches reserved and ran the actual coordinator (launch-stage endpoint refusal), the other was refused by the one-use gate, ONE marker/intent transaction committed and no second marker/audit/intent transaction exists
+2026/10/04 19:38:17 🐳 Stopping container: 68ff354e66f4
+2026/10/04 19:38:17 ✅ Container stopped: 68ff354e66f4
+2026/10/04 19:38:17 🐳 Terminating container: 68ff354e66f4
+2026/10/04 19:38:18 🚫 Container terminated: 68ff354e66f4
+=== RUN   TestBorrowedReplacementBoundPostcommitAdmission/N17-teardown-after-intent
+2026/10/04 19:38:18 🐳 Creating container for image postgres@sha256:4ef4dbc939d61acea57712655ddb4b4ab27419c913f94cca0cd57cb3ea3c2280
+2026/10/04 19:38:18 ✅ Container created: 8ff2b9015772
+2026/10/04 19:38:18 🐳 Starting container: 8ff2b9015772
+2026/10/04 19:38:19 ✅ Container started: 8ff2b9015772
+2026/10/04 19:38:19 ⏳ Waiting for container id 8ff2b9015772 image: postgres@sha256:4ef4dbc939d61acea57712655ddb4b4ab27419c913f94cca0cd57cb3ea3c2280. Waiting for: log message "database system is ready to accept connections" (occurrence: 2)
+2026/10/04 19:38:25 🔔 Container is ready: 8ff2b9015772
+    borrowed-successor-probe-registration_linux_test.go:693: protected fixture actual HBA rules (all SCRAM, no trust fallback): line=1 type=local address="" auth=scram-sha-256; line=2 type=host address="127.0.0.1" auth=scram-sha-256; line=3 type=host address="::1" auth=scram-sha-256; line=4 type=host address="all" auth=scram-sha-256
+    borrowed-replacement-bound-postcommit-admission_linux_test.go:2135: successor retired: backend PID 329 incarnation strictly gone, owner health retained, guard non-clean, acceptance zero
+    borrowed-replacement-bound-postcommit-admission_linux_test.go:2137: replacement session retired: backend PID 533 incarnation strictly gone, owner health retained, guard non-clean, acceptance zero
+    borrowed-replacement-bound-postcommit-admission_linux_test.go:2219: teardown-failure-after-committed-intent negative: the committed marker/intent and historical preparation audit were retained, the fence disposal could not complete (restored=false err=bound writer isolation: the HBA reload/effective-rule verification refused: pg_reload_conf refused (err=failed to deallocate cached statement(s): conn closed)) and no positive continuation/publication exists; committed history was never repaired
+2026/10/04 19:38:38 🐳 Stopping container: 8ff2b9015772
+2026/10/04 19:38:38 ✅ Container stopped: 8ff2b9015772
+2026/10/04 19:38:38 🐳 Terminating container: 8ff2b9015772
+2026/10/04 19:38:38 🚫 Container terminated: 8ff2b9015772
+--- PASS: TestBorrowedReplacementBoundPostcommitAdmission (390.74s)
+    --- PASS: TestBorrowedReplacementBoundPostcommitAdmission/P (22.85s)
+    --- PASS: TestBorrowedReplacementBoundPostcommitAdmission/N1-dirty-baseline (12.33s)
+    --- PASS: TestBorrowedReplacementBoundPostcommitAdmission/N2-missing-preparation (12.01s)
+    --- PASS: TestBorrowedReplacementBoundPostcommitAdmission/N3-rollback-uncertainty (15.08s)
+    --- PASS: TestBorrowedReplacementBoundPostcommitAdmission/N4-commit-ack-uncertainty (15.29s)
+    --- PASS: TestBorrowedReplacementBoundPostcommitAdmission/N5-disposed-isolation (15.35s)
+    --- PASS: TestBorrowedReplacementBoundPostcommitAdmission/N6-incomplete-isolation (12.41s)
+    --- PASS: TestBorrowedReplacementBoundPostcommitAdmission/N7-admitting-route (12.82s)
+    --- PASS: TestBorrowedReplacementBoundPostcommitAdmission/N7-retained-p1 (12.80s)
+    --- PASS: TestBorrowedReplacementBoundPostcommitAdmission/N8-observer-failure (12.85s)
+    --- PASS: TestBorrowedReplacementBoundPostcommitAdmission/N8-control-failure (15.73s)
+    --- PASS: TestBorrowedReplacementBoundPostcommitAdmission/N9-anchor-loss (12.89s)
+    --- PASS: TestBorrowedReplacementBoundPostcommitAdmission/N9-owner-loss-after-intent (16.03s)
+    --- PASS: TestBorrowedReplacementBoundPostcommitAdmission/N10-catalog-mismatch (12.93s)
+    --- PASS: TestBorrowedReplacementBoundPostcommitAdmission/N11-wrong-provenance (51.80s)
+    --- PASS: TestBorrowedReplacementBoundPostcommitAdmission/N12-early-prefix-loss (12.78s)
+    --- PASS: TestBorrowedReplacementBoundPostcommitAdmission/N12-late-prefix-loss (15.83s)
+    --- PASS: TestBorrowedReplacementBoundPostcommitAdmission/N13-cancel-before-handoff (15.71s)
+    --- PASS: TestBorrowedReplacementBoundPostcommitAdmission/N13-cancel-inside-marker (15.66s)
+    --- PASS: TestBorrowedReplacementBoundPostcommitAdmission/N13-cancel-after-intent (15.61s)
+    --- PASS: TestBorrowedReplacementBoundPostcommitAdmission/N14-endpoint-before-preflight (12.43s)
+    --- PASS: TestBorrowedReplacementBoundPostcommitAdmission/N15-row-holder-first (13.04s)
+    --- PASS: TestBorrowedReplacementBoundPostcommitAdmission/N16-concurrent-reservation (16.09s)
+    --- PASS: TestBorrowedReplacementBoundPostcommitAdmission/N17-teardown-after-intent (20.43s)
+=== RUN   TestBorrowedReplacementBoundReentryExclusion
+2026/10/04 19:38:38 🐳 Creating container for image postgres@sha256:4ef4dbc939d61acea57712655ddb4b4ab27419c913f94cca0cd57cb3ea3c2280
+2026/10/04 19:38:38 ✅ Container created: df0c217dd8bd
+2026/10/04 19:38:38 🐳 Starting container: df0c217dd8bd
+2026/10/04 19:38:39 ✅ Container started: df0c217dd8bd
+2026/10/04 19:38:39 ⏳ Waiting for container id df0c217dd8bd image: postgres@sha256:4ef4dbc939d61acea57712655ddb4b4ab27419c913f94cca0cd57cb3ea3c2280. Waiting for: log message "database system is ready to accept connections" (occurrence: 2)
+2026/10/04 19:38:40 🔔 Container is ready: df0c217dd8bd
+    borrowed-successor-probe-registration_linux_test.go:693: protected fixture actual HBA rules (all SCRAM, no trust fallback): line=1 type=local address="" auth=scram-sha-256; line=2 type=host address="127.0.0.1" auth=scram-sha-256; line=3 type=host address="::1" auth=scram-sha-256; line=4 type=host address="all" auth=scram-sha-256
+    borrowed-replacement-bound-reentry-exclusion_linux_test.go:772: successor retired: backend PID 329 incarnation strictly gone, owner health retained, guard non-clean, acceptance zero
+    borrowed-replacement-bound-reentry-exclusion_linux_test.go:796: replacement session retired: backend PID 531 incarnation strictly gone, owner health retained, guard non-clean, acceptance zero
+    borrowed-replacement-bound-reentry-exclusion_linux_test.go:814: bound re-entry different-key control: the real different-database canonical key was acquirable and only its temporary lock was released; the single authentic instance stayed open and the original owner was neither released nor reacquired
+    borrowed-replacement-bound-reentry-exclusion_linux_test.go:815: bound re-entry absent-row control: the unchanged fence refused the genuinely absent different canonical key with empty outputs and the no-row sentinel, the row stayed absent and the original inventory row was unchanged
+    borrowed-replacement-bound-reentry-exclusion_linux_test.go:817: bound re-entry provenance-mismatch control: the unchanged fence refused the real row at the operation-provenance stage (not an InstanceID isolation) with empty outputs and the row unchanged
+    borrowed-replacement-bound-reentry-exclusion_linux_test.go:957: bound re-entry refusal: the held barrier proven by a 55P03 same-row contender, a FALSE advisory try-lock with the owner independently held, and a nil bounded acquisition; the actual coordinator then refused with "bound target guard is not clean"; marker once with token 3b89cadf-4eb3-4be5-9464-d70c3c3470f5 generation 2, no child/command/receipt/probe/acceptance, durable snapshots/rows/catalog unchanged, owner/anchor healthy, guard unresolved, inventory NULL
+    borrowed-replacement-bound-reentry-exclusion_linux_test.go:960: bound re-entry replay/copy control: the later registration was refused at the frozen gate, the later dispatch and copied run were refused as already reserved, and nothing was published
+2026/10/04 19:38:53 🐳 Creating container for image postgres@sha256:4ef4dbc939d61acea57712655ddb4b4ab27419c913f94cca0cd57cb3ea3c2280
+2026/10/04 19:38:53 ✅ Container created: bd4844f66fb9
+2026/10/04 19:38:53 🐳 Starting container: bd4844f66fb9
+2026/10/04 19:38:54 ✅ Container started: bd4844f66fb9
+2026/10/04 19:38:54 ⏳ Waiting for container id bd4844f66fb9 image: postgres@sha256:4ef4dbc939d61acea57712655ddb4b4ab27419c913f94cca0cd57cb3ea3c2280. Waiting for: log message "database system is ready to accept connections" (occurrence: 2)
+2026/10/04 19:38:55 🔔 Container is ready: bd4844f66fb9
+    borrowed-successor-probe-registration_linux_test.go:693: protected fixture actual HBA rules (all SCRAM, no trust fallback): line=1 type=local address="" auth=scram-sha-256; line=2 type=host address="127.0.0.1" auth=scram-sha-256; line=3 type=host address="::1" auth=scram-sha-256; line=4 type=host address="all" auth=scram-sha-256
+    borrowed-replacement-bound-reentry-exclusion_linux_test.go:965: successor retired: backend PID 329 incarnation strictly gone, owner health retained, guard non-clean, acceptance zero
+    borrowed-replacement-bound-reentry-exclusion_linux_test.go:965: bound re-entry row-holder-first control: the callback fence received the structured 55P03 with empty outputs and no successful fencing, the production refusal was the sanitized marker-hook error, and the released row was lockable/unchanged with the complete pre-attempt snapshot/rows/catalog unchanged
+2026/10/04 19:39:03 🐳 Creating container for image postgres@sha256:4ef4dbc939d61acea57712655ddb4b4ab27419c913f94cca0cd57cb3ea3c2280
+2026/10/04 19:39:03 ✅ Container created: 503af8ed83b7
+2026/10/04 19:39:03 🐳 Starting container: 503af8ed83b7
+2026/10/04 19:39:04 ✅ Container started: 503af8ed83b7
+2026/10/04 19:39:04 ⏳ Waiting for container id 503af8ed83b7 image: postgres@sha256:4ef4dbc939d61acea57712655ddb4b4ab27419c913f94cca0cd57cb3ea3c2280. Waiting for: log message "database system is ready to accept connections" (occurrence: 2)
+2026/10/04 19:39:05 🔔 Container is ready: 503af8ed83b7
+    borrowed-successor-probe-registration_linux_test.go:693: protected fixture actual HBA rules (all SCRAM, no trust fallback): line=1 type=local address="" auth=scram-sha-256; line=2 type=host address="127.0.0.1" auth=scram-sha-256; line=3 type=host address="::1" auth=scram-sha-256; line=4 type=host address="all" auth=scram-sha-256
+    borrowed-replacement-bound-reentry-exclusion_linux_test.go:966: successor retired: backend PID 329 incarnation strictly gone, owner health retained, guard non-clean, acceptance zero
+    borrowed-replacement-bound-reentry-exclusion_linux_test.go:966: bound re-entry held-barrier cancellation control: the callback observed the caller cancellation after marker+fence and refused; the production refusal was sanitized, no durable marker/row mutation survived and the released row was lockable/unchanged
+2026/10/04 19:39:13 🐳 Creating container for image postgres@sha256:4ef4dbc939d61acea57712655ddb4b4ab27419c913f94cca0cd57cb3ea3c2280
+2026/10/04 19:39:13 ✅ Container created: e1746f1c06ce
+2026/10/04 19:39:13 🐳 Starting container: e1746f1c06ce
+2026/10/04 19:39:14 ✅ Container started: e1746f1c06ce
+2026/10/04 19:39:14 ⏳ Waiting for container id e1746f1c06ce image: postgres@sha256:4ef4dbc939d61acea57712655ddb4b4ab27419c913f94cca0cd57cb3ea3c2280. Waiting for: log message "database system is ready to accept connections" (occurrence: 2)
+2026/10/04 19:39:15 🔔 Container is ready: e1746f1c06ce
+    borrowed-successor-probe-registration_linux_test.go:693: protected fixture actual HBA rules (all SCRAM, no trust fallback): line=1 type=local address="" auth=scram-sha-256; line=2 type=host address="127.0.0.1" auth=scram-sha-256; line=3 type=host address="::1" auth=scram-sha-256; line=4 type=host address="all" auth=scram-sha-256
+    borrowed-replacement-bound-reentry-exclusion_linux_test.go:967: successor retired: backend PID 329 incarnation strictly gone, owner health retained, guard non-clean, acceptance zero
+    borrowed-replacement-bound-reentry-exclusion_linux_test.go:967: bound re-entry pre-dispatch source-loss control: the real copied-prefix loss refused wrapper registration/dispatch at the source stages with nothing published, reconstruction and a new session registration refused with nil values at the actual invalid-prefix stage, no raw-Run invalidation is claimed, and the complete pre-loss snapshot/rows/catalog/guard row were unchanged
+2026/10/04 19:39:23 🐳 Stopping container: e1746f1c06ce
+2026/10/04 19:39:24 ✅ Container stopped: e1746f1c06ce
+2026/10/04 19:39:24 🐳 Terminating container: e1746f1c06ce
+2026/10/04 19:39:24 🚫 Container terminated: e1746f1c06ce
+2026/10/04 19:39:24 🐳 Stopping container: 503af8ed83b7
+2026/10/04 19:39:24 ✅ Container stopped: 503af8ed83b7
+2026/10/04 19:39:24 🐳 Terminating container: 503af8ed83b7
+2026/10/04 19:39:24 🚫 Container terminated: 503af8ed83b7
+2026/10/04 19:39:24 🐳 Stopping container: bd4844f66fb9
+2026/10/04 19:39:24 ✅ Container stopped: bd4844f66fb9
+2026/10/04 19:39:24 🐳 Terminating container: bd4844f66fb9
+2026/10/04 19:39:25 🚫 Container terminated: bd4844f66fb9
+2026/10/04 19:39:25 🐳 Stopping container: df0c217dd8bd
+2026/10/04 19:39:25 ✅ Container stopped: df0c217dd8bd
+2026/10/04 19:39:25 🐳 Terminating container: df0c217dd8bd
+2026/10/04 19:39:25 🚫 Container terminated: df0c217dd8bd
+--- PASS: TestBorrowedReplacementBoundReentryExclusion (47.09s)
+PASS
+ok  	github.com/xtianxx/txharbor/internal/recovery	764.716s

@@ -112,18 +112,22 @@ R5=见证升级路径）；实现轮在隔离环境中跑真 fixture。ADR 本�
   [d16de83] 见证重建 `RebuildTargetWithRetainedProof`（低置信度快照 bin 数据 +`attempt_proof` 审计行 + T059F2/T060 fixture 切换） →
   [f98fb13] gap 闭合哨兵优先级 + 收敛门控确认绑定恢复 + childtransport 断言 →
   [678b8bd] 后提交 native-start P 测试 `${Try}+3` 更新（R5 语义一致）。
-- **drill5（根 runner，全部 296 顶层测试）**：`/tmp/r2lab/run_drill5/focus.log` + `/tmp/r2lab/pgfull2.log`；
-  **295 通过/0 失败/1 个跳过（fd-probe child helper 的 wrapper 自引用，历来如此）**；包含：
-  `TestBorrowedReplacementBoundPostcommitNativeStart`（P+N1..N10）、`TestBorrowedReplacementBoundPostcommitNativeReady`（`F`+`R` 两向）、
-  `TestBorrowedReplacementBoundPostcommitAdmission`/`AdmissionMismatch`、`TestBorrowedReplacementControlLedgerIntegrity`（T057 类）、
-  `TestT058Drill*` 方向（T058 类）以及 witness-destroy negative（`TestBorrowedReplacementTargetWitnessDestroy*`）。
+- **drill5（根 runner，全部 296 顶层测试组）**：`/tmp/r2lab/run_drill5/focus.log`（归档摘要见
+  `verification-archive-2026-10-05/INDEX.md`）；**295 通过/0 失败/1 个跳过（fd-probe child helper 的 wrapper 自引用，历来如此）**；
+  包含：`TestBorrowedReplacementBoundPostcommitNativeStart`（P+N1..N10）、`TestBorrowedReplacementBoundNativeReadyRefusal`
+  （native-ready 阶段拒绝：fresh dispatch 被非 clean 守卫拒绝 + replay/copy/并发负例拒绝，`borrowed-replacement-bound-native-ready-refusal_linux_test.go:827`）、
+  `TestBorrowedReplacementBoundPostcommitAdmission`；T057 类演练接线由 pgfull3b 的
+  `TestDrillCLIRealRestoreRecordAndArchive` 等 7 个 `TestDrillCLI*` 顶层测试覆盖（全 PASS）；T058 类为
+  `TestT058Drill*` 系列；witness 失效负例为 `TestDrillTargetWitnessLossAndObserverInterruptionFailClosed`
+  等 7 个 `TestDrillTargetWitness*`（drill5 全 PASS）。
 - **pgfull3b（git 修复 runner，全仓库标签 `integration`，HEAD `1a6779f`）**：`/tmp/r2lab/run_pgfull3b/pg-integration.jsonl`；
   **1825 顶层：1822 PASS / 0 FAIL / 3 SKIP**，`go_test_exit=0`。runner 镜像在 pinned `postgres@sha256:4ef4dbc9…` 之上补装
-  `git` 并以 `safe.directory=/workspace` 运行（一次性镜像 `txharbor-dev/run-pg-git:pg18`，仅本地构建）；此前 pgfull2 的 3 个
-  `Test*MigrationHistoryUntouched` 失败与 9 个 `error obtaining VCS status` 失败全部真实复跑至 PASS（迁移历史检查以真实仓库根
+  `git` 并以 `safe.directory=/workspace` 运行（一次性镜像 `txharbor-dev/run-pg-git:pg18`，仅本地构建）；此前 pgfull2 首跑的 3 个
+  `Test*MigrationHistoryUntouched` 失败（runner-env）与 pgfull3 首跑的 9 个 `error obtaining VCS status` 失败
+  在 pgfull3b 中全部真实复跑至 PASS（迁移历史检查以真实仓库根
   `/workspace` 与真实 git 历史执行，未被跳过或改记）。3 个 SKIP 均非必验 helper：`TestCrashHelper`（kill-point 子进程体，
   父侧 `TestPublisherCrashPointMatrix` 本轮 PASS）、`TestWithdrawalIntakeStorageDown`（T026-owned 占位）、
-  `TestEpochIONonRootHelperProcess`（子进程体，wrapper 本轮 PASS）。pgfull2 的 runner-env 口径作废。
+  `TestEpochIONonRootHelperProcess`（子进程体，wrapper 本轮 PASS）。pgfull2 的 runner-env 口径作废（其 `/tmp/r2lab/pgfull2.log` 为 0 字节遗留文件，不作证据引用；pgfull2 的 3 个 runner-env FAIL 已由 pgfull3b 真实复跑闭环，计数历史行保留）。
 - **.host-side suite 健康状况（最终树）**：`go build ./...` 退出码 0；`make lint`/`make test`/`make test-race`/`make test-contract`/`make test-integration-kafka/redis`/`make test-e2e` 均通过 (exit 0)。
 - **快速启动（quickstart）场景对照锚点**：此轮 maintenance evidence 在 `quickstart_matrix_evidence.md` §A.4 中逐场景体现。
 - **非声明**：不是生产就绪声明；未进行部署；仅执行了本地测试进程。

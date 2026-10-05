@@ -1,0 +1,229 @@
+{
+  "archive": "docs/evidence/015/verification-archive-2026-10-05",
+  "run_label": "pgfull3b",
+  "generated_at": "2026-10-05 (host local +08:00)",
+  "candidate_head": {
+    "short": "bb4f242",
+    "full": "bb4f2422371fd273bbb80f81d079408e900d1536",
+    "branch": "015-backup-recovery-safe-resumption"
+  },
+  "run_tree_commit": {
+    "short": "1a6779f",
+    "full": "1a6779f590ebf86770c186decc50720dc9f3af51",
+    "source": "repo-root.txt (recorded by the run itself in /pg-evidence)"
+  },
+  "source": {
+    "path": "/tmp/r2lab/run_pgfull3b/pg-integration.jsonl",
+    "bytes": 5845370,
+    "lines": 23569,
+    "sha256": "47cf14c062fb48339dc634f625e9431fc75426591e3350c0f01ee5419c95262b",
+    "md5": "d2422951728d43d82ffe4765a3dee1b9",
+    "archived_as": "pgfull3b_pg-integration.jsonl.gz",
+    "gzip_sha256": "fb1bed303b8aa77eb03c05268d2353594939402be16ad58a375cd58ae0bcae45",
+    "gzip_md5": "8cc8a2010efe3faa8a387845b2b40272",
+    "gzip_bytes": 448846,
+    "gzip_flags": "-9 -n (deterministic gzip; lossless, gzip -dc round-trip sha256 verified)"
+  },
+  "runner": {
+    "image": "txharbor-dev/run-pg-git:pg18 = postgres@sha256:4ef4dbc939d61acea57712655ddb4b4ab27419c913f94cca0cd57cb3ea3c2280 + git (one-off local image)",
+    "user": "0:0",
+    "network": "host",
+    "command": "go test -json -tags integration -count=1 -timeout 60m ./... > /pg-evidence/pg-integration.jsonl",
+    "go_test_exit": 0,
+    "runner_exit": 0,
+    "git_safe_directory": "GIT_CONFIG_GLOBAL=/pg-scratch/home/.gitconfig; git config --global --add safe.directory /workspace"
+  },
+  "repo_root_txt": {
+    "file": "pgfull3b_repo-root.txt",
+    "bytes": 270,
+    "sha256": "b901434a79d2d3df89ae9bb32a871846201bd03750a4d5366a139cc5a12cb543",
+    "md5": "0b7f5afd0840621437616af28c2b7090",
+    "content": "/workspace\n1a6779f test(015): P lane asserts the retained attempt_proof row itself (operation-scoped count/full-row digest, coordinator actor, attempt app/target/PID/startID/verifier binding, wait_terminal+drained, complete=true); helper scoped to the attempt operation\n"
+  },
+  "toolchain": {
+    "go": "go version go1.26.5 linux/amd64 (host /usr/local/go mounted at /host-go)"
+  },
+  "counts": {
+    "top_level": {
+      "pass": 1822,
+      "fail": 0,
+      "skip": 3,
+      "total": 1825
+    },
+    "subtest": {
+      "pass": 2082,
+      "fail": 0,
+      "skip": 0,
+      "total": 2082
+    }
+  },
+  "methodology": "go test -json terminal events (Action pass|fail|skip) with non-empty Test; each (Package,Test) has exactly one terminal event (duplicate check enforced); Test without \"/\" = top level, with \"/\" = subtest; package-level skip ([no test files], empty Test) not counted.",
+  "skip_items": [
+    {
+      "name": "TestCrashHelper",
+      "package": "github.com/xtianxx/txharbor/internal/txlifecycle"
+    },
+    {
+      "name": "TestWithdrawalIntakeStorageDown",
+      "package": "github.com/xtianxx/txharbor/internal/withdrawal"
+    },
+    {
+      "name": "TestEpochIONonRootHelperProcess",
+      "package": "github.com/xtianxx/txharbor/internal/recovery"
+    }
+  ],
+  "test_drill_cli_items": [
+    {
+      "name": "TestDrillCLILocalInputAnnotations",
+      "package": "github.com/xtianxx/txharbor/internal/app/recoveryadmin",
+      "level": "top_level",
+      "status": "pass"
+    },
+    {
+      "name": "TestDrillCLIRealRestoreRecordAndArchive",
+      "package": "github.com/xtianxx/txharbor/internal/app/recoveryadmin",
+      "level": "top_level",
+      "status": "pass"
+    },
+    {
+      "name": "TestDrillCLIRecordOnlyRejectsGenerationChangeBeforeRecord",
+      "package": "github.com/xtianxx/txharbor/internal/app/recoveryadmin",
+      "level": "top_level",
+      "status": "pass"
+    },
+    {
+      "name": "TestDrillCLIRecordOnlyRejectsMismatchedAndStaleProbe",
+      "package": "github.com/xtianxx/txharbor/internal/app/recoveryadmin",
+      "level": "top_level",
+      "status": "pass"
+    },
+    {
+      "name": "TestDrillCLIRecordOnlyRejectsMismatchedAndStaleProbe/backup_B_without_probe_A",
+      "package": "github.com/xtianxx/txharbor/internal/app/recoveryadmin",
+      "level": "subtest",
+      "status": "pass"
+    },
+    {
+      "name": "TestDrillCLIRecordOnlyRejectsMismatchedAndStaleProbe/stale_probe_A",
+      "package": "github.com/xtianxx/txharbor/internal/app/recoveryadmin",
+      "level": "subtest",
+      "status": "pass"
+    },
+    {
+      "name": "TestDrillCLIRecordOnlyRejectsProbeBoundToAnotherInstance",
+      "package": "github.com/xtianxx/txharbor/internal/app/recoveryadmin",
+      "level": "top_level",
+      "status": "pass"
+    },
+    {
+      "name": "TestDrillCLIRecordOnlyRejectsWrongTargetFingerprint",
+      "package": "github.com/xtianxx/txharbor/internal/app/recoveryadmin",
+      "level": "top_level",
+      "status": "pass"
+    },
+    {
+      "name": "TestDrillCLIRefusesUnverifiedDrillTargets",
+      "package": "github.com/xtianxx/txharbor/internal/app/recoveryadmin",
+      "level": "top_level",
+      "status": "pass"
+    }
+  ],
+  "migration_history_untouched_items": [
+    {
+      "name": "TestNonceMigrationHistoryUntouched",
+      "package": "github.com/xtianxx/txharbor/internal/nonce",
+      "level": "top_level",
+      "status": "pass",
+      "pgfull3_first_pass_error": "git rev-parse --show-toplevel: exit status 128 (runner 无 git)"
+    },
+    {
+      "name": "TestSignerMigrationHistoryUntouched",
+      "package": "github.com/xtianxx/txharbor/internal/signer",
+      "level": "top_level",
+      "status": "pass",
+      "pgfull3_first_pass_error": "git rev-parse --show-toplevel: exit status 128 (runner 无 git)"
+    },
+    {
+      "name": "TestWithdrawalMigrationHistoryUntouched",
+      "package": "github.com/xtianxx/txharbor/internal/withdrawal",
+      "level": "top_level",
+      "status": "pass",
+      "pgfull3_first_pass_error": "git rev-parse --show-toplevel: exit status 128 (runner 无 git)"
+    }
+  ],
+  "vcs_repair_items": [
+    {
+      "name": "TestConcurrentMigrateProcessesSerialize",
+      "pgfull3_first_pass": "fail",
+      "pgfull3_first_pass_error": "error obtaining VCS status: exit status 128",
+      "pgfull3b_status": "pass",
+      "package": "github.com/xtianxx/txharbor/internal/db"
+    },
+    {
+      "name": "TestIntegrationReconcileAdminPendingVerifyAcceptance",
+      "pgfull3_first_pass": "fail",
+      "pgfull3_first_pass_error": "error obtaining VCS status: exit status 128",
+      "pgfull3b_status": "pass",
+      "package": "github.com/xtianxx/txharbor/internal/app/reconcileadmin"
+    },
+    {
+      "name": "TestJointProcessEntryEndToEnd",
+      "pgfull3_first_pass": "fail",
+      "pgfull3_first_pass_error": "error obtaining VCS status: exit status 128",
+      "pgfull3b_status": "pass",
+      "package": "github.com/xtianxx/txharbor/internal/txlifecycle"
+    },
+    {
+      "name": "TestJointProcessReorgAfterCompleted",
+      "pgfull3_first_pass": "fail",
+      "pgfull3_first_pass_error": "error obtaining VCS status: exit status 128",
+      "pgfull3b_status": "pass",
+      "package": "github.com/xtianxx/txharbor/internal/txlifecycle"
+    },
+    {
+      "name": "TestJointProcessRestartConsumesRevisionAfterCompleted",
+      "pgfull3_first_pass": "fail",
+      "pgfull3_first_pass_error": "error obtaining VCS status: exit status 128",
+      "pgfull3b_status": "pass",
+      "package": "github.com/xtianxx/txharbor/internal/txlifecycle"
+    },
+    {
+      "name": "TestJointProcessRestartTrackingAfterCompleted",
+      "pgfull3_first_pass": "fail",
+      "pgfull3_first_pass_error": "error obtaining VCS status: exit status 128",
+      "pgfull3b_status": "pass",
+      "package": "github.com/xtianxx/txharbor/internal/txlifecycle"
+    },
+    {
+      "name": "TestJointProcessTrackingAfterCompleted",
+      "pgfull3_first_pass": "fail",
+      "pgfull3_first_pass_error": "error obtaining VCS status: exit status 128",
+      "pgfull3b_status": "pass",
+      "package": "github.com/xtianxx/txharbor/internal/txlifecycle"
+    },
+    {
+      "name": "TestMigrateLockWaitTimeoutExitsNonZero",
+      "pgfull3_first_pass": "fail",
+      "pgfull3_first_pass_error": "error obtaining VCS status: exit status 128",
+      "pgfull3b_status": "pass",
+      "package": "github.com/xtianxx/txharbor/internal/db"
+    },
+    {
+      "name": "TestRecoveryAdminCLIRejectsAmbientPGEnvironmentWithoutLeakingCanaries",
+      "pgfull3_first_pass": "fail",
+      "pgfull3_first_pass_error": "error obtaining VCS status: exit status 128",
+      "pgfull3b_status": "pass",
+      "package": "github.com/xtianxx/txharbor/internal/app/recoveryadmin"
+    }
+  ],
+  "other_first_pass_failures_closed": [
+    {
+      "name": "TestRecoveryAdminCLIUsesLiveCredentialPrivateNativeChild",
+      "package": "github.com/xtianxx/txharbor/internal/app/recoveryadmin",
+      "pgfull3_first_pass": "fail",
+      "pgfull3_first_pass_error": "cli_live_credentials_integration_test.go:68: build production CLI: exit status 1 (output omitted)",
+      "pgfull3b_status": "pass"
+    }
+  ],
+  "first_pass_note": "pgfull3 (runner without git) top-level FAIL set = 13; all 13 PASS in pgfull3b (3 migration-history git-128 + 9 error-obtaining-VCS-status + 1 production-CLI build exit 1); pgfull3b has 0 FAIL."
+}

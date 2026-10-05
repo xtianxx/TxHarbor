@@ -178,11 +178,11 @@ PG/CLI 直连层范围：本轮 integration-PG 仅执行 §1 的 2 个具名入�
 | S5 冲突准入意图 | PASS（受限的 intents 库存 → 类似历史） | 现有映射（`tasks.md`）与保持 ADR 语义（文件已提交），非新增桩。 |
 | S6 失败转型立即状态 | PASS | drill5 全部 `.go` 变异检查（quickstart §2 S6 断言在 `metadata.json`）在根 runner 上退出 0（容器 `determined_lichterman` exit 0）。 |
 | S7 助手（视图、raw、drill- articulate） | PASS | quickstart §5 `metadata.json` 段落（历史）保留。 |
-| S8 命名口袋独立释放 | PASS | **witness 重建路径**：`TestBorrowedReplacementTargetWitness*`（T058 类）= PASS；此前历史快照（pending）被替换。 |
+| S8 命名口袋独立释放 | PASS | **witness 重建路径**：`TestDrillTargetWitness*` 7 项（drill 通道 witness 失效负例，drill5 全 PASS）= PASS；此前历史快照（pending）被替换。 |
 | S9/S10 人工 T009 硬限制（ recipients） | PASS | exact-arg 检查在根 runner 上 PASS；surviving historical record 已保留。 |
 | S11 接近实例 | PASS | T060/T067 journal-window 类 PASS；排队检查 agent 同类不变。 |
 | S12 指标/归档 | PASS | S1 页面（T019 归零）+ S12 归档/verify 延续。 |
-| F1 备份不可用 | PASS | `TestDrillArmObservedPGRestoreRefusesBeforeStartрой` 等在根 runner 上 PASS; F1 concept now observed. |
+| F1 备份不可用 | PASS | `TestDrillArmObservedPGRestoreRefusesBeforeStart`（`bridge-launch-binding_linux_test.go:81`）等在根 runner 上 PASS（drill5 focus.log PASS 3.94s）；F1 concept now observed. |
 | F2 中断/部分恢复 | PASS（此前 FAIL） | `TestBorrowedReplacementBoundPostcommitNativeStart` P+N1..N10 + `TestBorrowedReplacementBoundPostcommitNativeStart*/R` 全部 PASS；`errBoundPostcommitNativeStart` 路径 + `Outages`/`Finalization` 处默认参数 3=+3 P 断言更新。 |
 | F3 不兼容程序 | PASS | 语义维持 `tasks.md` T059 快照（well-known constraints，root runner 下全部 PASS）。 |
 | F4 外部事实领先 | PASS（此前 FAIL） | `TestT058Drill*` 系列 + Kafka fixture 修复 + T059 成套（`exmeshT059F4` 全套 root runner PASS）。 |
@@ -190,6 +190,6 @@ PG/CLI 直连层范围：本轮 integration-PG 仅执行 §1 的 2 个具名入�
 | F6 gap 无法闭合 | PASS | `TestT059F6UnprovableGapStaysUnknownWithPackageAndEscalation` root PASS；`internal/...gaps` 哨兵优先级修复见提交 f98fb13。 |
 | F7 未经授权/过期审批 | PASS | 前 PASS；本轮 drill5 红 → 无 prove 失败项。 |
 
-**本轮尤其关闭的历史 FAIL/PARTIAL**：F2（恢复中断）、F4（Kafka offset）、T060（重入/ready 两向）。**runner-env 失败已闭环**：pgfull2 的 3 个 migration-history FAIL（runner 缺 git）与 9 个 `error obtaining VCS status` FAIL，已在 pgfull3b（git 修复 runner）真实复跑至全部 PASS（0 FAIL/1822 PASS/3 非 helper SKIP），不以"历史环境问题"口径留存。
+**本轮尤其关闭的历史 FAIL/PARTIAL**：F2（恢复中断）、F4（Kafka offset）、T060（重入/ready 两向）。**runner-env 失败已闭环**：pgfull2 首跑的 3 个 migration-history FAIL（runner 缺 git）与 pgfull3 首跑的 9 个 `error obtaining VCS status` FAIL，已在 pgfull3b（git 修复 runner）真实复跑至全部 PASS（0 FAIL/1822 PASS/3 非 helper SKIP），不以"历史环境问题"口径留存。
 
-**S1 detail.** S1 context: `r2-grant-inventory/README.md`, `r2_grant_matrix.tsv`, `raw/`（case1–12/pos/neg），以及本轮 drill5/pgfull2 logs 引用为“verification runs”。
+**S1 detail.** S1 context: `r2-grant-inventory/README.md`, `r2_grant_matrix.tsv`, `raw/`（case1–12/pos/neg），以及本轮 drill5（`/tmp/r2lab/run_drill5/focus.log`）与 pgfull3b（`/tmp/r2lab/run_pgfull3b/pg-integration.jsonl`）verification runs（归档摘要见 `verification-archive-2026-10-05/INDEX.md`；pgfull2 的 0 字节遗留文件不作证据引用）。

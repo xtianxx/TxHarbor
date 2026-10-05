@@ -1,0 +1,253 @@
+# source: /tmp/r2lab/run_drill5/focus.log
+# total_lines: 5914 | kept: head 50 + tail 200 = 250 | elided: 5664
+2026/10/04 15:08:17 github.com/testcontainers/testcontainers-go - Connected to docker: 
+  Server Version: 29.6.1
+  API Version: 1.55
+  Operating System: Ubuntu 24.04.4 LTS
+  Total Memory: 15915 MB
+  Testcontainers for Go Version: v0.44.0
+  Resolved Docker Host: unix:///var/run/docker.sock
+  Resolved Docker Socket Path: /var/run/docker.sock
+  Test SessionID: be368eb7f5e35a2c22cc283c161e2492026620f04835f9c096c1ae6cbbe748c3
+  Test ProcessID: f82c2b52-89ad-40ae-9461-2073a11f450e
+=== RUN   TestBorrowedHealthValidLockDelegatesToActualLock
+2026/10/04 15:08:17 🐳 Creating container for image postgres@sha256:4ef4dbc939d61acea57712655ddb4b4ab27419c913f94cca0cd57cb3ea3c2280
+2026/10/04 15:08:18 🐳 Creating container for image testcontainers/ryuk:0.14.0
+2026/10/04 15:08:18 ✅ Container created: 6908940117bb
+2026/10/04 15:08:18 🐳 Starting container: 6908940117bb
+2026/10/04 15:08:19 ✅ Container started: 6908940117bb
+2026/10/04 15:08:19 ⏳ Waiting for container id 6908940117bb image: testcontainers/ryuk:0.14.0. Waiting for: all of: [log message "Started", port 8080/tcp to be listening]
+2026/10/04 15:08:19 Shell not found in container
+2026/10/04 15:08:19 🔔 Container is ready: 6908940117bb
+2026/10/04 15:08:19 ✅ Container created: 0a0ac14f0e8e
+2026/10/04 15:08:19 🐳 Starting container: 0a0ac14f0e8e
+2026/10/04 15:08:19 ✅ Container started: 0a0ac14f0e8e
+2026/10/04 15:08:19 ⏳ Waiting for container id 0a0ac14f0e8e image: postgres@sha256:4ef4dbc939d61acea57712655ddb4b4ab27419c913f94cca0cd57cb3ea3c2280. Waiting for: all of: [log message "database system is ready to accept connections" (occurrence: 2)]
+2026/10/04 15:08:21 🔔 Container is ready: 0a0ac14f0e8e
+2026/10/04 15:08:23 🐳 Stopping container: 0a0ac14f0e8e
+2026/10/04 15:08:23 ✅ Container stopped: 0a0ac14f0e8e
+2026/10/04 15:08:23 🐳 Terminating container: 0a0ac14f0e8e
+2026/10/04 15:08:23 🚫 Container terminated: 0a0ac14f0e8e
+--- PASS: TestBorrowedHealthValidLockDelegatesToActualLock (6.39s)
+=== RUN   TestBorrowedHealthRefusesTerminatedOwnerAndReleasedLock
+2026/10/04 15:08:24 🐳 Creating container for image postgres@sha256:4ef4dbc939d61acea57712655ddb4b4ab27419c913f94cca0cd57cb3ea3c2280
+2026/10/04 15:08:24 ✅ Container created: 069afc0a30ce
+2026/10/04 15:08:24 🐳 Starting container: 069afc0a30ce
+2026/10/04 15:08:24 ✅ Container started: 069afc0a30ce
+2026/10/04 15:08:24 ⏳ Waiting for container id 069afc0a30ce image: postgres@sha256:4ef4dbc939d61acea57712655ddb4b4ab27419c913f94cca0cd57cb3ea3c2280. Waiting for: all of: [log message "database system is ready to accept connections" (occurrence: 2)]
+2026/10/04 15:08:28 🔔 Container is ready: 069afc0a30ce
+    borrowed-health-adapter_linux_test.go:99: causal: terminated owner health error="target lock control session health: FATAL: terminating connection due to administrator command (SQLSTATE 57P01)"
+    borrowed-health-adapter_linux_test.go:118: causal: released lock health error="target lock session is closed"
+2026/10/04 15:08:35 🐳 Stopping container: 069afc0a30ce
+2026/10/04 15:08:36 ✅ Container stopped: 069afc0a30ce
+2026/10/04 15:08:36 🐳 Terminating container: 069afc0a30ce
+2026/10/04 15:08:36 🚫 Container terminated: 069afc0a30ce
+--- PASS: TestBorrowedHealthRefusesTerminatedOwnerAndReleasedLock (8.60s)
+=== RUN   TestBorrowedHealthRefusesNilZeroAndJSONInert
+2026/10/04 15:08:36 🐳 Creating container for image postgres@sha256:4ef4dbc939d61acea57712655ddb4b4ab27419c913f94cca0cd57cb3ea3c2280
+2026/10/04 15:08:36 ✅ Container created: ee20318b0dc7
+2026/10/04 15:08:36 🐳 Starting container: ee20318b0dc7
+2026/10/04 15:08:37 ✅ Container started: ee20318b0dc7
+2026/10/04 15:08:37 ⏳ Waiting for container id ee20318b0dc7 image: postgres@sha256:4ef4dbc939d61acea57712655ddb4b4ab27419c913f94cca0cd57cb3ea3c2280. Waiting for: all of: [log message "database system is ready to accept connections" (occurrence: 2)]
+2026/10/04 15:08:39 🔔 Container is ready: ee20318b0dc7
+[... 5664 lines elided ...]
+2026/10/04 16:19:58 🐳 Starting container: 97e624630f08
+2026/10/04 16:19:59 ✅ Container started: 97e624630f08
+2026/10/04 16:19:59 ⏳ Waiting for container id 97e624630f08 image: postgres@sha256:4ef4dbc939d61acea57712655ddb4b4ab27419c913f94cca0cd57cb3ea3c2280. Waiting for: log message "database system is ready to accept connections" (occurrence: 2)
+2026/10/04 16:20:01 🔔 Container is ready: 97e624630f08
+    origin_gate_lifecycle_linux_test.go:79: protected fixture actual HBA rules (all SCRAM, no trust fallback): line=1 type=local address="" auth=scram-sha-256; line=2 type=host address="127.0.0.1" auth=scram-sha-256; line=3 type=host address="::1" auth=scram-sha-256; line=4 type=host address="all" auth=scram-sha-256
+2026/10/04 16:20:02 🐳 Stopping container: 97e624630f08
+2026/10/04 16:20:02 ✅ Container stopped: 97e624630f08
+2026/10/04 16:20:02 🐳 Terminating container: 97e624630f08
+2026/10/04 16:20:02 🚫 Container terminated: 97e624630f08
+--- PASS: TestDrillOriginGateLifecycleReleaseInterleaveExactlyOnce (4.21s)
+=== RUN   TestDrillOriginGateLifecycleInflightWriteTerminatedDrained
+2026/10/04 16:20:02 🐳 Creating container for image postgres@sha256:4ef4dbc939d61acea57712655ddb4b4ab27419c913f94cca0cd57cb3ea3c2280
+2026/10/04 16:20:03 ✅ Container created: f77303e15ca9
+2026/10/04 16:20:03 🐳 Starting container: f77303e15ca9
+2026/10/04 16:20:03 ✅ Container started: f77303e15ca9
+2026/10/04 16:20:03 ⏳ Waiting for container id f77303e15ca9 image: postgres@sha256:4ef4dbc939d61acea57712655ddb4b4ab27419c913f94cca0cd57cb3ea3c2280. Waiting for: log message "database system is ready to accept connections" (occurrence: 2)
+2026/10/04 16:20:05 🔔 Container is ready: f77303e15ca9
+    origin_gate_lifecycle_linux_test.go:192: protected fixture actual HBA rules (all SCRAM, no trust fallback): line=1 type=local address="" auth=scram-sha-256; line=2 type=host address="127.0.0.1" auth=scram-sha-256; line=3 type=host address="::1" auth=scram-sha-256; line=4 type=host address="all" auth=scram-sha-256
+2026/10/04 16:20:07 🐳 Stopping container: f77303e15ca9
+2026/10/04 16:20:07 ✅ Container stopped: f77303e15ca9
+2026/10/04 16:20:07 🐳 Terminating container: f77303e15ca9
+2026/10/04 16:20:07 🚫 Container terminated: f77303e15ca9
+--- PASS: TestDrillOriginGateLifecycleInflightWriteTerminatedDrained (4.96s)
+=== RUN   TestDrillOriginGateLifecycleDrainUnknownRetainsAndRefuses
+2026/10/04 16:20:07 🐳 Creating container for image postgres@sha256:4ef4dbc939d61acea57712655ddb4b4ab27419c913f94cca0cd57cb3ea3c2280
+2026/10/04 16:20:08 ✅ Container created: c9a9a010d3a6
+2026/10/04 16:20:08 🐳 Starting container: c9a9a010d3a6
+2026/10/04 16:20:08 ✅ Container started: c9a9a010d3a6
+2026/10/04 16:20:08 ⏳ Waiting for container id c9a9a010d3a6 image: postgres@sha256:4ef4dbc939d61acea57712655ddb4b4ab27419c913f94cca0cd57cb3ea3c2280. Waiting for: log message "database system is ready to accept connections" (occurrence: 2)
+2026/10/04 16:20:10 🔔 Container is ready: c9a9a010d3a6
+    origin_gate_lifecycle_linux_test.go:292: protected fixture actual HBA rules (all SCRAM, no trust fallback): line=1 type=local address="" auth=scram-sha-256; line=2 type=host address="127.0.0.1" auth=scram-sha-256; line=3 type=host address="::1" auth=scram-sha-256; line=4 type=host address="all" auth=scram-sha-256
+2026/10/04 16:20:15 🐳 Stopping container: c9a9a010d3a6
+2026/10/04 16:20:15 ✅ Container stopped: c9a9a010d3a6
+2026/10/04 16:20:15 🐳 Terminating container: c9a9a010d3a6
+2026/10/04 16:20:15 🚫 Container terminated: c9a9a010d3a6
+--- PASS: TestDrillOriginGateLifecycleDrainUnknownRetainsAndRefuses (8.05s)
+=== RUN   TestDrillOriginGateLifecycleObserverStallRefuses
+2026/10/04 16:20:15 🐳 Creating container for image postgres@sha256:4ef4dbc939d61acea57712655ddb4b4ab27419c913f94cca0cd57cb3ea3c2280
+2026/10/04 16:20:16 ✅ Container created: 96b9262e2100
+2026/10/04 16:20:16 🐳 Starting container: 96b9262e2100
+2026/10/04 16:20:16 ✅ Container started: 96b9262e2100
+2026/10/04 16:20:16 ⏳ Waiting for container id 96b9262e2100 image: postgres@sha256:4ef4dbc939d61acea57712655ddb4b4ab27419c913f94cca0cd57cb3ea3c2280. Waiting for: log message "database system is ready to accept connections" (occurrence: 2)
+2026/10/04 16:20:18 🔔 Container is ready: 96b9262e2100
+    origin_gate_lifecycle_linux_test.go:354: protected fixture actual HBA rules (all SCRAM, no trust fallback): line=1 type=local address="" auth=scram-sha-256; line=2 type=host address="127.0.0.1" auth=scram-sha-256; line=3 type=host address="::1" auth=scram-sha-256; line=4 type=host address="all" auth=scram-sha-256
+2026/10/04 16:20:22 🐳 Stopping container: 96b9262e2100
+2026/10/04 16:20:23 ✅ Container stopped: 96b9262e2100
+2026/10/04 16:20:23 🐳 Terminating container: 96b9262e2100
+2026/10/04 16:20:23 🚫 Container terminated: 96b9262e2100
+--- PASS: TestDrillOriginGateLifecycleObserverStallRefuses (7.31s)
+=== RUN   TestDrillOriginGateLifecycleContextCancelDrains
+2026/10/04 16:20:23 🐳 Creating container for image postgres@sha256:4ef4dbc939d61acea57712655ddb4b4ab27419c913f94cca0cd57cb3ea3c2280
+2026/10/04 16:20:23 ✅ Container created: 4eb6308bba89
+2026/10/04 16:20:23 🐳 Starting container: 4eb6308bba89
+2026/10/04 16:20:23 ✅ Container started: 4eb6308bba89
+2026/10/04 16:20:23 ⏳ Waiting for container id 4eb6308bba89 image: postgres@sha256:4ef4dbc939d61acea57712655ddb4b4ab27419c913f94cca0cd57cb3ea3c2280. Waiting for: log message "database system is ready to accept connections" (occurrence: 2)
+2026/10/04 16:20:25 🔔 Container is ready: 4eb6308bba89
+    origin_gate_lifecycle_linux_test.go:439: protected fixture actual HBA rules (all SCRAM, no trust fallback): line=1 type=local address="" auth=scram-sha-256; line=2 type=host address="127.0.0.1" auth=scram-sha-256; line=3 type=host address="::1" auth=scram-sha-256; line=4 type=host address="all" auth=scram-sha-256
+2026/10/04 16:20:26 🐳 Stopping container: 4eb6308bba89
+2026/10/04 16:20:27 ✅ Container stopped: 4eb6308bba89
+2026/10/04 16:20:27 🐳 Terminating container: 4eb6308bba89
+2026/10/04 16:20:27 🚫 Container terminated: 4eb6308bba89
+--- PASS: TestDrillOriginGateLifecycleContextCancelDrains (4.14s)
+=== RUN   TestDrillOriginGateLifecycleInheritedSocketRefused
+2026/10/04 16:20:27 🐳 Creating container for image postgres@sha256:4ef4dbc939d61acea57712655ddb4b4ab27419c913f94cca0cd57cb3ea3c2280
+2026/10/04 16:20:27 ✅ Container created: 4060dc96a5df
+2026/10/04 16:20:27 🐳 Starting container: 4060dc96a5df
+2026/10/04 16:20:28 ✅ Container started: 4060dc96a5df
+2026/10/04 16:20:28 ⏳ Waiting for container id 4060dc96a5df image: postgres@sha256:4ef4dbc939d61acea57712655ddb4b4ab27419c913f94cca0cd57cb3ea3c2280. Waiting for: log message "database system is ready to accept connections" (occurrence: 2)
+2026/10/04 16:20:29 🔔 Container is ready: 4060dc96a5df
+    origin_gate_lifecycle_linux_test.go:493: protected fixture actual HBA rules (all SCRAM, no trust fallback): line=1 type=local address="" auth=scram-sha-256; line=2 type=host address="127.0.0.1" auth=scram-sha-256; line=3 type=host address="::1" auth=scram-sha-256; line=4 type=host address="all" auth=scram-sha-256
+2026/10/04 16:20:30 🐳 Stopping container: 4060dc96a5df
+2026/10/04 16:20:30 ✅ Container stopped: 4060dc96a5df
+2026/10/04 16:20:30 🐳 Terminating container: 4060dc96a5df
+2026/10/04 16:20:30 🚫 Container terminated: 4060dc96a5df
+--- PASS: TestDrillOriginGateLifecycleInheritedSocketRefused (3.59s)
+=== RUN   TestDrillOriginGateLifecycleSupervisedOwnerLossDrained
+2026/10/04 16:20:31 🐳 Creating container for image postgres@sha256:4ef4dbc939d61acea57712655ddb4b4ab27419c913f94cca0cd57cb3ea3c2280
+2026/10/04 16:20:31 ✅ Container created: ec9bfa3aded5
+2026/10/04 16:20:31 🐳 Starting container: ec9bfa3aded5
+2026/10/04 16:20:31 ✅ Container started: ec9bfa3aded5
+2026/10/04 16:20:31 ⏳ Waiting for container id ec9bfa3aded5 image: postgres@sha256:4ef4dbc939d61acea57712655ddb4b4ab27419c913f94cca0cd57cb3ea3c2280. Waiting for: log message "database system is ready to accept connections" (occurrence: 2)
+2026/10/04 16:20:33 🔔 Container is ready: ec9bfa3aded5
+    origin_gate_lifecycle_linux_test.go:543: protected fixture actual HBA rules (all SCRAM, no trust fallback): line=1 type=local address="" auth=scram-sha-256; line=2 type=host address="127.0.0.1" auth=scram-sha-256; line=3 type=host address="::1" auth=scram-sha-256; line=4 type=host address="all" auth=scram-sha-256
+2026/10/04 16:20:35 🐳 Stopping container: ec9bfa3aded5
+2026/10/04 16:20:35 ✅ Container stopped: ec9bfa3aded5
+2026/10/04 16:20:35 🐳 Terminating container: ec9bfa3aded5
+2026/10/04 16:20:35 🚫 Container terminated: ec9bfa3aded5
+--- PASS: TestDrillOriginGateLifecycleSupervisedOwnerLossDrained (4.65s)
+=== RUN   TestDrillOriginGateRetirementWaitsForSoleWait
+2026/10/04 16:20:35 🐳 Creating container for image postgres@sha256:4ef4dbc939d61acea57712655ddb4b4ab27419c913f94cca0cd57cb3ea3c2280
+2026/10/04 16:20:35 ✅ Container created: 0c8d27b44ef9
+2026/10/04 16:20:35 🐳 Starting container: 0c8d27b44ef9
+2026/10/04 16:20:36 ✅ Container started: 0c8d27b44ef9
+2026/10/04 16:20:36 ⏳ Waiting for container id 0c8d27b44ef9 image: postgres@sha256:4ef4dbc939d61acea57712655ddb4b4ab27419c913f94cca0cd57cb3ea3c2280. Waiting for: log message "database system is ready to accept connections" (occurrence: 2)
+2026/10/04 16:20:37 🔔 Container is ready: 0c8d27b44ef9
+    origin_gate_retirement_linux_test.go:69: protected fixture actual HBA rules (all SCRAM, no trust fallback): line=1 type=local address="" auth=scram-sha-256; line=2 type=host address="127.0.0.1" auth=scram-sha-256; line=3 type=host address="::1" auth=scram-sha-256; line=4 type=host address="all" auth=scram-sha-256
+2026/10/04 16:20:39 🐳 Stopping container: 0c8d27b44ef9
+2026/10/04 16:20:40 ✅ Container stopped: 0c8d27b44ef9
+2026/10/04 16:20:40 🐳 Terminating container: 0c8d27b44ef9
+2026/10/04 16:20:40 🚫 Container terminated: 0c8d27b44ef9
+--- PASS: TestDrillOriginGateRetirementWaitsForSoleWait (4.78s)
+=== RUN   TestDrillOriginGateRetirementUnverifiedCleanOnLoss
+2026/10/04 16:20:40 🐳 Creating container for image postgres@sha256:4ef4dbc939d61acea57712655ddb4b4ab27419c913f94cca0cd57cb3ea3c2280
+2026/10/04 16:20:40 ✅ Container created: 2666200828dc
+2026/10/04 16:20:40 🐳 Starting container: 2666200828dc
+2026/10/04 16:20:41 ✅ Container started: 2666200828dc
+2026/10/04 16:20:41 ⏳ Waiting for container id 2666200828dc image: postgres@sha256:4ef4dbc939d61acea57712655ddb4b4ab27419c913f94cca0cd57cb3ea3c2280. Waiting for: log message "database system is ready to accept connections" (occurrence: 2)
+2026/10/04 16:20:42 🔔 Container is ready: 2666200828dc
+    origin_gate_retirement_linux_test.go:161: protected fixture actual HBA rules (all SCRAM, no trust fallback): line=1 type=local address="" auth=scram-sha-256; line=2 type=host address="127.0.0.1" auth=scram-sha-256; line=3 type=host address="::1" auth=scram-sha-256; line=4 type=host address="all" auth=scram-sha-256
+2026/10/04 16:20:59 🐳 Stopping container: 2666200828dc
+2026/10/04 16:20:59 ✅ Container stopped: 2666200828dc
+2026/10/04 16:20:59 🐳 Terminating container: 2666200828dc
+2026/10/04 16:20:59 🚫 Container terminated: 2666200828dc
+--- PASS: TestDrillOriginGateRetirementUnverifiedCleanOnLoss (18.84s)
+=== RUN   TestDrillOriginGateRetirementNativeCancelBeforeBarrierRelease
+2026/10/04 16:20:59 🐳 Creating container for image postgres@sha256:4ef4dbc939d61acea57712655ddb4b4ab27419c913f94cca0cd57cb3ea3c2280
+2026/10/04 16:20:59 ✅ Container created: ff4ccac5214b
+2026/10/04 16:20:59 🐳 Starting container: ff4ccac5214b
+2026/10/04 16:21:00 ✅ Container started: ff4ccac5214b
+2026/10/04 16:21:00 ⏳ Waiting for container id ff4ccac5214b image: postgres@sha256:4ef4dbc939d61acea57712655ddb4b4ab27419c913f94cca0cd57cb3ea3c2280. Waiting for: log message "database system is ready to accept connections" (occurrence: 2)
+2026/10/04 16:21:02 🔔 Container is ready: ff4ccac5214b
+    origin_gate_retirement_linux_test.go:220: protected fixture actual HBA rules (all SCRAM, no trust fallback): line=1 type=local address="" auth=scram-sha-256; line=2 type=host address="127.0.0.1" auth=scram-sha-256; line=3 type=host address="::1" auth=scram-sha-256; line=4 type=host address="all" auth=scram-sha-256
+2026/10/04 16:21:03 🐳 Stopping container: ff4ccac5214b
+2026/10/04 16:21:04 ✅ Container stopped: ff4ccac5214b
+2026/10/04 16:21:04 🐳 Terminating container: ff4ccac5214b
+2026/10/04 16:21:04 🚫 Container terminated: ff4ccac5214b
+--- PASS: TestDrillOriginGateRetirementNativeCancelBeforeBarrierRelease (4.29s)
+=== RUN   TestDrillOriginGateRetirementInspectionSeamRefuses
+2026/10/04 16:21:04 🐳 Creating container for image postgres@sha256:4ef4dbc939d61acea57712655ddb4b4ab27419c913f94cca0cd57cb3ea3c2280
+2026/10/04 16:21:04 ✅ Container created: 2b928700f568
+2026/10/04 16:21:04 🐳 Starting container: 2b928700f568
+2026/10/04 16:21:04 ✅ Container started: 2b928700f568
+2026/10/04 16:21:04 ⏳ Waiting for container id 2b928700f568 image: postgres@sha256:4ef4dbc939d61acea57712655ddb4b4ab27419c913f94cca0cd57cb3ea3c2280. Waiting for: log message "database system is ready to accept connections" (occurrence: 2)
+2026/10/04 16:21:06 🔔 Container is ready: 2b928700f568
+    origin_gate_retirement_linux_test.go:316: protected fixture actual HBA rules (all SCRAM, no trust fallback): line=1 type=local address="" auth=scram-sha-256; line=2 type=host address="127.0.0.1" auth=scram-sha-256; line=3 type=host address="::1" auth=scram-sha-256; line=4 type=host address="all" auth=scram-sha-256
+2026/10/04 16:21:08 🐳 Stopping container: 2b928700f568
+2026/10/04 16:21:08 ✅ Container stopped: 2b928700f568
+2026/10/04 16:21:08 🐳 Terminating container: 2b928700f568
+2026/10/04 16:21:08 🚫 Container terminated: 2b928700f568
+--- PASS: TestDrillOriginGateRetirementInspectionSeamRefuses (4.81s)
+=== RUN   TestDrillOriginGateRetirementPostRegistrationInheritanceRefused
+2026/10/04 16:21:08 🐳 Creating container for image postgres@sha256:4ef4dbc939d61acea57712655ddb4b4ab27419c913f94cca0cd57cb3ea3c2280
+2026/10/04 16:21:09 ✅ Container created: c7b719b6b9a2
+2026/10/04 16:21:09 🐳 Starting container: c7b719b6b9a2
+2026/10/04 16:21:09 ✅ Container started: c7b719b6b9a2
+2026/10/04 16:21:09 ⏳ Waiting for container id c7b719b6b9a2 image: postgres@sha256:4ef4dbc939d61acea57712655ddb4b4ab27419c913f94cca0cd57cb3ea3c2280. Waiting for: log message "database system is ready to accept connections" (occurrence: 2)
+2026/10/04 16:21:11 🔔 Container is ready: c7b719b6b9a2
+    origin_gate_retirement_linux_test.go:387: protected fixture actual HBA rules (all SCRAM, no trust fallback): line=1 type=local address="" auth=scram-sha-256; line=2 type=host address="127.0.0.1" auth=scram-sha-256; line=3 type=host address="::1" auth=scram-sha-256; line=4 type=host address="all" auth=scram-sha-256
+2026/10/04 16:21:12 🐳 Stopping container: c7b719b6b9a2
+2026/10/04 16:21:13 ✅ Container stopped: c7b719b6b9a2
+2026/10/04 16:21:13 🐳 Terminating container: c7b719b6b9a2
+2026/10/04 16:21:13 🚫 Container terminated: c7b719b6b9a2
+--- PASS: TestDrillOriginGateRetirementPostRegistrationInheritanceRefused (4.33s)
+=== RUN   TestDrillOriginGateSupervisorNativePgRestoreOwnedOrigin
+2026/10/04 16:21:13 🐳 Creating container for image postgres@sha256:4ef4dbc939d61acea57712655ddb4b4ab27419c913f94cca0cd57cb3ea3c2280
+2026/10/04 16:21:13 ✅ Container created: 0e9d37326607
+2026/10/04 16:21:13 🐳 Starting container: 0e9d37326607
+2026/10/04 16:21:14 ✅ Container started: 0e9d37326607
+2026/10/04 16:21:14 ⏳ Waiting for container id 0e9d37326607 image: postgres@sha256:4ef4dbc939d61acea57712655ddb4b4ab27419c913f94cca0cd57cb3ea3c2280. Waiting for: log message "database system is ready to accept connections" (occurrence: 2)
+2026/10/04 16:21:15 🔔 Container is ready: 0e9d37326607
+    origin_gate_supervisor_linux_test.go:173: protected fixture actual HBA rules (all SCRAM, no trust fallback): line=1 type=local address="" auth=scram-sha-256; line=2 type=host address="127.0.0.1" auth=scram-sha-256; line=3 type=host address="::1" auth=scram-sha-256; line=4 type=host address="all" auth=scram-sha-256
+    origin_gate_supervisor_linux_test.go:247: barrier held: buffered=1 AuthenticationOk=true target absent; armed child PID 319121 start 1316051
+2026/10/04 16:21:17 🐳 Stopping container: 0e9d37326607
+2026/10/04 16:21:18 ✅ Container stopped: 0e9d37326607
+2026/10/04 16:21:18 🐳 Terminating container: 0e9d37326607
+2026/10/04 16:21:18 🚫 Container terminated: 0e9d37326607
+--- PASS: TestDrillOriginGateSupervisorNativePgRestoreOwnedOrigin (4.85s)
+=== RUN   TestDrillOriginGateSupervisorRejectsInertAndWrongIdentity
+2026/10/04 16:21:18 🐳 Creating container for image postgres@sha256:4ef4dbc939d61acea57712655ddb4b4ab27419c913f94cca0cd57cb3ea3c2280
+2026/10/04 16:21:18 ✅ Container created: ffd5adb3b0ec
+2026/10/04 16:21:18 🐳 Starting container: ffd5adb3b0ec
+2026/10/04 16:21:18 ✅ Container started: ffd5adb3b0ec
+2026/10/04 16:21:18 ⏳ Waiting for container id ffd5adb3b0ec image: postgres@sha256:4ef4dbc939d61acea57712655ddb4b4ab27419c913f94cca0cd57cb3ea3c2280. Waiting for: log message "database system is ready to accept connections" (occurrence: 2)
+2026/10/04 16:21:20 🔔 Container is ready: ffd5adb3b0ec
+    origin_gate_supervisor_linux_test.go:319: protected fixture actual HBA rules (all SCRAM, no trust fallback): line=1 type=local address="" auth=scram-sha-256; line=2 type=host address="127.0.0.1" auth=scram-sha-256; line=3 type=host address="::1" auth=scram-sha-256; line=4 type=host address="all" auth=scram-sha-256
+    origin_gate_supervisor_linux_test.go:458: altered tools refused at arm time: arm refused tools: dump tool: tool is not a 64-bit little-endian ELF
+2026/10/04 16:21:26 🐳 Stopping container: ffd5adb3b0ec
+2026/10/04 16:21:26 ✅ Container stopped: ffd5adb3b0ec
+2026/10/04 16:21:26 🐳 Terminating container: ffd5adb3b0ec
+2026/10/04 16:21:26 🚫 Container terminated: ffd5adb3b0ec
+--- PASS: TestDrillOriginGateSupervisorRejectsInertAndWrongIdentity (8.62s)
+=== RUN   TestDrillOriginGateSupervisorObserverLossDrains
+2026/10/04 16:21:26 🐳 Creating container for image postgres@sha256:4ef4dbc939d61acea57712655ddb4b4ab27419c913f94cca0cd57cb3ea3c2280
+2026/10/04 16:21:26 ✅ Container created: 517f598af634
+2026/10/04 16:21:26 🐳 Starting container: 517f598af634
+2026/10/04 16:21:27 ✅ Container started: 517f598af634
+2026/10/04 16:21:27 ⏳ Waiting for container id 517f598af634 image: postgres@sha256:4ef4dbc939d61acea57712655ddb4b4ab27419c913f94cca0cd57cb3ea3c2280. Waiting for: log message "database system is ready to accept connections" (occurrence: 2)
+2026/10/04 16:21:29 🔔 Container is ready: 517f598af634
+    origin_gate_supervisor_linux_test.go:522: protected fixture actual HBA rules (all SCRAM, no trust fallback): line=1 type=local address="" auth=scram-sha-256; line=2 type=host address="127.0.0.1" auth=scram-sha-256; line=3 type=host address="::1" auth=scram-sha-256; line=4 type=host address="all" auth=scram-sha-256
+2026/10/04 16:21:32 🐳 Stopping container: 517f598af634
+2026/10/04 16:21:32 ✅ Container stopped: 517f598af634
+2026/10/04 16:21:32 🐳 Terminating container: 517f598af634
+2026/10/04 16:21:32 🚫 Container terminated: 517f598af634
+--- PASS: TestDrillOriginGateSupervisorObserverLossDrains (5.46s)
+=== RUN   TestDrillProvisionNativePGToolsCarrierSeal
+--- PASS: TestDrillProvisionNativePGToolsCarrierSeal (0.45s)
+=== RUN   TestDrillArmRefusesReplacedELFAndPreStartTamper
+--- PASS: TestDrillArmRefusesReplacedELFAndPreStartTamper (0.89s)
+PASS
+ok  	github.com/xtianxx/txharbor/internal/recovery	4117.824s
