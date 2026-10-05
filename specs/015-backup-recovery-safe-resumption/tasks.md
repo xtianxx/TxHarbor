@@ -694,7 +694,7 @@ Task: "approvals_contract_test.go" / "release_integration_test.go" /
 
 - 六项原行（T019/T020/T057/T058/T066/T068）在本轮收口后翻勾；其验收正文一字未改，证据见本轮 `quickstart_matrix_evidence.md` §11、`64140fb-followup-acceptance.md` R2 轮段、ADR-004 §2.1 实施轮记录。翻勾仅覆盖**本地隔离环境**验收范围；生产前置（observer `pg_authid` 可见性、真实部署管理员收敛、生产形态对象清单）仍 OPEN 并已在 ADR-004 §2.1 记录。
 - 最终运行：drill5 必验 19/19 顶层 PASS + 3/3 必验子测试 PASS（296 组：295 PASS/0 FAIL/1 wrapper 自引用 SKIP；log `/tmp/r2lab/run_drill5/focus.log`）；pgfull3b 全仓 PG 集成（git 修复 runner，HEAD `1a6779f`）：**1825 顶层 1822 PASS / 0 FAIL / 3 SKIP**（3 SKIP 均为非必验 helper：`TestCrashHelper` 子进程体、`TestWithdrawalIntakeStorageDown` T026-owned 占位、`TestEpochIONonRootHelperProcess` 子进程体；log `/tmp/r2lab/run_pgfull3b/pg-integration.jsonl`，`go_test_exit=0`）。历史 `64140fb` 62/70 与 2026-09-30 的 64/70 计数行按原样保留，不覆盖。
-- 计数更正（2026-10-05）：先前报告中的"必验 20 顶层"为笔误；`scripts/drillcoverage/check.go` 的 `requiredTests` 数组实为 **19 项顶层 + 3 项必验子测试**，drill5 中 19/19 + 3/3 全部 PASS（逐项核对 focus.log）。历史行按原样保留，不追溯改写，必验集合本身未增删。
+- 计数更正（2026-10-05）：先前报告中的"必验 20 顶层"为笔误；`scripts/drillcoverage/check.go` 的 `requiredTests` 数组实为 **19 项顶层 + 3 项必验子测试**，drill5 中 19/19 + 3/3 全部 PASS（逐项核对 focus.log）。历史行按原样保留，不追溯改写，必验集合本身未增删。随后同日 CI run 37252107877 定向修复：`TestTargetWriterProductionExecutableDiscovery` 因真实 pg_restore/可执行拓扑验证分层改标为 `integration && linux`（unit 通道不再依赖 runner PATH 上偶然存在的 pg_restore），drill 必验以 drill5 已 PASS 的 `TestDrillArmRefusesReplacedELFAndPreStartTamper`（`/tmp/r2lab/run_drill5/focus.log` 第 5912 行 `--- PASS:`）等价替换，仍为 19 项顶层 + 3 项必验子测试、断言零删减（同步记录见 `docs/evidence/015/verification-archive-2026-10-05/INDEX.md` §4）。
 
 ### 2026-10-04/05 R2 轮勾选（原验收文字逐条对照；ADR-004 仍 Proposed）
 

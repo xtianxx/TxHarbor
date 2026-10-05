@@ -1,5 +1,13 @@
-//go:build linux
+//go:build integration && linux
 
+// Production executable topology verification layer: these cases resolve and
+// reject the real pg_restore executable (direct ELF required) and exercise the
+// controlled test seam, so they run in the integration channel that pins the
+// native PostgreSQL 18.6 clients — never in the unit channel, where a
+// pg_restore that merely happens to sit on the runner PATH (e.g. a wrapper
+// script) must not decide a unit result. Assertions are unchanged by this
+// move; a missing native tool is a fatal NOT RUN under CI (fail closed) and a
+// skip otherwise.
 package recovery
 
 import (
@@ -29,7 +37,7 @@ func TestTargetWriterRejectsPATHScriptBeforeGuardWork(t *testing.T) {
 
 func TestTargetWriterProductionExecutableDiscovery(t *testing.T) {
 	if _, err := exec.LookPath("pg_restore"); err != nil {
-		t.Skip("pg_restore is not installed on PATH")
+		requireNativePG18Tool(t, "native pg_restore unavailable")
 	}
 	resolved, err := resolveTargetWriterExecutable("")
 	if err != nil {

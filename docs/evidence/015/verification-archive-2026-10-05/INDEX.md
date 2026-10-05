@@ -89,6 +89,7 @@ focus 定向运行即 `docker run … go test -tags "linux,drill" -run REGEX` �
 
 - 顶层 296 组：**295 PASS / 0 FAIL / 1 SKIP**（SKIP 为 `TestBorrowedAuthEntryProbeFDChildProcess`，wrapper 自引用 helper，历来如此）；子测试 **343 PASS / 0 FAIL / 0 SKIP**。
 - 必验 19 顶层 + 3 子测试（`scripts/drillcoverage/check.go` 的 `requiredTests`/`requiredSubtests`）全部 PASS，逐行见 `drill5_required_pass.txt`（22 行）。
+- 必验集合同步（2026-10-05，CI run 37252107877 定向修复）：`TestTargetWriterProductionExecutableDiscovery` 的构建标签由 `linux` 改为 `integration && linux`（真实 pg_restore/可执行拓扑验证归 integration 通道；unit 通道不得依赖 runner PATH 上偶然存在的 pg_restore），drill 必验以 drill5 已 PASS 的等价可执行拓扑断言 `TestDrillArmRefusesReplacedELFAndPreStartTamper`（来源 `focus.log` 第 5912 行 `--- PASS:`）等价替换；替换后 `requiredTests` 仍为 19 项顶层 + 3 项必验子测试，断言零删减。`drill5_required_pass.txt` 为替换前那次运行的历史记录，按原样保留、不追溯改写。
 
 ### pgfull3b（来源 `pg-integration.jsonl`；HEAD `1a6779f`；`go_test_exit=0`）
 

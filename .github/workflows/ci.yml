@@ -335,6 +335,42 @@ jobs:
         run: |
           set -euo pipefail
           echo "::add-mask::${TXHARBOR_PG_DSN}"
+      # Pinned native clients for the PostgreSQL layer: the integration tests
+      # resolve pg_dump/pg_restore from PATH and require direct ELF binaries
+      # reporting exactly `(PostgreSQL) 18.6`; a missing or different client
+      # fails the layer, and no wrapper/shim is ever accepted as a substitute.
+      # Installed from the official PGDG repository
+      # (postgresql.org/download/linux/ubuntu), version-pinned to 18.6.
+      - name: install pinned PostgreSQL 18.6 clients
+        if: steps.docker.outputs.available == 'true'
+        run: |
+          set -euo pipefail
+
+          # Import the PGDG signing key and repository, then refresh indexes.
+          sudo install -d /usr/share/postgresql-common/pgdg
+          sudo curl --fail --silent --show-error --location --retry 3 \
+            --output /usr/share/postgresql-common/pgdg/apt.postgresql.org.asc \
+            https://www.postgresql.org/media/keys/ACCC4CF8.asc
+          echo "deb [signed-by=/usr/share/postgresql-common/pgdg/apt.postgresql.org.asc] https://apt.postgresql.org/pub/repos/apt $(lsb_release -cs)-pgdg main" \
+            | sudo tee /etc/apt/sources.list.d/pgdg.list >/dev/null
+          sudo apt-get update
+
+          # Pin the exact 18.6 build: a repository without 18.6 MUST fail this
+          # step rather than silently fall back to another major/minor.
+          version="$(apt-cache madison postgresql-client-18 | awk -F'|' '{v=$2; gsub(/[[:space:]]/,"",v); if (v ~ /^18\.6-/ && !found) {print v; found=1}}')"
+          if [ -z "$version" ]; then
+            echo "::error::postgresql-client-18 18.6 is not available from the PGDG repository"
+            exit 1
+          fi
+          sudo apt-get install -y --no-install-recommends "postgresql-client-18=$version"
+
+          # The pinned clients must win PATH resolution over any preinstalled
+          # older client or pg_wrapper; print the explicit version evidence.
+          export PATH="/usr/lib/postgresql/18/bin:$PATH"
+          pg_restore --version
+          pg_dump --version
+          echo "/usr/lib/postgresql/18/bin" >> "$GITHUB_PATH"
+        timeout-minutes: 10
       - name: integration tests (PostgreSQL layer)
         if: steps.docker.outputs.available == 'true'
         run: make test-integration

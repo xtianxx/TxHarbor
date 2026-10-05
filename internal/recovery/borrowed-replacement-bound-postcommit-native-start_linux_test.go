@@ -1063,7 +1063,7 @@ func TestBorrowedReplacementBoundPostcommitNativeStart(t *testing.T) {
 		}
 		var (
 			proofActor, proofOperation, proofApplication, proofFactsJSON, proofTargetKeyOut string
-			proofFacts                                                                       struct {
+			proofFacts                                                                      struct {
 				TargetGuardKey  string `json:"target_guard_key"`
 				Application     string `json:"application_name"`
 				ChildPID        int    `json:"child_pid"`

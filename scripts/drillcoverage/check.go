@@ -13,7 +13,7 @@ import (
 )
 
 var requiredTests = []string{
-	"TestTargetWriterProductionExecutableDiscovery",
+	"TestDrillArmRefusesReplacedELFAndPreStartTamper",
 	"TestDrillTargetWitnessOldReconnectRejected",
 	"TestDrillTargetWitnessOldRoleLoginDuringRestoreAcceptanceFailsClosed",
 	"TestDrillTargetWitnessObserverTerminationDuringRestoreAcceptanceFailsClosed",
