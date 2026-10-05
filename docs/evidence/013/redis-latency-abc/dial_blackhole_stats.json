@@ -1,0 +1,104 @@
+{
+  "A/dial_blackhole/r1": {
+    "variant": "A",
+    "shape": "dial_blackhole",
+    "round": 1,
+    "count": 16,
+    "errors": 16,
+    "error_rate": 1,
+    "error_classes": {
+      "context_deadline_exceeded": 16
+    },
+    "p50_ms": 1001.6949999999999,
+    "p95_ms": 1002.66975,
+    "p99_ms": 1002.73635,
+    "max_ms": 1002.753,
+    "mean_ms": 1001.7238125,
+    "stddev_ms": 0.8140538244899417
+  },
+  "A/dial_blackhole/r2": {
+    "variant": "A",
+    "shape": "dial_blackhole",
+    "round": 2,
+    "count": 16,
+    "errors": 16,
+    "error_rate": 1,
+    "error_classes": {
+      "context_deadline_exceeded": 16
+    },
+    "p50_ms": 1000.7940000000001,
+    "p95_ms": 1000.96975,
+    "p99_ms": 1001.01955,
+    "max_ms": 1001.032,
+    "mean_ms": 1000.752125,
+    "stddev_ms": 0.18851379259885295
+  },
+  "B/dial_blackhole/r3": {
+    "variant": "B",
+    "shape": "dial_blackhole",
+    "round": 3,
+    "count": 16,
+    "errors": 16,
+    "error_rate": 1,
+    "error_classes": {
+      "context_deadline_exceeded": 16
+    },
+    "p50_ms": 1000.8795,
+    "p95_ms": 1001.534,
+    "p99_ms": 1001.5364000000001,
+    "max_ms": 1001.537,
+    "mean_ms": 1000.8589999999999,
+    "stddev_ms": 0.5813423546700722
+  },
+  "B/dial_blackhole/r4": {
+    "variant": "B",
+    "shape": "dial_blackhole",
+    "round": 4,
+    "count": 16,
+    "errors": 16,
+    "error_rate": 1,
+    "error_classes": {
+      "context_deadline_exceeded": 16
+    },
+    "p50_ms": 1000.972,
+    "p95_ms": 1001.3335,
+    "p99_ms": 1001.3562999999999,
+    "max_ms": 1001.362,
+    "mean_ms": 1000.9694374999999,
+    "stddev_ms": 0.29473965206601266
+  },
+  "C/dial_blackhole/r5": {
+    "variant": "C",
+    "shape": "dial_blackhole",
+    "round": 5,
+    "count": 16,
+    "errors": 16,
+    "error_rate": 1,
+    "error_classes": {
+      "context_deadline_exceeded": 16
+    },
+    "p50_ms": 1000.836,
+    "p95_ms": 1001.34625,
+    "p99_ms": 1001.38525,
+    "max_ms": 1001.395,
+    "mean_ms": 1000.8293749999999,
+    "stddev_ms": 0.4466079376813538
+  },
+  "C/dial_blackhole/r6": {
+    "variant": "C",
+    "shape": "dial_blackhole",
+    "round": 6,
+    "count": 16,
+    "errors": 16,
+    "error_rate": 1,
+    "error_classes": {
+      "context_deadline_exceeded": 16
+    },
+    "p50_ms": 1000.9005,
+    "p95_ms": 1001.13575,
+    "p99_ms": 1001.18555,
+    "max_ms": 1001.198,
+    "mean_ms": 1000.8648125,
+    "stddev_ms": 0.2115770052880624
+  }
+}
