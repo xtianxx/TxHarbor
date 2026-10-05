@@ -1,0 +1,11 @@
+fatal: detected dubious ownership in repository at '/workspace'
+To add an exception for this directory, call:
+
+	git config --global --add safe.directory /workspace
+tree_head=
+fatal: detected dubious ownership in repository at '/workspace'
+To add an exception for this directory, call:
+
+	git config --global --add safe.directory /workspace
+dirty_tracks=0
+---

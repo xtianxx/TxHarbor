@@ -1100,9 +1100,29 @@ func TestDepositCommitEmptyIntervalAdvances(t *testing.T) {
 // TestDepositCommitUnknownOutcomeRereadsDB: the COMMIT reply is dropped after
 // PostgreSQL accepted it; the commit re-reads the durable progress and
 // continues as committed, and a stale replay is still refused.
+//
+// The fault is injected by the read-side completion-drop fixture
+// (logscanOpenCompletionDropPool): the COMMIT request is forwarded untouched,
+// the wrapper withholds the backend's reply only until it observes the wire
+// completion pair — CommandComplete(tag COMMIT) followed by ReadyForQuery('I')
+// — and then closes the connection, handing pgx a connection error. That wire
+// pair is the server-side proof the commit landed, so "reply lost, commit
+// durable" holds deterministically and the owning test's immediate re-read
+// always observes the advance.
+//
+// The legacy write-side injector (logscanOpenCommitDropPool) must not be used
+// here: its controlled forensics (main CI run 37274084298 follow-up, 780 armed
+// commits) showed the close sends a FIN (client receive queue empty), forced
+// RSTs (SetLinger(0)) never rolled back a commit (180/180 landed), and the
+// commit always became durable — but the test's immediate durable re-read ran
+// 0.65-0.97ms after the COMMIT write while the row became visible
+// 6.56-7.65ms after it (local miss rate 25-33%). That completion-vs-reread
+// race, amplified by the CI runner's slower fsync tail, is what failed
+// 37274084298 ("progress unchanged" after a commit that had in fact landed);
+// the read-side fixture removes the race instead of assuming it away.
 func TestDepositCommitUnknownOutcomeRereadsDB(t *testing.T) {
 	dsn := startIndexerPostgres(t)
-	pool, drop := logscanOpenCommitDropPool(t, dsn)
+	pool, drop := logscanOpenCompletionDropPool(t, dsn)
 	defer pool.Close()
 	ctx := context.Background()
 
@@ -1123,8 +1143,8 @@ func TestDepositCommitUnknownOutcomeRereadsDB(t *testing.T) {
 	if err := sc.commitDepositUnit(ctx, lease, unit, batch, captured, 10, 20, rcap); err != nil {
 		t.Fatalf("uncertain commit = %v, want nil after the durable re-read", err)
 	}
-	if got := drop.dropped.Load(); got != 1 {
-		t.Fatalf("commit drops = %d, want exactly 1 (fault injection did not fire)", got)
+	if d, a := drop.dropped.Load(), drop.achieved.Load(); d != 1 || a != 1 {
+		t.Fatalf("commit-drop counters = (dropped=%d, achieved=%d), want (1, 1): the injection must fire exactly once and the wire completion pair must be observed before the reply is dropped", d, a)
 	}
 	if _, _, next, ok := depositCheckpointState(t, ctx, pool, cfg.ChainID); !ok || next != 21 {
 		t.Fatalf("checkpoint next = %d (ok=%v), want 21 after the lost reply", next, ok)

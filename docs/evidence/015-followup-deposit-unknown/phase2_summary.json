@@ -1,0 +1,74 @@
+[
+  {
+    "group": "default",
+    "n": 60,
+    "immediate_visible": 41,
+    "committed_visible": 60,
+    "never_visible": 0,
+    "late_visible": 0,
+    "recvq_positive_at_close": 0,
+    "commit_err_texts": {
+      "conn closed": 60
+    },
+    "trigger_frames": {
+      "510000000b636f6d6d697400": 60
+    },
+    "commit_dur_us_p50": 102,
+    "immediate_at_us_p50": 784,
+    "settle_at_us_p50": 836
+  },
+  {
+    "group": "linger0",
+    "n": 60,
+    "immediate_visible": 47,
+    "committed_visible": 60,
+    "never_visible": 0,
+    "late_visible": 0,
+    "recvq_positive_at_close": 0,
+    "commit_err_texts": {
+      "conn closed": 60
+    },
+    "trigger_frames": {
+      "510000000b636f6d6d697400": 60
+    },
+    "commit_dur_us_p50": 108,
+    "immediate_at_us_p50": 841,
+    "settle_at_us_p50": 865
+  },
+  {
+    "group": "lingerPositive",
+    "n": 60,
+    "immediate_visible": 60,
+    "committed_visible": 60,
+    "never_visible": 0,
+    "late_visible": 0,
+    "recvq_positive_at_close": 0,
+    "commit_err_texts": {
+      "conn closed": 60
+    },
+    "trigger_frames": {
+      "510000000b636f6d6d697400": 60
+    },
+    "commit_dur_us_p50": 708,
+    "immediate_at_us_p50": 1448,
+    "settle_at_us_p50": 1448
+  },
+  {
+    "group": "linger0AfterReply",
+    "n": 60,
+    "immediate_visible": 60,
+    "committed_visible": 60,
+    "never_visible": 0,
+    "late_visible": 0,
+    "recvq_positive_at_close": 60,
+    "commit_err_texts": {
+      "conn closed": 60
+    },
+    "trigger_frames": {
+      "510000000b636f6d6d697400": 60
+    },
+    "commit_dur_us_p50": 728,
+    "immediate_at_us_p50": 1430,
+    "settle_at_us_p50": 1430
+  }
+]

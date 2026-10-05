@@ -1,0 +1,20 @@
+[
+  {
+    "group": "default(original)",
+    "n": 60,
+    "immediate_visible": 60,
+    "committed_visible": 60,
+    "never_visible": 0,
+    "late_visible": 0,
+    "recvq_positive_at_close": 0,
+    "commit_err_texts": {
+      "nil": 60
+    },
+    "trigger_frames": {
+      "510000000b636f6d6d697400": 60
+    },
+    "commit_dur_us_p50": 0,
+    "immediate_at_us_p50": 0,
+    "settle_at_us_p50": 38726
+  }
+]
