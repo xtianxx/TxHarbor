@@ -1,0 +1,111 @@
+pgfull4 运行归档清单（自包含审计记录）
+=======================================
+
+归档对象
+- 归档文件:   docs/evidence/015-fix-session-census/pgfull4_pg-integration.jsonl.gz（gzip -9）
+- 原件:       /tmp/r2lab/run_pgfull4/pg-integration.jsonl（宿主留存原件；本归档为其 gzip 副本）
+- 原件 sha256: 706b0c7427aafdb543f8e14fd2453c43ee46cccd99374a082ec1bf598f1101c4
+- 归档 sha256: 4b2aaeef2f7f5fca9a941d17695ba8037b82c8b258161ffa18f63ee52456643a
+- 原件字节数: 5857955；归档字节数: 452127；原件行数: 23625
+- 校验（解压后须与原件哈希一致）:
+    gzip -dc pgfull4_pg-integration.jsonl.gz | sha256sum
+    → 706b0c7427aafdb543f8e14fd2453c43ee46cccd99374a082ec1bf598f1101c4
+
+统计口径与重算（归档目的：3901/7/3 可独立重算）
+- 口径: 仅计 test 级终态事件——记录含非空 "Test" 且 "Action" ∈ {pass, fail, skip}；
+  父测试与子测试（含 "/" 的子名）各计一次（不折叠父/子）。
+- 命令 A（python3）:
+    gzip -dc pgfull4_pg-integration.jsonl.gz | python3 -c "import json,sys,collections; c=collections.Counter(e['Action'] for e in map(json.loads,sys.stdin) if e.get('Test') and e['Action'] in ('pass','fail','skip')); print('pass=%d fail=%d skip=%d' % (c['pass'],c['fail'],c['skip']))"
+  期望输出: pass=3901 fail=7 skip=3
+- 命令 B（jq 等价）:
+    gzip -dc pgfull4_pg-integration.jsonl.gz | jq -r 'select((.Test // "") != "" and (.Action=="pass" or .Action=="fail" or .Action=="skip")) | .Action' | sort | uniq -c
+  期望输出: 7 fail / 3901 pass / 3 skip（各一行）
+- 折叠口径: 7 个 test 级失败折叠父/子后为 5 个独立故障、4 个包
+  （3×*MigrationHistoryUntouched；events TestPublisherCrashPointMatrix 父/子=1 个；signer TestSignerLegalPathH5 父/子=1 个）。
+  逐项分类见 pgfull4_summary.txt。
+- 包级终态（30 个包的 package 级 Action∈{pass,fail,skip} 且 Test 为空；按时间排序）:
+  04:07:38.971  skip     0.001s  cmd/txharbor
+  04:07:43.847  pass     1.189s  internal/eth
+  04:07:44.914  skip     0.000s  internal/faultdrill
+  04:07:44.915  skip     0.000s  internal/perf
+  04:07:44.928  pass     0.014s  internal/logx
+  04:07:44.956  pass     0.042s  internal/config
+  04:07:44.959  pass     0.045s  internal/ratelimit
+  04:07:45.157  pass     0.242s  internal/metrics
+  04:07:45.160  skip     0.000s  internal/recovery/controlstore/schema
+  04:07:45.160  skip     0.000s  internal/recovery/sources
+  04:07:45.215  pass     0.301s  internal/cache
+  04:07:45.217  skip     0.000s  internal/testutil
+  04:08:15.863  pass    33.205s  internal/health
+  04:08:15.875  skip     0.000s  migrations
+  04:08:15.930  pass     0.055s  scripts/drillcoverage
+  04:08:36.238  pass    55.863s  internal/jointwire
+  04:09:28.963  pass   113.045s  internal/app/reconcileadmin
+  04:10:20.941  pass   169.757s  internal/db
+  04:10:32.377  fail   180.001s  internal/withdrawal
+  04:11:54.385  pass   269.909s  internal/indexer
+  04:12:48.891  pass   328.731s  internal/txlifecycle
+  04:13:00.631  pass   340.759s  internal/reconciliation
+  04:13:23.823  pass   366.225s  internal/recovery/controlstore
+  04:13:40.809  pass   383.259s  internal/app/recoveryadmin
+  04:13:44.997  fail   387.447s  internal/events
+  04:13:47.526  fail   389.976s  internal/nonce
+  04:13:53.123  fail   397.628s  internal/signer
+  04:14:06.266  pass   411.016s  internal/execution
+  04:14:11.132  pass   415.882s  internal/app
+  04:21:23.358  pass   880.208s  internal/recovery
+  → 包级 fail=4: internal/withdrawal、internal/events、internal/nonce、internal/signer；其余 26 包 pass/skip。
+
+终端摘录（jsonl 末尾 3 行原文）
+  {"Time":"2026-10-05T04:21:23.34550787Z","Action":"output","Package":"github.com/xtianxx/txharbor/internal/recovery","Output":"PASS\n"}
+  {"Time":"2026-10-05T04:21:23.358349669Z","Action":"output","Package":"github.com/xtianxx/txharbor/internal/recovery","Output":"ok  \tgithub.com/xtianxx/txharbor/internal/recovery\t880.208s\n"}
+  {"Time":"2026-10-05T04:21:23.358395038Z","Action":"pass","Package":"github.com/xtianxx/txharbor/internal/recovery","Elapsed":880.208}
+- go_test_exit: 未留存（运行退出码未留存）。jsonl 内 grep -c 'go_test_exit' = 0；宿主 /tmp/r2lab/pgfull4.log 为 0 字节
+  （一次性容器命令在容器内将 go test 输出重定向进 jsonl；脚本尾部 echo 因 sh -e 在 go test 非零退出时未执行）。
+  宿主包装退出码 PGFULL4_EXIT=1 仅见于发起运行的本地交互会话记录（非仓库留存）；无独立直接留存可核验 go test 退出码。
+
+运行参数（来源：运行发起命令，2026-10-05T04:07:01Z 的本地交互会话记录；命令原文见文末）
+- 方式:            一次性 docker run（--rm --init --network host --user 0:0 --group-add 989；非 run_suite.sh）
+- 运行器容器镜像:  postgres@sha256:4ef4dbc939d61acea57712655ddb4b4ab27419c913f94cca0cd57cb3ea3c2280
+                    （go test 的执行环境，--entrypoint /bin/sh；该 digest 本机 docker 内现存）
+- 容器内命令:      cd /workspace && go test -json -tags integration -count=1 -timeout 60m ./...
+                    输出重定向: > /pg-evidence/pg-integration.jsonl（即本归档原件）
+- 挂载:            /home/dream/product_env/TxHarbor → /workspace 及同源第二挂载（均 read-only）、Go 工具链、
+                    模块缓存、宿主 docker CLI、宿主 docker.sock、$RUN_DIR→/pg-evidence、$SCRATCH→/pg-scratch
+- 环境变量:        CI=true、TXHARBOR_REQUIRE_DOCKER=1、TESTCONTAINERS_HOST_OVERRIDE=127.0.0.1、
+                    TESTCONTAINERS_DOCKER_SOCKET_OVERRIDE=/var/run/docker.sock、GOROOT=/host-go、
+                    GOMODCACHE=/host-gomodcache、CGO_ENABLED=0、GOCACHE=/pg-scratch/gocache、TMPDIR=/pg-scratch/tmp、
+                    HOME=/pg-scratch/home、DOCKER_HOST=unix:///var/run/docker.sock、
+                    PATH=/usr/lib/postgresql/18/bin:/host-go/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+- 测试内 PG 容器:  postgres:18.6-trixie（jsonl 内全部 PG 容器创建均以该 tag 引用：509 次；
+                    "postgres@sha256:…" 形式 0 次）。运行期该 tag 解析到的 digest 未随 jsonl 留存（未留存）。
+- 时间窗:          2026-10-05T04:07:38.971016764Z（首事件，package start）– 2026-10-05T04:21:23.358395038Z（末事件）
+- 工作树/树指纹:   树指纹未留存。时间线约束：运行期间工作树为分支修复后、提交 a385b9f（2026-10-05T04:23:52Z）之前的
+                    未提交状态，运行结束约 2.5 分钟后建立提交；旁证 = pgfix1（同工作树定向运行）与本源 jsonl 内
+                    四项新增判别力测试（TestBkpProbeExit*）均 PASS。未做逐字节树绑定，不可逐字节追溯。
+
+发起命令原文（留存副本；出处：本机交互会话转录
+/home/dream/.omp/agent/sessions/-product_env-TxHarbor/2026-10-04T01-33-38-483Z_01a1048b-9333-7696-aee2-e252d40df319.jsonl）
+------------------------------------------------------------------------------
+# 一次完整 PG 集成（全仓 ./...，与 CI 同并发条件 -p 默认）——按授权一次，不循环。后台跑（~15min）
+LABEL=pgfull4; RUN_DIR=/tmp/r2lab/run_$LABEL; SCRATCH=$RUN_DIR/scratch; mkdir -p $RUN_DIR $SCRATCH/gocache $SCRATCH/tmp $SCRATCH/home
+docker run --rm --init --network host --user 0:0 --group-add 989 \
+  --mount type=bind,src=/home/dream/product_env/TxHarbor,dst=/workspace,readonly \
+  --mount type=bind,src=/home/dream/product_env/TxHarbor,dst=/home/dream/product_env/TxHarbor,readonly \
+  --mount type=bind,src=/usr/local/go,dst=/host-go,readonly \
+  --mount type=bind,src=/home/dream/go/pkg/mod,dst=/host-gomodcache,readonly \
+  --mount type=bind,src=/usr/bin/docker,dst=/usr/bin/docker,readonly \
+  --mount type=bind,src=/var/run/docker.sock,dst=/var/run/docker.sock \
+  --mount type=bind,src=$RUN_DIR,dst=/pg-evidence --mount type=bind,src=$SCRATCH,dst=/pg-scratch \
+  -e 'PATH=/usr/lib/postgresql/18/bin:/host-go/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin' \
+  -e 'GOROOT=/host-go' -e 'GOMODCACHE=/host-gomodcache' -e 'CGO_ENABLED=0' -e 'GOCACHE=/pg-scratch/gocache' \
+  -e 'TMPDIR=/pg-scratch/tmp' -e 'HOME=/pg-scratch/home' -e 'DOCKER_HOST=unix:///var/run/docker.sock' \
+  -e 'TESTCONTAINERS_HOST_OVERRIDE=127.0.0.1' -e 'TESTCONTAINERS_DOCKER_SOCKET_OVERRIDE=/var/run/docker.sock' \
+  -e 'CI=true' -e 'TXHARBOR_REQUIRE_DOCKER=1' \
+  --entrypoint /bin/sh postgres@sha256:4ef4dbc939d61acea57712655ddb4b4ab27419c913f94cca0cd57cb3ea3c2280 -ec '
+    unset PGDATA PG_MAJOR PG_VERSION
+    cd /workspace
+    go test -json -tags integration -count=1 -timeout 60m ./... > /pg-evidence/pg-integration.jsonl
+    echo "go_test_exit=$?"
+  ' > /tmp/r2lab/pgfull4.log 2>&1; echo "PGFULL4_EXIT=$?"; tail -2 /tmp/r2lab/pgfull4.log
+------------------------------------------------------------------------------

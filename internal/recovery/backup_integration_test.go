@@ -610,6 +610,13 @@ func bkpRewriteDSNArg(arg string) string {
 const (
 	bkpProbeExitTimeout  = 10 * time.Second
 	bkpProbeExitInterval = 25 * time.Millisecond
+
+	// bkpTargetSessionDumpTimeout is the dump's own short, explicit budget. The
+	// dump is best-effort evidence appended to an already-decided error, so a
+	// blocked diagnostic round trip must never extend the bounded decision
+	// (which runs inside the rebuild lock's acceptance transaction) nor replace
+	// its primary error.
+	bkpTargetSessionDumpTimeout = 2 * time.Second
 )
 
 // bkpAwaitProbeExit performs bounded lifecycle synchronization on the test's
@@ -620,41 +627,75 @@ const (
 // waits for that one identity only: it never excludes by role or
 // application_name, never terminates other sessions, and never weakens the
 // authoritative target-wide census that follows it.
+//
+// The window is enforced on the wire, not only between round trips: every pool
+// acquisition, QueryRow/Scan and poll sleep runs on a context derived from the
+// caller's with the same timeout, and the caller's cancellation propagates into
+// it. A hung connect/acquire/query therefore ends the wait at the deadline with
+// the probe tuple and the remaining-session diagnostics instead of pinning the
+// caller's rebuild lock forever.
 func bkpAwaitProbeExit(ctx context.Context, admin *pgxpool.Pool, targetDB string, probePID int32, probeBackendStart time.Time, timeout, interval time.Duration) error {
+	if err := ctx.Err(); err != nil {
+		return fmt.Errorf("probe exit wait canceled: %w", err)
+	}
+	waitCtx, cancelWait := context.WithTimeout(ctx, timeout)
+	defer cancelWait()
 	deadline := time.Now().Add(timeout)
 	for {
 		var n int
-		if err := admin.QueryRow(ctx,
+		if err := admin.QueryRow(waitCtx,
 			`SELECT count(*) FROM pg_stat_activity WHERE pid=$1 AND backend_start=$2 AND datname=$3`,
 			probePID, probeBackendStart, targetDB).Scan(&n); err != nil {
-			return fmt.Errorf("observe probe exit: %w", err)
+			switch {
+			case ctx.Err() != nil:
+				return fmt.Errorf("probe exit wait canceled: %w", ctx.Err())
+			case waitCtx.Err() != nil:
+				return bkpProbeExitTimedOut(ctx, admin, targetDB, probePID, probeBackendStart, timeout)
+			default:
+				return fmt.Errorf("observe probe exit: %w", err)
+			}
 		}
 		if n == 0 {
 			return nil
 		}
-		if time.Now().After(deadline) {
-			return fmt.Errorf("probe backend (pid=%d backend_start=%s) still visible on %s after %s: %s",
-				probePID, probeBackendStart.Format(time.RFC3339Nano), targetDB, timeout,
-				bkpTargetSessionDump(ctx, admin, targetDB))
+		if !time.Now().Before(deadline) {
+			return bkpProbeExitTimedOut(ctx, admin, targetDB, probePID, probeBackendStart, timeout)
 		}
 		select {
-		case <-ctx.Done():
-			return fmt.Errorf("probe exit wait canceled: %w", ctx.Err())
+		case <-waitCtx.Done():
+			if ctxErr := ctx.Err(); ctxErr != nil {
+				return fmt.Errorf("probe exit wait canceled: %w", ctxErr)
+			}
+			return bkpProbeExitTimedOut(ctx, admin, targetDB, probePID, probeBackendStart, timeout)
 		case <-time.After(interval):
 		}
 	}
 }
 
+// bkpProbeExitTimedOut reports the bounded window's expiry. The probe tuple and
+// the timeout dominate the message; the best-effort session dump is appended and
+// carries its own short budget, and a failed/blocked dump is reported inline as
+// an additional line instead of masking the primary timeout.
+func bkpProbeExitTimedOut(ctx context.Context, admin *pgxpool.Pool, targetDB string, probePID int32, probeBackendStart time.Time, timeout time.Duration) error {
+	return fmt.Errorf("probe backend (pid=%d backend_start=%s) still visible on %s after %s: %s",
+		probePID, probeBackendStart.Format(time.RFC3339Nano), targetDB, timeout,
+		bkpTargetSessionDump(ctx, admin, targetDB))
+}
+
 // bkpTargetSessionDump renders identifying diagnostics for every remaining
-// session on the target database (server-side columns only).
+// session on the target database (server-side columns only). It runs on its own
+// short budget derived from the caller's context, so a blocked diagnostic query
+// cannot extend a bounded decision or hold the caller's rebuild lock.
 func bkpTargetSessionDump(ctx context.Context, admin *pgxpool.Pool, targetDB string) string {
-	rows, err := admin.Query(ctx,
+	dumpCtx, cancelDump := context.WithTimeout(ctx, bkpTargetSessionDumpTimeout)
+	defer cancelDump()
+	rows, err := admin.Query(dumpCtx,
 		`SELECT pid, COALESCE(backend_start::text,''), COALESCE(application_name,''),
 		        COALESCE(usename,''), COALESCE(state,''), COALESCE(wait_event_type,''), COALESCE(wait_event,''),
 		        COALESCE(left(query,120),'')
 		 FROM pg_stat_activity WHERE datname=$1 ORDER BY pid`, targetDB)
 	if err != nil {
-		return fmt.Sprintf("(session dump unavailable: %v)", err)
+		return fmt.Sprintf("\n  (session dump unavailable: %v)", err)
 	}
 	defer rows.Close()
 	var b strings.Builder
@@ -662,10 +703,15 @@ func bkpTargetSessionDump(ctx context.Context, admin *pgxpool.Pool, targetDB str
 		var pid int32
 		var start, app, user, state, waitType, waitEvent, query string
 		if err := rows.Scan(&pid, &start, &app, &user, &state, &waitType, &waitEvent, &query); err != nil {
-			return fmt.Sprintf("(session dump scan: %v)", err)
+			return fmt.Sprintf("\n  (session dump scan: %v)", err)
 		}
 		fmt.Fprintf(&b, "  remaining session pid=%d backend_start=%s application_name=%q usename=%q state=%q wait_event=(%s,%s) query=%q\n",
 			pid, start, app, user, state, waitType, waitEvent, query)
+	}
+	if err := rows.Err(); err != nil {
+		// The dump was cut short by its own budget (or the caller's context):
+		// report the truncation instead of silently presenting partial evidence.
+		fmt.Fprintf(&b, "  (session dump incomplete: %v)\n", err)
 	}
 	if b.Len() == 0 {
 		return "  (no remaining sessions on dump)"
