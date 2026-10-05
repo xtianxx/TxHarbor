@@ -30,6 +30,15 @@ exactly: raw write, `bytes.Contains(b, "commit")` trigger, arm CAS, close client
 (run.log / run2.log / run3.log); the primary artifacts below are from run3 which also added the
 delayed-read kernel scenarios. No production/test file was modified; the temp file is deleted.
 
+Container context (P2-4 wording limit): the shared testcontainers postgres instance runs with
+`fsync=off` (the module default; the repo only appends `max_connections`). Every "committed/visible"
+statement below therefore means the target transaction completed and is observable by another
+connection — it is not evidence of power-loss or media durability, and "durable" below is used only
+in that completion/visibility sense.
+
+CI-attribution limit (P2-3 wording sync): statements about why CI behaved as it did are marked
+`[INFERENCE]`; the controlled data here prove the local completion-vs-reread race only.
+
 Commands: `go test -tags integration -count=1 -timeout 25m -run 'TestZZWpa' -v ./internal/indexer/`
 
 ### Phase 1 — kernel close semantics (in-process TCP, no PostgreSQL), 3 reps each
@@ -66,16 +75,19 @@ all 180 default/linger0/lingerPositive iterations (the reply cannot and does not
 Replicates (default / linger0 settled-visible, immediate-visible):
 run1 60/60 & 60/60 (immediate 40, 44); run2 60/60 & 60/60 (immediate 45, 45); run3 60/60 & 60/60
 (immediate 41, 47). Pooled: default-path commits 180/180; forced-RST commits 180/180; no late-visible
-rows (final re-check); no never-visible rows.
+rows (final re-check); no never-visible rows. Archive boundary: run1/run2 survive only as these
+aggregate numbers (their raw logs were not archived this round); run3's per-iteration JSONL is the
+on-file artifact (`phase2_iterations.jsonl`; phase 3: `phase3_production.jsonl`).
 
-Race timing in the default group (the CI signature): 19/60 immediate misses. In every miss the
+Race timing in the default group (the CI failure's signature): 19/60 immediate misses. In every miss the
 immediate query completed 0.65–0.97 ms after the COMMIT write, while the commit became visible
 6.56–7.65 ms after it; 41/60 hits completed at ~0.78 ms (commit fast path ~0.8 ms). Same distribution
 in the linger0 misses. `lingerPositive` close blocks until the connection closes (server finished),
 so the re-read always follows completion (immediate 60/60).
 
 ### Phase 3 — production path (`commitDepositUnit`, first unit 10→20) with the ORIGINAL
-`logscanCommitDrop` type (recording conn underneath), 60 iterations
+`logscanCommitDrop` type (recording conn underneath), 60 iterations — POSITIVE CASE
+(60/60 success on the production path; not a failure reproduction)
 
 - prodErr `nil` 60/60 (production `commitResultVisible` saw the advance every time);
 - committed visible 60/60; trigger frame `Q...commit` 60/60; dropped = 1 each; recvq at commit write 0.
@@ -90,7 +102,7 @@ process`, which are artifacts of pgx's own `asyncClose` cancel request after the
 they are evidence that pgx observed the close, not of a server-side abort. Log channels were therefore
 not discriminating; commit visibility is.)
 
-## Verdict: hypothesis (2)/(3) REFUTED as the CI mechanism; race CONFIRMED
+## Verdict: hypothesis (2)/(3) REFUTED; completion-vs-reread race CONFIRMED (local)
 
 - The default injector never sends RST: FIONREAD at close was 0 in all 240+60 measured iterations
   (structurally: the reply can only exist after the server sent CommandComplete, i.e. after commit
@@ -98,17 +110,23 @@ not discriminating; commit visibility is.)
 - Even a forced RST immediately after the COMMIT write does not roll the commit back: 180/180
   committed across three replicates (and the kernel delivers already-queued COMMIT bytes before the
   reset error, phase-1 delayed-read).
-- The only close that can RST (unread data) RSTs *after* the reply — i.e. after the commit was
-  already durable; that exact scenario keeps the commit (180/180).
-- The reproduced CI signature is the fsync/commit-completion vs immediate-re-read race: re-read at
-  ~0.7 ms vs commit completion at ~7 ms in 25–33 % of local iterations, commit always landing; on a
-  loaded CI runner the slow-tail dominates. This matches the repo's existing note ("fsync-vs-reread
-  race diagnosed on the T028 CI failure" in logscan_integration_test.go).
+- The only close that can RST (unread data) RSTs *after* the reply — i.e. after the commit had
+  already completed and become visible; that exact scenario keeps the commit (180/180). (Per the
+  container caveat: completion/visibility evidence, not a media-durability claim.)
+- The controlled data reproduce the CI *signature* locally: the immediate-reread miss is the
+  completion-vs-reread race (re-read at ~0.7 ms vs commit visible at ~7 ms in 25–33 % of local
+  iterations; on this machine the commit always completed). CI run 37274084298 itself recorded only
+  the pgx `conn closed` error and `progress unchanged` — no in-run latency or visibility measurement
+  — so the CI-side explanation (a slower fsync/visibility tail on the loaded runner) is
+  **[INFERENCE]**, not an observation. The repo's existing note ("fsync-vs-reread race diagnosed on
+  the T028 CI failure" in logscan_integration_test.go) is likewise contextual, not a proof for this
+  run.
 - Fix direction supported: `logscanOpenCompletionDropPool` withholds the reply until the
-  CommandComplete(COMMIT)+ReadyForQuery('I') pair is observed, so any client error implies the commit
-  is already durable and the owning re-read is deterministic. The write-side injector's advertised
-  promise ("the forwarded COMMIT still lands") is empirically true (all 360 default-path commits
-  landed) — but it is not *timely*, which is what the test asserts.
+  CommandComplete(COMMIT)+ReadyForQuery('I') pair is observed, so any client error implies the target
+  transaction's COMMIT already completed and is observable (fsync=off container), and the owning
+  re-read is deterministic. The write-side injector's advertised promise ("the forwarded COMMIT still
+  lands") is empirically true in the completion/visibility sense (all 360 default-path commits
+  completed and were visible) — but it is not *timely*, which is what the test asserts.
 
 ## Evidence inventory (/tmp/wpa-rst)
 
@@ -116,6 +134,8 @@ not discriminating; commit visibility is.)
 - phase2_iterations.jsonl, phase2_summary.json — 240 wire-level iterations (run3)
 - phase3_production.jsonl, phase3_summary.json — 60 production-path iterations (original injector)
 - container_log_deltas_phase2.json / _phase3.json, container_logs_tail_phase{1,2,3}.txt
-- run.log, run2.log, run3.log — three full replicate runs (phase2 log lines carry per-iteration data)
+- run.log, run2.log, run3.log — three full replicate runs (phase2 log lines carry per-iteration
+  data); run1/run2 raw logs were not archived this round (see the Replicates archive boundary above),
+  run3's per-iteration JSONL is on file (`phase2_iterations.jsonl`, `phase3_production.jsonl`)
 - raw_rst_fin_probe.txt — independent raw-socket RST/FIN confirmation
 - ci_job.log — full CI job log of run 37274084298 (job 111647171009); failure block at line ~1568

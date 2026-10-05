@@ -1106,20 +1106,35 @@ func TestDepositCommitEmptyIntervalAdvances(t *testing.T) {
 // the wrapper withholds the backend's reply only until it observes the wire
 // completion pair — CommandComplete(tag COMMIT) followed by ReadyForQuery('I')
 // — and then closes the connection, handing pgx a connection error. That wire
-// pair is the server-side proof the commit landed, so "reply lost, commit
-// durable" holds deterministically and the owning test's immediate re-read
-// always observes the advance.
+// pair proves the target transaction's COMMIT completed and is observable by
+// other connections, so "reply lost, commit completed" holds deterministically
+// and the owning test's immediate re-read always observes the advance. The
+// test container runs with fsync=off (the testcontainers postgres default; the
+// harness only appends -c max_connections), so this proves commit completion
+// and cross-connection visibility, not durability against power loss or media
+// failure.
+//
+// The fixture consumes its single arm on the first "commit"-bearing request
+// write; the per-test database name (idx_t_testdepositcommitunknownoutcomerereadsdb_99)
+// also carries that lowercase marker, so a startup-packet mis-match cannot be
+// excluded in principle. It is fail-closed: a window without the completion
+// pair resolves achieved==0, and the counter assertion below fails the test
+// instead of faking a dropped reply.
 //
 // The legacy write-side injector (logscanOpenCommitDropPool) must not be used
 // here: its controlled forensics (main CI run 37274084298 follow-up, 780 armed
 // commits) showed the close sends a FIN (client receive queue empty), forced
-// RSTs (SetLinger(0)) never rolled back a commit (180/180 landed), and the
-// commit always became durable — but the test's immediate durable re-read ran
-// 0.65-0.97ms after the COMMIT write while the row became visible
-// 6.56-7.65ms after it (local miss rate 25-33%). That completion-vs-reread
-// race, amplified by the CI runner's slower fsync tail, is what failed
-// 37274084298 ("progress unchanged" after a commit that had in fact landed);
-// the read-side fixture removes the race instead of assuming it away.
+// RSTs (SetLinger(0)) never rolled back a commit (180/180 committed and
+// visible in the fsync=off container), and the commit always completed — but
+// the test's immediate re-read ran 0.65-0.97ms after the COMMIT write while
+// the row became visible 6.56-7.65ms after it (local miss rate 25-33%,
+// controlled local data only; run1/run2 raw logs were not archived this round,
+// only run3's per-iteration JSONL). CI run 37274084298 itself recorded only
+// "conn closed" plus "progress unchanged", with no in-run latency or
+// visibility measurement; attributing that failure to a slower CI fsync tail
+// is [INFERENCE], not observed fact, and the local race is what the controlled
+// data prove. The read-side fixture removes the race instead of assuming it
+// away.
 func TestDepositCommitUnknownOutcomeRereadsDB(t *testing.T) {
 	dsn := startIndexerPostgres(t)
 	pool, drop := logscanOpenCompletionDropPool(t, dsn)
