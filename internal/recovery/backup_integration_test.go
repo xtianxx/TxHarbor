@@ -599,6 +599,81 @@ func bkpRewriteDSNArg(arg string) string {
 }
 
 // ---------------------------------------------------------------------------
+// Probe-exit synchronization
+// ---------------------------------------------------------------------------
+
+// Probe-exit synchronization bounds: the local exit-window experiment
+// (docs/evidence/015-fix-session-census/) measured a p95 exit lag of ~27ms and
+// a max of ~28ms over 300 Close->observe iterations; 10s stays orders of
+// magnitude above the observed window while bounded, and 25ms matches the
+// fixture's existing drain-poll cadence (waitForLockWaiter).
+const (
+	bkpProbeExitTimeout  = 10 * time.Second
+	bkpProbeExitInterval = 25 * time.Millisecond
+)
+
+// bkpAwaitProbeExit performs bounded lifecycle synchronization on the test's
+// own just-closed probe backend: it polls until the exact (pid, backend_start)
+// tuple is absent from pg_stat_activity. PostgreSQL has no wait-for-foreign-
+// backend primitive and pgx Close returns no server-side terminal event (it is
+// a client-local close), so a bounded poll is the strongest available sync. It
+// waits for that one identity only: it never excludes by role or
+// application_name, never terminates other sessions, and never weakens the
+// authoritative target-wide census that follows it.
+func bkpAwaitProbeExit(ctx context.Context, admin *pgxpool.Pool, targetDB string, probePID int32, probeBackendStart time.Time, timeout, interval time.Duration) error {
+	deadline := time.Now().Add(timeout)
+	for {
+		var n int
+		if err := admin.QueryRow(ctx,
+			`SELECT count(*) FROM pg_stat_activity WHERE pid=$1 AND backend_start=$2 AND datname=$3`,
+			probePID, probeBackendStart, targetDB).Scan(&n); err != nil {
+			return fmt.Errorf("observe probe exit: %w", err)
+		}
+		if n == 0 {
+			return nil
+		}
+		if time.Now().After(deadline) {
+			return fmt.Errorf("probe backend (pid=%d backend_start=%s) still visible on %s after %s: %s",
+				probePID, probeBackendStart.Format(time.RFC3339Nano), targetDB, timeout,
+				bkpTargetSessionDump(ctx, admin, targetDB))
+		}
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("probe exit wait canceled: %w", ctx.Err())
+		case <-time.After(interval):
+		}
+	}
+}
+
+// bkpTargetSessionDump renders identifying diagnostics for every remaining
+// session on the target database (server-side columns only).
+func bkpTargetSessionDump(ctx context.Context, admin *pgxpool.Pool, targetDB string) string {
+	rows, err := admin.Query(ctx,
+		`SELECT pid, COALESCE(backend_start::text,''), COALESCE(application_name,''),
+		        COALESCE(usename,''), COALESCE(state,''), COALESCE(wait_event_type,''), COALESCE(wait_event,''),
+		        COALESCE(left(query,120),'')
+		 FROM pg_stat_activity WHERE datname=$1 ORDER BY pid`, targetDB)
+	if err != nil {
+		return fmt.Sprintf("(session dump unavailable: %v)", err)
+	}
+	defer rows.Close()
+	var b strings.Builder
+	for rows.Next() {
+		var pid int32
+		var start, app, user, state, waitType, waitEvent, query string
+		if err := rows.Scan(&pid, &start, &app, &user, &state, &waitType, &waitEvent, &query); err != nil {
+			return fmt.Sprintf("(session dump scan: %v)", err)
+		}
+		fmt.Fprintf(&b, "  remaining session pid=%d backend_start=%s application_name=%q usename=%q state=%q wait_event=(%s,%s) query=%q\n",
+			pid, start, app, user, state, waitType, waitEvent, query)
+	}
+	if b.Len() == 0 {
+		return "  (no remaining sessions on dump)"
+	}
+	return strings.TrimRight(b.String(), "\n")
+}
+
+// ---------------------------------------------------------------------------
 // Small helpers
 // ---------------------------------------------------------------------------
 
@@ -1417,6 +1492,12 @@ WHERE instance_id=$1 AND actor='deploy:executor' AND action=$2 AND result='ok'
 		if err != nil {
 			return fmt.Errorf("connect to recreated target baseline: %w", err)
 		}
+		var probePID int32
+		var probeBackendStart time.Time
+		if err := fresh.QueryRow(ctx, `SELECT pg_backend_pid(), backend_start FROM pg_stat_activity WHERE pid = pg_backend_pid()`).Scan(&probePID, &probeBackendStart); err != nil {
+			_ = fresh.Close(ctx)
+			return fmt.Errorf("observe recreated target probe identity: %w", err)
+		}
 		var userTables int
 		err = fresh.QueryRow(ctx, `SELECT count(*) FROM pg_class
 WHERE relkind='r' AND relnamespace='public'::regnamespace AND relname NOT LIKE 'pg_%'`).Scan(&userTables)
@@ -1424,9 +1505,22 @@ WHERE relkind='r' AND relnamespace='public'::regnamespace AND relname NOT LIKE '
 		if err != nil || closeErr != nil || userTables != 0 {
 			return fmt.Errorf("recreated target is not an observed empty baseline: user_tables=%d query_err=%v close_err=%v", userTables, err, closeErr)
 		}
+		// pgx Close is client-local (Terminate + flush + socket close; no
+		// server acknowledgement), so the probe's backend may still be visible
+		// in pg_stat_activity after Close returns. Synchronize on the probe's
+		// own (pid, backend_start) identity with a bounded wait, then run the
+		// authoritative target-wide zero-session census unchanged. This only
+		// ever waits for OUR just-closed probe; any other session - unknown
+		// writer, old attempt tag, recovery tool - is not absorbed by this
+		// wait and still fails the census below.
+		if err := bkpAwaitProbeExit(ctx, f.admin, target.name, probePID, probeBackendStart,
+			bkpProbeExitTimeout, bkpProbeExitInterval); err != nil {
+			return fmt.Errorf("probe session did not leave the recreated target: %w", err)
+		}
 		var postSessions int
 		if err := f.admin.QueryRow(ctx, `SELECT count(*) FROM pg_stat_activity WHERE datname=$1`, target.name).Scan(&postSessions); err != nil || postSessions != 0 {
-			return fmt.Errorf("recreated target is not empty of sessions: count=%d err=%v", postSessions, err)
+			return fmt.Errorf("recreated target is not empty of sessions: count=%d err=%v\n%s",
+				postSessions, err, bkpTargetSessionDump(ctx, f.admin, target.name))
 		}
 		emptyBaseline = true
 		operationID := "bkp-fixture-interrupted-rebuild-" + backupID

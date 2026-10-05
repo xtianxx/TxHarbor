@@ -1,0 +1,19 @@
+pgfull4 (015-fix-rebuild-session-census tree, one full PG integration run, CI-equivalent conditions)
+test-level: pass=3901 fail=7 skip=3
+
+015-relevant packages: ALL PASS (internal/recovery, internal/recovery/controlstore, internal/app/recoveryadmin)
+
+failures (all outside 015 scope, all with historical precedent):
+  internal/withdrawal TestWithdrawalMigrationHistoryUntouched
+  internal/signer TestSignerMigrationHistoryUntouched
+  internal/signer TestSignerLegalPathH5/expired_grant_blocks_delivery_after_a_successful_sign
+  internal/signer TestSignerLegalPathH5
+  internal/events TestPublisherCrashPointMatrix/published_before_ack
+  internal/events TestPublisherCrashPointMatrix
+  internal/nonce TestNonceMigrationHistoryUntouched
+
+classification:
+- 3x *MigrationHistoryUntouched: 'git' not in runner container PATH (environment gap; same class as main attempt1's runner-env failures; not a code regression)
+- events TestPublisherCrashPointMatrix/published_before_ack: known Kafka crash-point timing flake (historical: failed in earlier full runs, passes on isolated re-run)
+- signer TestSignerLegalPathH5/expired_grant_blocks_delivery_after_a_successful_sign: isolated timing flake ('error <nil> is not a *signer.RefusalError'); unrelated to this branch (no signer/recovery production changes)
+- per authorization: one full run only, no rerun-to-green; results preserved as-is
