@@ -1,0 +1,34 @@
+2026/10/05 11:52:12 github.com/testcontainers/testcontainers-go - Connected to docker: 
+  Server Version: 29.6.1
+  API Version: 1.55
+  Operating System: Ubuntu 24.04.4 LTS
+  Total Memory: 15915 MB
+  Testcontainers for Go Version: v0.44.0
+  Resolved Docker Host: unix:///var/run/docker.sock
+  Resolved Docker Socket Path: /var/run/docker.sock
+  Test SessionID: dd81668460c8e4165f6aeee477568be80e8dc5de040f2f3b4f06e64933d85c78
+  Test ProcessID: d444528d-4cd4-44e7-96c1-5f6d9f931d6e
+=== RUN   TestZZWPAProbeExitWindow
+2026/10/05 11:52:12 🐳 Creating container for image postgres:18.6-trixie
+2026/10/05 11:52:13 🐳 Creating container for image testcontainers/ryuk:0.14.0
+2026/10/05 11:52:13 ✅ Container created: ac6347f50615
+2026/10/05 11:52:13 🐳 Starting container: ac6347f50615
+2026/10/05 11:52:14 ✅ Container started: ac6347f50615
+2026/10/05 11:52:14 ⏳ Waiting for container id ac6347f50615 image: testcontainers/ryuk:0.14.0. Waiting for: all of: [log message "Started", port 8080/tcp to be listening]
+2026/10/05 11:52:14 Shell not found in container
+2026/10/05 11:52:14 🔔 Container is ready: ac6347f50615
+2026/10/05 11:52:14 ✅ Container created: a27e0c181c65
+2026/10/05 11:52:14 🐳 Starting container: a27e0c181c65
+2026/10/05 11:52:15 ✅ Container started: a27e0c181c65
+2026/10/05 11:52:15 ⏳ Waiting for container id a27e0c181c65 image: postgres:18.6-trixie. Waiting for: all of: [log message "database system is ready to accept connections" (occurrence: 2)]
+2026/10/05 11:52:17 🔔 Container is ready: a27e0c181c65
+    zz_wpa_probe_exit_window_test.go:150: ZZ_WPA_SUMMARY {"experiment":"WPA-015: pgx Close() -\u003e pg_stat_activity backend disappearance window","image":"postgres:18.6-trixie","iterations":300,"warmups":5,"count_gt0_observations":16,"pid_present_observations":16,"anomaly_datname_vs_pid":0,"errors":0,"timeouts":0,"max_lag_ms_present_case":28.14,"p50_lag_ms_present_case":27.323,"p95_lag_ms_present_case":28.14,"p50_lag_ms_all_iterations":0.789,"p95_lag_ms_all_iterations":26.844,"max_lag_ms_all_iterations":28.14,"p50_first_check_ms":0.785,"p95_first_check_ms":0.952,"lag_buckets_ms":"\u003c1ms=275 1-2ms=9 2-5ms=0 5-10ms=0 10-25ms=0 25-100ms=16 \u003e100ms=0","finished_at":"2026-10-05T11:52:21.030646606+08:00"}
+    zz_wpa_probe_exit_window_test.go:151: ZZ_WPA wrote /tmp/wpa/zz_wpa_probe_exit_window.json and .tsv
+2026/10/05 11:52:21 🐳 Stopping container: a27e0c181c65
+2026/10/05 11:52:21 ✅ Container stopped: a27e0c181c65
+2026/10/05 11:52:21 🐳 Terminating container: a27e0c181c65
+2026/10/05 11:52:21 🚫 Container terminated: a27e0c181c65
+--- PASS: TestZZWPAProbeExitWindow (9.17s)
+PASS
+ok  	github.com/xtianxx/txharbor/internal/recovery	9.319s
+GO_TEST_EXIT=0
