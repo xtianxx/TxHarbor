@@ -37,6 +37,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -116,7 +117,35 @@ const (
 	GateHold
 	// GateDown closes the listener: dials meet ECONNREFUSED (shape ①).
 	GateDown
+	// GateDrop forwards client→backend (the REAL Redis executes every
+	// command) but withholds backend replies from the client once an EVAL
+	// frame has been forwarded — pre-EVAL replies (HELLO handshake) still
+	// pass so a cold client reaches the EVAL stage. After the first withheld
+	// EVAL reply the gate optionally closes the CLIENT socket
+	// closeAfter>0 (response-loss before budget expiry) or keeps it open
+	// until the client's own deadline (closeAfter<0: hold-to-expiry control
+	// group). This is the "server executed but response lost" counterexample
+	// fixture for the budget design validation.
+	GateDrop
 )
+
+// gateCounters are cumulative, race-free event counts for evidence.
+type gateCounters struct {
+	accepts        atomic.Uint64 // conns accepted
+	evalFrames     atomic.Uint64 // EVAL frames forwarded client→backend
+	preEvalReplies atomic.Uint64 // backend replies forwarded before the EVAL (handshake)
+	droppedReplies atomic.Uint64 // backend reply chunks withheld after EVAL
+	droppedBytes   atomic.Uint64 // bytes withheld after EVAL
+}
+
+// GateCounterSnapshot is one read of the cumulative counters.
+type GateCounterSnapshot struct {
+	Accepts        uint64 `json:"accepts"`
+	EvalFrames     uint64 `json:"eval_frames"`
+	PreEvalReplies uint64 `json:"pre_eval_replies"`
+	DroppedReplies uint64 `json:"dropped_replies"`
+	DroppedBytes   uint64 `json:"dropped_bytes"`
+}
 
 // RedisGate is one scripted TCP gate over a Redis (or absent) backend.
 type RedisGate struct {
@@ -131,6 +160,13 @@ type RedisGate struct {
 	mode     GateMode
 	pairs    map[*connPair]struct{}
 	closed   bool
+	// dropCloseAfter, for GateDrop: >0 closes the client socket that long
+	// after the FIRST withheld EVAL reply (close-before-expiry group);
+	// <0 keeps it open (hold-to-expiry control group).
+	dropCloseAfter time.Duration
+	// counters accumulate gate events for evidence (accepts, EVAL frames
+	// forwarded, replies passed vs withheld).
+	counters gateCounters
 }
 
 // connPair is one proxied connection: the client-facing socket plus (in
@@ -148,6 +184,9 @@ type connPair struct {
 	// alive and does NOT close abort — it flips `holding` and closes the
 	// backend copy loops, then the pair's reader goes into the swallow loop.
 	abort chan struct{}
+	// evalSeen marks, for GateDrop, that an EVAL frame was forwarded to the
+	// backend: pair replies pass through until it flips, then are withheld.
+	evalSeen atomic.Bool
 	// once guards the idempotent teardown of one pair.
 	once sync.Once
 }
@@ -315,6 +354,10 @@ func (g *RedisGate) SetMode(mode GateMode) error {
 		g.convertHold()
 	case GatePass:
 		g.convertPairs(nil)
+	case GateDrop:
+		// Fresh conns land in Drop mode; existing Pass conns are torn down
+		// so no reply can slip through a pre-EVAL-established socket.
+		g.convertPairs(nil)
 	}
 	return nil
 }
@@ -370,6 +413,7 @@ func (g *RedisGate) serve(ln net.Listener) {
 		if err != nil {
 			return // the listener was closed/flipped under us
 		}
+		g.counters.accepts.Add(1)
 		pair := &connPair{client: conn, abort: make(chan struct{})}
 		g.mu.Lock()
 		if g.closed {
@@ -400,8 +444,193 @@ func (g *RedisGate) runPair(pair *connPair, mode GateMode) {
 		g.runHold(pair)
 	case GatePass:
 		g.runPass(pair)
+	case GateDrop:
+		g.runDrop(pair)
 	default:
 		return
+	}
+}
+
+// evalMarker is the RESP bulk form of the lowercase EVAL command name that
+// go-redis's scripting_commands.go writes ("eval"). HELLO/other commands
+// never contain this sequence.
+const evalMarker = "\r\n$4\r\neval\r\n"
+
+// runDrop forwards client→backend (the REAL Redis executes) while withholding
+// backend replies once an EVAL frame has been forwarded. HELLO handshake
+// replies (pre-EVAL) still pass so a cold client reaches the EVAL stage.
+// After the FIRST withheld reply, if g.dropCloseAfter > 0, the client socket
+// is closed that long later — the "close before budget expiry" counterexample;
+// with dropCloseAfter < 0 it stays open (hold-to-expiry control). Every EVAL
+// marker occurrence is counted as one server-bound send (retries included).
+func (g *RedisGate) runDrop(pair *connPair) {
+	backend, err := net.DialTimeout("tcp", g.backend, 3*time.Second)
+	if err != nil {
+		return // drop the client side through teardown
+	}
+	pair.mu.Lock()
+	if pair.holding {
+		pair.mu.Unlock()
+		_ = backend.Close()
+		return
+	}
+	pair.backend = backend
+	client := pair.client
+	pair.mu.Unlock()
+	if client == nil {
+		_ = backend.Close()
+		return
+	}
+	closeAfter := g.dropCloseAfterSnapshot()
+
+	var wg sync.WaitGroup
+	wg.Add(2)
+	// client → backend: forward verbatim; mark evalSeen BEFORE forwarding
+	// the EVAL chunk so the reply side is armed before the server answers.
+	go func() {
+		defer wg.Done()
+		// When THIS side stops (client closed by timer/teardown, or write
+		// error), close the backend so the reply-side goroutine unblocks:
+		// without it a timer-closed client leaves a blocked backend read and
+		// an open backend socket for the pair's whole lifetime (review P2:
+		// Drop pair self-cleanup).
+		defer func() { _ = backend.Close() }()
+		var scanTail []byte
+		buf := make([]byte, 4096)
+		for {
+			n, err := client.Read(buf)
+			if n > 0 {
+				chunk := buf[:n]
+				scan := append(append([]byte{}, scanTail...), chunk...)
+				// Count each marker ONCE: only occurrences that extend into
+				// the NEW bytes (start in tail+straddle or fully in chunk).
+				// A marker fully inside the previous tail was counted when
+				// it first appeared — re-counting it here would inflate the
+				// send count (review P2: duplicate marker counting).
+				if idx := indexAll(scan, []byte(evalMarker)); len(idx) > 0 {
+					counted := false
+					for _, i := range idx {
+						if i+len(evalMarker) > len(scanTail) {
+							g.counters.evalFrames.Add(1)
+							counted = true
+						}
+					}
+					if counted {
+						pair.evalSeen.Store(true)
+					}
+				}
+				// Keep a window long enough to catch a marker split across
+				// two reads (marker len + one read).
+				scanTail = append([]byte{}, scan...)
+				if len(scanTail) > 128 {
+					scanTail = scanTail[len(scanTail)-128:]
+				}
+				if _, werr := backend.Write(chunk); werr != nil {
+					return
+				}
+			}
+			if err != nil {
+				return
+			}
+		}
+	}()
+	// backend → client: pass until evalSeen; withhold afterwards.
+	go func() {
+		defer wg.Done()
+		// Mirror cleanup: when the reply side stops (backend died), close
+		// the client so the forward-side goroutine unblocks.
+		defer func() { _ = client.Close() }()
+		firstWithheld := false
+		buf := make([]byte, 4096)
+		for {
+			n, err := backend.Read(buf)
+			if n > 0 {
+				if pair.evalSeen.Load() {
+					g.counters.droppedReplies.Add(1)
+					g.counters.droppedBytes.Add(uint64(n))
+					if !firstWithheld {
+						firstWithheld = true
+						if closeAfter > 0 {
+							// Close the CLIENT socket after closeAfter: the
+							// go-redis read then fails with EOF/reset well
+							// before its own deadline (the counterexample).
+							time.AfterFunc(closeAfter, func() { _ = client.Close() })
+						}
+					}
+				} else {
+					g.counters.preEvalReplies.Add(1)
+					if _, werr := client.Write(buf[:n]); werr != nil {
+						return
+					}
+				}
+			}
+			if err != nil {
+				return
+			}
+		}
+	}()
+	wg.Wait()
+}
+
+// indexAll returns start offsets of every non-overlapping occurrence of
+// marker in hay (nil when absent).
+func indexAll(hay, marker []byte) []int {
+	var out []int
+	for off := 0; off+len(marker) <= len(hay); {
+		idx := indexBytes(hay[off:], marker)
+		if idx < 0 {
+			break
+		}
+		out = append(out, off+idx)
+		off += idx + len(marker)
+	}
+	return out
+}
+
+// indexBytes is bytes.Index without importing bytes (keeps the import list
+// explicit for review).
+func indexBytes(hay, needle []byte) int {
+	if len(needle) == 0 {
+		return 0
+	}
+	for i := 0; i+len(needle) <= len(hay); i++ {
+		match := true
+		for j := range needle {
+			if hay[i+j] != needle[j] {
+				match = false
+				break
+			}
+		}
+		if match {
+			return i
+		}
+	}
+	return -1
+}
+
+// dropCloseAfterSnapshot reads the drop close delay under mu.
+func (g *RedisGate) dropCloseAfterSnapshot() time.Duration {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return g.dropCloseAfter
+}
+
+// SetDropClose configures the GateDrop post-reply close delay (>0 close
+// client that long after the first withheld reply; <0 hold to expiry).
+func (g *RedisGate) SetDropClose(after time.Duration) {
+	g.mu.Lock()
+	g.dropCloseAfter = after
+	g.mu.Unlock()
+}
+
+// CounterSnapshot returns the cumulative gate event counters (evidence).
+func (g *RedisGate) CounterSnapshot() GateCounterSnapshot {
+	return GateCounterSnapshot{
+		Accepts:        g.counters.accepts.Load(),
+		EvalFrames:     g.counters.evalFrames.Load(),
+		PreEvalReplies: g.counters.preEvalReplies.Load(),
+		DroppedReplies: g.counters.droppedReplies.Load(),
+		DroppedBytes:   g.counters.droppedBytes.Load(),
 	}
 }
 
