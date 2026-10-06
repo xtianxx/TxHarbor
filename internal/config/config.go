@@ -127,12 +127,14 @@ const (
 	EnvRateLimitQuery              = "TXHARBOR_RATELIMIT_QUERY"
 	EnvRateLimitOperator           = "TXHARBOR_RATELIMIT_OPERATOR"
 	EnvRateLimitRPC                = "TXHARBOR_RATELIMIT_RPC"
-	EnvEventsCapacitySoftLimit     = "TXHARBOR_EVENTS_CAPACITY_SOFT_LIMIT"
-	EnvEventsCapacityHardLimit     = "TXHARBOR_EVENTS_CAPACITY_HARD_LIMIT"
-	EnvEventsCapacityReserve       = "TXHARBOR_EVENTS_CAPACITY_RESERVE"
-	EnvEventsCapacityRetention     = "TXHARBOR_EVENTS_CAPACITY_RETENTION"
-	EnvEventsCapacityMaxShutdown   = "TXHARBOR_EVENTS_CAPACITY_MAX_SHUTDOWN_WINDOW"
-	EnvEventsCapacityDrainTarget   = "TXHARBOR_EVENTS_CAPACITY_DRAIN_TARGET_WINDOW"
+	// Decision-budget supplement, docs/evidence/013/redis-latency-budget-design.md §5.
+	EnvRateLimitBudget           = "TXHARBOR_RATELIMIT_BUDGET"
+	EnvEventsCapacitySoftLimit   = "TXHARBOR_EVENTS_CAPACITY_SOFT_LIMIT"
+	EnvEventsCapacityHardLimit   = "TXHARBOR_EVENTS_CAPACITY_HARD_LIMIT"
+	EnvEventsCapacityReserve     = "TXHARBOR_EVENTS_CAPACITY_RESERVE"
+	EnvEventsCapacityRetention   = "TXHARBOR_EVENTS_CAPACITY_RETENTION"
+	EnvEventsCapacityMaxShutdown = "TXHARBOR_EVENTS_CAPACITY_MAX_SHUTDOWN_WINDOW"
+	EnvEventsCapacityDrainTarget = "TXHARBOR_EVENTS_CAPACITY_DRAIN_TARGET_WINDOW"
 	// 013 alert wiring (T075; FR-24; verification.md §1). The alert switch is
 	// an observability toggle only (it never changes a gate); the sustained
 	// window override is optional and derives from the capacity drain target
@@ -629,6 +631,12 @@ type RateLimitConfig struct {
 	Query         RateLimitClassConfig
 	Operator      RateLimitClassConfig
 	RPC           RateLimitClassConfig
+	// Budget bounds one limiter decision (Allow) including pool wait, dial
+	// and command execution. It defaults to the effective Redis.Timeout, so
+	// existing deployments keep their budget value (zero migration); an
+	// explicit value must be <= Redis.Timeout. The bucket key TTL is
+	// independent (2 x Redis.Timeout).
+	Budget time.Duration
 }
 
 // CapacityConfig is the outbox capacity guard configuration (PD-2;
@@ -888,9 +896,9 @@ func (c *Config) Summary() string {
 	)
 	if c.Events.Enabled {
 		summary += fmt.Sprintf(
-			" events_enabled=true events_publisher_batch=%d events_consumer_batch=%d kafka_brokers=%d kafka_topic=%s redis_addr=%s capacity_soft=%d capacity_hard=%d capacity_reserve=%d alerts_enabled=%t",
+			" events_enabled=true events_publisher_batch=%d events_consumer_batch=%d kafka_brokers=%d kafka_topic=%s redis_addr=%s ratelimit_budget=%s capacity_soft=%d capacity_hard=%d capacity_reserve=%d alerts_enabled=%t",
 			c.Events.Publisher.Batch, c.Events.Consumer.Batch,
-			len(c.Kafka.Brokers), c.Kafka.Topic, c.Redis.Addr,
+			len(c.Kafka.Brokers), c.Kafka.Topic, c.Redis.Addr, c.RateLimit.Budget,
 			c.Capacity.SoftLimit, c.Capacity.HardLimit, c.Capacity.Reserve,
 			c.Events.Alerts.Enabled)
 	}
@@ -1403,6 +1411,14 @@ func (c *Config) loadEvents013(getenv Getenv, errs *[]error) {
 	c.RateLimit.Query = parseRateClass(EnvRateLimitQuery)
 	c.RateLimit.Operator = parseRateClass(EnvRateLimitOperator)
 	c.RateLimit.RPC = parseRateClass(EnvRateLimitRPC)
+	// Decision budget (redis-latency-budget-design.md §5): unset inherits the
+	// effective Redis timeout, so existing deployments keep their budget
+	// value (zero migration); an explicit value must not exceed it.
+	c.RateLimit.Budget = duration(getenv, EnvRateLimitBudget, c.Redis.Timeout, errs)
+	if raw, ok := getenv(EnvRateLimitBudget); ok && raw != "" && c.RateLimit.Budget > c.Redis.Timeout {
+		*errs = append(*errs, invalid(EnvRateLimitBudget,
+			"budget %s must be <= %s (%s)", c.RateLimit.Budget, EnvRedisTimeout, c.Redis.Timeout))
+	}
 
 	// Capacity guard (PD-2; contracts/capacity.md §1). Limits have no
 	// defaults: a partial or non-ordered set refuses startup. The invariant

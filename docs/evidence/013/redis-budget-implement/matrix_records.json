@@ -1,0 +1,178 @@
+[
+  {
+    "cell": "old_assembly",
+    "budget": "1s",
+    "scenario": "normal",
+    "n": 32,
+    "statuses": {
+      "201": 32
+    },
+    "admitted_2xx": 32,
+    "refused_503": 0,
+    "other": 0,
+    "unavailable": 0,
+    "p50_ms": 12.646264500000001,
+    "p95_ms": 13.96580625,
+    "p99_ms": 25.54163586000002,
+    "max_ms": 30.621883,
+    "mean_ms": 13.278723500000002,
+    "accepted_keys_with_one_row": 32,
+    "refused_keys_with_zero_rows": 0,
+    "gate_delayed_replies": 0,
+    "gate_eval_frames": 0
+  },
+  {
+    "cell": "old_assembly",
+    "budget": "1s",
+    "scenario": "congestion",
+    "n": 32,
+    "statuses": {
+      "201": 32
+    },
+    "admitted_2xx": 32,
+    "refused_503": 0,
+    "other": 0,
+    "unavailable": 0,
+    "p50_ms": 413.7044395,
+    "p95_ms": 415.42209264999997,
+    "p99_ms": 417.05973470000004,
+    "max_ms": 417.71899,
+    "mean_ms": 413.89684478124997,
+    "accepted_keys_with_one_row": 32,
+    "refused_keys_with_zero_rows": 0,
+    "gate_delayed_replies": 32,
+    "gate_eval_frames": 32
+  },
+  {
+    "cell": "dedicated_default_1s",
+    "budget": "1s",
+    "scenario": "normal",
+    "n": 32,
+    "statuses": {
+      "201": 32
+    },
+    "admitted_2xx": 32,
+    "refused_503": 0,
+    "other": 0,
+    "unavailable": 0,
+    "p50_ms": 12.306432000000001,
+    "p95_ms": 13.04886,
+    "p99_ms": 16.503167500000004,
+    "max_ms": 18.050734,
+    "mean_ms": 12.434600374999999,
+    "accepted_keys_with_one_row": 32,
+    "refused_keys_with_zero_rows": 0,
+    "gate_delayed_replies": 0,
+    "gate_eval_frames": 0
+  },
+  {
+    "cell": "dedicated_default_1s",
+    "budget": "1s",
+    "scenario": "congestion",
+    "n": 32,
+    "statuses": {
+      "201": 32
+    },
+    "admitted_2xx": 32,
+    "refused_503": 0,
+    "other": 0,
+    "unavailable": 0,
+    "p50_ms": 413.87900049999996,
+    "p95_ms": 415.561432,
+    "p99_ms": 416.74740737,
+    "max_ms": 417.279545,
+    "mean_ms": 414.07295453124993,
+    "accepted_keys_with_one_row": 32,
+    "refused_keys_with_zero_rows": 0,
+    "gate_delayed_replies": 32,
+    "gate_eval_frames": 32
+  },
+  {
+    "cell": "dedicated_candidate_200ms",
+    "budget": "200ms",
+    "scenario": "normal",
+    "n": 32,
+    "statuses": {
+      "201": 32
+    },
+    "admitted_2xx": 32,
+    "refused_503": 0,
+    "other": 0,
+    "unavailable": 0,
+    "p50_ms": 11.938492499999999,
+    "p95_ms": 12.96055705,
+    "p99_ms": 16.917590290000007,
+    "max_ms": 18.664236,
+    "mean_ms": 12.14771965625,
+    "accepted_keys_with_one_row": 32,
+    "refused_keys_with_zero_rows": 0,
+    "gate_delayed_replies": 0,
+    "gate_eval_frames": 0
+  },
+  {
+    "cell": "dedicated_candidate_200ms",
+    "budget": "200ms",
+    "scenario": "congestion",
+    "n": 32,
+    "statuses": {
+      "503": 32
+    },
+    "admitted_2xx": 0,
+    "refused_503": 32,
+    "other": 0,
+    "unavailable": 32,
+    "p50_ms": 201.8996425,
+    "p95_ms": 202.46620165,
+    "p99_ms": 202.58427685,
+    "max_ms": 202.603982,
+    "mean_ms": 201.89449456249997,
+    "accepted_keys_with_one_row": 0,
+    "refused_keys_with_zero_rows": 32,
+    "gate_delayed_replies": 32,
+    "gate_eval_frames": 32
+  },
+  {
+    "cell": "dedicated_candidate_300ms",
+    "budget": "300ms",
+    "scenario": "normal",
+    "n": 32,
+    "statuses": {
+      "201": 32
+    },
+    "admitted_2xx": 32,
+    "refused_503": 0,
+    "other": 0,
+    "unavailable": 0,
+    "p50_ms": 12.03807,
+    "p95_ms": 12.79979515,
+    "p99_ms": 17.48690547000001,
+    "max_ms": 19.516061,
+    "mean_ms": 12.2470589375,
+    "accepted_keys_with_one_row": 32,
+    "refused_keys_with_zero_rows": 0,
+    "gate_delayed_replies": 0,
+    "gate_eval_frames": 0
+  },
+  {
+    "cell": "dedicated_candidate_300ms",
+    "budget": "300ms",
+    "scenario": "congestion",
+    "n": 32,
+    "statuses": {
+      "503": 32
+    },
+    "admitted_2xx": 0,
+    "refused_503": 32,
+    "other": 0,
+    "unavailable": 32,
+    "p50_ms": 302.09895900000004,
+    "p95_ms": 302.69718315,
+    "p99_ms": 302.92350885,
+    "max_ms": 302.988164,
+    "mean_ms": 302.0342852812501,
+    "accepted_keys_with_one_row": 0,
+    "refused_keys_with_zero_rows": 32,
+    "gate_delayed_replies": 32,
+    "gate_eval_frames": 32
+  }
+]

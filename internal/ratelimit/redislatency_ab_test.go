@@ -205,6 +205,7 @@ func buildLatencyLimiter(t *testing.T, addr string, dialTimeout time.Duration, o
 			ClassRPC:           {RatePerSecond: 500, Burst: 100},
 		},
 		Timeout:        redisLatencyCallerTimeout(),
+		BucketTTL:      2 * redisLatencyCallerTimeout(), // preserves the pre-BucketTTL script TTL (2*Timeout)
 		RecoveryWindow: 10 * time.Second,
 	}, observer)
 	if err != nil {
@@ -281,6 +282,7 @@ func runShapeWindow(
 				ClassRPC:           {RatePerSecond: 500, Burst: 100},
 			},
 			Timeout:        redisLatencyCallerTimeout(),
+			BucketTTL:      2 * redisLatencyCallerTimeout(), // preserves the pre-BucketTTL script TTL (2*Timeout)
 			RecoveryWindow: 10 * time.Second,
 		}, observer)
 		if err != nil {
@@ -570,6 +572,7 @@ func TestRedisLatencyABCDialBlackhole(t *testing.T) {
 					ClassQuery: {RatePerSecond: 500, Burst: 100},
 				},
 				Timeout:        redisLatencyCallerTimeout(),
+				BucketTTL:      2 * redisLatencyCallerTimeout(), // preserves the pre-BucketTTL script TTL (2*Timeout)
 				RecoveryWindow: 10 * time.Second,
 			}, observer)
 			if err != nil {

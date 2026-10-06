@@ -1,10 +1,14 @@
 // redisgate.go is test support only (same charter as redis.go: production
 // packages never import it, `make test` never starts it). It is a userspace
-// TCP gate in front of a real (or absent) Redis backend with three scripted
+// TCP gate in front of a real (or absent) Redis backend with four scripted
 // modes, so a fake outage can be driven per-fault-shape without killing a
 // container:
 //
 //   - GatePass: bidirectional byte forwarding — the healthy path (shape ④).
+//   - GateDelay: like GatePass, but once an EVAL frame has been forwarded on
+//     a pair, every backend→client reply chunk is delayed by the delay
+//     configured with SetDelay; pre-EVAL handshake replies pass undelayed —
+//     the "server answers, but late" latency-injection posture.
 //   - GateHold: accept, read the client bytes, then hold them without ever
 //     replying — "connection established, handshake done, command has no
 //     response" (shape ③). A mode flip CONVERSIONS established Pass pairs
@@ -127,6 +131,13 @@ const (
 	// group). This is the "server executed but response lost" counterexample
 	// fixture for the budget design validation.
 	GateDrop
+	// GateDelay forwards both directions like GatePass, but once an EVAL
+	// frame has been forwarded on a pair, every backend→client reply chunk
+	// is delayed by the delay configured with SetDelay before reaching the
+	// client. Pre-EVAL handshake replies pass undelayed so a cold client
+	// reaches the EVAL stage. Pairs are converted on a mode flip exactly
+	// like →Pass (torn down; fresh dials are served under the new mode).
+	GateDelay
 )
 
 // gateCounters are cumulative, race-free event counts for evidence.
@@ -136,6 +147,7 @@ type gateCounters struct {
 	preEvalReplies atomic.Uint64 // backend replies forwarded before the EVAL (handshake)
 	droppedReplies atomic.Uint64 // backend reply chunks withheld after EVAL
 	droppedBytes   atomic.Uint64 // bytes withheld after EVAL
+	delayedReplies atomic.Uint64 // backend reply chunks delayed after EVAL (GateDelay)
 }
 
 // GateCounterSnapshot is one read of the cumulative counters.
@@ -145,6 +157,7 @@ type GateCounterSnapshot struct {
 	PreEvalReplies uint64 `json:"pre_eval_replies"`
 	DroppedReplies uint64 `json:"dropped_replies"`
 	DroppedBytes   uint64 `json:"dropped_bytes"`
+	DelayedReplies uint64 `json:"delayed_replies"`
 }
 
 // RedisGate is one scripted TCP gate over a Redis (or absent) backend.
@@ -164,6 +177,9 @@ type RedisGate struct {
 	// after the FIRST withheld EVAL reply (close-before-expiry group);
 	// <0 keeps it open (hold-to-expiry control group).
 	dropCloseAfter time.Duration
+	// delay, for GateDelay: the per-chunk backend→client reply delay applied
+	// once an EVAL frame has been forwarded on a pair (0 = pass through).
+	delay time.Duration
 	// counters accumulate gate events for evidence (accepts, EVAL frames
 	// forwarded, replies passed vs withheld).
 	counters gateCounters
@@ -184,8 +200,9 @@ type connPair struct {
 	// alive and does NOT close abort — it flips `holding` and closes the
 	// backend copy loops, then the pair's reader goes into the swallow loop.
 	abort chan struct{}
-	// evalSeen marks, for GateDrop, that an EVAL frame was forwarded to the
-	// backend: pair replies pass through until it flips, then are withheld.
+	// evalSeen marks, for GateDrop/GateDelay, that an EVAL frame was forwarded
+	// to the backend: pair replies pass through until it flips, then are
+	// withheld (Drop) or delayed (Delay).
 	evalSeen atomic.Bool
 	// once guards the idempotent teardown of one pair.
 	once sync.Once
@@ -307,6 +324,9 @@ func (g *RedisGate) Mode() GateMode {
 //     ECONNREFUSED).
 //   - →Pass: every tracked pair is closed (clients redial) and the
 //     listener is (re)opened on the same address.
+//   - →Delay: like →Pass — every tracked pair is closed (clients redial)
+//     and the listener is (re)opened on the same address; new dials are
+//     served under the delay injection.
 //
 // The reopen retry loop absorbs the kernel's release window on the bound
 // address after the previous listener's Close.
@@ -329,7 +349,7 @@ func (g *RedisGate) SetMode(mode GateMode) error {
 		return nil
 	}
 
-	// Pass/Hold: rebind the listener on the remembered address.
+	// Pass/Hold/Delay: rebind the listener on the remembered address.
 	g.mu.Lock()
 	ln := g.listener
 	g.mu.Unlock()
@@ -357,6 +377,11 @@ func (g *RedisGate) SetMode(mode GateMode) error {
 	case GateDrop:
 		// Fresh conns land in Drop mode; existing Pass conns are torn down
 		// so no reply can slip through a pre-EVAL-established socket.
+		g.convertPairs(nil)
+	case GateDelay:
+		// Like →Pass: fresh conns are served under the delay injection;
+		// existing pairs (any prior mode) are torn down, so no reply can
+		// slip through a socket established before the flip.
 		g.convertPairs(nil)
 	}
 	return nil
@@ -446,6 +471,8 @@ func (g *RedisGate) runPair(pair *connPair, mode GateMode) {
 		g.runPass(pair)
 	case GateDrop:
 		g.runDrop(pair)
+	case GateDelay:
+		g.runDelay(pair)
 	default:
 		return
 	}
@@ -623,6 +650,21 @@ func (g *RedisGate) SetDropClose(after time.Duration) {
 	g.mu.Unlock()
 }
 
+// delaySnapshot reads the GateDelay reply delay under mu.
+func (g *RedisGate) delaySnapshot() time.Duration {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return g.delay
+}
+
+// SetDelay configures the GateDelay per-chunk backend→client reply delay
+// applied on a pair once an EVAL frame has been forwarded through it.
+func (g *RedisGate) SetDelay(d time.Duration) {
+	g.mu.Lock()
+	g.delay = d
+	g.mu.Unlock()
+}
+
 // CounterSnapshot returns the cumulative gate event counters (evidence).
 func (g *RedisGate) CounterSnapshot() GateCounterSnapshot {
 	return GateCounterSnapshot{
@@ -631,6 +673,7 @@ func (g *RedisGate) CounterSnapshot() GateCounterSnapshot {
 		PreEvalReplies: g.counters.preEvalReplies.Load(),
 		DroppedReplies: g.counters.droppedReplies.Load(),
 		DroppedBytes:   g.counters.droppedBytes.Load(),
+		DelayedReplies: g.counters.delayedReplies.Load(),
 	}
 }
 
@@ -717,6 +760,165 @@ func (g *RedisGate) runPass(pair *connPair) {
 		}
 		g.runHold(pair)
 	}
+}
+
+// runDelay forwards both directions like runPass, but once an EVAL frame has
+// been forwarded client→backend on the pair, every backend→client reply
+// chunk is delayed by the delay configured with SetDelay before it reaches
+// the client; pre-EVAL handshake replies pass undelayed so a cold client
+// reaches the EVAL stage. The EVAL scan mirrors runDrop (armed BEFORE the
+// EVAL chunk is forwarded, each marker occurrence counted once).
+// Teardown/conversion behavior is identical to runPass: the caller's
+// teardown closes both sockets, and a Hold conversion closes the backend
+// side, drains the copies and takes over the client side into the swallow
+// loop.
+func (g *RedisGate) runDelay(pair *connPair) {
+	backend, err := net.DialTimeout("tcp", g.backend, 3*time.Second)
+	if err != nil {
+		return // drop the client side through teardown
+	}
+	pair.mu.Lock()
+	if pair.holding {
+		pair.mu.Unlock()
+		_ = backend.Close()
+		g.runHold(pair) // conversion happened before the backend was up
+		return
+	}
+	pair.backend = backend
+	pair.mu.Unlock()
+
+	done := make(chan struct{})
+	var wg sync.WaitGroup
+	pair.mu.Lock()
+	cli := pair.client
+	pair.mu.Unlock()
+	if cli == nil {
+		return
+	}
+	clientGone := make(chan struct{})
+	backendGone := make(chan struct{})
+	wg.Add(2)
+	// client → backend: forward verbatim; mark evalSeen BEFORE forwarding
+	// the EVAL chunk so the reply side is armed before the server answers.
+	go func() {
+		defer wg.Done()
+		defer close(clientGone)
+		var scanTail []byte
+		buf := make([]byte, 4096)
+		for {
+			n, err := cli.Read(buf)
+			if n > 0 {
+				chunk := buf[:n]
+				scan := append(append([]byte{}, scanTail...), chunk...)
+				// Count each marker once, only when it extends into the NEW
+				// bytes (same discipline as runDrop: re-counting a marker
+				// already inside the tail would inflate the send count).
+				if idx := indexAll(scan, []byte(evalMarker)); len(idx) > 0 {
+					counted := false
+					for _, i := range idx {
+						if i+len(evalMarker) > len(scanTail) {
+							g.counters.evalFrames.Add(1)
+							counted = true
+						}
+					}
+					if counted {
+						pair.evalSeen.Store(true)
+					}
+				}
+				// Keep a window long enough to catch a marker split across
+				// two reads (marker len + one read).
+				scanTail = append([]byte{}, scan...)
+				if len(scanTail) > 128 {
+					scanTail = scanTail[len(scanTail)-128:]
+				}
+				if _, werr := backend.Write(chunk); werr != nil {
+					return
+				}
+			}
+			if err != nil {
+				return
+			}
+		}
+	}()
+	// backend → client: handshake replies pass immediately; once an EVAL
+	// frame has been forwarded, every reply chunk is delayed by the current
+	// delay (counted once per chunk). The sleep is cut short by teardown
+	// (abort) so a torn-down pair's goroutines exit promptly.
+	go func() {
+		defer wg.Done()
+		defer close(backendGone)
+		buf := make([]byte, 4096)
+		for {
+			n, err := backend.Read(buf)
+			if n > 0 {
+				if pair.evalSeen.Load() {
+					g.counters.delayedReplies.Add(1)
+					if d := g.delaySnapshot(); d > 0 {
+						select {
+						case <-time.After(d):
+						case <-pair.abort:
+							return
+						}
+					}
+					// A Hold conversion during the delay window must swallow
+					// the already-buffered reply: an established conn stops
+					// responding at the flip, it never delivers a queued
+					// answer afterwards.
+					pair.mu.Lock()
+					holdingNow := pair.holding
+					pair.mu.Unlock()
+					if holdingNow {
+						return
+					}
+				} else {
+					g.counters.preEvalReplies.Add(1)
+				}
+				if _, werr := cli.Write(buf[:n]); werr != nil {
+					return
+				}
+			}
+			if err != nil {
+				return
+			}
+		}
+	}()
+
+	// Signal both local exits: teardown (abort), conversion (backend closed
+	// by closeBackend), and either forwarding direction ending on its own —
+	// a timed-out client closes its socket while a reply is still being
+	// delayed, and the backend side may hang up first. The conversion path
+	// does not abort the pair: its client socket must survive into the
+	// swallow loop, so it is handled before any teardown.
+	go func() {
+		defer close(done)
+		select {
+		case <-pair.abort:
+		case <-conversionWait(pair):
+		case <-clientGone:
+		case <-backendGone:
+		}
+	}()
+	<-done
+
+	pair.mu.Lock()
+	holding := pair.holding
+	pair.mu.Unlock()
+	if holding {
+		select {
+		case <-pair.abort:
+			return
+		default:
+		}
+		// Let the copies drain (closeBackend already unblocked the backend
+		// side; the client side drains on its next read) before the handoff.
+		wg.Wait()
+		g.runHold(pair)
+		return
+	}
+	// A direction ended without a conversion: recycle the pair now. teardown
+	// closes both sockets, which also unblocks the other copy loop.
+	pair.teardown()
+	wg.Wait()
 }
 
 // conversionWait returns a one-shot channel that closes when the pair's

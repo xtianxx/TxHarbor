@@ -63,7 +63,10 @@ func TestRatelimitFailureHTTPPolicy(t *testing.T) {
 		t.Fatalf("config.Load: %v", err)
 	}
 
-	// The real 013 middleware stack over a real Redis.
+	// The real 013 middleware stack over a real Redis. The shared client keeps
+	// serving the dependency probe (its Ping drives the degradation signal);
+	// the limiter runs on the production dedicated client so this test
+	// exercises the served wiring (CTE + MaxRetries=-1 + small pool).
 	redisClient := redis.NewClient(&redis.Options{
 		Addr:         cfg.Redis.Addr,
 		DialTimeout:  cfg.Redis.Timeout,
@@ -71,7 +74,9 @@ func TestRatelimitFailureHTTPPolicy(t *testing.T) {
 		WriteTimeout: cfg.Redis.Timeout,
 	})
 	t.Cleanup(func() { _ = redisClient.Close() })
-	scriptStore, err := ratelimit.NewRedisScriptStore(redisClient)
+	limiterClient := newLimiterRedisClient(cfg) // cfg.Redis.Addr is the container
+	t.Cleanup(func() { _ = limiterClient.Close() })
+	scriptStore, err := ratelimit.NewRedisScriptStore(limiterClient)
 	if err != nil {
 		t.Fatalf("NewRedisScriptStore: %v", err)
 	}

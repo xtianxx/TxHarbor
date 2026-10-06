@@ -109,22 +109,31 @@ CTE 开启（推荐）：T_allow ≤ min(parent, L) + ε（socket 段逐段入�
   无法阻止「客户端断连被记成 limiter 中断 + send paused」的状态面放大
   （这是独立复核指出的 P1：识别≠豁免）。单凭 (i) 只解决可追溯性；
   (i)+(ii) 才兑现「取消与依赖故障在内部真正分开」。
-  **(iii) 识别口径必须基于 limiter 侧 `ctx.Err()`，不能只看 go-redis
-  错误串**（独立复核 P1：推荐配置下 `MaxRetries=-1` 使在途取消的 go-redis
-  终态可能是 socket `i/o timeout`——无重试路径把 Sleep 转成
+  **(iii) 识别口径 = 错误身份优先 + ctx 仅用于超时歧义消解（四分类，
+  本轮定向修正）**（独立复核 P1：推荐配置下 `MaxRetries=-1` 使在途取消的
+  go-redis 终态可能是 socket `i/o timeout`——无重试路径把 Sleep 转成
   `context.Canceled`——`errors.Is(err, context.Canceled)` 不命中）。确定
-  判别表（Eval 失败后按顺序）：
-  - `ctx.Err() == context.Canceled`（父请求取消）⇒ 取消：豁免
-    `markUnavailable`/`setPaused`，错误以 `errors.Join(ErrUnavailable,
-    ctx.Err(), go-redis err)` 形态返回（三个 cause 均可 `errors.Is`，
-    对外形状不变）；
-  - `ctx.Err() == context.DeadlineExceeded` 且来自 L 预算 ⇒ 依赖慢：
-    保持 `markUnavailable`（超时仍归 §3.2 失效）；
-  - `ctx.Err() == nil` ⇒ 依赖故障（连接/读写错误）：保持
-    `markUnavailable`。
-  三步 (i)(ii)(iii) 均列入实施范围（§7），非用户决策：不放行任何请求、
-  不改任何分类与形状；§7 增设「禁重试客户端在途取消的身份断言」验收
-  （cancel 后 `errors.Is(err, context.Canceled)` 必须为真）。
+  判别契约（Eval 失败后按顺序；`parent` = 调用者 ctx，`budgetCtx` =
+  limiter `WithTimeout(L)`）：
+  1. 错误身份优先：`errors.Is(err, context.Canceled)` ⇒ **父取消**；
+     `errors.Is(err, context.DeadlineExceeded)` ⇒ 父 deadline 已触发则
+     **父deadline**，否则 **预算到期**；
+  2. 仅 timeout 形状（`net.Error.Timeout()`）消解歧义：`parent.Err()`
+     Canceled ⇒ 父取消；DeadlineExceeded ⇒ 父deadline；`budgetCtx` 到期
+     ⇒ 预算到期；无 ctx 到期 ⇒ 传输故障；
+  3. **其余一律传输故障，无论 ctx 状态**（EOF/refused/reset/池超时/脚本
+     错误）——**真实故障不得被共时的取消掩盖**（「不能仅凭返回时
+     ctx.Err() 分类」的硬约束）。
+  豁免面（唯一）：**父取消**不 `markUnavailable`/`setPaused`；父deadline、
+  预算到期、传输故障保持现行污染面（无法证明依赖健康 ⇒ 保守）。错误以
+  `errors.Join(ErrUnavailable, 原err[, ctx cause])` 返回（原 err 已含该
+  cause 时不重复；三者均可 `errors.Is` 回溯；传输路径保持 `%w: %w`
+  原文本形状）。**边界硬约束**：取消仍返回 `ErrUnavailable` 包装 ⇒
+  PD-1 503/查询放行等对外映射不变；**不放行任何请求、不清除既有
+  Unavailable/Paused、不提前进入恢复**。
+  三步 (i)(ii)(iii) 均列入实施范围（§7），非用户决策；§7 增补
+  「禁重试客户端在途取消的身份断言」与「传输故障 × 取消竞争不得被
+  掩盖」验收。
 
 ## 2. 执行机制评估与最小推荐（闭合 2）
 
@@ -263,7 +272,7 @@ CTE 开启（推荐）：T_allow ≤ min(parent, L) + ε（socket 段逐段入�
   五类统一（NewWithdrawal/Write/Query/Operator/RPC）。分面需要新增
   per-class 时长结构与校验、且当前无任何按类差异的测量证据 ⇒ **不分面**；
   若将来出现「查询可更长、创建更短」的实测证据，再作为独立提案。
-- **改动点清单（实施期，8 项，本轮不实施）**：① config.go 常量区键名
+- **改动点清单（8 项，第三轮实施）**：① config.go 常量区键名
   （:118-129 旁）；② 默认值（继承语义，:311-313 旁）；③ 承载结构字段；
   ④ duration 装配 + 关系校验（:1371 旁）；⑤ buildLimiter 改读新字段
   （ratelimit_middleware.go:68）；⑥ config_013_test.go 三处同步（默认断言
@@ -274,38 +283,34 @@ CTE 开启（推荐）：T_allow ≤ min(parent, L) + ε（socket 段逐段入�
 - **配置文档登记（确定）**：沿用 013 现状（013 既有键**未**登记在
   .env.example/README，唯一命中 benchmark_report.md:81-82）——**实施
   批次把 013 既有键与新键一次性成组补登记**（不孤立新增、不制造
-  「部分登记」的新不一致）；本轮不动文档登记面。
-- **TTL 解耦（确定：独立常量）**：limiter.go:227 的 `2*l.timeout` 同时
-  是令牌桶键 TTL——L 收紧会把 TTL 从 2s 压到 400–600ms，空闲过期 ⇒
-  `tokens=burst` 全额重置（limiter.go:111-113），等价于用预算值改写
-  限流算法。**实测印证**：候选 L=200ms 下 bucket TTL=400ms，hold 组
+  「部分登记」的新不一致）；本批已执行（.env.example 全 013 键成组登记）。
+- **TTL 解耦（本轮定向修正：独立参数 × 原算法）**：limiter.go:227 的
+  `2*l.timeout` 同时是令牌桶键 TTL——L 收紧会把 TTL 从 2s 压到 400–600ms，
+  空闲过期 ⇒ `tokens=burst` 全额重置（limiter.go:111-113），等价于用预算
+  值改写限流算法。**实测印证**：候选 L=200ms 下 bucket TTL=400ms，hold 组
   settle 时 key 已过期（`redis-budget-cte` 归档 `tokens_settled=""`）。
-  **三方式评估结论：i) 独立常量 `bucketTTL = 2 * time.Second` 为推荐解**
-  ——在**缺省部署（Redis.Timeout=1s）下与现 PEXPIRE 值逐位一致** ⇒ 补给
-  （Δt×rate，与 TTL 无关）、到期时机、续期节奏（每次调用无条件
-  PEXPIRE）、过期→全量重置的恢复语义四条全部不变；ii) 按 rate/burst
-  推导会因五类 rate/burst 可配且无默认（config.go:1387-1405）产生按类
-  分化的桶生命周期且随配置漂移 ⇒ 不等价、不采用；iii) `2×独立基数`
-  仅在基数恒 1s 时退化为 i ⇒ 采用 i。
-  **等价性边界（独立复核 P1，如实声明）**：对把 `TXHARBOR_REDIS_TIMEOUT`
-  设为**非 1s** 的部署，今天的 TTL=2×该值，常量 2s 会改变其桶生命周期
-  （到期更早/更晚 → 空闲回满时机变化）——仓库内 bench/faultdrill/.env
-  证据全部钉 1s（无非默认部署证据），但实施批次须在配置登记与迁移说明中
-  显式记录该差异，不得宣称对任意旧配置逐位等价。
-  改动 = limiter.go:227 一行 + 验收「TTL 不随 L 变化」专项断言。
+  **第二轮曾定「独立常量 2s」，本轮按用户定向修正为**：TTL 作为 limiter
+  的独立构造参数（`Config.BucketTTL`），装配处**仍按原算法**计算 =
+  `2 × 有效 Redis.Timeout`（旧值来源）——`2×` 算法不变、输入换成显式旧值，
+  与预算 L 完全无关；**不固定归一为 2s、不新增 TTL 迁移**。
+  等价性：对任意旧部署（含非默认 `TXHARBOR_REDIS_TIMEOUT`）TTL 数值逐位
+  不变（旧值就是输入）⇒ 补给（Δt×rate，与 TTL 无关）、到期时机、续期
+  节奏（每次调用无条件 PEXPIRE）、过期→全量重置四条语义全部保持；新预算
+  200/300ms 不再触碰桶生命周期（新验收：PTTL 恒 2×Redis.Timeout）。
+  实现 = limiter.go 构造字段 + 装配处 `2 * cfg.Redis.Timeout` 一行 +
+  「TTL 不随 L 变化」专项断言（默认与非默认配置对照）。
 
 ## 6. 变更分级判断（真实契约对照）
 
 **结论：轻量补充设计级**。理由：只动「限流调用方预算（新键）+ 限流专用
 隔离客户端装配（CTE/MaxRetries/PoolSize，均在 serve 装配处新增，不动共享
-客户端）+ TTL 独立常量 + 内部错误包装（双 `%w`）」，PD-1（redis.md:23-27
+客户端）+ TTL 独立参数（原算法）+ 内部错误包装（双 `%w`）」，PD-1（redis.md:23-27
 §3.3）、失效四分类（:22 §3.2）、恢复梯度（:29 §3.5）、RPC 基线（:33-36 §4）
 全部保持既有条款文字与语义；契约文本不含毫秒数值（:21/:22/:24）⇒ 不违反
 条款。**前提条件两项**（不满足则升级为契约变更，须另行裁决）：
-1. 令牌桶键 TTL 与预算解耦为独立常量 2s（否则 §3.1 被预算值间接改写）——
-   本轮已确定为推荐解，**语义等价仅覆盖缺省（Redis.Timeout=1s）配置**；
-   非默认部署的桶生命周期差异须按 §5 显式登记迁移，不得对任意旧配置
-   宣称逐位等价（独立复核 P2，已同步）；
+1. 令牌桶键 TTL 与预算解耦为独立参数、按原算法以旧有效 Redis.Timeout
+   计算（否则 §3.1 被预算值间接改写）——本轮定向修正为**全配置逐位等价、
+   零迁移**（§5）；
 2. 使用独立预算键且缺省继承旧预算（否则 §2.5 回源超时被连带改动、或旧
    部署行为漂移）——本轮已确定（§5）。
 **显式声明（不改条款文字、语义面扩大）**：§4.2 的故障判定阈值实际 = L
@@ -314,7 +319,7 @@ CTE 开启（推荐）：T_allow ≤ min(parent, L) + ε（socket 段逐段入�
 **不改**：contracts 文件、PD-1、恢复梯度、失效分类、对外错误形状、
 共享客户端（探测/缓存）行为。
 
-## 7. 实施范围与验收条件（后续实施批次，本轮不实施）
+## 7. 实施范围与验收条件（第三轮实施批次——本轮执行）
 
 **实施范围**（最小集）：
 1. **限流专用隔离客户端**（serve.go:269 换绑；`ContextTimeoutEnabled: true`
@@ -322,7 +327,9 @@ CTE 开启（推荐）：T_allow ≤ min(parent, L) + ε（socket 段逐段入�
    = `cfg.Redis.Timeout`；启动 fail 路径与关停序列补 Close；探测/缓存
    继续用共享客户端不动）；
 2. 新增 `TXHARBOR_RATELIMIT_BUDGET`（§5 清单 8 项；**缺省继承旧预算**）；
-3. TTL 解耦独立常量 `bucketTTL = 2 * time.Second`（limiter.go:227 一行）；
+3. TTL 解耦为 limiter 独立参数 `Config.BucketTTL`，装配处按原算法计算
+   `2 × cfg.Redis.Timeout`（limiter.go 构造字段 + ratelimit_middleware.go
+   一行；**不固定 2s、不新增迁移**）；
 4. `buildLimiter` 改读新键；内部错误包装与取消身份按 §1 末条三步落地：
    (i) `errors.Join`/双 `%w`（可 Is 追溯）、(ii) `context.Canceled` 豁免
    `markUnavailable`/`setPaused`、(iii) 识别口径用 limiter 侧 `ctx.Err()`
@@ -330,7 +337,7 @@ CTE 开启（推荐）：T_allow ≤ min(parent, L) + ε（socket 段逐段入�
    取消身份）；
 5. 共享客户端零改动。
 
-**本轮已执行的验证（不必在实施批次重做，除非实现偏离本设计）**：
+**机制验证基线（第二轮归档；实施批次已复跑确认，结果见实施记录）**：
 `docs/evidence/013/redis-budget-cte/`（权威 = `-race -v` 单轮归档，
 `race_v_run.log`；两测试全 PASS、无 DATA RACE）：
 - CTE 边界 9 记录：热读阻塞 200.6/202.2ms、池等待取消 61.5ms（即时）、
@@ -347,8 +354,8 @@ CTE 开启（推荐）：T_allow ≤ min(parent, L) + ε（socket 段逐段入�
   isolated_noretry 1/1 + 35.5ms；bucket TTL=400ms 过期实证；
   `responses_withheld` 次级计数 6 轮 1 例漏计（已知缺口，不参与断言）。
 
-**实施批次验收条件**（integration_redis/e2e 现有层，复用 a59dcd1+本轮
-夹具；**不默认全量故障矩阵**）：
+**实施批次验收条件**（已执行；结果与证据见文末「实施记录（第三轮）」）：
+（integration_redis/e2e 现有层，复用 a59dcd1+本轮夹具；**不默认全量故障矩阵**）:
 - **禁重试客户端的取消身份断言（新增，独立复核 P1）**：在隔离客户端
   （MaxRetries=-1）+ CTE 下于在途读取消 ⇒ `errors.Is(err,
   context.Canceled)` 为真、limiter 不 `markUnavailable`、rpcBudget 不
@@ -369,7 +376,7 @@ CTE 开启（推荐）：T_allow ≤ min(parent, L) + ε（socket 段逐段入�
   + import 解析器守卫）与 007/011 既有门禁全绿（限流不可信时新提款仍
   503、0 行落库；查询经认证、归属校验、PG 权威读取不变）。
 - **配置回归**：config_013_test 新键三处断言 + 关系校验 case +
-  「缺省继承旧预算」的兼容断言；**TTL 专项断言：键 TTL 恒 2s 不随 L 变**。
+  「缺省继承旧预算」的兼容断言；**TTL 专项断言：键 TTL 恒 = 2×有效 Redis.Timeout（缺省 2s）且不随 L 变**。
 - **观测面检查**：`ratelimit_unavailable` 翻转密度变化被预期并记录；
   双 `%w` 后 `errors.Is(ctx.Canceled)` 可分取消与依赖故障（新增断言）。
 - **误拒绝测量（方法先行，数值待测）**：V-RATELIMIT 增列
@@ -389,7 +396,7 @@ CTE 开启（推荐）：T_allow ≤ min(parent, L) + ε（socket 段逐段入�
 （已收敛为确定技术建议、不再推回用户的项：预算键默认=继承旧值；不分面；
 取消/依赖故障内部分辨=双 `%w`（对外映射不变）；配置登记=013 键成组补登记；
 限流面状态=沿用既有 `ratelimit_unavailable` gauge（c 方案无新探测缺口）；
-TTL=独立常量 2s。）
+TTL=独立参数、原算法 2×有效 Redis.Timeout（零迁移）。）
 
 ## 9. 证据边界
 
@@ -489,3 +496,63 @@ redisgate.go 纯新增 209 行 0 删除、新测试、证据目录）；生产�
    2.992）、第二轮旁证 4/4/3（含 withheld 缺口样本）；
 4. withheld 声明改为「不参与跨组一致性断言（仅 hold 组 ≥1 单组下界）」；
 5. 实验 README 同步（第二轮 4/4/3、缺口样本定位到留存旁证日志）。
+
+---
+
+## 实施记录（第三轮，2026-10-06，本批实施完成）
+
+**落地范围**（验收证据 [redis-budget-implement/](redis-budget-implement/README.md)，
+全部 PASS、无 DATA RACE）：
+
+1. **限流专用隔离客户端**：`newLimiterRedisClient`（`ContextTimeoutEnabled=true`、
+   `MaxRetries=-1`、`PoolSize=16`；Dial/Read/Write=`cfg.Redis.Timeout`）接入
+   serve.go 限流换绑点；启动失败路径与关停序列补 `Close`；探测/缓存共享
+   客户端零改动（复核见 git diff）。
+2. **`TXHARBOR_RATELIMIT_BUDGET`**：缺省继承有效 `TXHARBOR_REDIS_TIMEOUT`
+   （缺省 1s 保持；非默认旧值同样保持）；显式值必须 ≤ 之，否则启动拒绝
+   （config_013_test 兼容/边界/非法值三面断言）；Summary 增
+   `ratelimit_budget`；`.env.example` 013 键（含全部既有键）成组登记。
+3. **TTL 解耦（本轮定向修正）**：`Config.BucketTTL` 独立参数，装配处
+   `2 × cfg.Redis.Timeout`（原算法）——实测 PTTL 1998/1999/5999/5999ms：
+   L=200ms 不触碰桶生命周期；任意旧配置逐位等价、零迁移。
+4. **错误四分类**：错误身份优先（传输故障不查 ctx，不被共时取消掩盖）；
+   仅父取消豁免 `markUnavailable`/`setPaused`，且不清除既有
+   Unavailable/Paused（单测 + RPC 姿态测试）；仍返回 `ErrUnavailable`
+   包装（PD-1 503/查询放行等对外映射不变；取消不放行任何请求）。
+5. **机制复验与代价测量**（修复后权威轮，-race）：
+   - 专用装配丢答（已执行+预算前断连）1 发送/1 执行/扣减 0.991/36.1ms；
+     旧对照 3/3/2.993/201.3ms（失败反例保留；跨轮 3–4 次随退避波动）；
+   - **取消身份装配级验收**（设计 §7 增补项，真实 socket）：在途取消
+     200.5ms 返回且 `errors.Is(err, context.Canceled)` 为真（终态为
+     socket `i/o timeout`，身份来自 join）、limiter 未标记、observer 0 事件、
+     RPC send 未 paused；RPC 预算取用取消同样未 paused；对照（无取消超时）
+     216.1ms、DeadlineExceeded、标记 +1、send paused——「仅父取消豁免」成立；
+   - 并发池竞争 32 goroutine max 205.2ms、返回后 TotalConns=3（≤16 界内）；
+   - CTE 边界 9 记录复跑全 ≤L+ε（cancel 非即时事实保持）；
+   - HTTP 矩阵：正常态误拒绝 0%（四单元 p50 11.9–12.6ms）；(200/300ms,1s)
+     中间拥塞（注入 400ms）误拒绝 100%（p50 201.9/302.1ms；L 的核心代价项，
+     **阈值待裁决**）；拒绝键 0 行（无新付款意图）、接受键恰 1 行（幂等）。
+
+**独立复核与修复（同批闭环）**：未参与修改者定向复核提出 5 项（.env.example
+可选值默认生效、下游启动失败未关专用客户端、缺真实无重试取消验收、
+GateDelay 定时窗口 pair 滞留、摘要数值与归档不一致），全部修复并重跑：
+- `.env.example` 013 块全部注释化（作为未启用部署的既有行为零变化）；
+- serve.go 增 deferred 启动清理（关停时序接管前，任何下游启动失败都关闭
+  专用客户端）；
+- 新增装配级取消身份测试（上条验收）与取消观测证据；
+- `runDelay` 任一转发方向结束即回收 pair（客户端超时不再滞留后端连接；
+  gate 自测以 `connected_clients` 回归基线证明，Hold 转换语义保持）；
+- 证据摘要全部改引修复后归档值。
+复核第二轮再验补充修复：设计记录 PTTL 元组同步为归档值
+（1998/1999/5999/5999）；`runDelay` 在 Hold 翻转时吞掉「已读取、延迟中」
+的应答（转换后不再交付排队应答）——新增回归断言并留存失败前证据
+（临时回退修复必红：`eval during the delay window succeeded after the
+Hold flip`，恢复后绿）。
+6. **可用性取舍（如实）**：`MaxRetries=-1` 放弃库内瞬时重试——单次传输
+   抖动即按不可用处置（换取「无双扣」与 L 硬上界；丢答路径实测 35ms
+   快速失败）。无故障态单次失败率与中间拥塞误拒绝率的生产测量仍为
+   §8 待决策②。
+7. **边界**：`max_retries` 记录字段 -1=构造禁用（读回 0；未设会读回 3）；
+   GateDelay 逐 backend→client 块延迟（实测单块；方向结束即回收 pair）；矩阵
+   `old_assembly` 仅复刻旧客户端配置；ε/容差为测试口径、非 SLO；
+   分面/熔断/查询缓存/Recovery Drill runner 仍不在本轮。

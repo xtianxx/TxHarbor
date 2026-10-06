@@ -10,6 +10,7 @@ import (
 	"errors"
 	"go/parser"
 	"go/token"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -18,11 +19,14 @@ import (
 	"time"
 )
 
-// fakeScriptStore records evaluations and returns scripted results.
+// fakeScriptStore records evaluations and returns scripted results. A non-nil
+// onEval hook replaces the scripted result/error, which lets a test drive the
+// evaluation with the store's own context (budget-expiry scenarios).
 type fakeScriptStore struct {
 	mu     sync.Mutex
 	result any
 	err    error
+	onEval func(ctx context.Context) (any, error)
 	calls  []scriptCall
 }
 
@@ -31,11 +35,15 @@ type scriptCall struct {
 	args []any
 }
 
-func (s *fakeScriptStore) Eval(_ context.Context, _ string, keys []string, args ...any) (any, error) {
+func (s *fakeScriptStore) Eval(ctx context.Context, _ string, keys []string, args ...any) (any, error) {
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	s.calls = append(s.calls, scriptCall{keys: append([]string(nil), keys...), args: append([]any(nil), args...)})
-	return s.result, s.err
+	onEval, result, err := s.onEval, s.result, s.err
+	s.mu.Unlock()
+	if onEval != nil {
+		return onEval(ctx)
+	}
+	return result, err
 }
 
 func (s *fakeScriptStore) lastCall(t *testing.T) scriptCall {
@@ -84,6 +92,7 @@ func testConfig() Config {
 			ClassRPC:           {RatePerSecond: 50, Burst: 20},
 		},
 		Timeout:        time.Second,
+		BucketTTL:      2 * time.Second,
 		RecoveryWindow: time.Minute,
 	}
 }
@@ -113,6 +122,25 @@ func TestLimiterTrustedAllowAndDeny(t *testing.T) {
 	}
 	if len(obs.denied) != 1 || obs.denied[0] != "new_withdrawal" {
 		t.Fatalf("denied observations = %v, want [new_withdrawal]", obs.denied)
+	}
+}
+
+// TestLimiterBucketTTLIsIndependentOfBudget: the key TTL (ARGV[5]) comes from
+// Config.BucketTTL alone; the per-evaluation budget never scales it.
+func TestLimiterBucketTTLIsIndependentOfBudget(t *testing.T) {
+	store := &fakeScriptStore{result: []any{int64(1), int64(1), int64(0)}}
+	cfg := testConfig()
+	cfg.Timeout = 300 * time.Millisecond
+	cfg.BucketTTL = 4 * time.Second
+	limiter, err := NewLimiter(store, cfg, nil)
+	if err != nil {
+		t.Fatalf("NewLimiter: %v", err)
+	}
+	if _, err := limiter.Allow(context.Background(), ClassRPC); err != nil {
+		t.Fatalf("Allow: %v", err)
+	}
+	if got := store.lastCall(t).args[4]; got != int64(4000) {
+		t.Fatalf("script ttl arg = %v, want 4000ms (BucketTTL, not 2×Timeout)", got)
 	}
 }
 
@@ -206,6 +234,99 @@ func TestLimiterRecoveryIsGradedNotInstant(t *testing.T) {
 	}
 }
 
+// timeoutErr is a net.Error whose Timeout() reports true, standing in for a
+// transport-level i/o timeout.
+type timeoutErr struct{}
+
+func (timeoutErr) Error() string   { return "i/o timeout" }
+func (timeoutErr) Timeout() bool   { return true }
+func (timeoutErr) Temporary() bool { return true }
+
+// TestLimiterEvalFailureClassification pins the four-way classification of an
+// Eval failure: caller cancellation and a caller deadline never mark the
+// limiter, a budget or transport fault always does, and a real transport
+// fault is never masked by a coincident cancellation.
+func TestLimiterEvalFailureClassification(t *testing.T) {
+	cancelled, cancelCancelled := context.WithCancel(context.Background())
+	cancelCancelled()
+	defer cancelCancelled()
+	// A deadline in the past makes the context already expired, so the
+	// parent-deadline branch is deterministic.
+	expired, cancelExpired := context.WithTimeout(context.Background(), -time.Second)
+	defer cancelExpired()
+
+	cases := []struct {
+		name         string
+		ctx          context.Context
+		store        *fakeScriptStore
+		wantMarked   bool
+		wantCanceled bool
+		wantDeadline bool
+	}{
+		{
+			name:         "caller cancel is reported as cancel and never marks",
+			ctx:          cancelled,
+			store:        &fakeScriptStore{err: context.Canceled},
+			wantCanceled: true,
+		},
+		{
+			name:         "caller cancel with a net timeout is still cancel",
+			ctx:          cancelled,
+			store:        &fakeScriptStore{err: timeoutErr{}},
+			wantCanceled: true,
+		},
+		{
+			name:         "caller deadline with a net timeout marks as deadline",
+			ctx:          expired,
+			store:        &fakeScriptStore{err: timeoutErr{}},
+			wantMarked:   true,
+			wantDeadline: true,
+		},
+		{
+			name: "budget expiry marks as deadline and never as cancel",
+			ctx:  context.Background(),
+			store: &fakeScriptStore{onEval: func(ctx context.Context) (any, error) {
+				<-ctx.Done()
+				return nil, timeoutErr{}
+			}},
+			wantMarked:   true,
+			wantDeadline: true,
+		},
+		{
+			name:       "a transport fault is never masked by a coincident cancel",
+			ctx:        cancelled,
+			store:      &fakeScriptStore{err: io.EOF},
+			wantMarked: true,
+		},
+		{
+			name:       "plain transport error marks",
+			ctx:        context.Background(),
+			store:      &fakeScriptStore{err: errors.New("connection refused")},
+			wantMarked: true,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := testConfig()
+			cfg.Timeout = 50 * time.Millisecond
+			limiter, err := NewLimiter(tc.store, cfg, nil)
+			if err != nil {
+				t.Fatalf("NewLimiter: %v", err)
+			}
+			if _, err := limiter.Allow(tc.ctx, ClassRPC); !errors.Is(err, ErrUnavailable) {
+				t.Fatalf("Allow = %v, want an error wrapping ErrUnavailable", err)
+			} else if got := errors.Is(err, context.Canceled); got != tc.wantCanceled {
+				t.Fatalf("errors.Is(err, context.Canceled) = %v, want %v (err = %v)", got, tc.wantCanceled, err)
+			} else if got := errors.Is(err, context.DeadlineExceeded); got != tc.wantDeadline {
+				t.Fatalf("errors.Is(err, context.DeadlineExceeded) = %v, want %v (err = %v)", got, tc.wantDeadline, err)
+			}
+			if got := limiter.Unavailable(); got != tc.wantMarked {
+				t.Fatalf("Unavailable() = %v, want %v", got, tc.wantMarked)
+			}
+		})
+	}
+}
+
 func TestLimiterUnknownClassFailsClosed(t *testing.T) {
 	store := &fakeScriptStore{result: []any{int64(1), int64(1), int64(0)}}
 	limiter, err := NewLimiter(store, testConfig(), nil)
@@ -225,12 +346,13 @@ func TestNewLimiterRejectsUnboundedConfig(t *testing.T) {
 		cfg   Config
 	}{
 		{"nil store", nil, valid},
-		{"zero timeout", &fakeScriptStore{}, Config{Classes: valid.Classes, RecoveryWindow: time.Minute}},
-		{"zero recovery", &fakeScriptStore{}, Config{Classes: valid.Classes, Timeout: time.Second}},
-		{"no classes", &fakeScriptStore{}, Config{Timeout: time.Second, RecoveryWindow: time.Minute}},
-		{"unknown class", &fakeScriptStore{}, Config{Classes: map[Class]ClassConfig{"bogus": {1, 1}}, Timeout: time.Second, RecoveryWindow: time.Minute}},
-		{"zero rate", &fakeScriptStore{}, Config{Classes: map[Class]ClassConfig{ClassQuery: {0, 1}}, Timeout: time.Second, RecoveryWindow: time.Minute}},
-		{"zero burst", &fakeScriptStore{}, Config{Classes: map[Class]ClassConfig{ClassQuery: {1, 0}}, Timeout: time.Second, RecoveryWindow: time.Minute}},
+		{"zero timeout", &fakeScriptStore{}, Config{Classes: valid.Classes, BucketTTL: time.Second, RecoveryWindow: time.Minute}},
+		{"zero bucket ttl", &fakeScriptStore{}, Config{Classes: valid.Classes, Timeout: time.Second, RecoveryWindow: time.Minute}},
+		{"zero recovery", &fakeScriptStore{}, Config{Classes: valid.Classes, Timeout: time.Second, BucketTTL: time.Second}},
+		{"no classes", &fakeScriptStore{}, Config{Timeout: time.Second, BucketTTL: time.Second, RecoveryWindow: time.Minute}},
+		{"unknown class", &fakeScriptStore{}, Config{Classes: map[Class]ClassConfig{"bogus": {1, 1}}, Timeout: time.Second, BucketTTL: time.Second, RecoveryWindow: time.Minute}},
+		{"zero rate", &fakeScriptStore{}, Config{Classes: map[Class]ClassConfig{ClassQuery: {0, 1}}, Timeout: time.Second, BucketTTL: time.Second, RecoveryWindow: time.Minute}},
+		{"zero burst", &fakeScriptStore{}, Config{Classes: map[Class]ClassConfig{ClassQuery: {1, 0}}, Timeout: time.Second, BucketTTL: time.Second, RecoveryWindow: time.Minute}},
 	}
 	for _, tc := range cases {
 		if _, err := NewLimiter(tc.store, tc.cfg, nil); err == nil {

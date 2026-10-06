@@ -1,0 +1,12 @@
+{
+  "budget_ms": 200,
+  "goroutines": 32,
+  "pool_size": 16,
+  "min_duration_ms": 201.276,
+  "median_duration_ms": 203.201,
+  "max_duration_ms": 205.248,
+  "failed_calls": 32,
+  "total_conns": 3,
+  "total_conns_bound": 16,
+  "limiter_unavailable": true
+}

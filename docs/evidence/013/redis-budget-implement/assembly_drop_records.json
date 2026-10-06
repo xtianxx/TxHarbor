@@ -1,0 +1,26 @@
+[
+  {
+    "group": "new_assembly_dedicated_client",
+    "cte": true,
+    "max_retries": -1,
+    "server_bound_sends": 1,
+    "confirmed_executions": 1,
+    "tokens_before": "9",
+    "tokens_after": "8.009",
+    "tokens_deducted_est": 0.9909999999999997,
+    "duration_ms": 36.089,
+    "error_text": "ratelimit: unavailable: ratelimit eval: EOF"
+  },
+  {
+    "group": "old_assembly_shared_client",
+    "cte": false,
+    "max_retries": 0,
+    "server_bound_sends": 3,
+    "confirmed_executions": 3,
+    "tokens_before": "9",
+    "tokens_after": "6.007",
+    "tokens_deducted_est": 2.9930000000000003,
+    "duration_ms": 201.269,
+    "error_text": "ratelimit: unavailable\nratelimit eval: context deadline exceeded"
+  }
+]

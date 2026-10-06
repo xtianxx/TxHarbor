@@ -92,6 +92,51 @@ func TestRPCBudgetPausesDistributedOnlyClassAndResumes(t *testing.T) {
 	}
 }
 
+// TestRPCBudgetCallerCancelKeepsPosture: caller cancellation is not a
+// dependency signal — it never pauses a class and never clears an existing
+// pause, while a real transport fault during the same outage still pauses.
+func TestRPCBudgetCallerCancelKeepsPosture(t *testing.T) {
+	store := &fakeScriptStore{err: context.Canceled}
+	obs := &fakeBudgetObserver{}
+	budget := testBudget(t, store, obs)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := budget.Admit(ctx, RPCClassSend); !errors.Is(err, context.Canceled) || errors.Is(err, ErrRPCPaused) {
+		t.Fatalf("Admit(send) on caller cancel = %v, want context.Canceled without ErrRPCPaused", err)
+	}
+	if got := budget.Status()["send"]; got != "ok" {
+		t.Fatalf("status[send] after caller cancel = %q, want ok", got)
+	}
+	if len(obs.paused) != 0 {
+		t.Fatalf("pause observations after caller cancel = %v, want none", obs.paused)
+	}
+
+	// A genuine transport fault still pauses, even with the caller canceled.
+	store.err = errors.New("connection refused")
+	if _, err := budget.Admit(ctx, RPCClassSend); !errors.Is(err, ErrRPCPaused) {
+		t.Fatalf("Admit(send) on a transport fault = %v, want ErrRPCPaused", err)
+	}
+	if got := budget.Status()["send"]; got != "paused" {
+		t.Fatalf("status[send] after the transport fault = %q, want paused", got)
+	}
+	if len(obs.paused) != 1 || obs.paused[0] != "send" {
+		t.Fatalf("pause observations after the transport fault = %v, want [send]", obs.paused)
+	}
+
+	// A later caller cancellation must not clear the existing pause.
+	store.err = context.Canceled
+	if _, err := budget.Admit(ctx, RPCClassSend); !errors.Is(err, context.Canceled) {
+		t.Fatalf("Admit(send) on a later caller cancel = %v, want context.Canceled", err)
+	}
+	if got := budget.Status()["send"]; got != "paused" {
+		t.Fatalf("status[send] after a cancel during the outage = %q, want still paused", got)
+	}
+	if len(obs.paused) != 1 {
+		t.Fatalf("pause observations after the cancel = %v, want still one", obs.paused)
+	}
+}
+
 func TestRPCBudgetBaselineClassContinuesBoundedWhileDegraded(t *testing.T) {
 	store := &fakeScriptStore{err: errors.New("timeout")}
 	budget := testBudget(t, store, nil)

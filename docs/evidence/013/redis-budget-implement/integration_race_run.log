@@ -1,0 +1,681 @@
+=== RUN   TestLimiterTrustedAllowAndDeny
+--- PASS: TestLimiterTrustedAllowAndDeny (0.00s)
+=== RUN   TestLimiterBucketTTLIsIndependentOfBudget
+--- PASS: TestLimiterBucketTTLIsIndependentOfBudget (0.00s)
+=== RUN   TestLimiterScriptErrorAndUntrustedResultMarkUnavailable
+--- PASS: TestLimiterScriptErrorAndUntrustedResultMarkUnavailable (0.00s)
+=== RUN   TestLimiterRecoveryIsGradedNotInstant
+--- PASS: TestLimiterRecoveryIsGradedNotInstant (0.00s)
+=== RUN   TestLimiterEvalFailureClassification
+=== RUN   TestLimiterEvalFailureClassification/caller_cancel_is_reported_as_cancel_and_never_marks
+=== RUN   TestLimiterEvalFailureClassification/caller_cancel_with_a_net_timeout_is_still_cancel
+=== RUN   TestLimiterEvalFailureClassification/caller_deadline_with_a_net_timeout_marks_as_deadline
+=== RUN   TestLimiterEvalFailureClassification/budget_expiry_marks_as_deadline_and_never_as_cancel
+=== RUN   TestLimiterEvalFailureClassification/a_transport_fault_is_never_masked_by_a_coincident_cancel
+=== RUN   TestLimiterEvalFailureClassification/plain_transport_error_marks
+--- PASS: TestLimiterEvalFailureClassification (0.05s)
+    --- PASS: TestLimiterEvalFailureClassification/caller_cancel_is_reported_as_cancel_and_never_marks (0.00s)
+    --- PASS: TestLimiterEvalFailureClassification/caller_cancel_with_a_net_timeout_is_still_cancel (0.00s)
+    --- PASS: TestLimiterEvalFailureClassification/caller_deadline_with_a_net_timeout_marks_as_deadline (0.00s)
+    --- PASS: TestLimiterEvalFailureClassification/budget_expiry_marks_as_deadline_and_never_as_cancel (0.05s)
+    --- PASS: TestLimiterEvalFailureClassification/a_transport_fault_is_never_masked_by_a_coincident_cancel (0.00s)
+    --- PASS: TestLimiterEvalFailureClassification/plain_transport_error_marks (0.00s)
+=== RUN   TestLimiterUnknownClassFailsClosed
+--- PASS: TestLimiterUnknownClassFailsClosed (0.00s)
+=== RUN   TestNewLimiterRejectsUnboundedConfig
+--- PASS: TestNewLimiterRejectsUnboundedConfig (0.00s)
+=== RUN   TestRatelimitNeverImportsFundingPackages
+--- PASS: TestRatelimitNeverImportsFundingPackages (0.01s)
+=== RUN   TestPolicyAllowsTrustedDecisions
+--- PASS: TestPolicyAllowsTrustedDecisions (0.00s)
+=== RUN   TestPolicyTrustedDenialIsRetryable429
+--- PASS: TestPolicyTrustedDenialIsRetryable429 (0.00s)
+=== RUN   TestPolicyUnavailableRefusesNewWithdrawalOnly
+--- PASS: TestPolicyUnavailableRefusesNewWithdrawalOnly (0.00s)
+=== RUN   TestPolicyUnconfiguredClassFailsClosed
+--- PASS: TestPolicyUnconfiguredClassFailsClosed (0.00s)
+=== RUN   TestNewPolicyRequiresLimiter
+--- PASS: TestNewPolicyRequiresLimiter (0.00s)
+=== RUN   TestRatelimitVRatelimitAgainstRealRedis
+2026/10/06 12:00:49 github.com/testcontainers/testcontainers-go - Connected to docker: 
+  Server Version: 29.6.1
+  API Version: 1.55
+  Operating System: Ubuntu 24.04.4 LTS
+  Total Memory: 15915 MB
+  Testcontainers for Go Version: v0.44.0
+  Resolved Docker Host: unix:///var/run/docker.sock
+  Resolved Docker Socket Path: /var/run/docker.sock
+  Test SessionID: 66f131458f9f22eb52ab90dde66a98711b8a3a464bacb8f92aa81522b4d0031a
+  Test ProcessID: ac1ec3fd-0c88-45d4-8044-12ddb502c769
+2026/10/06 12:00:49 🐳 Creating container for image redis:8.2.10-alpine
+2026/10/06 12:00:50 🐳 Creating container for image testcontainers/ryuk:0.14.0
+2026/10/06 12:00:50 ✅ Container created: e030c572c005
+2026/10/06 12:00:50 🐳 Starting container: e030c572c005
+2026/10/06 12:00:50 ✅ Container started: e030c572c005
+2026/10/06 12:00:50 ⏳ Waiting for container id e030c572c005 image: testcontainers/ryuk:0.14.0. Waiting for: all of: [log message "Started", port 8080/tcp to be listening]
+2026/10/06 12:00:51 Shell not found in container
+2026/10/06 12:00:51 🔔 Container is ready: e030c572c005
+2026/10/06 12:00:51 ✅ Container created: 2cc91e650057
+2026/10/06 12:00:51 🐳 Starting container: 2cc91e650057
+2026/10/06 12:00:51 ✅ Container started: 2cc91e650057
+2026/10/06 12:00:51 ⏳ Waiting for container id 2cc91e650057 image: redis:8.2.10-alpine. Waiting for: all of: [port 6379/tcp to be listening, log message "* Ready to accept connections"]
+2026/10/06 12:00:51 🔔 Container is ready: 2cc91e650057
+2026/10/06 12:00:51 🐳 Stopping container: 2cc91e650057
+2026/10/06 12:00:52 ✅ Container stopped: 2cc91e650057
+redis: 2026/10/06 12:00:52 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp 127.0.0.1:45649: connect: connection refused
+redis: 2026/10/06 12:00:53 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp 127.0.0.1:45649: connect: connection refused
+redis: 2026/10/06 12:00:53 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp 127.0.0.1:45649: connect: connection refused
+redis: 2026/10/06 12:00:53 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp 127.0.0.1:45649: connect: connection refused
+redis: 2026/10/06 12:00:54 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp 127.0.0.1:45649: connect: connection refused
+redis: 2026/10/06 12:00:54 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp 127.0.0.1:45649: connect: connection refused
+redis: 2026/10/06 12:00:55 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp 127.0.0.1:45649: connect: connection refused
+redis: 2026/10/06 12:00:55 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp 127.0.0.1:45649: connect: connection refused
+redis: 2026/10/06 12:00:56 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp 127.0.0.1:45649: connect: connection refused
+redis: 2026/10/06 12:00:56 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp 127.0.0.1:45649: connect: connection refused
+redis: 2026/10/06 12:00:56 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp 127.0.0.1:45649: connect: connection refused
+redis: 2026/10/06 12:00:57 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp 127.0.0.1:45649: connect: connection refused
+redis: 2026/10/06 12:00:55 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp 127.0.0.1:45649: connect: connection refused
+redis: 2026/10/06 12:00:55 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp 127.0.0.1:45649: connect: connection refused
+redis: 2026/10/06 12:00:56 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp 127.0.0.1:45649: connect: connection refused
+redis: 2026/10/06 12:00:56 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp 127.0.0.1:45649: connect: connection refused
+redis: 2026/10/06 12:00:56 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp 127.0.0.1:45649: connect: connection refused
+redis: 2026/10/06 12:00:57 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp 127.0.0.1:45649: connect: connection refused
+redis: 2026/10/06 12:00:57 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp 127.0.0.1:45649: connect: connection refused
+redis: 2026/10/06 12:00:58 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp 127.0.0.1:45649: connect: connection refused
+redis: 2026/10/06 12:00:58 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp 127.0.0.1:45649: connect: connection refused
+redis: 2026/10/06 12:00:59 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp 127.0.0.1:45649: connect: connection refused
+redis: 2026/10/06 12:00:59 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp 127.0.0.1:45649: connect: connection refused
+redis: 2026/10/06 12:01:00 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp 127.0.0.1:45649: connect: connection refused
+redis: 2026/10/06 12:01:00 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp 127.0.0.1:45649: connect: connection refused
+redis: 2026/10/06 12:01:00 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp 127.0.0.1:45649: connect: connection refused
+redis: 2026/10/06 12:01:01 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp 127.0.0.1:45649: connect: connection refused
+redis: 2026/10/06 12:01:01 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp 127.0.0.1:45649: connect: connection refused
+redis: 2026/10/06 12:01:02 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp 127.0.0.1:45649: connect: connection refused
+redis: 2026/10/06 12:01:02 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp 127.0.0.1:45649: connect: connection refused
+redis: 2026/10/06 12:01:03 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp 127.0.0.1:45649: connect: connection refused
+redis: 2026/10/06 12:01:03 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp 127.0.0.1:45649: connect: connection refused
+redis: 2026/10/06 12:01:04 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp 127.0.0.1:45649: connect: connection refused
+redis: 2026/10/06 12:01:04 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp 127.0.0.1:45649: connect: connection refused
+redis: 2026/10/06 12:01:04 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp 127.0.0.1:45649: connect: connection refused
+redis: 2026/10/06 12:01:05 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp 127.0.0.1:45649: connect: connection refused
+redis: 2026/10/06 12:01:05 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp 127.0.0.1:45649: connect: connection refused
+redis: 2026/10/06 12:01:06 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp 127.0.0.1:45649: connect: connection refused
+redis: 2026/10/06 12:01:06 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp 127.0.0.1:45649: connect: connection refused
+redis: 2026/10/06 12:01:07 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp 127.0.0.1:45649: connect: connection refused
+redis: 2026/10/06 12:01:07 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp 127.0.0.1:45649: connect: connection refused
+redis: 2026/10/06 12:01:07 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp 127.0.0.1:45649: connect: connection refused
+redis: 2026/10/06 12:01:08 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp 127.0.0.1:45649: connect: connection refused
+redis: 2026/10/06 12:01:08 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp 127.0.0.1:45649: connect: connection refused
+redis: 2026/10/06 12:01:09 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp 127.0.0.1:45649: connect: connection refused
+redis: 2026/10/06 12:01:09 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp 127.0.0.1:45649: connect: connection refused
+redis: 2026/10/06 12:01:10 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp 127.0.0.1:45649: connect: connection refused
+redis: 2026/10/06 12:01:10 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp 127.0.0.1:45649: connect: connection refused
+redis: 2026/10/06 12:01:11 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp 127.0.0.1:45649: connect: connection refused
+redis: 2026/10/06 12:01:11 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp 127.0.0.1:45649: connect: connection refused
+redis: 2026/10/06 12:01:11 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp 127.0.0.1:45649: connect: connection refused
+redis: 2026/10/06 12:01:12 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp 127.0.0.1:45649: connect: connection refused
+redis: 2026/10/06 12:01:12 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp 127.0.0.1:45649: connect: connection refused
+redis: 2026/10/06 12:01:13 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp 127.0.0.1:45649: connect: connection refused
+redis: 2026/10/06 12:01:13 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp 127.0.0.1:45649: connect: connection refused
+redis: 2026/10/06 12:01:14 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp 127.0.0.1:45649: connect: connection refused
+redis: 2026/10/06 12:01:14 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp 127.0.0.1:45649: connect: connection refused
+redis: 2026/10/06 12:01:14 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp 127.0.0.1:45649: connect: connection refused
+redis: 2026/10/06 12:01:15 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp 127.0.0.1:45649: connect: connection refused
+redis: 2026/10/06 12:01:15 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp 127.0.0.1:45649: connect: connection refused
+redis: 2026/10/06 12:01:16 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp 127.0.0.1:45649: connect: connection refused
+redis: 2026/10/06 12:01:16 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp 127.0.0.1:45649: connect: connection refused
+redis: 2026/10/06 12:01:17 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp 127.0.0.1:45649: connect: connection refused
+redis: 2026/10/06 12:01:17 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp 127.0.0.1:45649: connect: connection refused
+redis: 2026/10/06 12:01:18 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp 127.0.0.1:45649: connect: connection refused
+redis: 2026/10/06 12:01:18 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp 127.0.0.1:45649: connect: connection refused
+redis: 2026/10/06 12:01:18 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp 127.0.0.1:45649: connect: connection refused
+redis: 2026/10/06 12:01:19 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp 127.0.0.1:45649: connect: connection refused
+redis: 2026/10/06 12:01:19 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp 127.0.0.1:45649: connect: connection refused
+redis: 2026/10/06 12:01:20 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp 127.0.0.1:45649: connect: connection refused
+redis: 2026/10/06 12:01:20 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp 127.0.0.1:45649: connect: connection refused
+redis: 2026/10/06 12:01:21 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp 127.0.0.1:45649: connect: connection refused
+redis: 2026/10/06 12:01:21 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp 127.0.0.1:45649: connect: connection refused
+redis: 2026/10/06 12:01:21 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp 127.0.0.1:45649: connect: connection refused
+redis: 2026/10/06 12:01:22 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp 127.0.0.1:45649: connect: connection refused
+redis: 2026/10/06 12:01:22 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp 127.0.0.1:45649: connect: connection refused
+redis: 2026/10/06 12:01:23 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp 127.0.0.1:45649: connect: connection refused
+redis: 2026/10/06 12:01:23 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp 127.0.0.1:45649: connect: connection refused
+redis: 2026/10/06 12:01:24 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp 127.0.0.1:45649: connect: connection refused
+redis: 2026/10/06 12:01:24 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp 127.0.0.1:45649: connect: connection refused
+redis: 2026/10/06 12:01:24 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp 127.0.0.1:45649: connect: connection refused
+redis: 2026/10/06 12:01:25 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp 127.0.0.1:45649: connect: connection refused
+redis: 2026/10/06 12:01:25 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp 127.0.0.1:45649: connect: connection refused
+redis: 2026/10/06 12:01:26 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp 127.0.0.1:45649: connect: connection refused
+redis: 2026/10/06 12:01:26 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp 127.0.0.1:45649: connect: connection refused
+redis: 2026/10/06 12:01:27 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp 127.0.0.1:45649: connect: connection refused
+redis: 2026/10/06 12:01:27 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp 127.0.0.1:45649: connect: connection refused
+redis: 2026/10/06 12:01:25 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp 127.0.0.1:45649: connect: connection refused
+redis: 2026/10/06 12:01:25 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp 127.0.0.1:45649: connect: connection refused
+redis: 2026/10/06 12:01:26 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp 127.0.0.1:45649: connect: connection refused
+redis: 2026/10/06 12:01:26 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp 127.0.0.1:45649: connect: connection refused
+redis: 2026/10/06 12:01:27 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp 127.0.0.1:45649: connect: connection refused
+redis: 2026/10/06 12:01:27 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp 127.0.0.1:45649: connect: connection refused
+redis: 2026/10/06 12:01:28 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp 127.0.0.1:45649: connect: connection refused
+redis: 2026/10/06 12:01:28 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp 127.0.0.1:45649: connect: connection refused
+redis: 2026/10/06 12:01:28 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp 127.0.0.1:45649: connect: connection refused
+2026/10/06 12:01:28 🐳 Starting container: 2cc91e650057
+2026/10/06 12:01:29 ✅ Container started: 2cc91e650057
+2026/10/06 12:01:29 ⏳ Waiting for container id 2cc91e650057 image: redis:8.2.10-alpine. Waiting for: all of: [port 6379/tcp to be listening, log message "* Ready to accept connections"]
+2026/10/06 12:01:29 🔔 Container is ready: 2cc91e650057
+2026/10/06 12:01:29 🐳 Stopping container: 2cc91e650057
+2026/10/06 12:01:30 ✅ Container stopped: 2cc91e650057
+2026/10/06 12:01:30 🐳 Terminating container: 2cc91e650057
+2026/10/06 12:01:30 🚫 Container terminated: 2cc91e650057
+--- PASS: TestRatelimitVRatelimitAgainstRealRedis (45.64s)
+=== RUN   TestRedisBudgetCTEBoundary
+2026/10/06 12:01:30 🐳 Creating container for image redis:8.2.10-alpine
+2026/10/06 12:01:30 ✅ Container created: 974158f92f74
+2026/10/06 12:01:30 🐳 Starting container: 974158f92f74
+2026/10/06 12:01:30 ✅ Container started: 974158f92f74
+2026/10/06 12:01:30 ⏳ Waiting for container id 974158f92f74 image: redis:8.2.10-alpine. Waiting for: all of: [port 6379/tcp to be listening, log message "* Ready to accept connections"]
+2026/10/06 12:01:31 🔔 Container is ready: 974158f92f74
+    redisbudget_cte_test.go:210: cte evidence dir: /tmp/txharbor-impl-ev
+=== RUN   TestRedisBudgetCTEBoundary/hot_poolwait
+=== RUN   TestRedisBudgetCTEBoundary/cancel_points
+=== RUN   TestRedisBudgetCTEBoundary/cold_init
+=== RUN   TestRedisBudgetCTEBoundary/parent_deadline
+=== RUN   TestRedisBudgetCTEBoundary/cte_off_hot_control
+=== RUN   TestRedisBudgetCTEBoundary/normal_and_recovery
+=== NAME  TestRedisBudgetCTEBoundary
+    redisbudget_cte_test.go:561: hot_poolwait               primary      200.6ms ok=false bound=true   class=context_deadline_exceeded
+    redisbudget_cte_test.go:561: hot_poolwait               secondary    200.7ms ok=false bound=true   class=context_deadline_exceeded
+    redisbudget_cte_test.go:561: cancel_inflight            solo         201.1ms ok=false bound=true   class=other
+    redisbudget_cte_test.go:561: cancel_poolwait            solo          61.9ms ok=false bound=true   class=other
+    redisbudget_cte_test.go:561: cold_init                  solo         201.2ms ok=false bound=true   class=context_deadline_exceeded
+    redisbudget_cte_test.go:561: parent_deadline            solo          81.3ms ok=false bound=true   class=context_deadline_exceeded
+    redisbudget_cte_test.go:561: cte_off_hot_control        solo        1001.2ms ok=false bound=true   class=context_deadline_exceeded
+    redisbudget_cte_test.go:561: normal                     solo           6.3ms ok=true  bound=true   class=ok
+    redisbudget_cte_test.go:561: recovery                   solo           5.8ms ok=true  bound=true   class=
+2026/10/06 12:01:47 🐳 Stopping container: 974158f92f74
+2026/10/06 12:01:47 ✅ Container stopped: 974158f92f74
+2026/10/06 12:01:47 🐳 Terminating container: 974158f92f74
+2026/10/06 12:01:47 🚫 Container terminated: 974158f92f74
+--- PASS: TestRedisBudgetCTEBoundary (17.26s)
+    --- PASS: TestRedisBudgetCTEBoundary/hot_poolwait (2.25s)
+    --- PASS: TestRedisBudgetCTEBoundary/cancel_points (2.21s)
+    --- PASS: TestRedisBudgetCTEBoundary/cold_init (2.21s)
+    --- PASS: TestRedisBudgetCTEBoundary/parent_deadline (2.08s)
+    --- PASS: TestRedisBudgetCTEBoundary/cte_off_hot_control (3.01s)
+    --- PASS: TestRedisBudgetCTEBoundary/normal_and_recovery (4.22s)
+=== RUN   TestRedisBudgetResponseLossCounterexample
+2026/10/06 12:01:47 🐳 Creating container for image redis:8.2.10-alpine
+2026/10/06 12:01:47 ✅ Container created: f134174b1b5c
+2026/10/06 12:01:47 🐳 Starting container: f134174b1b5c
+2026/10/06 12:01:48 ✅ Container started: f134174b1b5c
+2026/10/06 12:01:48 ⏳ Waiting for container id f134174b1b5c image: redis:8.2.10-alpine. Waiting for: all of: [port 6379/tcp to be listening, log message "* Ready to accept connections"]
+2026/10/06 12:01:48 🔔 Container is ready: f134174b1b5c
+    redisbudget_cte_test.go:652: response-loss evidence dir: /tmp/txharbor-impl-ev
+    redisbudget_cte_test.go:821: close_before_expiry  sends=4 execs=4 withheld=4 tokens 9→5.007 settled="5.007" deduct≈4.0 dur=201.2ms resended=true doubled=true context_deadline_exceeded bucket_alive
+    redisbudget_cte_test.go:821: hold_to_expiry       sends=1 execs=1 withheld=1 tokens 9→8.008 settled="8.008" deduct≈1.0 dur=201.2ms resended=false doubled=false context_deadline_exceeded bucket_alive
+    redisbudget_cte_test.go:821: isolated_noretry     sends=1 execs=1 withheld=1 tokens 9→8.007 settled="8.007" deduct≈1.0 dur=35.8ms resended=false doubled=false other bucket_alive
+2026/10/06 12:01:50 🐳 Stopping container: f134174b1b5c
+2026/10/06 12:01:50 ✅ Container stopped: f134174b1b5c
+2026/10/06 12:01:50 🐳 Terminating container: f134174b1b5c
+2026/10/06 12:01:50 🚫 Container terminated: f134174b1b5c
+--- PASS: TestRedisBudgetResponseLossCounterexample (3.06s)
+=== RUN   TestRedisLatencyABCRefusedAndHold
+2026/10/06 12:01:50 🐳 Creating container for image redis:8.2.10-alpine
+2026/10/06 12:01:50 ✅ Container created: 3d04ae348486
+2026/10/06 12:01:50 🐳 Starting container: 3d04ae348486
+2026/10/06 12:01:51 ✅ Container started: 3d04ae348486
+2026/10/06 12:01:51 ⏳ Waiting for container id 3d04ae348486 image: redis:8.2.10-alpine. Waiting for: all of: [port 6379/tcp to be listening, log message "* Ready to accept connections"]
+2026/10/06 12:01:51 🔔 Container is ready: 3d04ae348486
+    redislatency_ab_test.go:420: redis-latency evidence dir: /tmp/txharbor-impl-ev
+    redislatency_ab_test.go:430: variant=A shape=refused round=1
+redis: 2026/10/06 12:01:51 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp 127.0.0.1:46661: connect: connection refused
+redis: 2026/10/06 12:01:51 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp 127.0.0.1:46661: connect: connection refused
+redis: 2026/10/06 12:01:51 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp 127.0.0.1:46661: connect: connection refused
+redis: 2026/10/06 12:01:51 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp 127.0.0.1:46661: connect: connection refused
+redis: 2026/10/06 12:01:51 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp 127.0.0.1:46661: connect: connection refused
+redis: 2026/10/06 12:01:51 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp 127.0.0.1:46661: connect: connection refused
+redis: 2026/10/06 12:01:51 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp 127.0.0.1:46661: connect: connection refused
+redis: 2026/10/06 12:01:51 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp 127.0.0.1:46661: connect: connection refused
+redis: 2026/10/06 12:01:52 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp 127.0.0.1:46661: connect: connection refused
+redis: 2026/10/06 12:01:52 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp 127.0.0.1:46661: connect: connection refused
+redis: 2026/10/06 12:01:52 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp 127.0.0.1:46661: connect: connection refused
+redis: 2026/10/06 12:01:52 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp 127.0.0.1:46661: connect: connection refused
+redis: 2026/10/06 12:01:52 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp 127.0.0.1:46661: connect: connection refused
+redis: 2026/10/06 12:01:52 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp 127.0.0.1:46661: connect: connection refused
+redis: 2026/10/06 12:01:52 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp 127.0.0.1:46661: connect: connection refused
+redis: 2026/10/06 12:01:52 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp 127.0.0.1:46661: connect: connection refused
+redis: 2026/10/06 12:01:52 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp 127.0.0.1:46661: connect: connection refused
+redis: 2026/10/06 12:01:52 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp 127.0.0.1:46661: connect: connection refused
+redis: 2026/10/06 12:01:52 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp 127.0.0.1:46661: connect: connection refused
+redis: 2026/10/06 12:01:52 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp 127.0.0.1:46661: connect: connection refused
+redis: 2026/10/06 12:01:52 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp 127.0.0.1:46661: connect: connection refused
+redis: 2026/10/06 12:01:52 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp 127.0.0.1:46661: connect: connection refused
+redis: 2026/10/06 12:01:52 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp 127.0.0.1:46661: connect: connection refused
+redis: 2026/10/06 12:01:52 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp 127.0.0.1:46661: connect: connection refused
+redis: 2026/10/06 12:01:52 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp 127.0.0.1:46661: connect: connection refused
+redis: 2026/10/06 12:01:52 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp 127.0.0.1:46661: connect: connection refused
+redis: 2026/10/06 12:01:52 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp 127.0.0.1:46661: connect: connection refused
+redis: 2026/10/06 12:01:52 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp 127.0.0.1:46661: connect: connection refused
+redis: 2026/10/06 12:01:52 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp 127.0.0.1:46661: connect: connection refused
+redis: 2026/10/06 12:01:52 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp 127.0.0.1:46661: connect: connection refused
+redis: 2026/10/06 12:01:52 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp 127.0.0.1:46661: connect: connection refused
+redis: 2026/10/06 12:01:52 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp 127.0.0.1:46661: connect: connection refused
+redis: 2026/10/06 12:01:53 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp 127.0.0.1:46661: connect: connection refused
+redis: 2026/10/06 12:01:53 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp 127.0.0.1:46661: connect: connection refused
+redis: 2026/10/06 12:01:53 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp 127.0.0.1:46661: connect: connection refused
+redis: 2026/10/06 12:01:53 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp 127.0.0.1:46661: connect: connection refused
+redis: 2026/10/06 12:01:53 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp 127.0.0.1:46661: connect: connection refused
+redis: 2026/10/06 12:01:53 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp 127.0.0.1:46661: connect: connection refused
+redis: 2026/10/06 12:01:53 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp 127.0.0.1:46661: connect: connection refused
+redis: 2026/10/06 12:01:53 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp 127.0.0.1:46661: connect: connection refused
+    redislatency_ab_test.go:430: variant=A shape=refused round=2
+redis: 2026/10/06 12:01:53 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp 127.0.0.1:46661: connect: connection refused
+redis: 2026/10/06 12:01:53 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp 127.0.0.1:46661: connect: connection refused
+redis: 2026/10/06 12:01:53 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp 127.0.0.1:46661: connect: connection refused
+redis: 2026/10/06 12:01:53 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp 127.0.0.1:46661: connect: connection refused
+redis: 2026/10/06 12:01:53 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp 127.0.0.1:46661: connect: connection refused
+redis: 2026/10/06 12:01:53 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp 127.0.0.1:46661: connect: connection refused
+redis: 2026/10/06 12:01:53 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp 127.0.0.1:46661: connect: connection refused
+redis: 2026/10/06 12:01:53 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp 127.0.0.1:46661: connect: connection refused
+redis: 2026/10/06 12:01:53 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp 127.0.0.1:46661: connect: connection refused
+redis: 2026/10/06 12:01:53 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp 127.0.0.1:46661: connect: connection refused
+redis: 2026/10/06 12:01:53 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp 127.0.0.1:46661: connect: connection refused
+redis: 2026/10/06 12:01:53 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp 127.0.0.1:46661: connect: connection refused
+redis: 2026/10/06 12:01:53 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp 127.0.0.1:46661: connect: connection refused
+redis: 2026/10/06 12:01:53 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp 127.0.0.1:46661: connect: connection refused
+redis: 2026/10/06 12:01:53 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp 127.0.0.1:46661: connect: connection refused
+redis: 2026/10/06 12:01:53 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp 127.0.0.1:46661: connect: connection refused
+redis: 2026/10/06 12:01:54 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp 127.0.0.1:46661: connect: connection refused
+redis: 2026/10/06 12:01:54 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp 127.0.0.1:46661: connect: connection refused
+redis: 2026/10/06 12:01:54 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp 127.0.0.1:46661: connect: connection refused
+redis: 2026/10/06 12:01:54 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp 127.0.0.1:46661: connect: connection refused
+redis: 2026/10/06 12:01:54 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp 127.0.0.1:46661: connect: connection refused
+redis: 2026/10/06 12:01:54 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp 127.0.0.1:46661: connect: connection refused
+redis: 2026/10/06 12:01:54 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp 127.0.0.1:46661: connect: connection refused
+redis: 2026/10/06 12:01:54 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp 127.0.0.1:46661: connect: connection refused
+redis: 2026/10/06 12:01:54 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp 127.0.0.1:46661: connect: connection refused
+redis: 2026/10/06 12:01:54 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp 127.0.0.1:46661: connect: connection refused
+redis: 2026/10/06 12:01:54 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp 127.0.0.1:46661: connect: connection refused
+redis: 2026/10/06 12:01:54 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp 127.0.0.1:46661: connect: connection refused
+redis: 2026/10/06 12:01:54 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp 127.0.0.1:46661: connect: connection refused
+redis: 2026/10/06 12:01:54 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp 127.0.0.1:46661: connect: connection refused
+redis: 2026/10/06 12:01:54 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp 127.0.0.1:46661: connect: connection refused
+redis: 2026/10/06 12:01:54 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp 127.0.0.1:46661: connect: connection refused
+redis: 2026/10/06 12:01:54 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp 127.0.0.1:46661: connect: connection refused
+redis: 2026/10/06 12:01:54 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp 127.0.0.1:46661: connect: connection refused
+redis: 2026/10/06 12:01:54 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp 127.0.0.1:46661: connect: connection refused
+redis: 2026/10/06 12:01:54 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp 127.0.0.1:46661: connect: connection refused
+redis: 2026/10/06 12:01:54 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp 127.0.0.1:46661: connect: connection refused
+redis: 2026/10/06 12:01:54 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp 127.0.0.1:46661: connect: connection refused
+redis: 2026/10/06 12:01:54 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp 127.0.0.1:46661: connect: connection refused
+redis: 2026/10/06 12:01:54 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp 127.0.0.1:46661: connect: connection refused
+redis: 2026/10/06 12:01:55 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp 127.0.0.1:46661: connect: connection refused
+redis: 2026/10/06 12:01:55 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp 127.0.0.1:46661: connect: connection refused
+redis: 2026/10/06 12:01:55 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp 127.0.0.1:46661: connect: connection refused
+redis: 2026/10/06 12:01:55 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp 127.0.0.1:46661: connect: connection refused
+redis: 2026/10/06 12:01:55 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp 127.0.0.1:46661: connect: connection refused
+redis: 2026/10/06 12:01:55 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp 127.0.0.1:46661: connect: connection refused
+redis: 2026/10/06 12:01:55 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp 127.0.0.1:46661: connect: connection refused
+redis: 2026/10/06 12:01:55 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp 127.0.0.1:46661: connect: connection refused
+    redislatency_ab_test.go:430: variant=A shape=conn_hold_cold round=3
+    redislatency_ab_test.go:430: variant=A shape=conn_hold_cold round=4
+    redislatency_ab_test.go:430: variant=A shape=conn_hold_warm round=5
+    redislatency_ab_test.go:430: variant=A shape=conn_hold_warm round=6
+    redislatency_ab_test.go:430: variant=A shape=normal round=7
+    redislatency_ab_test.go:430: variant=A shape=normal round=8
+    redislatency_ab_test.go:430: variant=B shape=refused round=9
+redis: 2026/10/06 12:02:03 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp 127.0.0.1:46661: connect: connection refused
+redis: 2026/10/06 12:02:03 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp 127.0.0.1:46661: connect: connection refused
+redis: 2026/10/06 12:02:03 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp 127.0.0.1:46661: connect: connection refused
+redis: 2026/10/06 12:02:03 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp 127.0.0.1:46661: connect: connection refused
+redis: 2026/10/06 12:02:03 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp 127.0.0.1:46661: connect: connection refused
+redis: 2026/10/06 12:02:03 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp 127.0.0.1:46661: connect: connection refused
+redis: 2026/10/06 12:02:03 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp 127.0.0.1:46661: connect: connection refused
+redis: 2026/10/06 12:02:03 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp 127.0.0.1:46661: connect: connection refused
+redis: 2026/10/06 12:02:04 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp 127.0.0.1:46661: connect: connection refused
+redis: 2026/10/06 12:02:04 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp 127.0.0.1:46661: connect: connection refused
+redis: 2026/10/06 12:02:04 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp 127.0.0.1:46661: connect: connection refused
+redis: 2026/10/06 12:02:04 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp 127.0.0.1:46661: connect: connection refused
+redis: 2026/10/06 12:02:04 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp 127.0.0.1:46661: connect: connection refused
+redis: 2026/10/06 12:02:04 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp 127.0.0.1:46661: connect: connection refused
+redis: 2026/10/06 12:02:04 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp 127.0.0.1:46661: connect: connection refused
+redis: 2026/10/06 12:02:04 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp 127.0.0.1:46661: connect: connection refused
+redis: 2026/10/06 12:02:04 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp 127.0.0.1:46661: connect: connection refused
+redis: 2026/10/06 12:02:04 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp 127.0.0.1:46661: connect: connection refused
+redis: 2026/10/06 12:02:04 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp 127.0.0.1:46661: connect: connection refused
+redis: 2026/10/06 12:02:04 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp 127.0.0.1:46661: connect: connection refused
+redis: 2026/10/06 12:02:04 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp 127.0.0.1:46661: connect: connection refused
+redis: 2026/10/06 12:02:04 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp 127.0.0.1:46661: connect: connection refused
+redis: 2026/10/06 12:02:04 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp 127.0.0.1:46661: connect: connection refused
+redis: 2026/10/06 12:02:04 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp 127.0.0.1:46661: connect: connection refused
+redis: 2026/10/06 12:02:04 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp 127.0.0.1:46661: connect: connection refused
+redis: 2026/10/06 12:02:04 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp 127.0.0.1:46661: connect: connection refused
+redis: 2026/10/06 12:02:04 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp 127.0.0.1:46661: connect: connection refused
+redis: 2026/10/06 12:02:04 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp 127.0.0.1:46661: connect: connection refused
+redis: 2026/10/06 12:02:04 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp 127.0.0.1:46661: connect: connection refused
+redis: 2026/10/06 12:02:04 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp 127.0.0.1:46661: connect: connection refused
+redis: 2026/10/06 12:02:04 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp 127.0.0.1:46661: connect: connection refused
+redis: 2026/10/06 12:02:04 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp 127.0.0.1:46661: connect: connection refused
+redis: 2026/10/06 12:02:05 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp 127.0.0.1:46661: connect: connection refused
+redis: 2026/10/06 12:02:05 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp 127.0.0.1:46661: connect: connection refused
+redis: 2026/10/06 12:02:05 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp 127.0.0.1:46661: connect: connection refused
+redis: 2026/10/06 12:02:05 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp 127.0.0.1:46661: connect: connection refused
+redis: 2026/10/06 12:02:05 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp 127.0.0.1:46661: connect: connection refused
+redis: 2026/10/06 12:02:05 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp 127.0.0.1:46661: connect: connection refused
+redis: 2026/10/06 12:02:05 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp 127.0.0.1:46661: connect: connection refused
+redis: 2026/10/06 12:02:05 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp 127.0.0.1:46661: connect: connection refused
+    redislatency_ab_test.go:430: variant=B shape=refused round=10
+redis: 2026/10/06 12:02:05 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp 127.0.0.1:46661: connect: connection refused
+redis: 2026/10/06 12:02:05 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp 127.0.0.1:46661: connect: connection refused
+redis: 2026/10/06 12:02:05 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp 127.0.0.1:46661: connect: connection refused
+redis: 2026/10/06 12:02:05 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp 127.0.0.1:46661: connect: connection refused
+redis: 2026/10/06 12:02:05 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp 127.0.0.1:46661: connect: connection refused
+redis: 2026/10/06 12:02:05 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp 127.0.0.1:46661: connect: connection refused
+redis: 2026/10/06 12:02:05 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp 127.0.0.1:46661: connect: connection refused
+redis: 2026/10/06 12:02:05 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp 127.0.0.1:46661: connect: connection refused
+redis: 2026/10/06 12:02:05 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp 127.0.0.1:46661: connect: connection refused
+redis: 2026/10/06 12:02:05 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp 127.0.0.1:46661: connect: connection refused
+redis: 2026/10/06 12:02:05 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp 127.0.0.1:46661: connect: connection refused
+redis: 2026/10/06 12:02:05 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp 127.0.0.1:46661: connect: connection refused
+redis: 2026/10/06 12:02:05 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp 127.0.0.1:46661: connect: connection refused
+redis: 2026/10/06 12:02:05 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp 127.0.0.1:46661: connect: connection refused
+redis: 2026/10/06 12:02:05 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp 127.0.0.1:46661: connect: connection refused
+redis: 2026/10/06 12:02:05 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp 127.0.0.1:46661: connect: connection refused
+redis: 2026/10/06 12:02:06 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp 127.0.0.1:46661: connect: connection refused
+redis: 2026/10/06 12:02:06 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp 127.0.0.1:46661: connect: connection refused
+redis: 2026/10/06 12:02:06 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp 127.0.0.1:46661: connect: connection refused
+redis: 2026/10/06 12:02:06 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp 127.0.0.1:46661: connect: connection refused
+redis: 2026/10/06 12:02:06 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp 127.0.0.1:46661: connect: connection refused
+redis: 2026/10/06 12:02:06 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp 127.0.0.1:46661: connect: connection refused
+redis: 2026/10/06 12:02:06 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp 127.0.0.1:46661: connect: connection refused
+redis: 2026/10/06 12:02:06 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp 127.0.0.1:46661: connect: connection refused
+redis: 2026/10/06 12:02:06 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp 127.0.0.1:46661: connect: connection refused
+redis: 2026/10/06 12:02:06 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp 127.0.0.1:46661: connect: connection refused
+redis: 2026/10/06 12:02:06 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp 127.0.0.1:46661: connect: connection refused
+redis: 2026/10/06 12:02:06 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp 127.0.0.1:46661: connect: connection refused
+redis: 2026/10/06 12:02:06 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp 127.0.0.1:46661: connect: connection refused
+redis: 2026/10/06 12:02:06 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp 127.0.0.1:46661: connect: connection refused
+redis: 2026/10/06 12:02:06 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp 127.0.0.1:46661: connect: connection refused
+redis: 2026/10/06 12:02:06 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp 127.0.0.1:46661: connect: connection refused
+redis: 2026/10/06 12:02:06 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp 127.0.0.1:46661: connect: connection refused
+redis: 2026/10/06 12:02:06 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp 127.0.0.1:46661: connect: connection refused
+redis: 2026/10/06 12:02:06 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp 127.0.0.1:46661: connect: connection refused
+redis: 2026/10/06 12:02:06 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp 127.0.0.1:46661: connect: connection refused
+redis: 2026/10/06 12:02:06 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp 127.0.0.1:46661: connect: connection refused
+redis: 2026/10/06 12:02:06 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp 127.0.0.1:46661: connect: connection refused
+redis: 2026/10/06 12:02:06 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp 127.0.0.1:46661: connect: connection refused
+redis: 2026/10/06 12:02:06 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp 127.0.0.1:46661: connect: connection refused
+redis: 2026/10/06 12:02:07 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp 127.0.0.1:46661: connect: connection refused
+redis: 2026/10/06 12:02:07 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp 127.0.0.1:46661: connect: connection refused
+redis: 2026/10/06 12:02:07 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp 127.0.0.1:46661: connect: connection refused
+redis: 2026/10/06 12:02:07 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp 127.0.0.1:46661: connect: connection refused
+redis: 2026/10/06 12:02:07 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp 127.0.0.1:46661: connect: connection refused
+redis: 2026/10/06 12:02:07 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp 127.0.0.1:46661: connect: connection refused
+redis: 2026/10/06 12:02:07 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp 127.0.0.1:46661: connect: connection refused
+redis: 2026/10/06 12:02:07 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp 127.0.0.1:46661: connect: connection refused
+    redislatency_ab_test.go:430: variant=B shape=conn_hold_cold round=11
+    redislatency_ab_test.go:430: variant=B shape=conn_hold_cold round=12
+    redislatency_ab_test.go:430: variant=B shape=conn_hold_warm round=13
+    redislatency_ab_test.go:430: variant=B shape=conn_hold_warm round=14
+    redislatency_ab_test.go:430: variant=B shape=normal round=15
+    redislatency_ab_test.go:430: variant=B shape=normal round=16
+    redislatency_ab_test.go:430: variant=C shape=refused round=17
+redis: 2026/10/06 12:02:18 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp 127.0.0.1:46661: connect: connection refused
+redis: 2026/10/06 12:02:18 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp 127.0.0.1:46661: connect: connection refused
+redis: 2026/10/06 12:02:18 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp 127.0.0.1:46661: connect: connection refused
+redis: 2026/10/06 12:02:18 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp 127.0.0.1:46661: connect: connection refused
+redis: 2026/10/06 12:02:18 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp 127.0.0.1:46661: connect: connection refused
+redis: 2026/10/06 12:02:18 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp 127.0.0.1:46661: connect: connection refused
+redis: 2026/10/06 12:02:18 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp 127.0.0.1:46661: connect: connection refused
+redis: 2026/10/06 12:02:18 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp 127.0.0.1:46661: connect: connection refused
+redis: 2026/10/06 12:02:18 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp 127.0.0.1:46661: connect: connection refused
+redis: 2026/10/06 12:02:18 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp 127.0.0.1:46661: connect: connection refused
+redis: 2026/10/06 12:02:18 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp 127.0.0.1:46661: connect: connection refused
+redis: 2026/10/06 12:02:18 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp 127.0.0.1:46661: connect: connection refused
+redis: 2026/10/06 12:02:18 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp 127.0.0.1:46661: connect: connection refused
+redis: 2026/10/06 12:02:18 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp 127.0.0.1:46661: connect: connection refused
+redis: 2026/10/06 12:02:18 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp 127.0.0.1:46661: connect: connection refused
+redis: 2026/10/06 12:02:18 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp 127.0.0.1:46661: connect: connection refused
+redis: 2026/10/06 12:02:19 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp 127.0.0.1:46661: connect: connection refused
+redis: 2026/10/06 12:02:19 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp 127.0.0.1:46661: connect: connection refused
+redis: 2026/10/06 12:02:19 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp 127.0.0.1:46661: connect: connection refused
+redis: 2026/10/06 12:02:19 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp 127.0.0.1:46661: connect: connection refused
+redis: 2026/10/06 12:02:19 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp 127.0.0.1:46661: connect: connection refused
+redis: 2026/10/06 12:02:19 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp 127.0.0.1:46661: connect: connection refused
+redis: 2026/10/06 12:02:19 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp 127.0.0.1:46661: connect: connection refused
+redis: 2026/10/06 12:02:19 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp 127.0.0.1:46661: connect: connection refused
+redis: 2026/10/06 12:02:19 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp 127.0.0.1:46661: connect: connection refused
+redis: 2026/10/06 12:02:19 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp 127.0.0.1:46661: connect: connection refused
+redis: 2026/10/06 12:02:19 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp 127.0.0.1:46661: connect: connection refused
+redis: 2026/10/06 12:02:19 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp 127.0.0.1:46661: connect: connection refused
+redis: 2026/10/06 12:02:19 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp 127.0.0.1:46661: connect: connection refused
+redis: 2026/10/06 12:02:19 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp 127.0.0.1:46661: connect: connection refused
+redis: 2026/10/06 12:02:19 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp 127.0.0.1:46661: connect: connection refused
+redis: 2026/10/06 12:02:19 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp 127.0.0.1:46661: connect: connection refused
+redis: 2026/10/06 12:02:19 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp 127.0.0.1:46661: connect: connection refused
+redis: 2026/10/06 12:02:19 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp 127.0.0.1:46661: connect: connection refused
+redis: 2026/10/06 12:02:19 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp 127.0.0.1:46661: connect: connection refused
+redis: 2026/10/06 12:02:19 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp 127.0.0.1:46661: connect: connection refused
+redis: 2026/10/06 12:02:19 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp 127.0.0.1:46661: connect: connection refused
+redis: 2026/10/06 12:02:19 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp 127.0.0.1:46661: connect: connection refused
+redis: 2026/10/06 12:02:19 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp 127.0.0.1:46661: connect: connection refused
+redis: 2026/10/06 12:02:19 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp 127.0.0.1:46661: connect: connection refused
+    redislatency_ab_test.go:430: variant=C shape=refused round=18
+redis: 2026/10/06 12:02:20 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp 127.0.0.1:46661: connect: connection refused
+redis: 2026/10/06 12:02:20 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp 127.0.0.1:46661: connect: connection refused
+redis: 2026/10/06 12:02:20 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp 127.0.0.1:46661: connect: connection refused
+redis: 2026/10/06 12:02:20 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp 127.0.0.1:46661: connect: connection refused
+redis: 2026/10/06 12:02:20 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp 127.0.0.1:46661: connect: connection refused
+redis: 2026/10/06 12:02:20 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp 127.0.0.1:46661: connect: connection refused
+redis: 2026/10/06 12:02:20 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp 127.0.0.1:46661: connect: connection refused
+redis: 2026/10/06 12:02:20 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp 127.0.0.1:46661: connect: connection refused
+redis: 2026/10/06 12:02:20 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp 127.0.0.1:46661: connect: connection refused
+redis: 2026/10/06 12:02:20 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp 127.0.0.1:46661: connect: connection refused
+redis: 2026/10/06 12:02:20 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp 127.0.0.1:46661: connect: connection refused
+redis: 2026/10/06 12:02:20 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp 127.0.0.1:46661: connect: connection refused
+redis: 2026/10/06 12:02:20 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp 127.0.0.1:46661: connect: connection refused
+redis: 2026/10/06 12:02:20 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp 127.0.0.1:46661: connect: connection refused
+redis: 2026/10/06 12:02:20 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp 127.0.0.1:46661: connect: connection refused
+redis: 2026/10/06 12:02:20 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp 127.0.0.1:46661: connect: connection refused
+redis: 2026/10/06 12:02:20 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp 127.0.0.1:46661: connect: connection refused
+redis: 2026/10/06 12:02:20 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp 127.0.0.1:46661: connect: connection refused
+redis: 2026/10/06 12:02:20 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp 127.0.0.1:46661: connect: connection refused
+redis: 2026/10/06 12:02:20 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp 127.0.0.1:46661: connect: connection refused
+redis: 2026/10/06 12:02:20 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp 127.0.0.1:46661: connect: connection refused
+redis: 2026/10/06 12:02:20 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp 127.0.0.1:46661: connect: connection refused
+redis: 2026/10/06 12:02:20 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp 127.0.0.1:46661: connect: connection refused
+redis: 2026/10/06 12:02:20 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp 127.0.0.1:46661: connect: connection refused
+redis: 2026/10/06 12:02:21 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp 127.0.0.1:46661: connect: connection refused
+redis: 2026/10/06 12:02:21 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp 127.0.0.1:46661: connect: connection refused
+redis: 2026/10/06 12:02:21 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp 127.0.0.1:46661: connect: connection refused
+redis: 2026/10/06 12:02:21 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp 127.0.0.1:46661: connect: connection refused
+redis: 2026/10/06 12:02:21 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp 127.0.0.1:46661: connect: connection refused
+redis: 2026/10/06 12:02:21 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp 127.0.0.1:46661: connect: connection refused
+redis: 2026/10/06 12:02:21 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp 127.0.0.1:46661: connect: connection refused
+redis: 2026/10/06 12:02:21 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp 127.0.0.1:46661: connect: connection refused
+redis: 2026/10/06 12:02:21 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp 127.0.0.1:46661: connect: connection refused
+redis: 2026/10/06 12:02:21 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp 127.0.0.1:46661: connect: connection refused
+redis: 2026/10/06 12:02:21 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp 127.0.0.1:46661: connect: connection refused
+redis: 2026/10/06 12:02:21 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp 127.0.0.1:46661: connect: connection refused
+redis: 2026/10/06 12:02:21 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp 127.0.0.1:46661: connect: connection refused
+redis: 2026/10/06 12:02:21 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp 127.0.0.1:46661: connect: connection refused
+redis: 2026/10/06 12:02:21 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp 127.0.0.1:46661: connect: connection refused
+redis: 2026/10/06 12:02:21 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp 127.0.0.1:46661: connect: connection refused
+redis: 2026/10/06 12:02:21 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp 127.0.0.1:46661: connect: connection refused
+redis: 2026/10/06 12:02:21 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp 127.0.0.1:46661: connect: connection refused
+redis: 2026/10/06 12:02:21 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp 127.0.0.1:46661: connect: connection refused
+redis: 2026/10/06 12:02:21 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp 127.0.0.1:46661: connect: connection refused
+redis: 2026/10/06 12:02:21 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp 127.0.0.1:46661: connect: connection refused
+redis: 2026/10/06 12:02:21 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp 127.0.0.1:46661: connect: connection refused
+redis: 2026/10/06 12:02:21 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp 127.0.0.1:46661: connect: connection refused
+redis: 2026/10/06 12:02:21 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp 127.0.0.1:46661: connect: connection refused
+    redislatency_ab_test.go:430: variant=C shape=conn_hold_cold round=19
+    redislatency_ab_test.go:430: variant=C shape=conn_hold_cold round=20
+    redislatency_ab_test.go:430: variant=C shape=conn_hold_warm round=21
+    redislatency_ab_test.go:430: variant=C shape=conn_hold_warm round=22
+    redislatency_ab_test.go:430: variant=C shape=normal round=23
+    redislatency_ab_test.go:430: variant=C shape=normal round=24
+    redislatency_ab_test.go:456: A/refused/r1                                         n=16   err=1.00 p50=1001.1 p95=1001.5 p99=1001.7 max=1001.7
+    redislatency_ab_test.go:456: A/conn_hold_cold/r4                                  n=16   err=1.00 p50=1007.9 p95=1013.4 p99=1013.4 max=1013.4
+    redislatency_ab_test.go:456: B/normal/r16                                         n=5701 err=0.00 p50=1.6 p95=2.1 p99=2.4 max=9.9
+    redislatency_ab_test.go:456: C/normal/r23                                         n=5934 err=0.00 p50=1.6 p95=2.0 p99=2.3 max=8.5
+    redislatency_ab_test.go:456: B/conn_hold_warm/r13                                 n=16   err=1.00 p50=1001.2 p95=1001.8 p99=1001.8 max=1001.8
+    redislatency_ab_test.go:456: C/conn_hold_cold/r20                                 n=16   err=1.00 p50=1003.4 p95=1004.2 p99=1004.2 max=1004.2
+    redislatency_ab_test.go:456: C/conn_hold_cold/r19                                 n=16   err=1.00 p50=1002.9 p95=1003.4 p99=1003.4 max=1003.4
+    redislatency_ab_test.go:456: A/normal/r8                                          n=5673 err=0.00 p50=1.6 p95=2.2 p99=2.5 max=11.6
+    redislatency_ab_test.go:456: C/conn_hold_warm/r21                                 n=16   err=1.00 p50=1001.5 p95=1002.4 p99=1002.5 max=1002.6
+    redislatency_ab_test.go:456: A/refused/r2                                         n=16   err=1.00 p50=1001.2 p95=1001.4 p99=1001.4 max=1001.5
+    redislatency_ab_test.go:456: A/conn_hold_warm/r5                                  n=16   err=1.00 p50=1001.6 p95=1002.7 p99=1002.7 max=1002.8
+    redislatency_ab_test.go:456: B/conn_hold_cold/r11                                 n=16   err=1.00 p50=1002.5 p95=1002.9 p99=1003.0 max=1003.0
+    redislatency_ab_test.go:456: C/normal/r24                                         n=5656 err=0.00 p50=1.6 p95=2.2 p99=2.7 max=9.2
+    redislatency_ab_test.go:456: B/normal/r15                                         n=5719 err=0.00 p50=1.6 p95=2.1 p99=2.4 max=20.3
+    redislatency_ab_test.go:456: C/conn_hold_warm/r22                                 n=16   err=1.00 p50=1001.7 p95=1002.4 p99=1002.4 max=1002.4
+    redislatency_ab_test.go:456: B/refused/r10                                        n=16   err=1.00 p50=1000.5 p95=1001.2 p99=1001.3 max=1001.3
+    redislatency_ab_test.go:456: B/conn_hold_cold/r12                                 n=16   err=1.00 p50=1001.9 p95=1002.5 p99=1002.5 max=1002.5
+    redislatency_ab_test.go:456: A/conn_hold_warm/r6                                  n=16   err=1.00 p50=1001.3 p95=1002.2 p99=1002.3 max=1002.3
+    redislatency_ab_test.go:456: C/refused/r17                                        n=16   err=1.00 p50=1001.2 p95=1001.5 p99=1001.7 max=1001.8
+    redislatency_ab_test.go:456: C/refused/r18                                        n=16   err=1.00 p50=1000.7 p95=1000.9 p99=1001.1 max=1001.1
+    redislatency_ab_test.go:456: A/conn_hold_cold/r3                                  n=16   err=1.00 p50=1002.3 p95=1002.9 p99=1002.9 max=1002.9
+    redislatency_ab_test.go:456: B/refused/r9                                         n=16   err=1.00 p50=1000.8 p95=1001.1 p99=1001.1 max=1001.1
+    redislatency_ab_test.go:456: A/normal/r7                                          n=5879 err=0.00 p50=1.6 p95=2.1 p99=2.3 max=10.7
+    redislatency_ab_test.go:456: B/conn_hold_warm/r14                                 n=16   err=1.00 p50=1001.8 p95=1002.4 p99=1002.5 max=1002.5
+2026/10/06 12:02:31 🐳 Stopping container: 3d04ae348486
+2026/10/06 12:02:31 ✅ Container stopped: 3d04ae348486
+2026/10/06 12:02:31 🐳 Terminating container: 3d04ae348486
+2026/10/06 12:02:31 🚫 Container terminated: 3d04ae348486
+--- PASS: TestRedisLatencyABCRefusedAndHold (45.92s)
+=== RUN   TestRedisLatencyABCRecovery
+2026/10/06 12:02:31 🐳 Creating container for image redis:8.2.10-alpine
+2026/10/06 12:02:31 ✅ Container created: 8abd3a777ded
+2026/10/06 12:02:31 🐳 Starting container: 8abd3a777ded
+2026/10/06 12:02:32 ✅ Container started: 8abd3a777ded
+2026/10/06 12:02:32 ⏳ Waiting for container id 8abd3a777ded image: redis:8.2.10-alpine. Waiting for: all of: [port 6379/tcp to be listening, log message "* Ready to accept connections"]
+2026/10/06 12:02:32 🔔 Container is ready: 8abd3a777ded
+    redislatency_ab_test.go:526: recovery: first trusted Allow succeeded after 5.179439ms (graded reopening window still on)
+2026/10/06 12:02:33 🐳 Stopping container: 8abd3a777ded
+2026/10/06 12:02:34 ✅ Container stopped: 8abd3a777ded
+2026/10/06 12:02:34 🐳 Terminating container: 8abd3a777ded
+2026/10/06 12:02:34 🚫 Container terminated: 8abd3a777ded
+--- PASS: TestRedisLatencyABCRecovery (2.63s)
+=== RUN   TestRedisLatencyABCDialBlackhole
+    redislatency_ab_test.go:544: dial-blackhole evidence dir: /tmp/txharbor-impl-ev
+redis: 2026/10/06 12:02:39 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp: dial timeout (experiment blackhole marker)
+redis: 2026/10/06 12:02:39 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp: dial timeout (experiment blackhole marker)
+redis: 2026/10/06 12:02:39 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp: blackhole dial canceled: context deadline exceeded
+redis: 2026/10/06 12:02:39 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp: dial timeout (experiment blackhole marker)
+redis: 2026/10/06 12:02:39 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp: dial timeout (experiment blackhole marker)
+redis: 2026/10/06 12:02:39 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp: dial timeout (experiment blackhole marker)
+redis: 2026/10/06 12:02:39 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp: blackhole dial canceled: context deadline exceeded
+redis: 2026/10/06 12:02:39 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp: blackhole dial canceled: context deadline exceeded
+redis: 2026/10/06 12:02:39 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp: dial timeout (experiment blackhole marker)
+redis: 2026/10/06 12:02:39 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp: blackhole dial canceled: context deadline exceeded
+redis: 2026/10/06 12:02:39 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp: dial timeout (experiment blackhole marker)
+redis: 2026/10/06 12:02:39 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp: dial timeout (experiment blackhole marker)
+redis: 2026/10/06 12:02:39 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp: blackhole dial canceled: context deadline exceeded
+redis: 2026/10/06 12:02:39 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp: blackhole dial canceled: context deadline exceeded
+redis: 2026/10/06 12:02:39 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp: dial timeout (experiment blackhole marker)
+redis: 2026/10/06 12:02:39 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp: blackhole dial canceled: context deadline exceeded
+redis: 2026/10/06 12:02:40 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp: blackhole dial canceled: context deadline exceeded
+redis: 2026/10/06 12:02:40 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp: blackhole dial canceled: context deadline exceeded
+redis: 2026/10/06 12:02:40 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp: dial timeout (experiment blackhole marker)
+redis: 2026/10/06 12:02:40 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp: dial timeout (experiment blackhole marker)
+redis: 2026/10/06 12:02:40 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp: blackhole dial canceled: context deadline exceeded
+redis: 2026/10/06 12:02:40 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp: dial timeout (experiment blackhole marker)
+redis: 2026/10/06 12:02:40 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp: blackhole dial canceled: context deadline exceeded
+redis: 2026/10/06 12:02:40 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp: blackhole dial canceled: context deadline exceeded
+redis: 2026/10/06 12:02:40 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp: blackhole dial canceled: context deadline exceeded
+redis: 2026/10/06 12:02:40 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp: dial timeout (experiment blackhole marker)
+redis: 2026/10/06 12:02:40 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp: dial timeout (experiment blackhole marker)
+redis: 2026/10/06 12:02:40 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp: dial timeout (experiment blackhole marker)
+redis: 2026/10/06 12:02:40 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp: dial timeout (experiment blackhole marker)
+redis: 2026/10/06 12:02:40 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp: blackhole dial canceled: context deadline exceeded
+redis: 2026/10/06 12:02:40 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp: blackhole dial canceled: context deadline exceeded
+redis: 2026/10/06 12:02:40 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp: blackhole dial canceled: context deadline exceeded
+redis: 2026/10/06 12:02:41 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp: blackhole dial canceled: context deadline exceeded
+redis: 2026/10/06 12:02:41 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp: dial timeout (experiment blackhole marker)
+redis: 2026/10/06 12:02:41 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp: dial timeout (experiment blackhole marker)
+redis: 2026/10/06 12:02:41 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp: blackhole dial canceled: context deadline exceeded
+redis: 2026/10/06 12:02:41 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp: dial timeout (experiment blackhole marker)
+redis: 2026/10/06 12:02:41 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp: dial timeout (experiment blackhole marker)
+redis: 2026/10/06 12:02:41 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp: blackhole dial canceled: context deadline exceeded
+redis: 2026/10/06 12:02:41 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp: blackhole dial canceled: context deadline exceeded
+redis: 2026/10/06 12:02:41 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp: blackhole dial canceled: context deadline exceeded
+redis: 2026/10/06 12:02:41 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp: blackhole dial canceled: context deadline exceeded
+redis: 2026/10/06 12:02:41 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp: dial timeout (experiment blackhole marker)
+redis: 2026/10/06 12:02:41 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp: blackhole dial canceled: context deadline exceeded
+redis: 2026/10/06 12:02:41 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp: dial timeout (experiment blackhole marker)
+redis: 2026/10/06 12:02:41 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp: dial timeout (experiment blackhole marker)
+redis: 2026/10/06 12:02:41 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp: dial timeout (experiment blackhole marker)
+redis: 2026/10/06 12:02:41 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp: blackhole dial canceled: context deadline exceeded
+redis: 2026/10/06 12:02:42 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp: dial timeout (experiment blackhole marker)
+redis: 2026/10/06 12:02:42 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp: dial timeout (experiment blackhole marker)
+redis: 2026/10/06 12:02:42 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp: dial timeout (experiment blackhole marker)
+redis: 2026/10/06 12:02:42 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp: blackhole dial canceled: context deadline exceeded
+redis: 2026/10/06 12:02:42 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp: dial timeout (experiment blackhole marker)
+redis: 2026/10/06 12:02:42 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp: dial timeout (experiment blackhole marker)
+redis: 2026/10/06 12:02:42 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp: blackhole dial canceled: context deadline exceeded
+redis: 2026/10/06 12:02:42 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp: blackhole dial canceled: context deadline exceeded
+redis: 2026/10/06 12:02:42 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp: dial timeout (experiment blackhole marker)
+redis: 2026/10/06 12:02:42 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp: dial timeout (experiment blackhole marker)
+redis: 2026/10/06 12:02:42 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp: blackhole dial canceled: context deadline exceeded
+redis: 2026/10/06 12:02:42 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp: dial timeout (experiment blackhole marker)
+redis: 2026/10/06 12:02:42 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp: dial timeout (experiment blackhole marker)
+redis: 2026/10/06 12:02:42 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp: blackhole dial canceled: context deadline exceeded
+redis: 2026/10/06 12:02:42 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp: dial timeout (experiment blackhole marker)
+redis: 2026/10/06 12:02:42 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp: dial timeout (experiment blackhole marker)
+redis: 2026/10/06 12:02:44 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp: dial timeout (experiment blackhole marker)
+redis: 2026/10/06 12:02:44 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp: dial timeout (experiment blackhole marker)
+redis: 2026/10/06 12:02:44 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp: dial timeout (experiment blackhole marker)
+redis: 2026/10/06 12:02:44 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp: dial timeout (experiment blackhole marker)
+redis: 2026/10/06 12:02:44 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp: dial timeout (experiment blackhole marker)
+redis: 2026/10/06 12:02:44 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp: blackhole dial canceled: context deadline exceeded
+redis: 2026/10/06 12:02:44 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp: dial timeout (experiment blackhole marker)
+redis: 2026/10/06 12:02:44 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp: blackhole dial canceled: context deadline exceeded
+redis: 2026/10/06 12:02:45 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp: blackhole dial canceled: context deadline exceeded
+redis: 2026/10/06 12:02:45 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp: dial timeout (experiment blackhole marker)
+redis: 2026/10/06 12:02:45 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp: dial timeout (experiment blackhole marker)
+redis: 2026/10/06 12:02:45 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp: blackhole dial canceled: context deadline exceeded
+redis: 2026/10/06 12:02:45 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp: blackhole dial canceled: context deadline exceeded
+redis: 2026/10/06 12:02:45 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp: blackhole dial canceled: context deadline exceeded
+redis: 2026/10/06 12:02:45 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp: blackhole dial canceled: context deadline exceeded
+redis: 2026/10/06 12:02:45 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp: blackhole dial canceled: context deadline exceeded
+redis: 2026/10/06 12:02:46 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp: dial timeout (experiment blackhole marker)
+redis: 2026/10/06 12:02:46 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp: dial timeout (experiment blackhole marker)
+redis: 2026/10/06 12:02:46 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp: dial timeout (experiment blackhole marker)
+redis: 2026/10/06 12:02:46 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp: dial timeout (experiment blackhole marker)
+redis: 2026/10/06 12:02:46 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp: dial timeout (experiment blackhole marker)
+redis: 2026/10/06 12:02:46 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp: dial timeout (experiment blackhole marker)
+redis: 2026/10/06 12:02:46 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp: dial timeout (experiment blackhole marker)
+redis: 2026/10/06 12:02:46 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp: blackhole dial canceled: context deadline exceeded
+    redislatency_ab_test.go:636: B/dial_blackhole/r4                                  n=16   err=1.00 p50=1000.8 p95=1001.5 p99=1001.6 max=1001.6
+    redislatency_ab_test.go:636: C/dial_blackhole/r5                                  n=16   err=1.00 p50=1002.5 p95=1005.0 p99=1005.0 max=1005.0
+    redislatency_ab_test.go:636: C/dial_blackhole/r6                                  n=16   err=1.00 p50=1004.2 p95=1007.5 p99=1007.5 max=1007.5
+    redislatency_ab_test.go:636: A/dial_blackhole/r1                                  n=16   err=1.00 p50=1004.0 p95=1007.8 p99=1007.9 max=1007.9
+    redislatency_ab_test.go:636: A/dial_blackhole/r2                                  n=16   err=1.00 p50=1002.5 p95=1003.1 p99=1003.2 max=1003.2
+    redislatency_ab_test.go:636: B/dial_blackhole/r3                                  n=16   err=1.00 p50=1002.0 p95=1002.4 p99=1002.5 max=1002.5
+--- PASS: TestRedisLatencyABCDialBlackhole (12.04s)
+=== RUN   TestRPCBudgetHealthyPathUsesDistributedBudget
+--- PASS: TestRPCBudgetHealthyPathUsesDistributedBudget (0.00s)
+=== RUN   TestRPCBudgetPausesDistributedOnlyClassAndResumes
+2026/10/06 12:02:46 WARN rpc class safely paused: distributed budget unavailable class=send
+2026/10/06 12:02:46 INFO rpc class resumed after distributed budget recovery class=send
+--- PASS: TestRPCBudgetPausesDistributedOnlyClassAndResumes (0.00s)
+=== RUN   TestRPCBudgetCallerCancelKeepsPosture
+2026/10/06 12:02:46 WARN rpc class safely paused: distributed budget unavailable class=send
+--- PASS: TestRPCBudgetCallerCancelKeepsPosture (0.00s)
+=== RUN   TestRPCBudgetBaselineClassContinuesBoundedWhileDegraded
+2026/10/06 12:02:46 WARN rpc class safely paused: distributed budget unavailable class=send
+--- PASS: TestRPCBudgetBaselineClassContinuesBoundedWhileDegraded (0.03s)
+=== RUN   TestRPCBudgetUnknownClassFailsClosed
+--- PASS: TestRPCBudgetUnknownClassFailsClosed (0.00s)
+=== RUN   TestNewRPCBudgetRejectsIncompletePolicy
+--- PASS: TestNewRPCBudgetRejectsIncompletePolicy (0.00s)
+PASS
+redis: 2026/10/06 12:02:47 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp: blackhole dial canceled: context deadline exceeded
+redis: 2026/10/06 12:02:47 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp: blackhole dial canceled: context deadline exceeded
+redis: 2026/10/06 12:02:47 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp: dial timeout (experiment blackhole marker)
+redis: 2026/10/06 12:02:47 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp: dial timeout (experiment blackhole marker)
+redis: 2026/10/06 12:02:47 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp: dial timeout (experiment blackhole marker)
+redis: 2026/10/06 12:02:47 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp: blackhole dial canceled: context deadline exceeded
+redis: 2026/10/06 12:02:47 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp: blackhole dial canceled: context deadline exceeded
+redis: 2026/10/06 12:02:47 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp: dial timeout (experiment blackhole marker)
+ok  	github.com/xtianxx/txharbor/internal/ratelimit	127.743s

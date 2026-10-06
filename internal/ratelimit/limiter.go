@@ -17,6 +17,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net"
 	"sync"
 	"time"
 )
@@ -92,6 +93,10 @@ type Config struct {
 	Classes map[Class]ClassConfig
 	// Timeout bounds every Redis round trip.
 	Timeout time.Duration
+	// BucketTTL is the token-bucket key TTL (Redis PEXPIRE on the class key).
+	// It is the original algorithm's TTL decoupled from Timeout: the caller
+	// passes 2× the effective Redis timeout. Required and positive.
+	BucketTTL time.Duration
 	// RecoveryWindow is the graded-reopening window after an outage: during
 	// it the limiter runs at half rate/burst so recovery is never an instant
 	// unbounded reopening (initial value, calibrated after measurement).
@@ -136,6 +141,7 @@ type Limiter struct {
 	store          ScriptStore
 	classes        map[Class]ClassConfig
 	timeout        time.Duration
+	bucketTTL      time.Duration
 	recoveryWindow time.Duration
 	clock          func() time.Time
 	observer       Observer
@@ -152,6 +158,9 @@ func NewLimiter(store ScriptStore, cfg Config, observer Observer) (*Limiter, err
 	}
 	if cfg.Timeout <= 0 {
 		return nil, errors.New("ratelimit: timeout must be positive")
+	}
+	if cfg.BucketTTL <= 0 {
+		return nil, errors.New("ratelimit: bucket ttl must be positive")
 	}
 	if cfg.RecoveryWindow <= 0 {
 		return nil, errors.New("ratelimit: recovery window must be positive")
@@ -175,6 +184,7 @@ func NewLimiter(store ScriptStore, cfg Config, observer Observer) (*Limiter, err
 		store:          store,
 		classes:        cfg.Classes,
 		timeout:        cfg.Timeout,
+		bucketTTL:      cfg.BucketTTL,
 		recoveryWindow: cfg.RecoveryWindow,
 		clock:          clock,
 		observer:       observer,
@@ -204,7 +214,11 @@ func (l *Limiter) Recovering() bool {
 
 // Allow evaluates one class decision. A trusted decision is returned as a
 // Decision; an untrusted/failed evaluation returns ErrUnavailable and marks
-// the limiter unavailable (never a silent allow).
+// the limiter unavailable (never a silent allow). Only a clear caller
+// cancellation is exempt from marking: it preempted the wait and leaves no
+// fault evidence, while a caller deadline, the evaluation budget or any
+// transport error cannot prove the dependency is healthy and stay
+// conservative.
 func (l *Limiter) Allow(ctx context.Context, class Class) (Decision, error) {
 	classCfg, ok := l.classes[class]
 	if !ok {
@@ -219,16 +233,16 @@ func (l *Limiter) Allow(ctx context.Context, class Class) (Decision, error) {
 		burst = maxInt(1, burst/2)
 	}
 
-	ctx, cancel := context.WithTimeout(ctx, l.timeout)
+	parent := ctx
+	budgetCtx, cancel := context.WithTimeout(parent, l.timeout)
 	defer cancel()
 	now := l.clock()
-	result, err := l.store.Eval(ctx, tokenBucketScript,
+	result, err := l.store.Eval(budgetCtx, tokenBucketScript,
 		[]string{"txharbor:rl:" + string(class)},
-		rate, burst, now.UnixMilli(), 1, int64((2 * l.timeout).Milliseconds()),
+		rate, burst, now.UnixMilli(), 1, int64(l.bucketTTL.Milliseconds()),
 	)
 	if err != nil {
-		l.markUnavailable()
-		return Decision{}, fmt.Errorf("%w: %v", ErrUnavailable, err)
+		return Decision{}, l.evalFailed(parent, budgetCtx, err)
 	}
 	allowed, remaining, retry, ok := parseScriptResult(result)
 	if !ok {
@@ -244,6 +258,95 @@ func (l *Limiter) Allow(ctx context.Context, class Class) (Decision, error) {
 		}
 	}
 	return decision, nil
+}
+
+// evalFailure is the closed classification of a failed script evaluation: it
+// decides whether the failure marks the limiter unavailable and how the error
+// is wrapped for the caller's policy.
+type evalFailure int
+
+const (
+	// evalFailureTransport is a genuine dependency/transport fault and the
+	// zero value: it always marks the limiter unavailable.
+	evalFailureTransport evalFailure = iota
+	// evalFailureCallerCancel: the caller canceled; its own state says
+	// nothing about the dependency, so the limiter keeps its health.
+	evalFailureCallerCancel
+	// evalFailureParentDeadline: the caller's own deadline expired. It still
+	// marks the limiter unavailable (only a caller cancellation is exempt):
+	// the expired wait gives no evidence the dependency was healthy.
+	evalFailureParentDeadline
+	// evalFailureBudget: the limiter's per-evaluation budget expired; a
+	// dependency timeout, so the limiter is unavailable.
+	evalFailureBudget
+)
+
+// classifyEvalFailure orders the possible causes of an Eval error. Identity
+// comes first: a wrapped context.Canceled is always caller cancellation, and
+// a wrapped context.DeadlineExceeded is the caller's deadline when the parent
+// carries one and the evaluation budget otherwise. A transport net timeout is
+// attributed through the context states, since a bare timeout does not say
+// who timed out. Everything else is a transport fault, classified on the
+// error alone: consulting the contexts there would let a coincident
+// cancellation mask a real dependency fault.
+func classifyEvalFailure(parent, budgetCtx context.Context, err error) evalFailure {
+	switch {
+	case errors.Is(err, context.Canceled):
+		return evalFailureCallerCancel
+	case errors.Is(err, context.DeadlineExceeded):
+		if errors.Is(parent.Err(), context.DeadlineExceeded) {
+			return evalFailureParentDeadline
+		}
+		return evalFailureBudget
+	}
+	var netErr net.Error
+	if errors.As(err, &netErr) && netErr.Timeout() {
+		switch {
+		case errors.Is(parent.Err(), context.Canceled):
+			return evalFailureCallerCancel
+		case errors.Is(parent.Err(), context.DeadlineExceeded):
+			return evalFailureParentDeadline
+		case errors.Is(budgetCtx.Err(), context.DeadlineExceeded):
+			return evalFailureBudget
+		default:
+			return evalFailureTransport
+		}
+	}
+	// Not a context identity and not a timeout shape: a genuine transport
+	// fault, classified on the error alone — a coincident cancellation must
+	// never mask it.
+	return evalFailureTransport
+}
+
+// joinEvalFailure wraps a failed evaluation with ErrUnavailable without
+// duplicating a context cause the error already carries.
+func joinEvalFailure(ctxErr, err error) error {
+	if ctxErr == nil || errors.Is(err, ctxErr) {
+		return errors.Join(ErrUnavailable, err)
+	}
+	return errors.Join(ErrUnavailable, err, ctxErr)
+}
+
+// evalFailed applies a failed evaluation to the limiter's health and returns
+// the error the caller sees. Only a caller cancellation leaves the limiter's
+// health untouched; a caller deadline, the evaluation budget and transport
+// faults all mark it unavailable. Every cause is still wrapped with
+// ErrUnavailable so the policy layer keeps mapping it per class.
+func (l *Limiter) evalFailed(parent, budgetCtx context.Context, err error) error {
+	switch classifyEvalFailure(parent, budgetCtx, err) {
+	case evalFailureCallerCancel:
+		return joinEvalFailure(parent.Err(), err)
+	case evalFailureParentDeadline:
+		l.markUnavailable()
+		return joinEvalFailure(parent.Err(), err)
+	case evalFailureBudget:
+		l.markUnavailable()
+		return joinEvalFailure(budgetCtx.Err(), err)
+	default:
+		// Transport faults keep the historical single-cause wrapping.
+		l.markUnavailable()
+		return fmt.Errorf("%w: %w", ErrUnavailable, err)
+	}
 }
 
 // parseScriptResult accepts exactly the script's documented three-integer

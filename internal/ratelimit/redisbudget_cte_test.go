@@ -2,9 +2,11 @@
 
 // redisbudget_cte_test.go: directional mechanism validation for the "rate-
 // limit decision total wait budget" supplement design
-// (docs/evidence/013/redis-latency-budget-design.md). Test-side only:
-// ContextTimeoutEnabled and the candidate budget are set on TEST clients;
-// no production code, config default, error mapping or CI is touched.
+// (docs/evidence/013/redis-latency-budget-design.md). Test-side fixture for
+// directional evidence (not a served-path re-run): ContextTimeoutEnabled and
+// the candidate budget are set on TEST clients whose options mirror the
+// production limiter client semantics; this file itself changes no
+// production behavior.
 //
 // What this file proves (and what it deliberately does NOT prove):
 //   - CTE boundary: with ContextTimeoutEnabled=true, caller-returned time for
@@ -91,7 +93,9 @@ func defaultBudgetClasses() map[Class]ClassConfig {
 
 // buildCTEBudgetLimiter builds the real 013 limiter over a TEST client with
 // the experiment's options; returns the concrete *redis.Client so PoolStats
-// can be observed.
+// can be observed. The fixture pins the production Redis timeout knob at 1s,
+// so the decoupled BucketTTL (2 * Redis.Timeout) is 2s regardless of the
+// candidate budget L.
 func buildCTEBudgetLimiter(t *testing.T, addr string, o cteOpts) (*Limiter, *redis.Client) {
 	t.Helper()
 	ropts := &redis.Options{
@@ -118,6 +122,7 @@ func buildCTEBudgetLimiter(t *testing.T, addr string, o cteOpts) (*Limiter, *red
 	limiter, err := NewLimiter(store, Config{
 		Classes:        classes,
 		Timeout:        budgetVerifyL,
+		BucketTTL:      2 * time.Second, // 2 * the fixture's 1s Redis timeout, NOT 2*L: mirrors the production decoupling
 		RecoveryWindow: 10 * time.Second,
 	}, &t066Observer{})
 	if err != nil {
@@ -573,7 +578,7 @@ type responseLossRecord struct {
 	DroppedReplies    uint64  `json:"responses_withheld"`   // gate observed & withheld
 	TokensBefore      string  `json:"tokens_before"`
 	TokensAfter       string  `json:"tokens_after"`
-	TokensSettled     string  `json:"tokens_settled_after_sleep"` // "" = bucket expired (TTL=2*L)
+	TokensSettled     string  `json:"tokens_settled_after_sleep"` // "" must not occur: BucketTTL=2*Redis.Timeout=2s outlives the settle window
 	TokensDeductedEst float64 `json:"tokens_deducted_est"`        // before-after (refill only lowers it)
 	DurationMS        float64 `json:"duration_ms"`
 	ErrorCode         string  `json:"error_class"`
@@ -670,7 +675,8 @@ func TestRedisBudgetResponseLossCounterexample(t *testing.T) {
 			cte: true, maxRetries: maxRetries, classes: lossClasses(),
 		})
 		// Fresh bucket per group: delete + one warm (Pass-mode) allow so
-		// tokensBefore is deterministic and inside the 2*Timeout=400ms TTL.
+		// tokensBefore is deterministic and inside the decoupled BucketTTL
+		// (2 * the fixture's 1s Redis timeout = 2s, independent of L).
 		if err := direct.Del(context.Background(), budgetBucketKey).Err(); err != nil {
 			t.Fatalf("del bucket: %v", err)
 		}
@@ -691,10 +697,12 @@ func TestRedisBudgetResponseLossCounterexample(t *testing.T) {
 		_, allowErr := limiter.Allow(ctx, ClassQuery)
 		dur := time.Since(start)
 
-		// Read the bucket IMMEDIATELY (inside the script TTL = 2*L = 400ms
-		// with the candidate budget — the reading after the settle sleep
-		// would miss the expired key; that expiry is recorded separately as
-		// TTL-coupling evidence, see Note).
+		// Read the bucket right after the call returns (the post-call state);
+		// under the decoupled BucketTTL = 2 * Redis.Timeout = 2s the key
+		// survives the settle window too — asserted below as TTL-decoupling
+		// evidence. The historical 400ms expiry observation (script TTL tied
+		// to the 200ms candidate budget) lives in docs/evidence/013/redis-
+		// budget-cte.
 		execAfter := evalConfirmedExecutions(t, direct)
 		tokensAfter := bucketTokens(t, direct)
 
@@ -791,14 +799,24 @@ func TestRedisBudgetResponseLossCounterexample(t *testing.T) {
 	if err := writer.WriteJSON("response_loss_records.json", records); err != nil {
 		t.Fatalf("write response_loss_records: %v", err)
 	}
+	// TTL-decoupling assertion, every group: BucketTTL is 2 * the fixture's
+	// 1s Redis timeout (2s), decoupled from the candidate budget L=200ms, so
+	// the bucket — and the token value written by the measured Allow — must
+	// survive the settle window (~L + 150ms). Exact equality holds because no
+	// EVAL may write the field after the call returns (all attempts are
+	// bounded by the same 200ms budget).
 	for _, r := range records {
+		if r.TokensSettled == "" {
+			t.Errorf("%s: tokens_settled is empty — bucket expired inside the settle window despite the decoupled BucketTTL=2s", r.Group)
+		} else if r.TokensSettled != r.TokensAfter {
+			t.Errorf("%s: tokens_settled=%q != tokens_after=%q (no EVAL may write between the two reads)", r.Group, r.TokensSettled, r.TokensAfter)
+		}
 		settledNote := "bucket_alive"
 		if r.TokensSettled == "" {
-			// TTL coupling observation: bucket TTL = 2*L = 400ms with the
-			// candidate budget; idle past it expires the bucket (this is a
-			// MEASUREMENT of the TTL coupling the design doc flags, not a
-			// failure of this test).
-			settledNote = "bucket_expired(TTL=2*L)"
+			// Defensive only: under the fixture BucketTTL = 2 * Redis.Timeout
+			// = 2s, so the bucket must survive the settle window; an expired
+			// key would contradict the decoupled TTL (asserted above).
+			settledNote = "bucket_expired(UNEXPECTED under BucketTTL=2s)"
 		}
 		t.Logf("%-20s sends=%d execs=%d withheld=%d tokens %s→%s settled=%q deduct≈%.1f dur=%.1fms resended=%v doubled=%v %s %s",
 			r.Group, r.Sends, r.ConfirmedExecs, r.DroppedReplies,
