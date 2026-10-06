@@ -46,6 +46,15 @@ on:
     # Weekly, off-peak; the cadence is operational, not a budget claim.
     - cron: "41 3 * * 1"
   workflow_dispatch:
+    inputs:
+      diagnostic:
+        # TEMPORARY diagnostic input (branch diag/carrier-identity-probe only;
+        # never merged): when true, the ordinary drill job is skipped and the
+        # short carrier identity probe runs instead. Default false keeps the
+        # registered dispatch behavior unchanged.
+        description: "diagnostic only: carrier identity probe; the full drill job will NOT run"
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -63,6 +72,7 @@ env:
 jobs:
   drill:
     name: full recovery drill (S1-S12 + F1-F7, Docker)
+    if: ${{ inputs.diagnostic != true }}
     runs-on: ubuntu-latest
     timeout-minutes: 240
     steps:
@@ -92,3 +102,67 @@ jobs:
           path: ${{ runner.temp }}/drill-evidence
           if-no-files-found: warn
           retention-days: 30
+
+  # TEMPORARY DIAGNOSTIC (exists only on branch diag/carrier-identity-probe;
+  # never merged). Purpose: one bounded, read-only probe of the runner-side
+  # image identity chain for the sealed-tools "pristine carrier" failure
+  # observed in run 37481398499 (candidate 08c96e8). It pulls the same pinned
+  # reference, records the default runner Docker's store semantics and the
+  # ref's identity fields, and inspects registry objects. It MUST NOT run
+  # `make test-drill`, must not emit drill acceptance output, and creates only
+  # a non-started temporary container that it removes again. A successful run
+  # of THIS job is not drill acceptance and closes nothing.
+  carrier-diagnostic:
+    name: carrier identity diagnostic (diagnostic only; never runs the drill)
+    if: ${{ inputs.diagnostic == true }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+      - name: carrier identity probe (diagnostic only)
+        run: |
+          set -uo pipefail
+          REF='postgres@sha256:4ef4dbc939d61acea57712655ddb4b4ab27419c913f94cca0cd57cb3ea3c2280'
+          OUT="${RUNNER_TEMP}/carrier-diagnostic"; mkdir -p "$OUT"
+          echo "DIAGNOSTIC ONLY: carrier identity probe; no drill is executed; success of this job is NOT drill acceptance."
+          echo "checkout=$(git rev-parse HEAD)" | tee "$OUT/checkout-sha.txt"
+          uname -a | tee "$OUT/uname.txt"
+          docker version --format 'client={{.Client.Version}} server={{.Server.Version}}' | tee "$OUT/docker-version.txt"
+          docker info --format 'server_version={{.ServerVersion}} driver={{.Driver}} os={{.OperatingSystem}} arch={{.Architecture}}' | tee "$OUT/docker-info.txt"
+          docker info --format '{{json .DriverStatus}}' | tee "$OUT/driver-status.json"
+          docker pull "$REF" 2>&1 | tee "$OUT/pull.log"
+          docker image inspect --format '{{.Id}}' "$REF" | tee "$OUT/image-id.txt"
+          docker image inspect --format '{{json .RepoDigests}}' "$REF" | tee "$OUT/repo-digests.json"
+          docker image inspect --format '{{.Os}}/{{.Architecture}}' "$REF" | tee "$OUT/os-arch.txt"
+          docker image inspect "$REF" > "$OUT/image-inspect.json"
+          cid=$(docker create "$REF" /bin/true); echo "cid=$cid" | tee "$OUT/container-cid.txt"
+          docker inspect --format '{{.Image}}' "$cid" | tee "$OUT/container-image.txt"
+          docker rm -f "$cid" >/dev/null
+          docker buildx imagetools inspect --raw "$REF" > "$OUT/imagetools-raw-index.json" 2> "$OUT/imagetools-raw-index.err" || echo "imagetools-raw rc=$?" >> "$OUT/imagetools-raw-index.err"
+          docker buildx imagetools inspect "$REF" > "$OUT/imagetools-platform-view.txt" 2>&1 || echo "imagetools-view rc=$?" >> "$OUT/imagetools-platform-view.txt"
+          TOK=$(curl -fsS 'https://auth.docker.io/token?service=registry.docker.io&scope=repository:library/postgres:pull' | jq -r .token)
+          ACC='application/vnd.oci.image.index.v1+json,application/vnd.docker.distribution.manifest.list.v2+json,application/vnd.oci.image.manifest.v1+json,application/vnd.docker.distribution.manifest.v2+json'
+          curl -fsS -D "$OUT/manifest.headers" -o "$OUT/manifest.body" -H "Authorization: Bearer $TOK" -H "Accept: $ACC" \
+            "https://registry-1.docker.io/v2/library/postgres/manifests/sha256:4ef4dbc939d61acea57712655ddb4b4ab27419c913f94cca0cd57cb3ea3c2280" 2> "$OUT/manifest.err" || echo "manifest fetch rc=$?" >> "$OUT/manifest.err"
+          sha256sum "$OUT/manifest.body" 2>/dev/null | tee "$OUT/manifest.sha256"
+          grep -i 'content-type\|docker-content-digest' "$OUT/manifest.headers" 2>/dev/null | tee "$OUT/manifest.key-headers.txt"
+          AMD=$(jq -r '[.manifests[]|select(.platform.os=="linux" and .platform.architecture=="amd64")][0].digest' "$OUT/manifest.body" 2>/dev/null)
+          echo "amd64_manifest=$AMD" | tee "$OUT/amd64-manifest-digest.txt"
+          curl -fsS -D "$OUT/amd64.headers" -o "$OUT/amd64.body" -H "Authorization: Bearer $TOK" -H "Accept: $ACC" \
+            "https://registry-1.docker.io/v2/library/postgres/manifests/$AMD" 2> "$OUT/amd64.err" || echo "amd64 fetch rc=$?" >> "$OUT/amd64.err"
+          sha256sum "$OUT/amd64.body" 2>/dev/null | tee "$OUT/amd64.sha256"
+          CFG=$(jq -r '.config.digest' "$OUT/amd64.body" 2>/dev/null)
+          echo "config_digest=$CFG" | tee "$OUT/config-digest.txt"
+          curl -fsSL -D "$OUT/config.headers" -o "$OUT/config.body" -H "Authorization: Bearer $TOK" \
+            "https://registry-1.docker.io/v2/library/postgres/blobs/$CFG" 2> "$OUT/config.err" || echo "config fetch rc=$?" >> "$OUT/config.err"
+          sha256sum "$OUT/config.body" 2>/dev/null | tee "$OUT/config.sha256"
+          sha256sum "$OUT"/* > "$OUT/SHA256SUMS" 2>/dev/null
+          echo "carrier diagnostic artifacts:"; ls -l "$OUT"
+      - name: upload carrier diagnostic artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: carrier-diagnostic-${{ github.run_id }}
+          path: ${{ runner.temp }}/carrier-diagnostic
+          if-no-files-found: warn
+          retention-days: 14
