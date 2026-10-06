@@ -4,6 +4,8 @@
 `013-redis-latency-budget-design`，基线链 a59dcd1→db21da2→476e987→本批）。
 设计与机制验证见 [../redis-latency-budget-design.md](../redis-latency-budget-design.md)
 与 [../redis-budget-cte/](../redis-budget-cte/)。
+第四轮（发布前审查 F1–F5 闭环：四形态整决策验收 + GateDelay 受控负例）
+证据见 [../redis-budget-acceptance/](../redis-budget-acceptance/README.md)。
 
 **环境**：Go 1.26.5；go-redis v9.22.0；容器 redis:8.2.10-alpine、
 postgres:18.6-trixie（testcontainers）。所有命令在干净工作树上执行；
@@ -29,7 +31,7 @@ GateDelay 定时窗口 pair 泄漏、摘要与归档数值不一致）——全�
 
 | # | 命令 | 结果 | 日志 |
 |---|---|---|---|
-| 1 | `go test -race -tags integration_redis ./internal/ratelimit`（−v，127.7s） | 全 PASS；CTE 边界 9 记录、丢答 3 组、V-Ratelimit、A/B/C、RPC 预算全绿；`grep -c "DATA RACE"` = 0 | `integration_race_run.log` |
+| 1 | `go test -race -tags integration_redis ./internal/ratelimit`（−v，127.7s） | 全 PASS；CTE 边界 9 记录（8 CTE-on 预算界 + 1 CTE-off 反向对照）、丢答 3 组、V-Ratelimit、A/B/C、RPC 预算全绿；`grep -c "DATA RACE"` = 0 | `integration_race_run.log` |
 | 2 | `go test -race -tags e2e ./internal/app -run 'TestRatelimitAssembly\|TestRatelimitBudgetTTLDecoupling\|TestRatelimitFailureHTTPPolicy'` | 6/6 PASS（专用客户端选项、TTL 对照、丢答对照、池竞争、**取消身份**、真实 HTTP PD-1 策略回归） | `e2e_run.log` |
 | 3 | `go test -race -tags e2e -run TestRatelimitBudgetMeasurementMatrix`（51.6s） | PASS；8 单元矩阵 | `matrix_run1.log` / `matrix_records.json` |
 | 4 | `go test -race -tags integration_redis ./internal/testutil -run TestRedisGate` | 3/3 PASS（含 GateDelay 自测：延迟注入、客户端超时后 pair 回收、Hold 转换保持） | `gate_delay_test.log` |

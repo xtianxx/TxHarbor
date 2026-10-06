@@ -1,0 +1,104 @@
+{
+  "task": "F5 gate-test stabilization + F4 controlled negative control",
+  "baseline": {
+    "repo": "/home/dream/product_env/TxHarbor",
+    "branch": "013-redis-latency-budget-design",
+    "head": "9e0ae1933264acdc3b4f767dcd6f5d8eae240e13",
+    "base_main": "be272cb"
+  },
+  "source_fingerprints_at_run_time": {
+    "internal/testutil/redisgate.go": "sha256:29612c6343961277abaa0eebffe9993f6eab24c82f4ab4a5721744292a5edc96",
+    "internal/testutil/redisgate_test.go": "sha256:3baea444a9aa43ecf1296f947ca10dc77b4ce93bc93634b389499fdcd5531e94"
+  },
+  "f5_edit": {
+    "file": "internal/testutil/redisgate_test.go",
+    "test": "TestRedisGateDelayDelaysEvalReplies",
+    "subcase": "Conversion DURING the delay window",
+    "change": "replaced fixed time.Sleep(100ms) before SetMode(GateHold) with a bounded wait: delayedBefore snapshot of gate.CounterSnapshot().DelayedReplies taken immediately before launching the midClient eval goroutine, then poll every 2ms (deadline 5s) until the counter is greater; timeout fatals naming both counter values. DelayedReplies increments in runDelay before the delay sleep, so the Hold flip lands inside the pending-delay window."
+  },
+  "negative_control": {
+    "worktree": "/tmp/txharbor-r6/neg",
+    "worktree_removed": true,
+    "reverted_hunk": "internal/testutil/redisgate.go runDelay backend->client goroutine: removed the holdingNow check (pair.holding read + return) that swallows an already-buffered reply after a Hold conversion during the delay sleep (~lines 860-872 in main tree).",
+    "test_copied_into_worktree": true,
+    "test_copy_sha256": "sha256:3baea444a9aa43ecf1296f947ca10dc77b4ce93bc93634b389499fdcd5531e94",
+    "patch_file": "/tmp/txharbor-r6/gate/negative_control_patch.diff",
+    "patch_sha256": "0dc6cc15b1c0195335daee18c15e68655276c14fa5973479caf5332675a867b5",
+    "patch_scope_note": "the stabilized test was copied and `git add`-ed first, so `git -C /tmp/txharbor-r6/neg diff` records only the Hold-fix reversion (no test-file noise)"
+  },
+  "environment": {
+    "go": "go1.26.5 linux/amd64",
+    "redis_image": "redis:8.2.10-alpine",
+    "testcontainers_go": "v0.44.0",
+    "docker_server": "29.6.1",
+    "os": "linux (WSL2 kernel 6.18.33.2-microsoft-standard-WSL2)"
+  },
+  "run_params": {
+    "gate_delay": "300ms",
+    "midclient_read_timeout": "700ms",
+    "bounded_wait": "poll 2ms, deadline 5s",
+    "flags": "-race -tags integration_redis -count=1 -timeout 10m -v -run TestRedisGate",
+    "evidence_env": "TXHARBOR_FAULT_EVIDENCE_DIR=/tmp/txharbor-r6/gate"
+  },
+  "runs": [
+    {
+      "name": "green_main",
+      "cwd": "/home/dream/product_env/TxHarbor",
+      "cmd": "TXHARBOR_FAULT_EVIDENCE_DIR=/tmp/txharbor-r6/gate go test -race -tags integration_redis -count=1 -timeout 10m -v ./internal/testutil -run TestRedisGate",
+      "exit_code": 0,
+      "result": "PASS all 3 tests; ok github.com/xtianxx/txharbor/internal/testutil 19.726s; TestRedisGateDelayDelaysEvalReplies PASS (9.15s)",
+      "log": "/tmp/txharbor-r6/gate/gate_green_main.log",
+      "log_sha256": "7b8cc2b5e1d4399d2f35d60c09b901acac3275d00d453ff15bf9fcd6d0d3d257",
+      "utc_window": "2026-10-06T07:31:25Z..2026-10-06T07:31:42Z"
+    },
+    {
+      "name": "red_negcontrol",
+      "cwd": "/tmp/txharbor-r6/neg",
+      "cmd": "TXHARBOR_FAULT_EVIDENCE_DIR=/tmp/txharbor-r6/gate go test -race -tags integration_redis -count=1 -timeout 10m -v ./internal/testutil -run TestRedisGate",
+      "exit_code": 1,
+      "result": "FAIL TestRedisGateDelayDelaysEvalReplies (2.91s); FAIL github.com/xtianxx/txharbor/internal/testutil 12.222s",
+      "failure_line_verbatim": "    redisgate_test.go:230: eval during the delay window succeeded after the Hold flip: the pending reply was delivered (must be swallowed)",
+      "failure_line_number": 230,
+      "log": "/tmp/txharbor-r6/gate/gate_red_negcontrol.log",
+      "log_sha256": "5076468f674aa33f9949a39300b3d752c592eb022f3855db4d441de70adc1c8a",
+      "utc_window": "2026-10-06T07:32:25Z..2026-10-06T07:32:38Z"
+    },
+    {
+      "name": "green_negcontrol_restored",
+      "cwd": "/tmp/txharbor-r6/neg",
+      "pre_step": "git checkout -- internal/testutil/redisgate.go (holdingNow fix restored in worktree only; verified by grep: lines 868/870)",
+      "cmd": "TXHARBOR_FAULT_EVIDENCE_DIR=/tmp/txharbor-r6/gate go test -race -tags integration_redis -count=1 -timeout 10m -v ./internal/testutil -run TestRedisGate",
+      "exit_code": 0,
+      "result": "PASS all 3 tests; ok github.com/xtianxx/txharbor/internal/testutil 19.381s; TestRedisGateDelayDelaysEvalReplies PASS (9.08s)",
+      "worktree_status_after_restore": "M  internal/testutil/redisgate_test.go (staged test copy only; committed content otherwise clean)",
+      "log": "/tmp/txharbor-r6/gate/gate_green_negcontrol_restored.log",
+      "log_sha256": "96cc27f895d7957d58ab8e82807948d3312f4b216b3d00588c6a8313c9436a7b",
+      "utc_window": "2026-10-06T07:32:46Z..2026-10-06T07:33:04Z"
+    }
+  ],
+  "lost_log_search": {
+    "bounded": true,
+    "commands": [
+      "grep -rl 'eval during the delay window' /tmp /home/dream/product_env/TxHarbor/docs /home/dream/product_env/TxHarbor/internal",
+      "grep -rln 'must be swallowed' /tmp /home/dream/product_env/TxHarbor/docs /home/dream/product_env/TxHarbor/internal",
+      "find /tmp -maxdepth 3 -iname '*fail*' -o -iname '*red*' (txharbor-scoped)",
+      "grep over /tmp/txharbor-test-evidence-* /tmp/txharbor-impl-ev /tmp/txharbor-dev"
+    ],
+    "matches_excluding_this_batch": [
+      "/home/dream/product_env/TxHarbor/internal/testutil/redisgate_test.go (source assertion text)",
+      "/home/dream/product_env/TxHarbor/docs/evidence/013/redis-latency-budget-design.md (doc quoting the assertion)"
+    ],
+    "result": "NOT FOUND - no archived pre-fix red-run log exists anywhere searched; only source/doc text matches. 原始失败日志已灭失（仅源码断言文本存在），本轮以受控负例替代，不冒称历史原运行"
+  },
+  "main_tree_verification": {
+    "git_status_porcelain": [
+      " M docs/evidence/013/redis-latency-abc/SHA256SUMS",
+      " M docs/evidence/013/redis-latency-budget-design.md",
+      " M internal/testutil/redisgate_test.go"
+    ],
+    "owned_file": "internal/testutil/redisgate_test.go",
+    "other_changes_note": "docs/* changes are sibling-agent work, untouched by this task",
+    "holdingNow_fix_in_main": "present: internal/testutil/redisgate.go:868 holdingNow := pair.holding, line 870 if holdingNow",
+    "worktree_list": "/home/dream/product_env/TxHarbor  9e0ae19 [013-redis-latency-budget-design] (neg worktree removed)"
+  }
+}

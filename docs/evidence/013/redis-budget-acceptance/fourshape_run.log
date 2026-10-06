@@ -1,0 +1,135 @@
+$ TXHARBOR_FAULT_EVIDENCE_DIR=/tmp/txharbor-r6/fourshape go test -race -tags e2e -count=1 -timeout 30m -v ./internal/app -run TestRatelimitBudgetFourShapeAcceptance
+
+=== RUN   TestRatelimitBudgetFourShapeAcceptance
+2026/10/06 16:00:11 github.com/testcontainers/testcontainers-go - Connected to docker: 
+  Server Version: 29.6.1
+  API Version: 1.55
+  Operating System: Ubuntu 24.04.4 LTS
+  Total Memory: 15915 MB
+  Testcontainers for Go Version: v0.44.0
+  Resolved Docker Host: unix:///var/run/docker.sock
+  Resolved Docker Socket Path: /var/run/docker.sock
+  Test SessionID: 99c1aabd846fe908475d91bff364adb5a9364f00f013527b59a482b9edfa6af3
+  Test ProcessID: 062b8260-accd-421b-a0ee-02726b4f61a0
+2026/10/06 16:00:11 🐳 Creating container for image redis:8.2.10-alpine
+2026/10/06 16:00:11 🐳 Creating container for image testcontainers/ryuk:0.14.0
+2026/10/06 16:00:11 ✅ Container created: 8f24fd3a9653
+2026/10/06 16:00:11 🐳 Starting container: 8f24fd3a9653
+2026/10/06 16:00:12 ✅ Container started: 8f24fd3a9653
+2026/10/06 16:00:12 ⏳ Waiting for container id 8f24fd3a9653 image: testcontainers/ryuk:0.14.0. Waiting for: all of: [log message "Started", port 8080/tcp to be listening]
+2026/10/06 16:00:12 Shell not found in container
+2026/10/06 16:00:12 🔔 Container is ready: 8f24fd3a9653
+2026/10/06 16:00:12 ✅ Container created: d0fd8922f305
+2026/10/06 16:00:12 🐳 Starting container: d0fd8922f305
+2026/10/06 16:00:13 ✅ Container started: d0fd8922f305
+2026/10/06 16:00:13 ⏳ Waiting for container id d0fd8922f305 image: redis:8.2.10-alpine. Waiting for: all of: [port 6379/tcp to be listening, log message "* Ready to accept connections"]
+2026/10/06 16:00:13 🔔 Container is ready: d0fd8922f305
+    ratelimit_budget_fourshape_integration_test.go:251: four-shape evidence dir: /tmp/txharbor-r6/fourshape
+redis: 2026/10/06 16:00:13 redis.go:2022: failed to initialize maintnotifications: failed to register handler for MOVING: handler register failed for 'MOVING': cannot overwrite existing handler
+redis: 2026/10/06 16:00:13 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp 127.0.0.1:45059: connect: connection refused
+redis: 2026/10/06 16:00:13 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp 127.0.0.1:45059: connect: connection refused
+redis: 2026/10/06 16:00:14 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp 127.0.0.1:45059: connect: connection refused
+redis: 2026/10/06 16:00:14 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp 127.0.0.1:45059: connect: connection refused
+redis: 2026/10/06 16:00:14 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp 127.0.0.1:45059: connect: connection refused
+redis: 2026/10/06 16:00:14 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp 127.0.0.1:45059: connect: connection refused
+redis: 2026/10/06 16:00:14 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp 127.0.0.1:45059: connect: connection refused
+redis: 2026/10/06 16:00:15 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp 127.0.0.1:45059: connect: connection refused
+redis: 2026/10/06 16:00:15 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp 127.0.0.1:45059: connect: connection refused
+redis: 2026/10/06 16:00:15 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp 127.0.0.1:45059: connect: connection refused
+redis: 2026/10/06 16:00:15 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp 127.0.0.1:45059: connect: connection refused
+redis: 2026/10/06 16:00:15 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp 127.0.0.1:45059: connect: connection refused
+redis: 2026/10/06 16:00:16 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp 127.0.0.1:45059: connect: connection refused
+redis: 2026/10/06 16:00:16 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp 127.0.0.1:45059: connect: connection refused
+redis: 2026/10/06 16:00:16 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp 127.0.0.1:45059: connect: connection refused
+redis: 2026/10/06 16:00:16 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp 127.0.0.1:45059: connect: connection refused
+redis: 2026/10/06 16:00:16 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp 127.0.0.1:45059: connect: connection refused
+redis: 2026/10/06 16:00:17 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp 127.0.0.1:45059: connect: connection refused
+    ratelimit_budget_fourshape_integration_test.go:292: group refused/L=200ms: n=32 all_pass=32 bound_pass=true duration_upper=32 duration_lower=32 class=32 err_unavailable=32 dial_hit=32 min=0.06ms p50=200.52ms max=205.61ms classes=map[refused:14 timeout:18] dial_attempts=89 refused_phase1=18 refused_phase2=14 after_return_increment=2 background_observed=true
+redis: 2026/10/06 16:00:18 redis.go:2022: failed to initialize maintnotifications: failed to register handler for MOVING: handler register failed for 'MOVING': cannot overwrite existing handler
+redis: 2026/10/06 16:00:18 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp 127.0.0.1:45059: connect: connection refused
+redis: 2026/10/06 16:00:19 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp 127.0.0.1:45059: connect: connection refused
+redis: 2026/10/06 16:00:19 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp 127.0.0.1:45059: connect: connection refused
+redis: 2026/10/06 16:00:19 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp 127.0.0.1:45059: connect: connection refused
+redis: 2026/10/06 16:00:20 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp 127.0.0.1:45059: connect: connection refused
+redis: 2026/10/06 16:00:20 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp 127.0.0.1:45059: connect: connection refused
+redis: 2026/10/06 16:00:20 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp 127.0.0.1:45059: connect: connection refused
+redis: 2026/10/06 16:00:21 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp 127.0.0.1:45059: connect: connection refused
+redis: 2026/10/06 16:00:21 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp 127.0.0.1:45059: connect: connection refused
+redis: 2026/10/06 16:00:21 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp 127.0.0.1:45059: connect: connection refused
+redis: 2026/10/06 16:00:21 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp 127.0.0.1:45059: connect: connection refused
+redis: 2026/10/06 16:00:22 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp 127.0.0.1:45059: connect: connection refused
+redis: 2026/10/06 16:00:22 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp 127.0.0.1:45059: connect: connection refused
+redis: 2026/10/06 16:00:22 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp 127.0.0.1:45059: connect: connection refused
+redis: 2026/10/06 16:00:23 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp 127.0.0.1:45059: connect: connection refused
+redis: 2026/10/06 16:00:23 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp 127.0.0.1:45059: connect: connection refused
+redis: 2026/10/06 16:00:23 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp 127.0.0.1:45059: connect: connection refused
+    ratelimit_budget_fourshape_integration_test.go:292: group refused/L=300ms: n=32 all_pass=32 bound_pass=true duration_upper=32 duration_lower=32 class=32 err_unavailable=32 dial_hit=32 min=0.09ms p50=300.32ms max=306.55ms classes=map[refused:15 timeout:17] dial_attempts=84 refused_phase1=17 refused_phase2=15 after_return_increment=2 background_observed=true
+redis: 2026/10/06 16:00:25 redis.go:2022: failed to initialize maintnotifications: failed to register handler for MOVING: handler register failed for 'MOVING': cannot overwrite existing handler
+redis: 2026/10/06 16:00:30 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp: blackhole dial canceled: context deadline exceeded
+redis: 2026/10/06 16:00:30 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp: dial timeout (experiment blackhole marker)
+redis: 2026/10/06 16:00:31 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp: blackhole dial canceled: context deadline exceeded
+redis: 2026/10/06 16:00:31 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp: blackhole dial canceled: context deadline exceeded
+redis: 2026/10/06 16:00:31 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp: dial timeout (experiment blackhole marker)
+redis: 2026/10/06 16:00:31 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp: blackhole dial canceled: context deadline exceeded
+    ratelimit_budget_fourshape_integration_test.go:292: group dial_blackhole/L=200ms: n=32 all_pass=32 bound_pass=true duration_upper=32 duration_lower=32 class=32 err_unavailable=32 dial_hit=32 min=200.18ms p50=200.96ms max=201.92ms classes=map[timeout:32] dial_attempts=80 refused_phase1=0 refused_phase2=0 after_return_increment=0 background_observed=false
+redis: 2026/10/06 16:00:31 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp: blackhole dial canceled: context deadline exceeded
+redis: 2026/10/06 16:00:32 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp: dial timeout (experiment blackhole marker)
+redis: 2026/10/06 16:00:32 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp: blackhole dial canceled: context deadline exceeded
+redis: 2026/10/06 16:00:32 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp: dial timeout (experiment blackhole marker)
+redis: 2026/10/06 16:00:32 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp: blackhole dial canceled: context deadline exceeded
+redis: 2026/10/06 16:00:32 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp: dial timeout (experiment blackhole marker)
+redis: 2026/10/06 16:00:32 redis.go:2022: failed to initialize maintnotifications: failed to register handler for MOVING: handler register failed for 'MOVING': cannot overwrite existing handler
+redis: 2026/10/06 16:00:33 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp: blackhole dial canceled: context deadline exceeded
+redis: 2026/10/06 16:00:33 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp: blackhole dial canceled: context deadline exceeded
+redis: 2026/10/06 16:00:33 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp: dial timeout (experiment blackhole marker)
+redis: 2026/10/06 16:00:33 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp: dial timeout (experiment blackhole marker)
+redis: 2026/10/06 16:00:36 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp: blackhole dial canceled: context deadline exceeded
+redis: 2026/10/06 16:00:36 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp: blackhole dial canceled: context deadline exceeded
+redis: 2026/10/06 16:00:36 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp: blackhole dial canceled: context deadline exceeded
+redis: 2026/10/06 16:00:36 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp: blackhole dial canceled: context deadline exceeded
+redis: 2026/10/06 16:00:36 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp: dial timeout (experiment blackhole marker)
+redis: 2026/10/06 16:00:37 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp: blackhole dial canceled: context deadline exceeded
+redis: 2026/10/06 16:00:35 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp: dial timeout (experiment blackhole marker)
+redis: 2026/10/06 16:00:35 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp: blackhole dial canceled: context deadline exceeded
+redis: 2026/10/06 16:00:36 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp: dial timeout (experiment blackhole marker)
+redis: 2026/10/06 16:00:36 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp: dial timeout (experiment blackhole marker)
+redis: 2026/10/06 16:00:36 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp: blackhole dial canceled: context deadline exceeded
+redis: 2026/10/06 16:00:37 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp: blackhole dial canceled: context deadline exceeded
+redis: 2026/10/06 16:00:37 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp: blackhole dial canceled: context deadline exceeded
+redis: 2026/10/06 16:00:37 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp: dial timeout (experiment blackhole marker)
+redis: 2026/10/06 16:00:38 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp: dial timeout (experiment blackhole marker)
+redis: 2026/10/06 16:00:38 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp: blackhole dial canceled: context deadline exceeded
+redis: 2026/10/06 16:00:38 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp: blackhole dial canceled: context deadline exceeded
+redis: 2026/10/06 16:00:38 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp: blackhole dial canceled: context deadline exceeded
+redis: 2026/10/06 16:00:39 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp: dial timeout (experiment blackhole marker)
+redis: 2026/10/06 16:00:39 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp: blackhole dial canceled: context deadline exceeded
+redis: 2026/10/06 16:00:39 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp: blackhole dial canceled: context deadline exceeded
+    ratelimit_budget_fourshape_integration_test.go:292: group dial_blackhole/L=300ms: n=32 all_pass=32 bound_pass=true duration_upper=32 duration_lower=32 class=32 err_unavailable=32 dial_hit=32 min=300.14ms p50=300.73ms max=307.39ms classes=map[timeout:32] dial_attempts=115 refused_phase1=0 refused_phase2=0 after_return_increment=0 background_observed=false
+redis: 2026/10/06 16:00:40 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp: blackhole dial canceled: context deadline exceeded
+redis: 2026/10/06 16:00:41 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp: blackhole dial canceled: context deadline exceeded
+redis: 2026/10/06 16:00:41 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp: dial timeout (experiment blackhole marker)
+redis: 2026/10/06 16:00:41 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp: dial timeout (experiment blackhole marker)
+redis: 2026/10/06 16:00:41 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp: blackhole dial canceled: context deadline exceeded
+redis: 2026/10/06 16:00:42 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp: blackhole dial canceled: context deadline exceeded
+redis: 2026/10/06 16:00:42 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp: blackhole dial canceled: context deadline exceeded
+redis: 2026/10/06 16:00:42 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp: blackhole dial canceled: context deadline exceeded
+redis: 2026/10/06 16:00:43 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp: dial timeout (experiment blackhole marker)
+redis: 2026/10/06 16:00:43 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp: dial timeout (experiment blackhole marker)
+redis: 2026/10/06 16:00:43 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp: dial timeout (experiment blackhole marker)
+redis: 2026/10/06 16:00:44 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp: dial timeout (experiment blackhole marker)
+redis: 2026/10/06 16:00:44 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp: dial timeout (experiment blackhole marker)
+redis: 2026/10/06 16:00:44 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp: dial timeout (experiment blackhole marker)
+redis: 2026/10/06 16:00:44 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp: blackhole dial canceled: context deadline exceeded
+    ratelimit_budget_fourshape_integration_test.go:292: group cold_init/L=200ms: n=32 all_pass=32 bound_pass=true duration_upper=32 duration_lower=32 class=32 err_unavailable=32 dial_hit=32 min=200.22ms p50=201.11ms max=205.44ms classes=map[timeout:32] dial_attempts=0 refused_phase1=0 refused_phase2=0 after_return_increment=0 background_observed=false
+    ratelimit_budget_fourshape_integration_test.go:292: group cold_init/L=300ms: n=32 all_pass=32 bound_pass=true duration_upper=32 duration_lower=32 class=32 err_unavailable=32 dial_hit=32 min=300.18ms p50=301.23ms max=320.20ms classes=map[timeout:32] dial_attempts=0 refused_phase1=0 refused_phase2=0 after_return_increment=0 background_observed=false
+    ratelimit_budget_fourshape_integration_test.go:292: group hot_blocked/L=200ms: n=32 all_pass=32 bound_pass=true duration_upper=32 duration_lower=32 class=32 err_unavailable=32 dial_hit=32 min=200.34ms p50=201.35ms max=208.18ms classes=map[timeout:32] dial_attempts=0 refused_phase1=0 refused_phase2=0 after_return_increment=0 background_observed=false
+    ratelimit_budget_fourshape_integration_test.go:292: group hot_blocked/L=300ms: n=32 all_pass=32 bound_pass=true duration_upper=32 duration_lower=32 class=32 err_unavailable=32 dial_hit=32 min=300.36ms p50=301.50ms max=310.81ms classes=map[timeout:32] dial_attempts=0 refused_phase1=0 refused_phase2=0 after_return_increment=0 background_observed=false
+2026/10/06 16:01:21 🐳 Stopping container: d0fd8922f305
+2026/10/06 16:01:21 ✅ Container stopped: d0fd8922f305
+2026/10/06 16:01:21 🐳 Terminating container: d0fd8922f305
+2026/10/06 16:01:21 🚫 Container terminated: d0fd8922f305
+--- PASS: TestRatelimitBudgetFourShapeAcceptance (75.74s)
+PASS
+ok  	github.com/xtianxx/txharbor/internal/app	76.820s
+
+exit_code=0

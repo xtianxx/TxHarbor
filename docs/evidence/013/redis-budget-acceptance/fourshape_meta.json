@@ -1,0 +1,65 @@
+{
+  "test": "TestRatelimitBudgetFourShapeAcceptance",
+  "run_baseline": {
+    "git_head": "9e0ae1933264acdc3b4f767dcd6f5d8eae240e13",
+    "branch": "013-redis-latency-budget-design",
+    "note": "batch working tree: new test file (internal/app/ratelimit_budget_fourshape_integration_test.go) untracked; peer-owned modifications present at run time (docs/evidence/013/*, internal/testutil/redisgate_test.go)",
+    "git_status_porcelain": [
+      " M docs/evidence/013/redis-latency-abc/SHA256SUMS",
+      " M docs/evidence/013/redis-latency-budget-design.md",
+      " M internal/testutil/redisgate_test.go",
+      "?? internal/app/ratelimit_budget_fourshape_integration_test.go"
+    ]
+  },
+  "source_sha256_at_run": {
+    "internal/app/serve.go": "9567cd75209e080df20edca70c9ef24bc4aab66bcc9c495b975221aba285cdb5",
+    "internal/app/ratelimit_middleware.go": "79c815ac01fb566bc0831241313696cf6c170cd5034649e0a37f72bdcbcd4c5e",
+    "internal/ratelimit/limiter.go": "ef259b8cbf412db6d0aa9889a21bce0e06662752a68b1467dee2094dea019da7",
+    "internal/testutil/redisgate.go": "29612c6343961277abaa0eebffe9993f6eab24c82f4ab4a5721744292a5edc96",
+    "internal/app/ratelimit_budget_fourshape_integration_test.go": "228f80cde00217f42dc190637012b57277d0e00c248afb124a1f1c7457a03ae9"
+  },
+  "go_version": "go version go1.26.5 linux/amd64",
+  "go_redis_version": "github.com/redis/go-redis/v9 v9.22.0 (go.mod)",
+  "params": {
+    "shapes": [
+      "refused",
+      "dial_blackhole",
+      "cold_init",
+      "hot_blocked"
+    ],
+    "budgets_ms": [
+      200,
+      300
+    ],
+    "rounds": 2,
+    "samples_per_round": 16,
+    "total_samples": 256,
+    "tolerance_ms": 150,
+    "redis_timeout_ms": 1000,
+    "class_expectations": {
+      "cold_init": [
+        "timeout"
+      ],
+      "dial_blackhole": [
+        "blackhole",
+        "timeout"
+      ],
+      "hot_blocked": [
+        "timeout"
+      ],
+      "refused": [
+        "refused",
+        "timeout"
+      ]
+    }
+  },
+  "command": "TXHARBOR_FAULT_EVIDENCE_DIR=/tmp/txharbor-r6/fourshape go test -race -tags e2e -count=1 -timeout 30m -v ./internal/app -run TestRatelimitBudgetFourShapeAcceptance",
+  "exit_code": 0,
+  "test_result": "--- PASS: TestRatelimitBudgetFourShapeAcceptance (75.74s)",
+  "data_race_marker_lines": 0,
+  "evidence_files": {
+    "run_log": "fourshape_run.log",
+    "records": "fourshape_records.json"
+  },
+  "generated_at_utc": "2026-10-06T08:01:38.250303+00:00"
+}

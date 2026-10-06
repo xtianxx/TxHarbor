@@ -207,6 +207,9 @@ CTE 开启（推荐）：T_allow ≤ min(parent, L) + ε（socket 段逐段入�
     已实证）；② 预算内断连的防重发必须由限流专用客户端
     `MaxRetries=-1` 保证（已实证 1/1/1），不得依赖 CTE、不得全局关闭
     共享客户端重试、不得新增脚本幂等协议。**
+  - **边界（不夸大）**：①/② 只证明「单次 Allow 调用内不自动重发」；
+    **不**构成跨请求的 exactly-once/幂等保证——bucket 脚本无幂等键，
+    响应丢失时该次 token 仍可能已扣（判定纪律不变）。
 - **分类**：超时/断连 ⇒ `ErrUnavailable`（§3.2 失效，不是拒绝）——不变；
   PD-1 的 503 触发与形状不受影响。
 - **重复扣除的影响与运维口径**：单键重复扣 N 个 token 是暂时性丢弃 N 次
@@ -354,7 +357,10 @@ CTE 开启（推荐）：T_allow ≤ min(parent, L) + ε（socket 段逐段入�
   isolated_noretry 1/1 + 35.5ms；bucket TTL=400ms 过期实证；
   `responses_withheld` 次级计数 6 轮 1 例漏计（已知缺口，不参与断言）。
 
-**实施批次验收条件**（已执行；结果与证据见文末「实施记录（第三轮）」）：
+**实施批次验收条件**（已执行：**整决策耗时四形态在第四轮完成**
+（n≥16×2、候选客户端+200/300ms 预算；见
+[redis-budget-acceptance/](redis-budget-acceptance/README.md)），其余在
+第三轮；结果与证据见文末「实施记录（第三轮/第四轮）」）：
 （integration_redis/e2e 现有层，复用 a59dcd1+本轮夹具；**不默认全量故障矩阵**）:
 - **禁重试客户端的取消身份断言（新增，独立复核 P1）**：在隔离客户端
   （MaxRetries=-1）+ CTE 下于在途读取消 ⇒ `errors.Is(err,
@@ -528,10 +534,15 @@ redisgate.go 纯新增 209 行 0 删除、新测试、证据目录）；生产�
      RPC send 未 paused；RPC 预算取用取消同样未 paused；对照（无取消超时）
      216.1ms、DeadlineExceeded、标记 +1、send paused——「仅父取消豁免」成立；
    - 并发池竞争 32 goroutine max 205.2ms、返回后 TotalConns=3（≤16 界内）；
-   - CTE 边界 9 记录复跑全 ≤L+ε（cancel 非即时事实保持）；
+   - CTE 边界 9 记录复跑（断言分列）：8 个 CTE-on 场景 ≤L+ε；第 9 条为
+     CTE-off 反向对照（`cte_off_hot_control` 1001.2ms），只断言 ≥0.8s
+     （反向证据）、**不计入 L+ε 统计**；cancel 非即时事实保持；
    - HTTP 矩阵：正常态误拒绝 0%（四单元 p50 11.9–12.6ms）；(200/300ms,1s)
      中间拥塞（注入 400ms）误拒绝 100%（p50 201.9/302.1ms；L 的核心代价项，
      **阈值待裁决**）；拒绝键 0 行（无新付款意图）、接受键恰 1 行（幂等）。
+     **口径边界**：0% = 正常姿态 4 单元×32 请求；100% = 注入 400ms 姿态下
+     的候选预算单元——均为该实验输入姿态的观测结果，**不是**生产正常态/
+     生产拥塞误拒绝率；上限阈值仍按 §8 待测/待裁决。
 
 **独立复核与修复（同批闭环）**：未参与修改者定向复核提出 5 项（.env.example
 可选值默认生效、下游启动失败未关专用客户端、缺真实无重试取消验收、
@@ -556,3 +567,46 @@ Hold flip`，恢复后绿）。
    GateDelay 逐 backend→client 块延迟（实测单块；方向结束即回收 pair）；矩阵
    `old_assembly` 仅复刻旧客户端配置；ε/容差为测试口径、非 SLO；
    分面/熔断/查询缓存/Recovery Drill runner 仍不在本轮。
+
+---
+
+## 实施记录（第四轮：发布前审查 F1–F5 闭环，2026-10-06）
+
+**范围**：只增测试与证据、刷新文档/清单；**生产代码、配置默认、CI 零
+改动**；生产阈值（L 取值、误拒绝率上限）不变，仍为 §8 待决策。验收证据
+[redis-budget-acceptance/](redis-budget-acceptance/README.md)（全部 -race、
+无 DATA RACE）。
+
+1. **F2 整决策耗时四形态（§7 验收项，本轮完成，exit 0）**：新装配级测试
+   `TestRatelimitBudgetFourShapeAcceptance`
+   （`internal/app/ratelimit_budget_fourshape_integration_test.go`，sha256
+   228f80cd…）——4 形态（拒连/合成拨号阻塞/冷初始化/热阻塞）× L∈{200,300}ms
+   × 2 轮 × 16 = **256/256 断言通过**；8 组 p50/max(ms)：refused
+   200.52/205.61、300.32/306.55；dial_blackhole 200.96/201.92、
+   300.73/307.39；cold_init 201.11/205.44、301.23/320.20；hot_blocked
+   201.35/208.18、301.50/310.81（容差 150ms 为装配层测试输入、非 SLO；
+   实际最大超界 +20.20ms）。拒连两相与 v9.22.0 结构一致：phase1 预算
+   到期时拨号仍在重试（detached dial ctx，pool.go:~1059；type timeout
+   18/17）、phase2 dialErrorsNum 饱和快路（pool.go:~692/765；type refused
+   14/15）；拨号尝试 89/84；返回后 +2 为观测（非协程退出证明）。选项
+   等价：替换 Dialer 的 4 组对生产构造全字段 DeepEqual（deep_equal=true；
+   Dialer/PushNotificationProcessor 除外并置 nil）；`MaxRetries=-1` 不触碰
+   `DialerRetries`（生产默认保留）。
+2. **F4/F5 GateDelay（本轮闭环）**：F5 = `redisgate_test.go`（sha256
+   3baea444…）把延迟窗口内 Hold 翻转前的固定 `Sleep(100ms)` 改为有界等待
+   （2ms 轮询 `DelayedReplies` 递增、5s 上限、超时 fatal 列出两值）——
+   主树 green exit 0。F4 = 吞答负例：临时 worktree 仅回退 Hold 吞答分支
+   （patch sha256 0dc6cc15…）⇒ exit 1，断言 `redisgate_test.go:230: eval
+   during the delay window succeeded after the Hold flip: the pending reply
+   was delivered (must be swallowed)`；恢复后 exit 0。**原始失败日志已灭失**
+   （有界搜索仅命中源码断言文本与文档引用）——以受控负例替代，不冒称
+   历史原运行。
+3. **F1 断言分列修正**：第三轮实施记录「CTE 边界 9 记录复跑全 ≤L+ε」改为
+   断言分列：8 个 CTE-on 场景 ≤L+ε；第 9 条 CTE-off 反向对照
+   （`cte_off_hot_control` 1001.2ms）只断言 ≥0.8s、不计入 L+ε 统计；
+   `redis-latency-abc/SHA256SUMS` 刷新 README 条目后 5/5 OK（5 条）。
+4. **F3 清单刷新**：abc 5/5、implement 12/12（本轮 README 指针更新后重算）、
+   cte 6/6、`redis-budget-acceptance/` 新清单 10/10——manifest 与文件逐一
+   核对，无「陈旧摘要」。
+5. **边界重申**：四形态/150ms 容差/后台拨号观测均为测试口径，非 SLO、
+   非协程退出证明；Recovery Drill run `37298994567` 仍独立失败、不在本轮。

@@ -205,11 +205,24 @@ func TestRedisGateDelayDelaysEvalReplies(t *testing.T) {
 	})
 	t.Cleanup(func() { _ = midClient.Close() })
 	midDone := make(chan error, 1)
+	delayedBefore := gate.CounterSnapshot().DelayedReplies
 	go func() {
 		_, merr := midClient.Eval(ctx, "return 7", nil).Result()
 		midDone <- merr
 	}()
-	time.Sleep(100 * time.Millisecond) // the gate has read the reply, delay pending
+	// Bounded wait for the pending-reply window: DelayedReplies is
+	// incremented after the gate has read this EVAL's reply and BEFORE the
+	// delay sleep, so seeing it advance proves the reply is being held back.
+	// A fixed sleep could flip to Hold before the reply even crossed and let
+	// this subcase pass without exercising the pending-reply path.
+	waitDeadline := time.Now().Add(5 * time.Second)
+	for gate.CounterSnapshot().DelayedReplies <= delayedBefore {
+		if time.Now().After(waitDeadline) {
+			t.Fatalf("delayed_replies did not advance within 5s (before=%d, now=%d): the gate never read the EVAL reply, so the Hold flip would not exercise the pending-reply path",
+				delayedBefore, gate.CounterSnapshot().DelayedReplies)
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
 	if err := gate.SetMode(GateHold); err != nil {
 		t.Fatalf("hold during delay: %v", err)
 	}
