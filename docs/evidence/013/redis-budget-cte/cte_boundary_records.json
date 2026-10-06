@@ -1,0 +1,269 @@
+[
+  {
+    "scenario": "hot_poolwait",
+    "caller": "primary",
+    "duration_ms": 200.614,
+    "ok": false,
+    "error_class": "context_deadline_exceeded",
+    "error_text": "ratelimit: unavailable: ratelimit eval: context deadline exceeded",
+    "conn_before": {
+      "total_conns": 0,
+      "idle_conns": 0,
+      "stale_conns": 0,
+      "hits": 0,
+      "misses": 0,
+      "timeouts": 0
+    },
+    "conn_after": {
+      "total_conns": 0,
+      "idle_conns": 0,
+      "stale_conns": 2,
+      "hits": 1,
+      "misses": 2,
+      "timeouts": 0
+    },
+    "gate_accepts_at_return": 2,
+    "gate_accepts_after_2s": 2,
+    "gate_accepts_added_in_2s_after_return": 0,
+    "duration_bound_checked": "duration \u003c= L + epsilon",
+    "bound_pass": true,
+    "note": "primary: in-flight read blocked on hold; secondary: pool-wait (PoolSize=1) then hold"
+  },
+  {
+    "scenario": "hot_poolwait",
+    "caller": "secondary",
+    "duration_ms": 202.178,
+    "ok": false,
+    "error_class": "context_deadline_exceeded",
+    "error_text": "ratelimit: unavailable: ratelimit eval: context deadline exceeded",
+    "conn_before": {
+      "total_conns": 0,
+      "idle_conns": 0,
+      "stale_conns": 0,
+      "hits": 0,
+      "misses": 0,
+      "timeouts": 0
+    },
+    "conn_after": {
+      "total_conns": 0,
+      "idle_conns": 0,
+      "stale_conns": 2,
+      "hits": 1,
+      "misses": 2,
+      "timeouts": 0
+    },
+    "gate_accepts_at_return": 2,
+    "gate_accepts_after_2s": 2,
+    "gate_accepts_added_in_2s_after_return": 0,
+    "duration_bound_checked": "duration \u003c= L + epsilon",
+    "bound_pass": true,
+    "note": "primary: in-flight read blocked on hold; secondary: pool-wait (PoolSize=1) then hold"
+  },
+  {
+    "scenario": "cancel_inflight",
+    "caller": "solo",
+    "duration_ms": 202.998,
+    "ok": false,
+    "error_class": "other",
+    "error_text": "ratelimit: unavailable: ratelimit eval: context canceled",
+    "conn_before": {
+      "total_conns": 0,
+      "idle_conns": 0,
+      "stale_conns": 0,
+      "hits": 0,
+      "misses": 0,
+      "timeouts": 0
+    },
+    "conn_after": {
+      "total_conns": 0,
+      "idle_conns": 0,
+      "stale_conns": 1,
+      "hits": 1,
+      "misses": 1,
+      "timeouts": 0
+    },
+    "gate_accepts_at_return": 3,
+    "gate_accepts_after_2s": 3,
+    "gate_accepts_added_in_2s_after_return": 0,
+    "duration_bound_checked": "cancel_at + 100ms \u003c= duration \u003c= L + epsilon (NOT immediate)",
+    "bound_pass": true,
+    "note": "cancelled at 60ms"
+  },
+  {
+    "scenario": "cancel_poolwait",
+    "caller": "solo",
+    "duration_ms": 61.454,
+    "ok": false,
+    "error_class": "other",
+    "error_text": "ratelimit: unavailable: ratelimit eval: context canceled",
+    "conn_before": {
+      "total_conns": 0,
+      "idle_conns": 0,
+      "stale_conns": 0,
+      "hits": 0,
+      "misses": 0,
+      "timeouts": 0
+    },
+    "conn_after": {
+      "total_conns": 0,
+      "idle_conns": 0,
+      "stale_conns": 1,
+      "hits": 1,
+      "misses": 1,
+      "timeouts": 0
+    },
+    "gate_accepts_at_return": 3,
+    "gate_accepts_after_2s": 3,
+    "gate_accepts_added_in_2s_after_return": 0,
+    "duration_bound_checked": "duration \u003c= cancel_at + epsilon",
+    "bound_pass": true,
+    "note": "cancelled at 60ms"
+  },
+  {
+    "scenario": "cold_init",
+    "caller": "solo",
+    "duration_ms": 200.862,
+    "ok": false,
+    "error_class": "context_deadline_exceeded",
+    "error_text": "ratelimit: unavailable: ratelimit eval: context deadline exceeded",
+    "conn_before": {
+      "total_conns": 0,
+      "idle_conns": 0,
+      "stale_conns": 0,
+      "hits": 0,
+      "misses": 0,
+      "timeouts": 0
+    },
+    "conn_after": {
+      "total_conns": 0,
+      "idle_conns": 0,
+      "stale_conns": 1,
+      "hits": 0,
+      "misses": 1,
+      "timeouts": 0
+    },
+    "gate_accepts_at_return": 4,
+    "gate_accepts_after_2s": 4,
+    "gate_accepts_added_in_2s_after_return": 0,
+    "duration_bound_checked": "duration \u003c= L + epsilon",
+    "bound_pass": true,
+    "note": "fresh client: dial OK (gate accepts), HELLO read held; init-failure conn must be Removed"
+  },
+  {
+    "scenario": "parent_deadline",
+    "caller": "solo",
+    "duration_ms": 81.597,
+    "ok": false,
+    "error_class": "context_deadline_exceeded",
+    "error_text": "ratelimit: unavailable: ratelimit eval: context deadline exceeded",
+    "conn_before": {
+      "total_conns": 0,
+      "idle_conns": 0,
+      "stale_conns": 0,
+      "hits": 0,
+      "misses": 0,
+      "timeouts": 0
+    },
+    "conn_after": {
+      "total_conns": 0,
+      "idle_conns": 0,
+      "stale_conns": 0,
+      "hits": 0,
+      "misses": 0,
+      "timeouts": 0
+    },
+    "gate_accepts_at_return": 5,
+    "gate_accepts_after_2s": 5,
+    "gate_accepts_added_in_2s_after_return": 0,
+    "duration_bound_checked": "duration \u003c= parent_budget + epsilon AND \u003c L",
+    "bound_pass": true,
+    "note": "parent budget 80ms \u003c L 200ms: min(parent, L) must win"
+  },
+  {
+    "scenario": "cte_off_hot_control",
+    "caller": "solo",
+    "duration_ms": 1001.262,
+    "ok": false,
+    "error_class": "context_deadline_exceeded",
+    "error_text": "ratelimit: unavailable: ratelimit eval: context deadline exceeded",
+    "conn_before": {
+      "total_conns": 0,
+      "idle_conns": 0,
+      "stale_conns": 0,
+      "hits": 0,
+      "misses": 0,
+      "timeouts": 0
+    },
+    "conn_after": {
+      "total_conns": 0,
+      "idle_conns": 0,
+      "stale_conns": 1,
+      "hits": 1,
+      "misses": 1,
+      "timeouts": 0
+    },
+    "gate_accepts_at_return": 6,
+    "gate_accepts_after_2s": 6,
+    "gate_accepts_added_in_2s_after_return": 0,
+    "duration_bound_checked": "duration \u003e= 0.8s (socket deadline = now+ReadTimeout, NOT L)",
+    "bound_pass": true,
+    "note": "CTE=false control: caller waits the socket ReadTimeout after the ctx deadline — documents WHY CTE is required for L+epsilon"
+  },
+  {
+    "scenario": "normal",
+    "caller": "solo",
+    "duration_ms": 6.693,
+    "ok": true,
+    "error_class": "ok",
+    "conn_before": {
+      "total_conns": 0,
+      "idle_conns": 0,
+      "stale_conns": 0,
+      "hits": 0,
+      "misses": 0,
+      "timeouts": 0
+    },
+    "conn_after": {
+      "total_conns": 0,
+      "idle_conns": 0,
+      "stale_conns": 0,
+      "hits": 0,
+      "misses": 0,
+      "timeouts": 0
+    },
+    "gate_accepts_at_return": 7,
+    "gate_accepts_after_2s": 7,
+    "gate_accepts_added_in_2s_after_return": 0,
+    "duration_bound_checked": "duration \u003c L AND background_add==0 (sampled)",
+    "bound_pass": true
+  },
+  {
+    "scenario": "recovery",
+    "caller": "solo",
+    "duration_ms": 5.626,
+    "ok": true,
+    "error_class": "",
+    "conn_before": {
+      "total_conns": 0,
+      "idle_conns": 0,
+      "stale_conns": 0,
+      "hits": 0,
+      "misses": 0,
+      "timeouts": 0
+    },
+    "conn_after": {
+      "total_conns": 0,
+      "idle_conns": 0,
+      "stale_conns": 0,
+      "hits": 0,
+      "misses": 0,
+      "timeouts": 0
+    },
+    "gate_accepts_at_return": 8,
+    "gate_accepts_after_2s": 8,
+    "gate_accepts_added_in_2s_after_return": 0,
+    "duration_bound_checked": "first trusted Allow \u003c= 30s + Recovering()==true",
+    "bound_pass": true,
+    "note": "graded reopening window still opens (10s, unchanged); background window recorded, not asserted (recovery re-dials legitimately inside the recovery loop)"
+  }
+]

@@ -87,6 +87,7 @@ func TestRatelimitVRatelimitAgainstRealRedis(t *testing.T) {
 			ClassRPC:           {RatePerSecond: 50, Burst: 20},
 		},
 		Timeout:        2 * time.Second,
+		BucketTTL:      4 * time.Second,
 		RecoveryWindow: 10 * time.Second,
 	}, observer)
 	if err != nil {

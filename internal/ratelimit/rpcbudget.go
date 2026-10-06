@@ -130,6 +130,11 @@ func (b *RPCBudget) Admit(ctx context.Context, class RPCClass) (func(), error) {
 		// A configuration error fails closed, exactly like the limiter.
 		return nil, err
 	}
+	if errors.Is(err, context.Canceled) {
+		// Caller cancellation is not a dependency signal: it must never flip
+		// a class posture (never pause, never clear an existing pause).
+		return nil, err
+	}
 	if !policy.baselineBounded {
 		// Only the distributed budget could keep this class bounded: pause it
 		// safely (never silently unbounded) until the limiter recovers.

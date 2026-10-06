@@ -1,0 +1,35 @@
+=== RUN   TestRedisBudgetResponseLossCounterexample
+2026/10/06 10:55:09 github.com/testcontainers/testcontainers-go - Connected to docker: 
+  Server Version: 29.6.1
+  API Version: 1.55
+  Operating System: Ubuntu 24.04.4 LTS
+  Total Memory: 15915 MB
+  Testcontainers for Go Version: v0.44.0
+  Resolved Docker Host: unix:///var/run/docker.sock
+  Resolved Docker Socket Path: /var/run/docker.sock
+  Test SessionID: eb6c29923fe3d2ec8aa3b81ebf88462cbb162c76f217d1d08149f64da665e327
+  Test ProcessID: c0798a74-30e6-4020-a736-05fcf615f859
+2026/10/06 10:55:10 🐳 Creating container for image redis:8.2.10-alpine
+2026/10/06 10:55:10 🐳 Creating container for image testcontainers/ryuk:0.14.0
+2026/10/06 10:55:10 ✅ Container created: 0a6223f6e2bc
+2026/10/06 10:55:10 🐳 Starting container: 0a6223f6e2bc
+2026/10/06 10:55:11 ✅ Container started: 0a6223f6e2bc
+2026/10/06 10:55:11 ⏳ Waiting for container id 0a6223f6e2bc image: testcontainers/ryuk:0.14.0. Waiting for: all of: [log message "Started", port 8080/tcp to be listening]
+2026/10/06 10:55:11 Shell not found in container
+2026/10/06 10:55:11 🔔 Container is ready: 0a6223f6e2bc
+2026/10/06 10:55:11 ✅ Container created: 83e80d4b3380
+2026/10/06 10:55:11 🐳 Starting container: 83e80d4b3380
+2026/10/06 10:55:11 ✅ Container started: 83e80d4b3380
+2026/10/06 10:55:11 ⏳ Waiting for container id 83e80d4b3380 image: redis:8.2.10-alpine. Waiting for: all of: [port 6379/tcp to be listening, log message "* Ready to accept connections"]
+2026/10/06 10:55:11 🔔 Container is ready: 83e80d4b3380
+    redisbudget_cte_test.go:647: response-loss evidence dir: /tmp/txharbor-test-evidence-3035712079
+    redisbudget_cte_test.go:803: close_before_expiry  sends=4 execs=4 withheld=3 tokens 9→5.010999999999999 settled="5.010999999999999" deduct≈4.0 dur=200.2ms resended=true doubled=true read_io_timeout bucket_alive
+    redisbudget_cte_test.go:803: hold_to_expiry       sends=1 execs=1 withheld=1 tokens 9→8.007 settled="" deduct≈1.0 dur=201.0ms resended=false doubled=false context_deadline_exceeded bucket_expired(TTL=2*L)
+    redisbudget_cte_test.go:803: isolated_noretry     sends=1 execs=1 withheld=1 tokens 9→8.007 settled="8.007" deduct≈1.0 dur=35.3ms resended=false doubled=false other bucket_alive
+2026/10/06 10:55:13 🐳 Stopping container: 83e80d4b3380
+2026/10/06 10:55:11 ✅ Container stopped: 83e80d4b3380
+2026/10/06 10:55:11 🐳 Terminating container: 83e80d4b3380
+2026/10/06 10:55:11 🚫 Container terminated: 83e80d4b3380
+--- PASS: TestRedisBudgetResponseLossCounterexample (4.23s)
+PASS
+ok  	github.com/xtianxx/txharbor/internal/ratelimit	4.280s

@@ -1,0 +1,21 @@
+diff --git a/internal/testutil/redisgate.go b/internal/testutil/redisgate.go
+index f6ee4ce..394b6ff 100644
+--- a/internal/testutil/redisgate.go
++++ b/internal/testutil/redisgate.go
+@@ -860,16 +860,6 @@ func (g *RedisGate) runDelay(pair *connPair) {
+ 							return
+ 						}
+ 					}
+-					// A Hold conversion during the delay window must swallow
+-					// the already-buffered reply: an established conn stops
+-					// responding at the flip, it never delivers a queued
+-					// answer afterwards.
+-					pair.mu.Lock()
+-					holdingNow := pair.holding
+-					pair.mu.Unlock()
+-					if holdingNow {
+-						return
+-					}
+ 				} else {
+ 					g.counters.preEvalReplies.Add(1)
+ 				}

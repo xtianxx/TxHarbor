@@ -67,8 +67,8 @@ func TestLoadEvents013DisabledKeepsExistingSemantics(t *testing.T) {
 	if (cfg.Capacity != CapacityConfig{}) {
 		t.Errorf("Capacity = %+v, want zero while disabled (no invented thresholds)", cfg.Capacity)
 	}
-	if (cfg.RateLimit != RateLimitConfig{}) {
-		t.Errorf("RateLimit = %+v, want zero while disabled", cfg.RateLimit)
+	if (cfg.RateLimit != RateLimitConfig{Budget: DefaultRedisTimeout}) {
+		t.Errorf("RateLimit = %+v, want zero classes and the inherited budget %s while disabled", cfg.RateLimit, DefaultRedisTimeout)
 	}
 	if (cfg.Events.Alerts != AlertsConfig{}) {
 		t.Errorf("Events.Alerts = %+v, want zero while disabled", cfg.Events.Alerts)
@@ -93,6 +93,7 @@ func TestLoadEvents013EnabledParsesFullSet(t *testing.T) {
 	env[EnvRedisTimeout] = "250ms"
 	env[EnvRedisCacheTTL] = "1m"
 	env[EnvRedisCacheEpoch] = "epoch-a"
+	env[EnvRateLimitBudget] = "100ms"
 	env[EnvKafkaTopic] = "txharbor.events.test"
 	env[EnvKafkaConsumerGroupPrefix] = "txharbor.test"
 
@@ -124,16 +125,81 @@ func TestLoadEvents013EnabledParsesFullSet(t *testing.T) {
 		cfg.RateLimit.RPC != (RateLimitClassConfig{RatePerSecond: 20, Burst: 40}) {
 		t.Errorf("rate limit = %+v", cfg.RateLimit)
 	}
+	if cfg.RateLimit.Budget != 100*time.Millisecond {
+		t.Errorf("RateLimit.Budget = %s, want 100ms", cfg.RateLimit.Budget)
+	}
 	if cfg.Capacity.SoftLimit != 1000 || cfg.Capacity.HardLimit != 2000 || cfg.Capacity.Reserve != 100 ||
 		cfg.Capacity.Retention != 24*time.Hour || cfg.Capacity.MaxShutdownWindow != time.Hour ||
 		cfg.Capacity.DrainTargetWindow != 30*time.Minute {
 		t.Errorf("capacity = %+v", cfg.Capacity)
 	}
 	for _, want := range []string{"events_enabled=true", "kafka_topic=txharbor.events.test", "capacity_soft=1000",
-		"alerts_enabled=true"} {
+		"ratelimit_budget=100ms", "alerts_enabled=true"} {
 		if !strings.Contains(cfg.Summary(), want) {
 			t.Errorf("summary %q lacks %q", cfg.Summary(), want)
 		}
+	}
+}
+
+// TestLoadRateLimitBudgetCompatibility pins the decision-budget supplement
+// (docs/evidence/013/redis-latency-budget-design.md §5): an unset budget
+// inherits the effective Redis timeout (zero migration), an explicit value at
+// or below the timeout is accepted, an explicit value above it is refused by
+// name, and a malformed value is refused.
+func TestLoadRateLimitBudgetCompatibility(t *testing.T) {
+	// (a) Unset: the budget inherits the effective Redis timeout, default or
+	// explicit.
+	for _, timeout := range []string{"", "3s"} {
+		env := eventsEnv()
+		want := DefaultRedisTimeout
+		if timeout != "" {
+			env[EnvRedisTimeout] = timeout
+			want = 3 * time.Second
+		}
+		cfg, err := Load(fakeEnv(env))
+		if err != nil {
+			t.Fatalf("Load() error = %v", err)
+		}
+		if cfg.RateLimit.Budget != want {
+			t.Errorf("Budget = %s with Redis timeout %q, want %s", cfg.RateLimit.Budget, timeout, want)
+		}
+	}
+
+	// (b) Explicit values at or below the 1s timeout are accepted.
+	for _, tc := range []struct {
+		raw  string
+		want time.Duration
+	}{
+		{"200ms", 200 * time.Millisecond},
+		{"1s", time.Second},
+	} {
+		env := eventsEnv()
+		env[EnvRateLimitBudget] = tc.raw
+		cfg, err := Load(fakeEnv(env))
+		if err != nil {
+			t.Fatalf("Load() with budget %q error = %v", tc.raw, err)
+		}
+		if cfg.RateLimit.Budget != tc.want {
+			t.Errorf("Budget = %s for %q, want %s", cfg.RateLimit.Budget, tc.raw, tc.want)
+		}
+	}
+
+	// (c) An explicit budget above the timeout is refused by exact key name.
+	env := eventsEnv()
+	env[EnvRateLimitBudget] = "2s"
+	_, err := Load(fakeEnv(env))
+	if err == nil {
+		t.Fatal("Load() = nil, want refusal for a budget above the Redis timeout")
+	}
+	if !strings.Contains(err.Error(), EnvRateLimitBudget) {
+		t.Errorf("error %q does not name %s", err, EnvRateLimitBudget)
+	}
+
+	// (d) A malformed value is refused (fail-closed).
+	env = eventsEnv()
+	env[EnvRateLimitBudget] = "200"
+	if _, err := Load(fakeEnv(env)); err == nil {
+		t.Fatal("Load() = nil, want refusal for a malformed budget")
 	}
 }
 

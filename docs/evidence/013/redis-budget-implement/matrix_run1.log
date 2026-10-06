@@ -1,0 +1,52 @@
+=== RUN   TestRatelimitBudgetMeasurementMatrix
+2026/10/06 13:35:18 github.com/testcontainers/testcontainers-go - Connected to docker: 
+  Server Version: 29.6.1
+  API Version: 1.55
+  Operating System: Ubuntu 24.04.4 LTS
+  Total Memory: 15915 MB
+  Testcontainers for Go Version: v0.44.0
+  Resolved Docker Host: unix:///var/run/docker.sock
+  Resolved Docker Socket Path: /var/run/docker.sock
+  Test SessionID: e8732d8cd83866af696cf902e105b15e4b7652267ed8cc6f2fac82a33820f9e9
+  Test ProcessID: 251925ee-d398-470b-b387-55e55f13c5ae
+2026/10/06 13:35:18 🐳 Creating container for image postgres:18.6-trixie
+2026/10/06 13:35:18 🐳 Creating container for image testcontainers/ryuk:0.14.0
+2026/10/06 13:35:18 ✅ Container created: 7c3f3ff44971
+2026/10/06 13:35:18 🐳 Starting container: 7c3f3ff44971
+2026/10/06 13:35:19 ✅ Container started: 7c3f3ff44971
+2026/10/06 13:35:19 ⏳ Waiting for container id 7c3f3ff44971 image: testcontainers/ryuk:0.14.0. Waiting for: all of: [log message "Started", port 8080/tcp to be listening]
+2026/10/06 13:35:19 Shell not found in container
+2026/10/06 13:35:19 🔔 Container is ready: 7c3f3ff44971
+2026/10/06 13:35:19 ✅ Container created: 9139ff8b9e18
+2026/10/06 13:35:19 🐳 Starting container: 9139ff8b9e18
+2026/10/06 13:35:20 ✅ Container started: 9139ff8b9e18
+2026/10/06 13:35:20 ⏳ Waiting for container id 9139ff8b9e18 image: postgres:18.6-trixie. Waiting for: all of: [log message "database system is ready to accept connections" (occurrence: 2)]
+2026/10/06 13:35:21 🔔 Container is ready: 9139ff8b9e18
+2026/10/06 13:35:22 🐳 Creating container for image redis:8.2.10-alpine
+2026/10/06 13:35:22 ✅ Container created: 80edc28924c9
+2026/10/06 13:35:22 🐳 Starting container: 80edc28924c9
+2026/10/06 13:35:23 ✅ Container started: 80edc28924c9
+2026/10/06 13:35:23 ⏳ Waiting for container id 80edc28924c9 image: redis:8.2.10-alpine. Waiting for: all of: [port 6379/tcp to be listening, log message "* Ready to accept connections"]
+2026/10/06 13:35:23 🔔 Container is ready: 80edc28924c9
+    ratelimit_budget_matrix_integration_test.go:182: matrix evidence dir: /tmp/txharbor-impl-ev
+    ratelimit_budget_matrix_integration_test.go:183: cell                         budget  scenario      n   2xx   503 other   p50_ms   p95_ms   max_ms  unavail  delayed
+    ratelimit_budget_matrix_integration_test.go:193: old_assembly                 1s      normal       32    32     0     0     12.6     14.0     30.6        0        0
+    ratelimit_budget_matrix_integration_test.go:193: old_assembly                 1s      congestion   32    32     0     0    413.7    415.4    417.7        0       32
+    ratelimit_budget_matrix_integration_test.go:193: dedicated_default_1s         1s      normal       32    32     0     0     12.3     13.0     18.1        0        0
+    ratelimit_budget_matrix_integration_test.go:193: dedicated_default_1s         1s      congestion   32    32     0     0    413.9    415.6    417.3        0       32
+    ratelimit_budget_matrix_integration_test.go:193: dedicated_candidate_200ms    200ms   normal       32    32     0     0     11.9     13.0     18.7        0        0
+    ratelimit_budget_matrix_integration_test.go:193: dedicated_candidate_200ms    200ms   congestion   32     0    32     0    201.9    202.5    202.6       32       32
+    ratelimit_budget_matrix_integration_test.go:193: dedicated_candidate_300ms    300ms   normal       32    32     0     0     12.0     12.8     19.5        0        0
+    ratelimit_budget_matrix_integration_test.go:193: dedicated_candidate_300ms    300ms   congestion   32     0    32     0    302.1    302.7    303.0       32       32
+    ratelimit_budget_matrix_integration_test.go:204: matrix_records.json: 8 records written
+2026/10/06 13:36:06 🐳 Stopping container: 80edc28924c9
+2026/10/06 13:36:07 ✅ Container stopped: 80edc28924c9
+2026/10/06 13:36:07 🐳 Terminating container: 80edc28924c9
+2026/10/06 13:36:07 🚫 Container terminated: 80edc28924c9
+2026/10/06 13:36:07 🐳 Stopping container: 9139ff8b9e18
+2026/10/06 13:36:07 ✅ Container stopped: 9139ff8b9e18
+2026/10/06 13:36:07 🐳 Terminating container: 9139ff8b9e18
+2026/10/06 13:36:07 🚫 Container terminated: 9139ff8b9e18
+--- PASS: TestRatelimitBudgetMeasurementMatrix (51.62s)
+PASS
+ok  	github.com/xtianxx/txharbor/internal/app	52.721s

@@ -189,6 +189,16 @@ func Serve(ctx context.Context, d Deps) int {
 	signals := health.NewDependencySignals()
 	var dependencies []string
 	var redisClient *redis.Client
+	var limiterClient *redis.Client
+	// limiterOwnedByShutdown flips once the shutdown sequence takes over the
+	// dedicated limiter client; until then every return path (any startup
+	// failure after the client was created) closes it here.
+	limiterOwnedByShutdown := false
+	defer func() {
+		if limiterClient != nil && !limiterOwnedByShutdown {
+			_ = limiterClient.Close()
+		}
+	}()
 	if cfg.Redis.Addr != "" {
 		redisClient = redis.NewClient(&redis.Options{
 			Addr:         cfg.Redis.Addr,
@@ -246,7 +256,10 @@ func Serve(ctx context.Context, d Deps) int {
 	// a bounded guard, the limiter's failure policy is PD-1
 	// (ratelimit.Policy), and the RPC budget degrades or safely pauses classes
 	// without touching error classification, chain-identity or completeness
-	// checks. A Redis outage never refuses startup.
+	// checks. A Redis outage never refuses startup. The limiter runs on its
+	// dedicated client (context-timeout enabled, no retries) while health and
+	// cache stay on the shared client; the limiter's availability state comes
+	// only from its own Allow outcomes.
 	if redisClient != nil {
 		store, err := cache.NewRedisStore(redisClient)
 		if err != nil {
@@ -266,7 +279,8 @@ func Serve(ctx context.Context, d Deps) int {
 			return fail("startup failed (cache): %s", logx.Redact(err.Error()))
 		}
 		cacheClient.SetObserver(m)
-		scriptStore, err := ratelimit.NewRedisScriptStore(redisClient)
+		limiterClient = newLimiterRedisClient(cfg)
+		scriptStore, err := ratelimit.NewRedisScriptStore(limiterClient)
 		if err != nil {
 			ethClient.Close()
 			pool.Close()
@@ -717,7 +731,10 @@ serveLoop:
 
 	// 6. Shutdown: stop accepting work, let the indexer and the reconcile
 	// observer exit, then release resources, all sharing one 15s budget.
-	// Budget exhaustion is recorded and exits non-zero.
+	// Budget exhaustion is recorded and exits non-zero. The shutdown sequence
+	// now owns the dedicated limiter client (its Close step below); the
+	// deferred startup cleanup stands down.
+	limiterOwnedByShutdown = true
 	if err := runShutdown(context.Background(), cfg.ShutdownTimeout,
 		func(shCtx context.Context) error { return srv.Shutdown(shCtx) },
 		func(shCtx context.Context) error {
@@ -743,6 +760,9 @@ serveLoop:
 			if redisClient != nil {
 				_ = redisClient.Close()
 			}
+			if limiterClient != nil {
+				_ = limiterClient.Close()
+			}
 			reconcileRPC.Close()
 			ethClient.Close()
 			recoveryWiring.close()
@@ -754,6 +774,31 @@ serveLoop:
 		exitCode = 1
 	}
 	return exitCode
+}
+
+// limiterPoolSize bounds the dedicated limiter client's connection pool: the
+// per-class targets stay ≤500 evals/s with ~1ms EVAL RTT, so 16 connections
+// give burst headroom and a hard bound on the extra connections a second pool
+// adds.
+const limiterPoolSize = 16
+
+// newLimiterRedisClient builds the limiter's dedicated Redis client. The
+// limiter gets its own client instead of sharing the probe/cache one:
+// ContextTimeoutEnabled lets the command context deadline bound every wait
+// (pool, dial, read — measured ≤ L+ε), MaxRetries=-1 keeps a lost response
+// after execution from re-sending the non-idempotent token-bucket script, and
+// the explicit small pool bounds the extra connections the second pool adds.
+// Health and cache keep the shared client untouched.
+func newLimiterRedisClient(cfg *config.Config) *redis.Client {
+	return redis.NewClient(&redis.Options{
+		Addr:                  cfg.Redis.Addr,
+		DialTimeout:           cfg.Redis.Timeout,
+		ReadTimeout:           cfg.Redis.Timeout,
+		WriteTimeout:          cfg.Redis.Timeout,
+		ContextTimeoutEnabled: true,
+		MaxRetries:            -1,
+		PoolSize:              limiterPoolSize,
+	})
 }
 
 // ---------------------------------------------------------------------------

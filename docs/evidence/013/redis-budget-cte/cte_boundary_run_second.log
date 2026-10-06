@@ -1,0 +1,54 @@
+=== RUN   TestRedisBudgetCTEBoundary
+2026/10/06 10:54:50 github.com/testcontainers/testcontainers-go - Connected to docker: 
+  Server Version: 29.6.1
+  API Version: 1.55
+  Operating System: Ubuntu 24.04.4 LTS
+  Total Memory: 15915 MB
+  Testcontainers for Go Version: v0.44.0
+  Resolved Docker Host: unix:///var/run/docker.sock
+  Resolved Docker Socket Path: /var/run/docker.sock
+  Test SessionID: 3bb58b4794220ca5f2e01bd250af74ce9810e7beba78c493b88cb8e9c29544ea
+  Test ProcessID: 9de3bbfc-a49c-460c-8a9a-fb8df371a561
+2026/10/06 10:54:50 🐳 Creating container for image redis:8.2.10-alpine
+2026/10/06 10:54:50 🐳 Creating container for image testcontainers/ryuk:0.14.0
+2026/10/06 10:54:50 ✅ Container created: 06bf55f33dfb
+2026/10/06 10:54:50 🐳 Starting container: 06bf55f33dfb
+2026/10/06 10:54:51 ✅ Container started: 06bf55f33dfb
+2026/10/06 10:54:51 ⏳ Waiting for container id 06bf55f33dfb image: testcontainers/ryuk:0.14.0. Waiting for: all of: [log message "Started", port 8080/tcp to be listening]
+2026/10/06 10:54:51 Shell not found in container
+2026/10/06 10:54:51 🔔 Container is ready: 06bf55f33dfb
+2026/10/06 10:54:51 ✅ Container created: 529d59592cfd
+2026/10/06 10:54:51 🐳 Starting container: 529d59592cfd
+2026/10/06 10:54:51 ✅ Container started: 529d59592cfd
+2026/10/06 10:54:51 ⏳ Waiting for container id 529d59592cfd image: redis:8.2.10-alpine. Waiting for: all of: [port 6379/tcp to be listening, log message "* Ready to accept connections"]
+2026/10/06 10:54:51 🔔 Container is ready: 529d59592cfd
+    redisbudget_cte_test.go:205: cte evidence dir: /tmp/txharbor-test-evidence-4277656501
+=== RUN   TestRedisBudgetCTEBoundary/hot_poolwait
+=== RUN   TestRedisBudgetCTEBoundary/cancel_points
+=== RUN   TestRedisBudgetCTEBoundary/cold_init
+=== RUN   TestRedisBudgetCTEBoundary/parent_deadline
+=== RUN   TestRedisBudgetCTEBoundary/cte_off_hot_control
+=== RUN   TestRedisBudgetCTEBoundary/normal_and_recovery
+=== NAME  TestRedisBudgetCTEBoundary
+    redisbudget_cte_test.go:556: hot_poolwait               primary      208.4ms ok=false bound=true   class=context_deadline_exceeded
+    redisbudget_cte_test.go:556: hot_poolwait               secondary    201.2ms ok=false bound=true   class=context_deadline_exceeded
+    redisbudget_cte_test.go:556: cancel_inflight            solo         201.5ms ok=false bound=true   class=other
+    redisbudget_cte_test.go:556: cancel_poolwait            solo          60.4ms ok=false bound=true   class=other
+    redisbudget_cte_test.go:556: cold_init                  solo         201.1ms ok=false bound=true   class=context_deadline_exceeded
+    redisbudget_cte_test.go:556: parent_deadline            solo          80.4ms ok=false bound=true   class=context_deadline_exceeded
+    redisbudget_cte_test.go:556: cte_off_hot_control        solo        1000.6ms ok=false bound=true   class=context_deadline_exceeded
+    redisbudget_cte_test.go:556: normal                     solo           6.3ms ok=true  bound=true   class=ok
+    redisbudget_cte_test.go:556: recovery                   solo           4.9ms ok=true  bound=true   class=
+2026/10/06 10:55:07 🐳 Stopping container: 529d59592cfd
+2026/10/06 10:55:08 ✅ Container stopped: 529d59592cfd
+2026/10/06 10:55:08 🐳 Terminating container: 529d59592cfd
+2026/10/06 10:55:08 🚫 Container terminated: 529d59592cfd
+--- PASS: TestRedisBudgetCTEBoundary (18.37s)
+    --- PASS: TestRedisBudgetCTEBoundary/hot_poolwait (2.24s)
+    --- PASS: TestRedisBudgetCTEBoundary/cancel_points (2.21s)
+    --- PASS: TestRedisBudgetCTEBoundary/cold_init (2.20s)
+    --- PASS: TestRedisBudgetCTEBoundary/parent_deadline (2.09s)
+    --- PASS: TestRedisBudgetCTEBoundary/cte_off_hot_control (3.01s)
+    --- PASS: TestRedisBudgetCTEBoundary/normal_and_recovery (4.22s)
+PASS
+ok  	github.com/xtianxx/txharbor/internal/ratelimit	18.403s

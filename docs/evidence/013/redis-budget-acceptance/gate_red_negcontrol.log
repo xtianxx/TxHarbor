@@ -1,0 +1,54 @@
+$ cd /tmp/txharbor-r6/neg && TXHARBOR_FAULT_EVIDENCE_DIR=/tmp/txharbor-r6/gate go test -race -tags integration_redis -count=1 -timeout 10m -v ./internal/testutil -run TestRedisGate
+=== RUN   TestRedisGatePassForwardsAndHoldConverses
+2026/10/06 15:32:25 github.com/testcontainers/testcontainers-go - Connected to docker: 
+  Server Version: 29.6.1
+  API Version: 1.55
+  Operating System: Ubuntu 24.04.4 LTS
+  Total Memory: 15915 MB
+  Testcontainers for Go Version: v0.44.0
+  Resolved Docker Host: unix:///var/run/docker.sock
+  Resolved Docker Socket Path: /var/run/docker.sock
+  Test SessionID: 94ffc0d9171269e6543e2af86b6190d81e47c34361fdaaad402c01aaa4ae949d
+  Test ProcessID: 34a32189-9b88-43e1-9398-b622d2e789b2
+2026/10/06 15:32:26 🐳 Creating container for image redis:8.2.10-alpine
+2026/10/06 15:32:26 🐳 Creating container for image testcontainers/ryuk:0.14.0
+2026/10/06 15:32:26 ✅ Container created: 5a1e5af0a8d9
+2026/10/06 15:32:26 🐳 Starting container: 5a1e5af0a8d9
+2026/10/06 15:32:26 ✅ Container started: 5a1e5af0a8d9
+2026/10/06 15:32:26 ⏳ Waiting for container id 5a1e5af0a8d9 image: testcontainers/ryuk:0.14.0. Waiting for: all of: [log message "Started", port 8080/tcp to be listening]
+2026/10/06 15:32:27 Shell not found in container
+2026/10/06 15:32:27 🔔 Container is ready: 5a1e5af0a8d9
+2026/10/06 15:32:27 ✅ Container created: b86fe6d18a34
+2026/10/06 15:32:27 🐳 Starting container: b86fe6d18a34
+2026/10/06 15:32:27 ✅ Container started: b86fe6d18a34
+2026/10/06 15:32:27 ⏳ Waiting for container id b86fe6d18a34 image: redis:8.2.10-alpine. Waiting for: all of: [port 6379/tcp to be listening, log message "* Ready to accept connections"]
+2026/10/06 15:32:27 🔔 Container is ready: b86fe6d18a34
+redis: 2026/10/06 15:32:33 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp 127.0.0.1:46191: connect: connection refused
+redis: 2026/10/06 15:32:33 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp 127.0.0.1:46191: connect: connection refused
+redis: 2026/10/06 15:32:34 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp 127.0.0.1:46191: connect: connection refused
+redis: 2026/10/06 15:32:34 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp 127.0.0.1:46191: connect: connection refused
+    redisgate_test.go:74: down-gate error (informational): dial tcp 127.0.0.1:46191: connect: connection refused
+2026/10/06 15:32:34 🐳 Stopping container: b86fe6d18a34
+2026/10/06 15:32:35 ✅ Container stopped: b86fe6d18a34
+2026/10/06 15:32:35 🐳 Terminating container: b86fe6d18a34
+2026/10/06 15:32:35 🚫 Container terminated: b86fe6d18a34
+--- PASS: TestRedisGatePassForwardsAndHoldConverses (9.25s)
+=== RUN   TestRedisGateRefusedOnDownBeforeAnyConn
+--- PASS: TestRedisGateRefusedOnDownBeforeAnyConn (0.00s)
+=== RUN   TestRedisGateDelayDelaysEvalReplies
+2026/10/06 15:32:35 🐳 Creating container for image redis:8.2.10-alpine
+2026/10/06 15:32:35 ✅ Container created: 2a15f9415c0b
+2026/10/06 15:32:35 🐳 Starting container: 2a15f9415c0b
+2026/10/06 15:32:35 ✅ Container started: 2a15f9415c0b
+2026/10/06 15:32:35 ⏳ Waiting for container id 2a15f9415c0b image: redis:8.2.10-alpine. Waiting for: all of: [port 6379/tcp to be listening, log message "* Ready to accept connections"]
+2026/10/06 15:32:36 🔔 Container is ready: 2a15f9415c0b
+    redisgate_test.go:230: eval during the delay window succeeded after the Hold flip: the pending reply was delivered (must be swallowed)
+2026/10/06 15:32:37 🐳 Stopping container: 2a15f9415c0b
+2026/10/06 15:32:38 ✅ Container stopped: 2a15f9415c0b
+2026/10/06 15:32:38 🐳 Terminating container: 2a15f9415c0b
+2026/10/06 15:32:38 🚫 Container terminated: 2a15f9415c0b
+--- FAIL: TestRedisGateDelayDelaysEvalReplies (2.91s)
+FAIL
+FAIL	github.com/xtianxx/txharbor/internal/testutil	12.222s
+FAIL
+EXIT_CODE=1

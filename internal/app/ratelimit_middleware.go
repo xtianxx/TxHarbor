@@ -64,8 +64,12 @@ func rateLimitClasses(cfg *config.Config) map[ratelimit.Class]ratelimit.ClassCon
 // the same wiring.
 func buildLimiter(store ratelimit.ScriptStore, cfg *config.Config, observer ratelimit.Observer) (*ratelimit.Limiter, error) {
 	return ratelimit.NewLimiter(store, ratelimit.Config{
-		Classes:        rateLimitClasses(cfg),
-		Timeout:        cfg.Redis.Timeout,
+		Classes: rateLimitClasses(cfg),
+		Timeout: cfg.RateLimit.Budget,
+		// The bucket TTL keeps the original algorithm (2× the effective Redis
+		// timeout) as an independent parameter, so tightening the decision
+		// budget never changes the bucket lifecycle.
+		BucketTTL:      2 * cfg.Redis.Timeout,
 		RecoveryWindow: rateLimitRecoveryWindow,
 	}, observer)
 }

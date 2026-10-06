@@ -1,0 +1,38 @@
+[
+  {
+    "variant": "timeout_1s_budget_unset",
+    "budget_inherited": true,
+    "redis_timeout_ms": 1000,
+    "budget_ms": 1000,
+    "expected_ttl_ms": 2000,
+    "pttl_ms": 1998,
+    "bound_pass": true
+  },
+  {
+    "variant": "timeout_1s_budget_200ms",
+    "budget_inherited": false,
+    "redis_timeout_ms": 1000,
+    "budget_ms": 200,
+    "expected_ttl_ms": 2000,
+    "pttl_ms": 1999,
+    "bound_pass": true
+  },
+  {
+    "variant": "timeout_3s_budget_unset",
+    "budget_inherited": true,
+    "redis_timeout_ms": 3000,
+    "budget_ms": 3000,
+    "expected_ttl_ms": 6000,
+    "pttl_ms": 5999,
+    "bound_pass": true
+  },
+  {
+    "variant": "timeout_3s_budget_200ms",
+    "budget_inherited": false,
+    "redis_timeout_ms": 3000,
+    "budget_ms": 200,
+    "expected_ttl_ms": 6000,
+    "pttl_ms": 5999,
+    "bound_pass": true
+  }
+]
