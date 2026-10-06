@@ -1,0 +1,4 @@
+146c146
+< 	exec sh -ec "make -n test-drill >/dev/null && go build ./... && go test -c -tags drill -o /dev/null ./internal/recovery && go test -tags drill -count=1 -v -run TestDrillTargetWitnessOldReconnectRejected ./internal/recovery"
+---
+> 	exec make test-drill

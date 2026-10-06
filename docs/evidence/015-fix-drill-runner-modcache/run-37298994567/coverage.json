@@ -1,0 +1,124 @@
+{
+  "run_id": "run.pBV0i8",
+  "started_at": "2026-10-05T10:49:49Z",
+  "commit": "be272cb7da9f51e2af120cd116c4e2d2bbbefbf0",
+  "tree_fingerprint": "sha256:cce2675fea93b9062474d51e4c563d6ffcc3850c675da4967543e7b73e45dda9",
+  "package": "./...",
+  "go_test_exit_status": 1,
+  "checker_result": "FAIL",
+  "checker_exit_status": 1,
+  "overall_result": "FAIL",
+  "required_cases": [
+    {
+      "name": "TestDrillArmRefusesReplacedELFAndPreStartTamper",
+      "status": "NOTRUN",
+      "reason": "missing from go test -json output"
+    },
+    {
+      "name": "TestDrillTargetWitnessOldReconnectRejected",
+      "status": "NOTRUN",
+      "reason": "missing from go test -json output"
+    },
+    {
+      "name": "TestDrillTargetWitnessOldRoleLoginDuringRestoreAcceptanceFailsClosed",
+      "status": "NOTRUN",
+      "reason": "missing from go test -json output"
+    },
+    {
+      "name": "TestDrillTargetWitnessObserverTerminationDuringRestoreAcceptanceFailsClosed",
+      "status": "NOTRUN",
+      "reason": "missing from go test -json output"
+    },
+    {
+      "name": "TestT058DrillE2EBackupAdvanceRestoreRefuseThenRelease",
+      "status": "NOTRUN",
+      "reason": "missing from go test -json output"
+    },
+    {
+      "name": "TestT058DrillGapCannotBeClosedStaysPaused",
+      "status": "NOTRUN",
+      "reason": "missing from go test -json output"
+    },
+    {
+      "name": "TestT058DrillEventLayerKafkaBrokerOffsetDivergence",
+      "status": "NOTRUN",
+      "reason": "missing from go test -json output"
+    },
+    {
+      "name": "TestT058DrillEventEffectRecovery",
+      "status": "NOTRUN",
+      "reason": "missing from go test -json output"
+    },
+    {
+      "name": "TestT058WithdrawalEffectRestoreRetry",
+      "status": "NOTRUN",
+      "reason": "missing from go test -json output"
+    },
+    {
+      "name": "TestT059F1BackupUnusableCorruptTruncatedUnverified",
+      "status": "NOTRUN",
+      "reason": "missing from go test -json output"
+    },
+    {
+      "name": "TestT059F2RestoreInterruptionNotRestoredRebuildRerunIdempotent",
+      "status": "NOTRUN",
+      "reason": "missing from go test -json output"
+    },
+    {
+      "name": "TestT059F3IncompatibleProgramRefusedNoSilentDowngrade",
+      "status": "NOTRUN",
+      "reason": "missing from go test -json output"
+    },
+    {
+      "name": "TestT059F4ExternalLeadZeroReplayZeroAuthorityWrites",
+      "status": "NOTRUN",
+      "reason": "missing from go test -json output"
+    },
+    {
+      "name": "TestT059F5IsolationUnprovenRefusedAndNotInferred",
+      "status": "NOTRUN",
+      "reason": "missing from go test -json output"
+    },
+    {
+      "name": "TestT059F6UnprovableGapStaysUnknownWithPackageAndEscalation",
+      "status": "NOTRUN",
+      "reason": "missing from go test -json output"
+    },
+    {
+      "name": "TestT059F7UnauthorizedInsufficientStaleApprovalsRefused",
+      "status": "NOTRUN",
+      "reason": "missing from go test -json output"
+    },
+    {
+      "name": "TestT060DrillRepeatedVerifyApproveReleaseCloseNoFlips",
+      "status": "NOTRUN",
+      "reason": "missing from go test -json output"
+    },
+    {
+      "name": "TestT060DrillRestoreReentryConvergesWithSingleState",
+      "status": "NOTRUN",
+      "reason": "missing from go test -json output"
+    },
+    {
+      "name": "TestT060DrillInstanceCloseOnlyWhenAllReleasedAndIdempotent",
+      "status": "NOTRUN",
+      "reason": "missing from go test -json output"
+    },
+    {
+      "name": "TestT059F1BackupUnusableCorruptTruncatedUnverified/corrupt-verification",
+      "status": "NOTRUN",
+      "reason": "missing from go test -json output"
+    },
+    {
+      "name": "TestT059F1BackupUnusableCorruptTruncatedUnverified/edited-verified-manifest",
+      "status": "NOTRUN",
+      "reason": "missing from go test -json output"
+    },
+    {
+      "name": "TestT059F3IncompatibleProgramRefusedNoSilentDowngrade/incompatible-restore",
+      "status": "NOTRUN",
+      "reason": "missing from go test -json output"
+    }
+  ],
+  "optional_skips": []
+}
