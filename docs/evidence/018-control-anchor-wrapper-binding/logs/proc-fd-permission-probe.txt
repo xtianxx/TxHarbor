@@ -1,0 +1,19 @@
+# /proc/<pid>/fd readability probe (this batch, added record - supports sec.2 rationale for not reusing hostOwnedSocketInode)
+captured_at_utc: 2026-10-07T04:09:54Z
+uid: 1000
+
+== HOST (uid 1000) ==
+-- pid=1 owner=root
+   ls /proc/1/fd rc=2 err=ls: cannot open directory '/proc/1/fd': Permission denied
+-- pid=2 owner=root
+   ls /proc/2/fd rc=2 err=ls: cannot open directory '/proc/2/fd': Permission denied
+-- pid=3583733 owner=dream
+   ls /proc/3583733/fd rc=0 err=
+
+== CONTAINER (pinned postgres image, uid 1000) ==
+-- pid=1 owner=UNKNOWN
+   ls /proc/1/fd rc=0 err=
+-- pid=1 start identity read test:
+   cat /proc/1/stat rc=0 err=
+-- own fd (pid self) readable:
+   ls /proc/self/fd rc=0
