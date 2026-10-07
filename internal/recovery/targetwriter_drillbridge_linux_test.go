@@ -7,6 +7,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/binary"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -416,16 +417,24 @@ func DrillRunObservedPGCommand(
 // adoption phase.
 // ---------------------------------------------------------------------------
 
+// Carrier image identity is store-dependent. The pinned reference resolves to
+// an OCI image index; a containerd-snapshotter store reports that index digest
+// as the image identity, while the classic overlay2 graph driver reports the
+// config digest. The linux/amd64 platform manifest digest is not any store's
+// image identity, so it is deliberately not part of the accepted set.
+// Evidence: docs/evidence/016-carrier-image-identity/.
 const (
-	drillCarrierImage      = "postgres@sha256:4ef4dbc939d61acea57712655ddb4b4ab27419c913f94cca0cd57cb3ea3c2280"
-	drillCarrierImageID    = "sha256:4ef4dbc939d61acea57712655ddb4b4ab27419c913f94cca0cd57cb3ea3c2280"
-	drillCarrierRestore    = "/usr/lib/postgresql/18/bin/pg_restore"
-	drillCarrierDump       = "/usr/lib/postgresql/18/bin/pg_dump"
-	drillCarrierLibpq      = "/usr/lib/x86_64-linux-gnu/libpq.so.5.18"
-	drillCarrierRestoreSHA = "06115b93c3d1bf9d7c62563abb595792ea90acb9083233fd293eac1b34695840"
-	drillCarrierDumpSHA    = "66115325f4e49f7f9c79a83cfc89d2c9a1698858a1ae9786ae7595cd7a9f2de9"
-	drillCarrierLibpqSHA   = "9cce9bfae9405a71e0d642457d9d8748093cea9fdc0f785b5d2ed9575aec168d"
-	drillToolsVersion      = "(PostgreSQL) 18.6"
+	drillCarrierImage                  = "postgres@sha256:4ef4dbc939d61acea57712655ddb4b4ab27419c913f94cca0cd57cb3ea3c2280"
+	drillCarrierIndexDigest            = "sha256:4ef4dbc939d61acea57712655ddb4b4ab27419c913f94cca0cd57cb3ea3c2280"
+	drillCarrierPlatformManifestDigest = "sha256:7341002d2b8c7c5bdd7542a671a95b36196c0b5b888daf454ae4fc33ba5346d7"
+	drillCarrierConfigDigest           = "sha256:a6638641707cdf047e5d5c2781f437e2e809323cab22c70b280be8389fbb7878"
+	drillCarrierRestore                = "/usr/lib/postgresql/18/bin/pg_restore"
+	drillCarrierDump                   = "/usr/lib/postgresql/18/bin/pg_dump"
+	drillCarrierLibpq                  = "/usr/lib/x86_64-linux-gnu/libpq.so.5.18"
+	drillCarrierRestoreSHA             = "06115b93c3d1bf9d7c62563abb595792ea90acb9083233fd293eac1b34695840"
+	drillCarrierDumpSHA                = "66115325f4e49f7f9c79a83cfc89d2c9a1698858a1ae9786ae7595cd7a9f2de9"
+	drillCarrierLibpqSHA               = "9cce9bfae9405a71e0d642457d9d8748093cea9fdc0f785b5d2ed9575aec168d"
+	drillToolsVersion                  = "(PostgreSQL) 18.6"
 )
 
 // DrillOriginEndpoint is an opaque origin endpoint capability: it retains the
@@ -749,20 +758,99 @@ func drillVerifyFileDigest(path, expected string) error {
 	return nil
 }
 
+// drillCarrierStoreClass names the docker image store semantics that decide
+// which digest is the image identity.
+type drillCarrierStoreClass string
+
+const (
+	drillCarrierStoreClassic    drillCarrierStoreClass = "classic-overlay2"
+	drillCarrierStoreContainerd drillCarrierStoreClass = "containerd-snapshotter"
+)
+
+// drillCarrierStoreClassify derives the store class from docker info driver
+// facts. The containerd snapshotter marker is checked first because the c8d
+// store also reports a driver whose status carries driver-type.
+func drillCarrierStoreClassify(driver, driverStatusJSON string) (drillCarrierStoreClass, error) {
+	if strings.Contains(driverStatusJSON, "io.containerd.snapshotter.v1") {
+		return drillCarrierStoreContainerd, nil
+	}
+	if strings.TrimSpace(driver) == "overlay2" {
+		return drillCarrierStoreClassic, nil
+	}
+	return "", fmt.Errorf("docker image store driver %q is not a recognized carrier store class", strings.TrimSpace(driver))
+}
+
+// drillVerifyCarrierIdentity checks the store-specific image identity, the
+// pinned platform and the exact repository digest provenance of the carrier.
+func drillVerifyCarrierIdentity(store drillCarrierStoreClass, imageID, imagePlatform, repoDigestsJSON string) error {
+	var expected string
+	switch store {
+	case drillCarrierStoreClassic:
+		expected = drillCarrierConfigDigest
+	case drillCarrierStoreContainerd:
+		expected = drillCarrierIndexDigest
+	default:
+		return fmt.Errorf("carrier store class %q is unrecognized", store)
+	}
+	if strings.TrimSpace(imageID) != expected {
+		return fmt.Errorf("carrier image content digest does not match the pinned identity (store %s, want %s, got %s)", store, expected, strings.TrimSpace(imageID))
+	}
+	if strings.TrimSpace(imagePlatform) != "linux/amd64" {
+		return fmt.Errorf("carrier image platform is not linux/amd64 (got %q)", strings.TrimSpace(imagePlatform))
+	}
+	var repoDigests []string
+	if err := json.Unmarshal([]byte(repoDigestsJSON), &repoDigests); err != nil {
+		return errors.New("carrier image repository digests are not a JSON string array")
+	}
+	for _, digest := range repoDigests {
+		if digest == drillCarrierImage {
+			return nil
+		}
+	}
+	return errors.New("carrier image provenance is not the pinned repository digest")
+}
+
+// drillVerifyCarrierContainerImage checks that the created container still
+// points at the verified carrier image identity.
+func drillVerifyCarrierContainerImage(imageID, containerImage string) error {
+	if strings.TrimSpace(containerImage) != strings.TrimSpace(imageID) {
+		return fmt.Errorf("pristine carrier container image ID is not the pinned content digest (want %s, got %s)", strings.TrimSpace(imageID), strings.TrimSpace(containerImage))
+	}
+	return nil
+}
+
+// drillCarrierStore reads the live docker info store facts.
+func drillCarrierStore(ctx context.Context) (drillCarrierStoreClass, error) {
+	driver, err := drillDockerOutput(ctx, "info", "--format", "{{.Driver}}")
+	if err != nil {
+		return "", err
+	}
+	driverStatus, err := drillDockerOutput(ctx, "info", "--format", "{{json .DriverStatus}}")
+	if err != nil {
+		return "", err
+	}
+	return drillCarrierStoreClassify(driver, driverStatus)
+}
+
 func drillCreatePristineCarrier(ctx context.Context) (string, func(), error) {
-	imageID, err := drillDockerOutput(ctx, "image", "inspect", "--format", "{{.Id}}", drillCarrierImage)
+	store, err := drillCarrierStore(ctx)
 	if err != nil {
 		return "", nil, err
 	}
-	if strings.TrimSpace(imageID) != drillCarrierImageID {
-		return "", nil, errors.New("carrier image content digest does not match the pinned identity")
+	imageID, err := drillDockerOutput(ctx, "image", "inspect", "--format", "{{.Id}}", drillCarrierImage)
+	if err != nil {
+		return "", nil, err
 	}
 	repoDigests, err := drillDockerOutput(ctx, "image", "inspect", "--format", "{{json .RepoDigests}}", drillCarrierImage)
 	if err != nil {
 		return "", nil, err
 	}
-	if !strings.Contains(repoDigests, drillCarrierImage) {
-		return "", nil, errors.New("carrier image provenance is not the pinned repository digest")
+	imagePlatform, err := drillDockerOutput(ctx, "image", "inspect", "--format", "{{.Os}}/{{.Architecture}}", drillCarrierImage)
+	if err != nil {
+		return "", nil, err
+	}
+	if err := drillVerifyCarrierIdentity(store, imageID, imagePlatform, repoDigests); err != nil {
+		return "", nil, err
 	}
 	containerID, err := drillDockerOutput(ctx, "create", drillCarrierImage, "/bin/true")
 	if err != nil {
@@ -776,9 +864,9 @@ func drillCreatePristineCarrier(ctx context.Context) (string, func(), error) {
 		remove()
 		return "", nil, err
 	}
-	if strings.TrimSpace(inspected) != drillCarrierImageID {
+	if err := drillVerifyCarrierContainerImage(imageID, inspected); err != nil {
 		remove()
-		return "", nil, errors.New("pristine carrier container image ID is not the pinned content digest")
+		return "", nil, err
 	}
 	return containerID, remove, nil
 }

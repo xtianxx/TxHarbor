@@ -1,0 +1,66 @@
+docker.io/library/postgres@sha256:4ef4dbc939d61acea57712655ddb4b4ab27419c913f94cca0cd57cb3ea3c2280: Pulling from library/postgres
+6310eb16bf42: Pulling fs layer
+6463c6b5c703: Pulling fs layer
+8d6422da287d: Pulling fs layer
+2fc0e69f8d7d: Pulling fs layer
+5fa29c524b4e: Pulling fs layer
+ace4b5b96a91: Pulling fs layer
+af2a6480a058: Pulling fs layer
+5ee6c6ca7fd9: Pulling fs layer
+c5694bff1357: Pulling fs layer
+aedab7177504: Pulling fs layer
+a4635eaec9b8: Pulling fs layer
+46e663abc8f5: Pulling fs layer
+1bb54e8f7727: Pulling fs layer
+5ee6c6ca7fd9: Waiting
+a4635eaec9b8: Waiting
+c5694bff1357: Waiting
+aedab7177504: Waiting
+46e663abc8f5: Waiting
+1bb54e8f7727: Waiting
+2fc0e69f8d7d: Waiting
+5fa29c524b4e: Waiting
+ace4b5b96a91: Waiting
+af2a6480a058: Waiting
+6463c6b5c703: Verifying Checksum
+6463c6b5c703: Download complete
+8d6422da287d: Verifying Checksum
+8d6422da287d: Download complete
+6310eb16bf42: Verifying Checksum
+6310eb16bf42: Download complete
+2fc0e69f8d7d: Verifying Checksum
+2fc0e69f8d7d: Download complete
+5fa29c524b4e: Verifying Checksum
+5fa29c524b4e: Download complete
+ace4b5b96a91: Verifying Checksum
+ace4b5b96a91: Download complete
+af2a6480a058: Verifying Checksum
+af2a6480a058: Download complete
+5ee6c6ca7fd9: Verifying Checksum
+5ee6c6ca7fd9: Download complete
+aedab7177504: Verifying Checksum
+aedab7177504: Download complete
+a4635eaec9b8: Verifying Checksum
+a4635eaec9b8: Download complete
+c5694bff1357: Verifying Checksum
+c5694bff1357: Download complete
+6310eb16bf42: Pull complete
+46e663abc8f5: Verifying Checksum
+46e663abc8f5: Download complete
+1bb54e8f7727: Verifying Checksum
+1bb54e8f7727: Download complete
+6463c6b5c703: Pull complete
+8d6422da287d: Pull complete
+2fc0e69f8d7d: Pull complete
+5fa29c524b4e: Pull complete
+ace4b5b96a91: Pull complete
+af2a6480a058: Pull complete
+5ee6c6ca7fd9: Pull complete
+c5694bff1357: Pull complete
+aedab7177504: Pull complete
+a4635eaec9b8: Pull complete
+46e663abc8f5: Pull complete
+1bb54e8f7727: Pull complete
+Digest: sha256:4ef4dbc939d61acea57712655ddb4b4ab27419c913f94cca0cd57cb3ea3c2280
+Status: Downloaded newer image for postgres@sha256:4ef4dbc939d61acea57712655ddb4b4ab27419c913f94cca0cd57cb3ea3c2280
+docker.io/library/postgres@sha256:4ef4dbc939d61acea57712655ddb4b4ab27419c913f94cca0cd57cb3ea3c2280
