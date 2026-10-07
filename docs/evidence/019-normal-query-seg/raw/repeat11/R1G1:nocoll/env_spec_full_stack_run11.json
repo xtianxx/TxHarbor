@@ -1,0 +1,53 @@
+{
+  "path": "full_stack",
+  "run": 11,
+  "commit": "7587116eb895003fcf7a2fd91fcbd2a0939d6f05",
+  "go_version": "go1.26.5",
+  "pg_image": "postgres:18.6-trixie",
+  "anvil_image": "ghcr.io/foundry-rs/foundry:v1.8.1",
+  "kafka_image": "confluentinc/confluent-local:7.9.10",
+  "redis_image": "redis:8.2.10-alpine",
+  "kafka_topic": "txharbor.events.v1",
+  "kafka_partitions": 6,
+  "redis_addr": "localhost:46091",
+  "started_at": "2026-10-07T12:14:03.108408291Z",
+  "layer": "perf",
+  "profile": {
+    "Warmup": 8000000000,
+    "StateWindow": 12000000000,
+    "QueryLadder": [
+      {
+        "Offset": 0,
+        "RPS": 10
+      },
+      {
+        "Offset": 4000000000,
+        "RPS": 25
+      },
+      {
+        "Offset": 8000000000,
+        "RPS": 50
+      }
+    ],
+    "Burst": {
+      "At": 8000000000,
+      "Size": 50
+    },
+    "CreateRPS": 2,
+    "DepositRPS": 1
+  },
+  "dataset_scale": "seed_requests=20 grants=360 query_ladder=[{0s 10} {4s 25} {8s 50}] burst=50@8s create_rps=2 deposit_rps=1 state_window=12s",
+  "config": {
+    "TXHARBOR_CONFIRMATION_DEPTH": "1",
+    "TXHARBOR_EVENTS_CAPACITY_DRAIN_TARGET_WINDOW": "5m",
+    "TXHARBOR_EVENTS_CAPACITY_HARD_LIMIT": "200000",
+    "TXHARBOR_EVENTS_CAPACITY_RESERVE": "1000",
+    "TXHARBOR_EVENTS_CAPACITY_SOFT_LIMIT": "100000",
+    "TXHARBOR_EVENTS_CONSUMER_GAP_WAIT": "2s",
+    "TXHARBOR_EVENTS_CONSUMER_POLL_INTERVAL": "200ms",
+    "TXHARBOR_EVENTS_ENABLED": "true",
+    "TXHARBOR_EVENTS_PUBLISHER_POLL_INTERVAL": "200ms",
+    "TXHARBOR_RATELIMIT_NEW_WITHDRAWAL": "500/100",
+    "TXHARBOR_RATELIMIT_QUERY": "500/100"
+  }
+}

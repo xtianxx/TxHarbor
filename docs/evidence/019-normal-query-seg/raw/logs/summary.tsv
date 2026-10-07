@@ -1,0 +1,6 @@
+label	arms	repeat	rc
+overhead1	R1G1:nocoll	10	0
+repeat1	R0G0,R1G0,R0G1,R1G1	1	0
+repeat2	R1G0,R0G1,R1G1,R0G0	2	0
+repeat3	R0G1,R1G1,R0G0,R1G0	3	0
+overhead2	R1G1:nocoll	11	0
