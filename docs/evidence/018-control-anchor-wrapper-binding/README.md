@@ -12,11 +12,11 @@
 
 | 运行 | 拓扑 | 修复 | 退出码 | 结果 |
 |---|---|---|---|---|
-| `logs/host-prefix/` | 宿主 | 修复前 | `0` | PASS（`host-prefix/run.out:29-31`） |
-| `logs/wrapper-prefix/` | wrapper 容器 | 修复前 | `1` | FAIL：`control-anchor-mini_linux_test.go:163: anchor local tuple is not a loopback TCP endpoint`（`wrapper-prefix/run.out:25,30-33`） |
-| `logs/postfix-host/` | 宿主 | 修复后 | `0` | PASS（`postfix-host/run.out:33,35`） |
-| `logs/postfix-wrapper/` | wrapper 容器 | 修复后 | `0` | PASS（`postfix-wrapper/run.out:33,35`） |
-| `logs/race/` | 宿主 + `-race` | 修复后 | `0` | PASS，无 race 报告（`race/run.out:33,35`；全文无 `DATA RACE`/`WARNING: DATA RACE`） |
+| `logs/host-prefix/` | 宿主 | 修复前 | `0` | PASS（`host-prefix/run.log:29-31`） |
+| `logs/wrapper-prefix/` | wrapper 容器 | 修复前 | `1` | FAIL：`control-anchor-mini_linux_test.go:163: anchor local tuple is not a loopback TCP endpoint`（`wrapper-prefix/run.log:25,30-33`） |
+| `logs/postfix-host/` | 宿主 | 修复后 | `0` | PASS（`postfix-host/run.log:33,35`） |
+| `logs/postfix-wrapper/` | wrapper 容器 | 修复后 | `0` | PASS（`postfix-wrapper/run.log:33,35`） |
+| `logs/race/` | 宿主 + `-race` | 修复后 | `0` | PASS，无 race 报告（`race/run.log:33,35`；全文无 `DATA RACE`/`WARNING: DATA RACE`） |
 
 ---
 
@@ -54,14 +54,14 @@ internal/recovery/targetwriter_drillbridge_linux_test.go:458   (DrillOpenOriginE
 
 1. `scripts/drillcoverage/run-in-container.sh:87` 注入 `-e "TESTCONTAINERS_HOST_OVERRIDE=host.docker.internal"`（`:88` 另有 `TESTCONTAINERS_DOCKER_SOCKET_OVERRIDE=/var/run/docker.sock`）。
 2. `testcontainers-go@v0.44.0/docker.go:1614-1621`（`daemonHostLocked`）：`host, exists := os.LookupEnv("TESTCONTAINERS_HOST_OVERRIDE")` → **原样返回该值**作为“容器可达的宿主 host”。
-3. 于是 drill 的 control DSN host = `host.docker.internal`；`--add-host=host.docker.internal:host-gateway` 把它解析成 docker0 网关 `172.17.0.1`（实测：`wrapper-prefix/probe.out:118` `/etc/hosts`、`:121` `getent hosts`、`:241` S4.5；宿主侧 `docker0 = 172.17.0.1/16` 见 `probe.out:18,242`）。
+3. 于是 drill 的 control DSN host = `host.docker.internal`；`--add-host=host.docker.internal:host-gateway` 把它解析成 docker0 网关 `172.17.0.1`（实测：`wrapper-prefix/probe.log:118` `/etc/hosts`、`:121` `getent hosts`、`:241` S4.5；宿主侧 `docker0 = 172.17.0.1/16` 见 `probe.log:18,242`）。
 4. 控制连接于是从**容器自己的 eth0 地址**发出（实测 `172.17.0.2`/`172.17.0.3`），客户端本地 tuple 永远不是 loopback → `:163` 必红。
 
 ### 1.4 去掉 override 的对照同样失败（override 不是唯一成因）
 
 同一 wrapper 装配、只去掉 `TESTCONTAINERS_HOST_OVERRIDE`（保留 socket override）的对照运行，仍在同一行失败：见 `MANIFEST.txt` §“Control variant without TESTCONTAINERS_HOST_OVERRIDE”（源：`.evidence/drill-runner-env/topology-repro/wrapper/no-override/run.out`，`run.rc = 1`，窗口 `2026-10-07T03:56:49Z → 03:56:57Z`）。原因在
 `docker.go:1636-1647`：`core.InAContainer()`（`internal/core/docker_host.go:320` 的 `DockerEnvFile = "/.dockerenv"`，判定见 `:324-333`）为真时，testcontainers 改为在容器内**推断默认网络网关 IP**：
-`:1641` `p.getGatewayIP(ctx, defaultNetwork)`，失败则 `:1643` `core.DefaultGatewayIP()`；后者（`internal/core/docker_host.go:46-48`）是 `sh -c "ip route|awk '/default/ { print $3 }'"`，而该镜像里**没有 `ip`**（`probe.out:123` “ip command unavailable”），最终落到 `:1646-1647` 的 `ip = "localhost"`（容器内 localhost 仍是容器自身，控制连接仍从容器接口发出）。因此 loopback 假设的失效来自**容器化拓扑本身**，与 override 无关。
+`:1641` `p.getGatewayIP(ctx, defaultNetwork)`，失败则 `:1643` `core.DefaultGatewayIP()`；后者（`internal/core/docker_host.go:46-48`）是 `sh -c "ip route|awk '/default/ { print $3 }'"`，而该镜像里**没有 `ip`**（`probe.log:123` “ip command unavailable”），最终落到 `:1646-1647` 的 `ip = "localhost"`（容器内 localhost 仍是容器自身，控制连接仍从容器接口发出）。因此 loopback 假设的失效来自**容器化拓扑本身**，与 override 无关。
 
 ---
 
@@ -110,7 +110,7 @@ internal/recovery/targetwriter_drillbridge_linux_test.go:458   (DrillOpenOriginE
 
 ## 3. 正负例结果（全部为实测日志值）
 
-宿主（`logs/postfix-host/run.out`）：
+宿主（`logs/postfix-host/run.log`）：
 
 | 用例 | 结果 | 日志行 |
 |---|---|---|
@@ -119,7 +119,7 @@ internal/recovery/targetwriter_drillbridge_linux_test.go:458   (DrillOpenOriginE
 | 负例：错误 inode | `wrong socket inode probe refused: process 382631 holds no descriptor for socket inode 54487717` | `:27` |
 | 负例：独立连接 tuple 不同 | `independent connection tuple differs: independent local=127.0.0.1:44734 vs captured local=127.0.0.1:44726` | `:28` |
 
-wrapper 容器（`logs/postfix-wrapper/run.out`）：
+wrapper 容器（`logs/postfix-wrapper/run.log`）：
 
 | 用例 | 结果 | 日志行 |
 |---|---|---|
@@ -128,7 +128,7 @@ wrapper 容器（`logs/postfix-wrapper/run.out`）：
 | 负例：错误 inode | `wrong socket inode probe refused: process 193 holds no descriptor for socket inode 54505160` | `:27` |
 | 负例：独立连接 tuple 不同 | `independent connection tuple differs: independent local=172.17.0.3:42500 vs captured local=172.17.0.3:42476` | `:28` |
 
-宿主 + `-race`（`logs/race/run.out`，本批任务 1）：
+宿主 + `-race`（`logs/race/run.log`，本批任务 1）：
 
 | 用例 | 结果 | 日志行 |
 |---|---|---|
@@ -141,14 +141,14 @@ wrapper 容器（`logs/postfix-wrapper/run.out`）：
 
 ---
 
-## 4. 拓扑事实（`logs/wrapper-prefix/probe.out`，wrapper 装配）
+## 4. 拓扑事实（`logs/wrapper-prefix/probe.log`，wrapper 装配）
 
-- **独立 netns**：容器内 `/proc/self/ns/net == /proc/1/ns/net == net:[4026532379]`，宿主 `/proc/self/ns/net == net:[4026531833]`（`probe.out:174-177`、`S4.4 :234-239`）；容器内 `/proc/self` 是 pid 17（`:176-177`），与宿主 docker top 里的 pid 不同 → 独立 PID 名空间。
+- **独立 netns**：容器内 `/proc/self/ns/net == /proc/1/ns/net == net:[4026532379]`，宿主 `/proc/self/ns/net == net:[4026531833]`（`probe.log:174-177`、`S4.4 :234-239`）；容器内 `/proc/self` 是 pid 17（`:176-177`），与宿主 docker top 里的 pid 不同 → 独立 PID 名空间。
 - **地址**：容器 `/etc/hosts` 含 `172.17.0.1 host.docker.internal`、`172.17.0.2 <container-hostname>`（`:118-119`、`S4.5 :241`）；镜像无 `ip`（`:123`），由 `/proc/net/fib_trie` 可见 `172.17.0.2/32 host LOCAL` on eth0、`172.17.0.0/16 link`（`S4.5 :243-244`）；宿主 `docker0 172.17.0.1/16`（`:18,242`），`docker inspect` 容器 IP `172.17.0.2`（`:96-97`）。
 - **探针实测拨号**：`/proc/net/tcp` 行 `020011AC:A9AA 010011AC:A112 st=01`（`:180-182`）→ local `172.17.0.2:43434`（容器接口，非 loopback）、remote `172.17.0.1:41234`（宿主网关），宿主镜像行 `010011AC:A112 020011AC:A9AA st=01` 与 `ss ESTAB 172.17.0.1:41234 <- 172.17.0.2:43434`（`:210-211`）；容器内 Go `net.Dial`（与锚点捕获相同的调用）`local=172.17.0.2:52952 local_ip_is_loopback=false remote=172.17.0.1:41234`（`:186-188`、`SECTION 3 :193-196`）。
 - **真实控制连接**（wrapper 内，`S4.2 :215-224`，原始 `wrapper/tuple-watch/…`）`020011AC:9144 010011AC:AE81 01` / `020011AC:914A 010011AC:AE81 01` → local `172.17.0.2:37188/37194` remote `172.17.0.1:44673`；宿主同端口镜像 `172.17.0.1:44673 <- 172.17.0.2:37188/:37194`。
 - **真实控制连接**（宿主，`S4.3 :225-233`，原始 `host/tuple-watch.out`）`0100007F:B758/B75A 0100007F:AE83 01` → local `127.0.0.1:46936/:46938` remote `127.0.0.1:44675`，fd 属主 `users:(("recovery.test",pid=344264,fd=8/fd=9))` → **宿主侧确实 loopback**（这正是 `:162` 想断言的东西，因此原断言只在宿主拓扑下偶然成立）。
-- 段 4（`:198-244`）是唯一派生内容（hex→点分 IP 解码），已显式标注；段 1-3 为原始日志逐字拼接（`probe.out:1-9`）。
+- 段 4（`:198-244`）是唯一派生内容（hex→点分 IP 解码），已显式标注；段 1-3 为原始日志逐字拼接（`probe.log:1-9`）。
 
 ---
 
@@ -158,11 +158,11 @@ wrapper 容器（`logs/postfix-wrapper/run.out`）：
 
 | # | 运行 | 命令 | rc | 时间窗 (UTC) | 环境要点 | 证据 |
 |---|---|---|---|---|---|---|
-| 1 | 修复前宿主 | `go test -tags drill -count=1 -v -run '^TestControlAnchorCaptureMatchesActualControlOwner$' ./internal/recovery/` | `0` | `03:51:37Z → 03:51:51Z`（14s） | 宿主 Go/docker，无 `TESTCONTAINERS_*` | `logs/host-prefix/{run.out,run.rc,env.txt}`；窗口与 rc 见 `host-prefix/env.txt` 末尾字段 |
-| 2 | 修复前 wrapper | `docker run --rm --init --user 1000:1000 --group-add 989 --add-host=host.docker.internal:host-gateway … --entrypoint /bin/sh postgres@sha256:4ef4dbc9… -ec 'unset PGDATA PG_MAJOR PG_VERSION; cd /workspace; go test -tags drill -count=1 -v -run "^TestControlAnchorCaptureMatchesActualControlOwner$" ./internal/recovery/'`（完整命令行逐字见 `logs/wrapper-prefix/cmd.txt`；装配与 `scripts/drillcoverage/run-in-container.sh` 同构，含 `run-in-container.sh:87` 的 `TESTCONTAINERS_HOST_OVERRIDE=host.docker.internal`、`:88` socket override、`CGO_ENABLED=0`、`GOCACHE=/drill-scratch/gocache`、`TMPDIR`、`HOME`、`CI=true`、`TXHARBOR_REQUIRE_DOCKER=1`） | `1` | `03:52:58Z → 03:53:45Z`（47s） | 固定 postgres 镜像、宿主 docker.sock、workspace 只读挂载 | `logs/wrapper-prefix/{run.out,run.rc,cmd.txt,probe.out}`；窗口/rc 亦见 `MANIFEST.txt` |
-| 3 | 修复后宿主 | 同 #1（源码/工作区：修复后测试文件 `e6477c93…`） | `0` | 日志时间戳 `12:06:31 → 12:06:41` CST = `04:06:31Z → 04:06:41Z`；单测 9.77s | 宿主 Go/docker | `logs/postfix-host/{run.out,run.rc}` |
-| 4 | 修复后 wrapper | 同 #2（`run-postfix.sh` §wrapper：`docker run … -ec 'unset PGDATA PG_MAJOR PG_VERSION; cd /workspace; go test -tags drill -count=1 -v -run "^TestControlAnchorCaptureMatchesActualControlOwner$" ./internal/recovery/'`） | `0` | 日志时间戳 `04:06:49 → 04:06:53` UTC；单测 5.25s | 同 #2 | `logs/postfix-wrapper/{run.out,run.rc}` |
-| 5 | 本批定向 race（宿主） | `go test -race -tags drill -count=1 -v -run '^TestControlAnchorCaptureMatchesActualControlOwner$' ./internal/recovery/` | `0` | `04:07:41Z → 04:08:09Z`（28s）；单测 8.02s | 宿主 Go/docker（无 `TESTCONTAINERS_*`），`GOMODCACHE=/home/dream/go/pkg/mod`、`GOCACHE=/home/dream/.cache/go-build`、uid 1000 | `logs/race/{run.out,run.rc,env.txt}` |
+| 1 | 修复前宿主 | `go test -tags drill -count=1 -v -run '^TestControlAnchorCaptureMatchesActualControlOwner$' ./internal/recovery/` | `0` | `03:51:37Z → 03:51:51Z`（14s） | 宿主 Go/docker，无 `TESTCONTAINERS_*` | `logs/host-prefix/{run.log,run.rc,env.txt}`；窗口与 rc 见 `host-prefix/env.txt` 末尾字段 |
+| 2 | 修复前 wrapper | `docker run --rm --init --user 1000:1000 --group-add 989 --add-host=host.docker.internal:host-gateway … --entrypoint /bin/sh postgres@sha256:4ef4dbc9… -ec 'unset PGDATA PG_MAJOR PG_VERSION; cd /workspace; go test -tags drill -count=1 -v -run "^TestControlAnchorCaptureMatchesActualControlOwner$" ./internal/recovery/'`（完整命令行逐字见 `logs/wrapper-prefix/cmd.txt`；装配与 `scripts/drillcoverage/run-in-container.sh` 同构，含 `run-in-container.sh:87` 的 `TESTCONTAINERS_HOST_OVERRIDE=host.docker.internal`、`:88` socket override、`CGO_ENABLED=0`、`GOCACHE=/drill-scratch/gocache`、`TMPDIR`、`HOME`、`CI=true`、`TXHARBOR_REQUIRE_DOCKER=1`） | `1` | `03:52:58Z → 03:53:45Z`（47s） | 固定 postgres 镜像、宿主 docker.sock、workspace 只读挂载 | `logs/wrapper-prefix/{run.log,run.rc,cmd.txt,probe.log}`；窗口/rc 亦见 `MANIFEST.txt` |
+| 3 | 修复后宿主 | 同 #1（源码/工作区：修复后测试文件 `e6477c93…`） | `0` | 日志时间戳 `12:06:31 → 12:06:41` CST = `04:06:31Z → 04:06:41Z`；单测 9.77s | 宿主 Go/docker | `logs/postfix-host/{run.log,run.rc}` |
+| 4 | 修复后 wrapper | 同 #2（`run-postfix.sh` §wrapper：`docker run … -ec 'unset PGDATA PG_MAJOR PG_VERSION; cd /workspace; go test -tags drill -count=1 -v -run "^TestControlAnchorCaptureMatchesActualControlOwner$" ./internal/recovery/'`） | `0` | 日志时间戳 `04:06:49 → 04:06:53` UTC；单测 5.25s | 同 #2 | `logs/postfix-wrapper/{run.log,run.rc}` |
+| 5 | 本批定向 race（宿主） | `go test -race -tags drill -count=1 -v -run '^TestControlAnchorCaptureMatchesActualControlOwner$' ./internal/recovery/` | `0` | `04:07:41Z → 04:08:09Z`（28s）；单测 8.02s | 宿主 Go/docker（无 `TESTCONTAINERS_*`），`GOMODCACHE=/home/dream/go/pkg/mod`、`GOCACHE=/home/dream/.cache/go-build`、uid 1000 | `logs/race/{run.log,run.rc,env.txt}` |
 
 补充：#3/#4 的命令原文在 `.evidence/drill-runner-env/topology-repro/run-postfix.sh`（该目录 git-excluded、只读）。#3/#4 运行时刻测试文件 mtime = `2026-10-07 12:06:05 +0800`（= `04:06:05Z`），早于两次运行（`12:06:31` / `04:06:49`），即 postfix 日志对应的正是本批修复后的文件字节。
 
@@ -190,18 +190,18 @@ wrapper 容器（`logs/postfix-wrapper/run.out`）：
 | 文件 | sha256 | 对应源（`.evidence/drill-runner-env/topology-repro/`） |
 |---|---|---|
 | `MANIFEST.txt` | `fabc778b2fe4875ceece75abc90fc4208b4d446a11844bee18dd831c43913f15` | `MANIFEST.txt`（字节相同） |
-| `logs/host-prefix/run.out` | `c697e45c34e313f6c8cbf7403462fe9a5afd764e55f16715c645d5fcd474bdb3` | `host/run.out` |
+| `logs/host-prefix/run.log` | `c697e45c34e313f6c8cbf7403462fe9a5afd764e55f16715c645d5fcd474bdb3` | `host/run.out` |
 | `logs/host-prefix/run.rc` | `9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa` | `host/run.rc`（内容 `0`） |
 | `logs/host-prefix/env.txt` | `f280dd916ef390388d570c4f838ba42d9336ea06dde117468d565e18b039c1ab` | `host/env.txt` |
-| `logs/wrapper-prefix/run.out` | `754a999cffdead7857467c254c92e390c88f8457b72f644e806402ad6ba0ea9d` | `wrapper/run.out` |
+| `logs/wrapper-prefix/run.log` | `754a999cffdead7857467c254c92e390c88f8457b72f644e806402ad6ba0ea9d` | `wrapper/run.out` |
 | `logs/wrapper-prefix/run.rc` | `4355a46b19d348dc2f57c046f8ef63d4538ebb936000f3c9ee954a27460dd865` | `wrapper/run.rc`（内容 `1`） |
 | `logs/wrapper-prefix/cmd.txt` | `b12f714d33f708ff8dbbe6751aca50c7adda3d91e812133fd97d4fb2f68c27b5` | `wrapper/cmd.txt` |
-| `logs/wrapper-prefix/probe.out` | `b6cbb3a0cc1d3f84638af8bcbdc003a1d53747dcd205b714cb66668102445508` | `wrapper/probe.out` |
-| `logs/postfix-host/run.out` | `4f02b5c59d731559368f88e3bb32f1fe5aa0accf4b44907dd5c119cadd9436ea` | `postfix-host/run.out` |
+| `logs/wrapper-prefix/probe.log` | `b6cbb3a0cc1d3f84638af8bcbdc003a1d53747dcd205b714cb66668102445508` | `wrapper/probe.out` |
+| `logs/postfix-host/run.log` | `4f02b5c59d731559368f88e3bb32f1fe5aa0accf4b44907dd5c119cadd9436ea` | `postfix-host/run.out` |
 | `logs/postfix-host/run.rc` | `9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa` | `postfix-host/run.rc`（内容 `0`） |
-| `logs/postfix-wrapper/run.out` | `5ea9a969aee3b5cc194c06a551740e572cc51e24c59f56c9d3bbd79103a8a810` | `postfix-wrapper/run.out` |
+| `logs/postfix-wrapper/run.log` | `5ea9a969aee3b5cc194c06a551740e572cc51e24c59f56c9d3bbd79103a8a810` | `postfix-wrapper/run.out` |
 | `logs/postfix-wrapper/run.rc` | `9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa` | `postfix-wrapper/run.rc`（内容 `0`） |
-| `logs/race/run.out` | `8380ad870aea3e3d64943bd4e75b7e6be3a0c5e476d051dae2ab8fa4134c9d82` | 本批新产出（任务 1） |
+| `logs/race/run.log` | `8380ad870aea3e3d64943bd4e75b7e6be3a0c5e476d051dae2ab8fa4134c9d82` | 本批新产出（任务 1） |
 | `logs/race/run.rc` | `5feceb66ffc86f38d952786c6d696c79c2dbc239dd4e91b46729d73a27fb57e9` | 本批新产出（内容 `0`，1 字节） |
 | `logs/race/env.txt` | `451e4ebd5bc37ce166f94e9d1a8bb29feb5f7a6f2111ad4aee80c8c81e272d23` | 本批新产出 |
 | `logs/proc-fd-permission-probe.txt` | `a71976b23e47756938b8b086c533e3ec903ded9db04cb008a97201ca9e4076f2` | 本批新产出 |
@@ -209,6 +209,8 @@ wrapper 容器（`logs/postfix-wrapper/run.out`）：
 | `env.txt` | `5917eab859a3af7480f1bde0d59ee2742208ed4ec4ecb658688210f64d7ff10f` | 本批新产出 |
 
 所有“对应源”项的复制均逐文件 `sha256` 复核为**字节相同**（上表两侧同值；复核命令见 §6.3）。`SHA256SUMS` 覆盖本目录除自身外的全部文件，`sha256sum -c SHA256SUMS` 通过（见 §6.3）。
+
+> 注：证据副本扩展名由 `.out` 改为 `.log`（仓库 `.gitignore` 排除 `*.out`，017 轮起按此约定处理）；文件字节与 `sha256` 不变（见上表）；表中“对应源”列的 `.out` 名是 `.evidence` 暂存目录中的原始源文件。
 
 ### 6.3 复核命令
 

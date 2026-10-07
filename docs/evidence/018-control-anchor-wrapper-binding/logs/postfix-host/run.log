@@ -1,0 +1,35 @@
+2026/10/07 12:06:31 github.com/testcontainers/testcontainers-go - Connected to docker: 
+  Server Version: 29.6.1
+  API Version: 1.55
+  Operating System: Ubuntu 24.04.4 LTS
+  Total Memory: 15915 MB
+  Testcontainers for Go Version: v0.44.0
+  Resolved Docker Host: unix:///var/run/docker.sock
+  Resolved Docker Socket Path: /var/run/docker.sock
+  Test SessionID: ec87f274c900f23cfb4c385e8d22612c25909f423738a6512ef2ce5b03127498
+  Test ProcessID: a674acba-37de-4120-8df9-908ff1cab127
+=== RUN   TestControlAnchorCaptureMatchesActualControlOwner
+2026/10/07 12:06:31 🐳 Creating container for image postgres@sha256:4ef4dbc939d61acea57712655ddb4b4ab27419c913f94cca0cd57cb3ea3c2280
+2026/10/07 12:06:32 🐳 Creating container for image testcontainers/ryuk:0.14.0
+2026/10/07 12:06:32 ✅ Container created: 1a210e9f9f6b
+2026/10/07 12:06:32 🐳 Starting container: 1a210e9f9f6b
+2026/10/07 12:06:33 ✅ Container started: 1a210e9f9f6b
+2026/10/07 12:06:33 ⏳ Waiting for container id 1a210e9f9f6b image: testcontainers/ryuk:0.14.0. Waiting for: all of: [log message "Started", port 8080/tcp to be listening]
+2026/10/07 12:06:33 Shell not found in container
+2026/10/07 12:06:33 🔔 Container is ready: 1a210e9f9f6b
+2026/10/07 12:06:33 ✅ Container created: d965036279e5
+2026/10/07 12:06:33 🐳 Starting container: d965036279e5
+2026/10/07 12:06:34 ✅ Container started: d965036279e5
+2026/10/07 12:06:34 ⏳ Waiting for container id d965036279e5 image: postgres@sha256:4ef4dbc939d61acea57712655ddb4b4ab27419c913f94cca0cd57cb3ea3c2280. Waiting for: all of: [log message "database system is ready to accept connections" (occurrence: 2)]
+2026/10/07 12:06:37 🔔 Container is ready: d965036279e5
+    control-anchor-mini_linux_test.go:214: anchor live binding accepted: local=127.0.0.1:44726 remote=127.0.0.1:44687 inode=54487716
+    control-anchor-mini_linux_test.go:228: foreign owner probe refused: process 383445 holds no descriptor for socket inode 54487716
+    control-anchor-mini_linux_test.go:233: wrong socket inode probe refused: process 382631 holds no descriptor for socket inode 54487717
+    control-anchor-mini_linux_test.go:247: independent connection tuple differs: independent local=127.0.0.1:44734 vs captured local=127.0.0.1:44726
+2026/10/07 12:06:40 🐳 Stopping container: d965036279e5
+2026/10/07 12:06:41 ✅ Container stopped: d965036279e5
+2026/10/07 12:06:41 🐳 Terminating container: d965036279e5
+2026/10/07 12:06:41 🚫 Container terminated: d965036279e5
+--- PASS: TestControlAnchorCaptureMatchesActualControlOwner (9.77s)
+PASS
+ok  	github.com/xtianxx/txharbor/internal/recovery	9.851s
