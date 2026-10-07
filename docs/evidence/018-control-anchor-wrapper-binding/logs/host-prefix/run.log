@@ -1,0 +1,31 @@
+2026/10/07 11:51:44 github.com/testcontainers/testcontainers-go - Connected to docker: 
+  Server Version: 29.6.1
+  API Version: 1.55
+  Operating System: Ubuntu 24.04.4 LTS
+  Total Memory: 15915 MB
+  Testcontainers for Go Version: v0.44.0
+  Resolved Docker Host: unix:///var/run/docker.sock
+  Resolved Docker Socket Path: /var/run/docker.sock
+  Test SessionID: 627d4d4adb35efb7e9dffcf49fd867dc5e8509bb36bf844d045467f0f6612c4a
+  Test ProcessID: ac31739c-e87a-42ed-89cc-a2a435933976
+=== RUN   TestControlAnchorCaptureMatchesActualControlOwner
+2026/10/07 11:51:44 🐳 Creating container for image postgres@sha256:4ef4dbc939d61acea57712655ddb4b4ab27419c913f94cca0cd57cb3ea3c2280
+2026/10/07 11:51:45 🐳 Creating container for image testcontainers/ryuk:0.14.0
+2026/10/07 11:51:45 ✅ Container created: 3c3b364a2068
+2026/10/07 11:51:45 🐳 Starting container: 3c3b364a2068
+2026/10/07 11:51:46 ✅ Container started: 3c3b364a2068
+2026/10/07 11:51:46 ⏳ Waiting for container id 3c3b364a2068 image: testcontainers/ryuk:0.14.0. Waiting for: all of: [log message "Started", port 8080/tcp to be listening]
+2026/10/07 11:51:44 Shell not found in container
+2026/10/07 11:51:44 🔔 Container is ready: 3c3b364a2068
+2026/10/07 11:51:44 ✅ Container created: 9a8572db168e
+2026/10/07 11:51:44 🐳 Starting container: 9a8572db168e
+2026/10/07 11:51:44 ✅ Container started: 9a8572db168e
+2026/10/07 11:51:44 ⏳ Waiting for container id 9a8572db168e image: postgres@sha256:4ef4dbc939d61acea57712655ddb4b4ab27419c913f94cca0cd57cb3ea3c2280. Waiting for: all of: [log message "database system is ready to accept connections" (occurrence: 2)]
+2026/10/07 11:51:46 🔔 Container is ready: 9a8572db168e
+2026/10/07 11:51:50 🐳 Stopping container: 9a8572db168e
+2026/10/07 11:51:51 ✅ Container stopped: 9a8572db168e
+2026/10/07 11:51:51 🐳 Terminating container: 9a8572db168e
+2026/10/07 11:51:51 🚫 Container terminated: 9a8572db168e
+--- PASS: TestControlAnchorCaptureMatchesActualControlOwner (9.95s)
+PASS
+ok  	github.com/xtianxx/txharbor/internal/recovery	10.057s

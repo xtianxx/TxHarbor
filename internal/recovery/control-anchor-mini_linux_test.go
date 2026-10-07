@@ -13,7 +13,12 @@ package recovery
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"net"
+	"os"
+	"os/exec"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -144,7 +149,15 @@ SELECT EXISTS (
 		t.Fatal("anchor SQL incarnation is not the actual control cluster/incarnation")
 	}
 
-	// Actual live TCP tuple of the same dedicated connection.
+	// Actual live TCP tuple of the same dedicated connection. The binding is
+	// the live kernel socket itself, never the route class: the captured
+	// four-tuple must be an ESTABLISHED socket owned by this process whose
+	// inode equals the captured Fstat inode. A host-loopback route (local
+	// development) and a bridge/host-gateway route (the drill wrapper
+	// container; testcontainers resolves the endpoint through the container
+	// host) are the same kernel socket facts — an interface address class is
+	// fixture topology, not part of the control-owner contract (no production
+	// dial path constrains the control DSN to loopback).
 	controlTarget, err := controlstore.ParseDSNTarget(e.ctrlDSN)
 	if err != nil {
 		t.Fatalf("parse control DSN: %v", err)
@@ -159,8 +172,8 @@ SELECT EXISTS (
 	}
 	localIP := net.ParseIP(localHost)
 	remoteIP := net.ParseIP(remoteHost)
-	if localIP == nil || remoteIP == nil || !localIP.IsLoopback() {
-		t.Fatal("anchor local tuple is not a loopback TCP endpoint")
+	if localIP == nil || remoteIP == nil {
+		t.Fatalf("anchor tuple is not a TCP endpoint pair: local=%q remote=%q", facts.LocalAddress, facts.RemoteAddress)
 	}
 	if localPort != strconv.Itoa(facts.LocalPort) || remotePort != strconv.Itoa(facts.RemotePort) {
 		t.Fatal("anchor tuple ports disagree with the diagnostic projection")
@@ -168,6 +181,70 @@ SELECT EXISTS (
 	if facts.LocalPort <= 0 || facts.RemotePort != int(controlTarget.Port) {
 		t.Fatal("anchor tuple does not name the actual control connection endpoint")
 	}
+	// The captured tuple and kernel socket inode must be the live dedicated
+	// control connection's own: both are re-derived independently from the
+	// actual connection object and the live descriptor. The binding is
+	// topology agnostic — a host-loopback route (local development) and a
+	// bridge/host-gateway route (the drill wrapper container; testcontainers
+	// resolves the endpoint through the container host) are the same kernel
+	// socket facts. No production dial path constrains the control DSN to
+	// loopback: an interface address class is fixture topology, not part of
+	// the control-owner contract.
+	pgxConn, ok := lock.conn.(*pgx.Conn)
+	if !ok || pgxConn == nil || pgxConn.PgConn() == nil || pgxConn.PgConn().Conn() == nil {
+		t.Fatal("the dedicated control connection object is not available for the live tuple binding")
+	}
+	liveConn := pgxConn.PgConn().Conn()
+	liveLocal, okLiveLocal := liveConn.LocalAddr().(*net.TCPAddr)
+	liveRemote, okLiveRemote := liveConn.RemoteAddr().(*net.TCPAddr)
+	if !okLiveLocal || !okLiveRemote {
+		t.Fatal("the live dedicated control connection has no TCP tuple")
+	}
+	if !drillControlAnchorSameTCP(liveLocal, &net.TCPAddr{IP: localIP, Port: facts.LocalPort}) ||
+		!drillControlAnchorSameTCP(liveRemote, &net.TCPAddr{IP: remoteIP, Port: facts.RemotePort}) {
+		t.Fatal("captured anchor tuple is not the live dedicated control connection tuple")
+	}
+	liveInode, liveInodeOK := drillControlAnchorSocketInode(liveConn)
+	if !liveInodeOK || liveInode == 0 || liveInode != facts.SocketInode {
+		t.Fatalf("captured anchor socket inode %d is not the live control connection socket inode %d", facts.SocketInode, liveInode)
+	}
+	if err := drillControlAnchorProcessOwnsSocketInode(os.Getpid(), facts.SocketInode); err != nil {
+		t.Fatalf("captured anchor socket inode is not held by this process: %v", err)
+	}
+	t.Logf("anchor live binding accepted: local=%s remote=%s inode=%d", facts.LocalAddress, facts.RemoteAddress, facts.SocketInode)
+	// Refusals: a foreign owner or a wrong inode must never bind, and an
+	// independent connection to the same endpoint is a different socket.
+	foreign := exec.Command("sleep", "30")
+	if err := foreign.Start(); err != nil {
+		t.Fatalf("start foreign owner probe: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = foreign.Process.Kill()
+		_, _ = foreign.Process.Wait()
+	})
+	if err := drillControlAnchorProcessOwnsSocketInode(foreign.Process.Pid, facts.SocketInode); err == nil {
+		t.Fatal("a foreign process was accepted as the owner of the captured control socket inode")
+	} else {
+		t.Logf("foreign owner probe refused: %v", err)
+	}
+	if err := drillControlAnchorProcessOwnsSocketInode(os.Getpid(), facts.SocketInode+1); err == nil {
+		t.Fatal("a wrong socket inode was accepted as owned by this process")
+	} else {
+		t.Logf("wrong socket inode probe refused: %v", err)
+	}
+	independent, err := net.DialTimeout("tcp", facts.RemoteAddress, 5*time.Second)
+	if err != nil {
+		t.Fatalf("open independent control endpoint probe: %v", err)
+	}
+	t.Cleanup(func() { _ = independent.Close() })
+	independentLocal, independentOK := independent.LocalAddr().(*net.TCPAddr)
+	if !independentOK {
+		t.Fatal("independent control endpoint probe has no TCP tuple")
+	}
+	if drillControlAnchorSameTCP(independentLocal, &net.TCPAddr{IP: localIP, Port: facts.LocalPort}) {
+		t.Fatal("an independent connection to the same endpoint impersonated the captured control connection tuple")
+	}
+	t.Logf("independent connection tuple differs: independent local=%s vs captured local=%s", independentLocal, facts.LocalAddress)
 
 	// The same live anchor rechecks successfully and no child was started.
 	if err := anchor.Recheck(e.ctx); err != nil {
@@ -182,6 +259,37 @@ SELECT EXISTS (
 	if identity := run.Observation().StartedIdentity(); identity.Started {
 		t.Fatal("control anchor capture started a child")
 	}
+}
+
+// drillControlAnchorProcessOwnsSocketInode verifies that the named process
+// holds a live descriptor for the exact kernel socket inode: one of its
+// /proc/<pid>/fd entries resolves to `socket:[<inode>]`. This is the
+// topology-agnostic ownership binding — the descriptor table of the named
+// process only, never a cross-process census: a foreign-uid /proc/<pid>/fd
+// table is unreadable outside single-uid drill containers (e.g. /proc/1/fd on
+// a development host), and the caller's live inode equality with the captured
+// Fstat inode already binds the tuple to the one captured socket, so no
+// foreign or substituted connection can pass.
+func drillControlAnchorProcessOwnsSocketInode(pid int, inode uint64) error {
+	if pid <= 0 || inode == 0 {
+		return errors.New("a positive process and socket inode are required")
+	}
+	fdDir := fmt.Sprintf("/proc/%d/fd", pid)
+	entries, err := os.ReadDir(fdDir)
+	if err != nil {
+		return fmt.Errorf("read process %d descriptor table: %w", pid, err)
+	}
+	want := "socket:[" + strconv.FormatUint(inode, 10) + "]"
+	for _, entry := range entries {
+		target, err := os.Readlink(filepath.Join(fdDir, entry.Name()))
+		if err != nil {
+			continue
+		}
+		if target == want {
+			return nil
+		}
+	}
+	return fmt.Errorf("process %d holds no descriptor for socket inode %d", pid, inode)
 }
 
 // installControlAnchorStageHook installs the narrow test-only pause seam for

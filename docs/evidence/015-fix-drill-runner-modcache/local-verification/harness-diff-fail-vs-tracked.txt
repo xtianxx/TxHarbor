@@ -1,0 +1,4 @@
+146c146
+< 	exec sh -ec "go build ./internal/definitely-missing-package"
+---
+> 	exec make test-drill

@@ -1,0 +1,91 @@
+topology-repro evidence manifest
+repo /home/dream/product_env/TxHarbor @ fee2d904eb6e013ee046c4375f395df143957a9c (branch fix/drill-runner-modcache-prime)
+workspace after all runs: `git status --porcelain` empty -> no repository file was added, modified or deleted.
+All artifacts live under .evidence/drill-runner-env/topology-repro/ (.evidence/ is git-excluded).
+
+=====================================================================
+TEST UNDER REPRODUCTION
+=====================================================================
+internal/recovery/control-anchor-mini_linux_test.go:162-163
+    if localIP == nil || remoteIP == nil || !localIP.IsLoopback() {
+        t.Fatal("anchor local tuple is not a loopback TCP endpoint")
+facts.LocalAddress/RemoteAddress come from the dedicated TargetLock pgx connection:
+  targetwriter_controlanchor_drillbridge_linux_test.go:441,449 (lock.conn -> pgx.Conn -> pgConn.Conn())
+  targetwriter_controlanchor_drillbridge_linux_test.go:453,457 (netConn.LocalAddr()/RemoteAddr())
+  targetwriter_controlanchor_drillbridge_linux_test.go:362-365 (projected into Diagnostics)
+sha256 at run time:
+  0a7fd0a140edabf92de070954adf783071bef37e8e59711b58030152d5dcbb61  internal/recovery/control-anchor-mini_linux_test.go
+  03d38e4d015e104807cebb57babcfc894ece21ca625d683ce397beaadd39742e  internal/recovery/targetwriter_drillbridge_linux_test.go
+
+=====================================================================
+HOST PATH  ->  PASS, exit 0
+=====================================================================
+host/run.out (31 lines)
+host/run.rc = 0
+host/env.txt (date -u, git HEAD, sha256sums, go/docker version+driver+root, uname -a, uid/gid, appended run window)
+   window 2026-10-07T03:51:37Z -> 2026-10-07T03:51:51Z (14 s); "--- PASS: TestControlAnchorCaptureMatchesActualControlOwner (9.95s)"
+2nd identical host run for tuple capture: host/run-watch.out, host/run-watch.rc = 0, host/watch-host-tuple.sh
+host/tuple-watch.out: real control connections in the HOST netns =
+   127.0.0.1:46936 -> 127.0.0.1:44675  and  127.0.0.1:46938 -> 127.0.0.1:44675
+   (/proc/net/tcp 0100007F:B758/B75A -> 0100007F:AE83, owner recovery.test pid=344264 fd=8/fd=9)
+   => client-local tuple is LOOPBACK, which is exactly what :162 asserts.
+
+=====================================================================
+WRAPPER PATH (same docker assembly as scripts/drillcoverage/run-in-container.sh)  ->  FAIL, exit 1
+=====================================================================
+wrapper/run.out, wrapper/run.rc = 1, wrapper/cmd.txt (full command line), wrapper/env.txt, wrapper/window.txt, wrapper/run-wrapper.sh
+   window 2026-10-07T03:52:58Z -> 2026-10-07T03:53:45Z (47 s); package FAIL (10.277s); failing line verbatim:
+   control-anchor-mini_linux_test.go:163: anchor local tuple is not a loopback TCP endpoint
+2nd identical wrapper run with a host-side netns watcher: wrapper/tuple-watch/run2.out, run2-cmd.txt, tuple-watch.out,
+   wrapper/run-with-tuple-watch.rc = 1, wrapper/watch-wrapper-tuple.sh
+   window 03:55:14Z -> 03:55:22Z; same :163 failure; REAL control connections while the test held the lock:
+     172.17.0.2:37188 -> 172.17.0.1:44673 (ctrlDB published port)
+     172.17.0.2:37194 -> 172.17.0.1:44673
+   => client-local tuple is the container eth0 address, NOT loopback -> :162 fails.
+Control variant without TESTCONTAINERS_HOST_OVERRIDE (TESTCONTAINERS_DOCKER_SOCKET_OVERRIDE kept):
+   wrapper/no-override/run.out, run.rc = 1, cmd.txt, window.txt, wrapper/run-no-override.sh
+   window 2026-10-07T03:56:49Z -> 03:56:57Z; SAME failure at :163 -> the override is not the sole cause; the
+   containerized topology itself yields a non-loopback control-connection address.
+
+=====================================================================
+TOPOLOGY PROBE (wrapper assembly)
+=====================================================================
+wrapper/probe.out = canonical probe artifact: sections 1-3 are verbatim copies of the raw logs, section 4 is the only
+   derived content (marked "DERIVED": hex -> dotted-IP decode).
+raw parts: wrapper/probe-host.out (host driver log), wrapper/probe-host-listen.log,
+           wrapper/evidence/probe-container.out (in-container), wrapper/evidence/probe-go.out (Go net.Dial)
+driver/entry: wrapper/run-probe.sh, wrapper/scratch/probe-entry.sh, wrapper/probe-cmd.txt, wrapper/probe-console.out
+measured facts:
+  container hostname 8901407b88f5; own network namespace net:[4026532379] (/proc/self/ns/net == /proc/1/ns/net),
+    host namespace net:[4026531833] -> distinct netns.
+  /etc/hosts: 172.17.0.1 host.docker.internal ; 172.17.0.2 <container-hostname>.
+  ip(8) is absent in the image -> /proc/net/fib_trie shows 172.17.0.2/32 host LOCAL on eth0 (172.17.0.0/16 link);
+    host docker0 = 172.17.0.1/16 (bridge IPAM gateway = host-gateway); docker inspect container IP = 172.17.0.2.
+  live dial (connection held open 6 s): /proc/net/tcp 020011AC:A9AA 010011AC:A112 st=01 ESTABLISHED
+    -> local 172.17.0.2:43434 (container interface, non-loopback), remote 172.17.0.1:41234 (host-gateway).
+  host mirror of the same connection: ss ESTAB 172.17.0.1:41234 <- 172.17.0.2:43434 (python3 listener pid 338983,
+    killed afterwards; see "host listener stopped" line) and /proc/net/tcp 010011AC:A112 020011AC:A9AA st=01.
+  in-container Go net.Dial (same call the anchor capture reads): local=172.17.0.2:52952 local_ip_is_loopback=false,
+    remote=172.17.0.1:41234.
+
+=====================================================================
+MECHANISM VERDICT
+=====================================================================
+CONFIRMED. testcontainers-go@v0.44.0/docker.go:1619-1621 returns TESTCONTAINERS_HOST_OVERRIDE verbatim as the
+container host, so the drill DSN host becomes host.docker.internal = 172.17.0.1; the control connection is therefore
+established from the container's own eth0 address (172.17.0.2), and the client-local tuple the anchor projects is
+never loopback. The no-override control variant shows that leaving the override unset does not restore loopback either:
+docker.go:1640-1652 then infers the default-network gateway IP inside a container (/.dockerenv present), another
+non-loopback address (its own fallback, core.DefaultGatewayIP() in internal/core/docker_host.go:46-58, shells out to
+`ip route`, which does not exist in this image).
+=> :163 currently encodes a HOST-TOPOLOGY assumption (control loopback), not something the production read path
+   requires: the read path itself only refuses a nil/unspecified-Port/Unspecified-IP tuple
+   (targetwriter_controlanchor_drillbridge_linux_test.go:453-459).
+
+=====================================================================
+DISPOSABLE (not evidence)
+=====================================================================
+wrapper/scratch/  container-only GOCACHE, HOME, TMPDIR and the probe marker file
+wrapper/evidence/ rw mount used by the container (probe logs are copied into wrapper/probe.out)
+No secrets or customer data are present in any artifact (only loopback/private RFC1918 addresses, container ids,
+tool versions and test output).

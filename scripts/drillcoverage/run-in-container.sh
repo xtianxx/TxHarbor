@@ -34,6 +34,21 @@ for required in "$GOROOT_HOST/bin/go" "$GOMODCACHE_HOST" "$DOCKER_HOST_BIN" "$MA
 done
 
 cd "$REPO_ROOT"
+
+# The container builds with CGO_ENABLED=0 and the `drill` tag; both select
+# package variants (go-ethereum's !cgo secp256k1 backend; the testcontainers
+# postgres module used by the drill tests) whose modules an ordinary
+# cgo-enabled, non-drill host build never fetches. The module cache is
+# mounted read-only, so every module the containerized build can need MUST be
+# materialized in it beforehand; otherwise the Go toolchain fails mid-build
+# with `mkdir /host-gomodcache/...: read-only file system` and the run reads
+# as NOT RUN (observed on a runner cache without a CGO_ENABLED=0 build). No
+# arguments: fetch and extract every module explicitly required by go.mod.
+if ! go mod download; then
+	echo "could not prime the Go module cache for the containerized drill build" >&2
+	exit 1
+fi
+
 TREE_FINGERPRINT_BEFORE="$(go run scripts/drillcoverage/check.go --fingerprint)"
 if [[ ! "$TREE_FINGERPRINT_BEFORE" =~ ^sha256:[0-9a-f]{64}$ ]]; then
 	echo "could not establish runtime/test source fingerprint" >&2

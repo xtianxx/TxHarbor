@@ -1,0 +1,69 @@
+# 017 统计（派生文件，非原始运行日志；源：logs/identity-unit.go-test.json、logs/identity-unit-race.go-test.json、logs/carrier-real-docker.go-test.json）
+# 复现（在仓库根执行；把下面整个 heredoc 粘到 shell 即可，输出应与本文件末尾一致）：
+python3 - <<'PY'
+import collections
+import json
+import sys
+
+base = sys.argv[1] if len(sys.argv) > 1 else "docs/evidence/017-carrier-identity-r1-strict-classifier/logs"
+
+
+def scan(path):
+    actions = collections.Counter()
+    subtests = collections.defaultdict(set)
+    tops = []
+    with open(path) as fh:
+        for line in fh:
+            line = line.strip()
+            if not line:
+                continue
+            ev = json.loads(line)
+            action = ev.get("Action")
+            actions[action] += 1
+            name = ev.get("Test")
+            if not name:
+                continue
+            if "/" in name:
+                subtests[name.split("/", 1)[0]].add(name)
+            elif action == "run":
+                tops.append(name)
+    return actions, tops, subtests
+
+
+for fname in (
+    "identity-unit.go-test.json",
+    "identity-unit-race.go-test.json",
+    "carrier-real-docker.go-test.json",
+):
+    actions, tops, subtests = scan(f"{base}/{fname}")
+    print(f"== {fname} ==")
+    print(f"   events: pass={actions['pass']} fail={actions['fail']} skip={actions['skip']}")
+    print(f"   top-level tests: {len(tops)}")
+    for top in tops:
+        print(f"     - {top}: subtests={len(subtests.get(top, ()))}")
+    print()
+PY
+# ---- 以上为复现命令；以下为本次运行的原始输出（2026-10-07T01:58:39Z）----
+
+== identity-unit.go-test.json ==
+   events: pass=53 fail=0 skip=0
+   top-level tests: 4
+     - TestDrillCarrierContentChainMatchesCommittedPayloads: subtests=0
+     - TestDrillCarrierStoreClassify: subtests=24
+     - TestDrillCarrierIdentityStoreSemantics: subtests=18
+     - TestDrillCarrierContainerImageConsistency: subtests=6
+
+== identity-unit-race.go-test.json ==
+   events: pass=53 fail=0 skip=0
+   top-level tests: 4
+     - TestDrillCarrierContentChainMatchesCommittedPayloads: subtests=0
+     - TestDrillCarrierStoreClassify: subtests=24
+     - TestDrillCarrierIdentityStoreSemantics: subtests=18
+     - TestDrillCarrierContainerImageConsistency: subtests=6
+
+== carrier-real-docker.go-test.json ==
+   events: pass=3 fail=0 skip=0
+   top-level tests: 2
+     - TestDrillProvisionNativePGToolsCarrierSeal: subtests=0
+     - TestDrillArmRefusesReplacedELFAndPreStartTamper: subtests=0
+

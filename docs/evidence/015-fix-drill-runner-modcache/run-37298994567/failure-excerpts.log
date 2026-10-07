@@ -1,0 +1,56 @@
+# Recovery Drill run 37298994567 — failure excerpts (headSha be272cb)
+# Source: `gh run view 37298994567 --repo xtianxx/TxHarbor --log` (full local copy kept untracked; see README section 6).
+# Redaction: the workflow masks TXHARBOR_PG_DSN; all credentials in this run are fictional test values. No secrets.
+# Line numbers refer to the local full log file.
+
+----- lines 150-157 -----
+full recovery drill (S1-S12 + F1-F7, Docker)	UNKNOWN STEP	2026-10-05T10:49:28.2482774Z Cache hit for: setup-go-Linux-x64-ubuntu24-go-1.26.5-c27b1067b11962675b4f5b29e737f4d3e6f959307900b295826198967794a17f
+full recovery drill (S1-S12 + F1-F7, Docker)	UNKNOWN STEP	2026-10-05T10:49:29.3994576Z Received 100663296 of 365111547 (27.6%), 95.9 MBs/sec
+full recovery drill (S1-S12 + F1-F7, Docker)	UNKNOWN STEP	2026-10-05T10:49:30.4016609Z Received 268435456 of 365111547 (73.5%), 127.8 MBs/sec
+full recovery drill (S1-S12 + F1-F7, Docker)	UNKNOWN STEP	2026-10-05T10:49:30.9119515Z Received 365111547 of 365111547 (100.0%), 138.6 MBs/sec
+full recovery drill (S1-S12 + F1-F7, Docker)	UNKNOWN STEP	2026-10-05T10:49:30.9120290Z Cache Size: ~348 MB (365111547 B)
+full recovery drill (S1-S12 + F1-F7, Docker)	UNKNOWN STEP	2026-10-05T10:49:30.9152557Z [command]/usr/bin/tar -xf /home/runner/work/_temp/859aa98c-2899-4760-bc1a-401334205532/cache.tzst -P -C /home/runner/work/TxHarbor/TxHarbor --use-compress-program unzstd
+full recovery drill (S1-S12 + F1-F7, Docker)	UNKNOWN STEP	2026-10-05T10:49:33.2066918Z Cache restored successfully
+full recovery drill (S1-S12 + F1-F7, Docker)	UNKNOWN STEP	2026-10-05T10:49:33.2247696Z Cache restored from key: setup-go-Linux-x64-ubuntu24-go-1.26.5-c27b1067b11962675b4f5b29e737f4d3e6f959307900b295826198967794a17f
+
+----- lines 189-190 -----
+full recovery drill (S1-S12 + F1-F7, Docker)	UNKNOWN STEP	2026-10-05T10:49:33.2412546Z GOMODCACHE='/home/runner/go/pkg/mod'
+full recovery drill (S1-S12 + F1-F7, Docker)	UNKNOWN STEP	2026-10-05T10:49:33.2413058Z GONOPROXY=''
+
+----- lines 365-376 -----
+full recovery drill (S1-S12 + F1-F7, Docker)	UNKNOWN STEP	2026-10-05T10:49:42.0556472Z pg_restore (PostgreSQL) 18.6 (Debian 18.6-1.pgdg13+2)
+full recovery drill (S1-S12 + F1-F7, Docker)	UNKNOWN STEP	2026-10-05T10:49:42.0593023Z pg_dump (PostgreSQL) 18.6 (Debian 18.6-1.pgdg13+2)
+full recovery drill (S1-S12 + F1-F7, Docker)	UNKNOWN STEP	2026-10-05T10:49:49.5919463Z ok  	github.com/xtianxx/txharbor/scripts/drillcoverage	0.006s
+full recovery drill (S1-S12 + F1-F7, Docker)	UNKNOWN STEP	2026-10-05T10:49:49.6344070Z Pinned-image tools and host Docker connectivity verified.
+full recovery drill (S1-S12 + F1-F7, Docker)	UNKNOWN STEP	2026-10-05T10:49:49.8964109Z go: downloading github.com/testcontainers/testcontainers-go/modules/postgres v0.44.0
+full recovery drill (S1-S12 + F1-F7, Docker)	UNKNOWN STEP	2026-10-05T10:49:49.9103200Z go: downloading github.com/decred/dcrd/dcrec/secp256k1/v4 v4.0.1
+full recovery drill (S1-S12 + F1-F7, Docker)	UNKNOWN STEP	2026-10-05T10:50:29.2053340Z {"ImportPath":"github.com/decred/dcrd/dcrec/secp256k1/v4","Action":"build-output","Output":"# github.com/xtianxx/txharbor/cmd/txharbor\n"}
+full recovery drill (S1-S12 + F1-F7, Docker)	UNKNOWN STEP	2026-10-05T10:50:29.2088275Z ##[error]{"ImportPath":"github.com/decred/dcrd/dcrec/secp256k1/v4","Action":"build-output","Output":"/host-gomodcache/github.com/ethereum/go-ethereum@v1.17.5/crypto/signature_nocgo.go:28:2: mkdir /host-gomodcache/cache/download/github.com/decred: read-only file system\n"}
+full recovery drill (S1-S12 + F1-F7, Docker)	UNKNOWN STEP	2026-10-05T10:50:29.2102328Z {"ImportPath":"github.com/decred/dcrd/dcrec/secp256k1/v4","Action":"build-fail"}
+full recovery drill (S1-S12 + F1-F7, Docker)	UNKNOWN STEP	2026-10-05T10:50:29.2103695Z {"ImportPath":"github.com/decred/dcrd/dcrec/secp256k1/v4/ecdsa","Action":"build-output","Output":"# github.com/xtianxx/txharbor/cmd/txharbor\n"}
+full recovery drill (S1-S12 + F1-F7, Docker)	UNKNOWN STEP	2026-10-05T10:50:29.2107100Z ##[error]{"ImportPath":"github.com/decred/dcrd/dcrec/secp256k1/v4/ecdsa","Action":"build-output","Output":"/host-gomodcache/github.com/ethereum/go-ethereum@v1.17.5/crypto/signature_nocgo.go:29:2: mkdir /host-gomodcache/cache/download/github.com/decred: read-only file system\n"}
+full recovery drill (S1-S12 + F1-F7, Docker)	UNKNOWN STEP	2026-10-05T10:50:29.2109951Z {"ImportPath":"github.com/decred/dcrd/dcrec/secp256k1/v4/ecdsa","Action":"build-fail"}
+
+----- lines 468-476 -----
+full recovery drill (S1-S12 + F1-F7, Docker)	UNKNOWN STEP	2026-10-05T10:50:29.2311690Z {"Time":"2026-10-05T10:49:50.398826067Z","Action":"output","Package":"github.com/xtianxx/txharbor/internal/reconciliation","Output":"FAIL\tgithub.com/xtianxx/txharbor/internal/reconciliation [setup failed]\n"}
+full recovery drill (S1-S12 + F1-F7, Docker)	UNKNOWN STEP	2026-10-05T10:50:29.2313253Z {"Time":"2026-10-05T10:49:50.398830624Z","Action":"fail","Package":"github.com/xtianxx/txharbor/internal/reconciliation","Elapsed":0,"FailedBuild":"github.com/decred/dcrd/dcrec/secp256k1/v4"}
+full recovery drill (S1-S12 + F1-F7, Docker)	UNKNOWN STEP	2026-10-05T10:50:29.2315042Z {"ImportPath":"github.com/testcontainers/testcontainers-go/modules/postgres","Action":"build-output","Output":"# github.com/xtianxx/txharbor/internal/recovery\n"}
+full recovery drill (S1-S12 + F1-F7, Docker)	UNKNOWN STEP	2026-10-05T10:50:29.2318488Z ##[error]{"ImportPath":"github.com/testcontainers/testcontainers-go/modules/postgres","Action":"build-output","Output":"internal/recovery/borrowed-transport-phase1_linux_test.go:31:2: mkdir /host-gomodcache/cache/download/github.com/testcontainers/testcontainers-go/modules/postgres: read-only file system\n"}
+full recovery drill (S1-S12 + F1-F7, Docker)	UNKNOWN STEP	2026-10-05T10:50:29.2322773Z {"ImportPath":"github.com/testcontainers/testcontainers-go/modules/postgres","Action":"build-fail"}
+full recovery drill (S1-S12 + F1-F7, Docker)	UNKNOWN STEP	2026-10-05T10:50:29.2324022Z {"Time":"2026-10-05T10:49:50.461691857Z","Action":"start","Package":"github.com/xtianxx/txharbor/internal/recovery"}
+full recovery drill (S1-S12 + F1-F7, Docker)	UNKNOWN STEP	2026-10-05T10:50:29.2326101Z {"Time":"2026-10-05T10:49:50.461704646Z","Action":"output","Package":"github.com/xtianxx/txharbor/internal/recovery","Output":"FAIL\tgithub.com/xtianxx/txharbor/internal/recovery [setup failed]\n"}
+full recovery drill (S1-S12 + F1-F7, Docker)	UNKNOWN STEP	2026-10-05T10:50:29.2328312Z {"Time":"2026-10-05T10:49:50.461710856Z","Action":"fail","Package":"github.com/xtianxx/txharbor/internal/recovery","Elapsed":0,"FailedBuild":"github.com/testcontainers/testcontainers-go/modules/postgres"}
+full recovery drill (S1-S12 + F1-F7, Docker)	UNKNOWN STEP	2026-10-05T10:50:29.2330545Z {"ImportPath":"github.com/decred/dcrd/dcrec/secp256k1/v4","Action":"build-output","Output":"# github.com/xtianxx/txharbor/internal/recovery/sources\n"}
+
+----- lines 1634-1637 -----
+full recovery drill (S1-S12 + F1-F7, Docker)	UNKNOWN STEP	2026-10-05T10:50:29.4487201Z Drill scenario coverage incomplete:
+full recovery drill (S1-S12 + F1-F7, Docker)	UNKNOWN STEP	2026-10-05T10:50:29.4488048Z - NOT RUN: TestDrillArmRefusesReplacedELFAndPreStartTamper (missing from go test -json output)
+full recovery drill (S1-S12 + F1-F7, Docker)	UNKNOWN STEP	2026-10-05T10:50:29.4489265Z - FAIL: TestDrillArmRefusesReplacedELFAndPreStartTamper reported from unexpected package ""
+full recovery drill (S1-S12 + F1-F7, Docker)	UNKNOWN STEP	2026-10-05T10:50:29.4490305Z - NOT RUN: TestDrillTargetWitnessOldReconnectRejected (missing from go test -json output)
+
+----- lines 1678-1682 -----
+full recovery drill (S1-S12 + F1-F7, Docker)	UNKNOWN STEP	2026-10-05T10:50:29.4542099Z - FAIL: TestT059F3IncompatibleProgramRefusedNoSilentDowngrade/incompatible-restore reported from unexpected package ""
+full recovery drill (S1-S12 + F1-F7, Docker)	UNKNOWN STEP	2026-10-05T10:50:29.4543084Z exit status 1
+full recovery drill (S1-S12 + F1-F7, Docker)	UNKNOWN STEP	2026-10-05T10:50:29.4543488Z make: *** [Makefile:76: test-drill] Error 1
+full recovery drill (S1-S12 + F1-F7, Docker)	UNKNOWN STEP	2026-10-05T10:50:30.3963898Z ##[error]Process completed with exit code 2.
+full recovery drill (S1-S12 + F1-F7, Docker)	UNKNOWN STEP	2026-10-05T10:50:30.4046221Z ##[group]Run actions/upload-artifact@v4

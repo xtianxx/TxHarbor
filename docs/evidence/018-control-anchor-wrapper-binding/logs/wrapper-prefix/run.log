@@ -1,0 +1,33 @@
+2026/10/07 03:53:37 github.com/testcontainers/testcontainers-go - Connected to docker: 
+  Server Version: 29.6.1
+  API Version: 1.55
+  Operating System: Ubuntu 24.04.4 LTS
+  Total Memory: 15915 MB
+  Testcontainers for Go Version: v0.44.0
+  Resolved Docker Host: unix:///var/run/docker.sock
+  Resolved Docker Socket Path: /var/run/docker.sock
+  Test SessionID: a48491757f303ea86789d2962bb2f178516e5ebd397ca13506947d44ed3293a5
+  Test ProcessID: 6187252d-2bbc-40d0-9590-7e71c247330b
+=== RUN   TestControlAnchorCaptureMatchesActualControlOwner
+2026/10/07 03:53:37 🐳 Creating container for image postgres@sha256:4ef4dbc939d61acea57712655ddb4b4ab27419c913f94cca0cd57cb3ea3c2280
+2026/10/07 03:53:38 🐳 Creating container for image testcontainers/ryuk:0.14.0
+2026/10/07 03:53:38 ✅ Container created: 6915e2b6626e
+2026/10/07 03:53:38 🐳 Starting container: 6915e2b6626e
+2026/10/07 03:53:39 ✅ Container started: 6915e2b6626e
+2026/10/07 03:53:39 ⏳ Waiting for container id 6915e2b6626e image: testcontainers/ryuk:0.14.0. Waiting for: all of: [log message "Started", port 8080/tcp to be listening]
+2026/10/07 03:53:40 Shell not found in container
+2026/10/07 03:53:40 🔔 Container is ready: 6915e2b6626e
+2026/10/07 03:53:40 ✅ Container created: ac47b5c45985
+2026/10/07 03:53:40 🐳 Starting container: ac47b5c45985
+2026/10/07 03:53:41 ✅ Container started: ac47b5c45985
+2026/10/07 03:53:41 ⏳ Waiting for container id ac47b5c45985 image: postgres@sha256:4ef4dbc939d61acea57712655ddb4b4ab27419c913f94cca0cd57cb3ea3c2280. Waiting for: all of: [log message "database system is ready to accept connections" (occurrence: 2)]
+2026/10/07 03:53:43 🔔 Container is ready: ac47b5c45985
+    control-anchor-mini_linux_test.go:163: anchor local tuple is not a loopback TCP endpoint
+2026/10/07 03:53:44 🐳 Stopping container: ac47b5c45985
+2026/10/07 03:53:44 ✅ Container stopped: ac47b5c45985
+2026/10/07 03:53:44 🐳 Terminating container: ac47b5c45985
+2026/10/07 03:53:44 🚫 Container terminated: ac47b5c45985
+--- FAIL: TestControlAnchorCaptureMatchesActualControlOwner (10.23s)
+FAIL
+FAIL	github.com/xtianxx/txharbor/internal/recovery	10.277s
+FAIL

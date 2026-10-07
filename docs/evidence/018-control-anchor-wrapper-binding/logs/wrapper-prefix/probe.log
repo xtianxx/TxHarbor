@@ -1,0 +1,244 @@
+===================================================================
+probe.out - canonical topology probe artifact (WRAPPER assembly)
+  window: host listener pid 338983, start 2026-10-07T03:54:26Z == -> == host listener stopped: 2026-10-07T03:54:34Z (pid 338983 killed) ==
+  raw sources kept next to this file:
+    probe-host.out                  (host driver log: listener + host-side snapshots)
+    evidence/probe-container.out    (in-container: hostname/netns/fib_trie/live dial+/proc/net/tcp)
+    evidence/probe-go.out           (in-container Go net.Dial: LocalAddr/RemoteAddr)
+  this file is the concatenation of those raw logs; section 4 below is the
+  ONLY derived content (hex -> dotted-IP annotation) and is clearly marked.
+===================================================================
+
+### SECTION 1: host driver log (raw: probe-host.out) ###
+== host listener pid 338983, start 2026-10-07T03:54:26Z ==
+-- ss -ltn sport = :41234 (host) --
+State  Recv-Q Send-Q Local Address:Port  Peer Address:PortProcess
+LISTEN 0      5            0.0.0.0:41234      0.0.0.0:*          
+-- docker bridge gateway facts (host) --
+6: docker0    inet 172.17.0.1/16 brd 172.17.255.255 scope global docker0\       valid_lft forever preferred_lft forever
+[{"Subnet":"172.17.0.0/16","Gateway":"172.17.0.1"}]
+== host-side snapshot while the container connection is open: 2026-10-07T03:54:27Z ==
+marker_present: yes
+-- ss -tnp '( sport = :41234 or dport = :41234 )' (host) --
+State Recv-Q Send-Q Local Address:Port  Peer Address:Port Process
+ESTAB 0      0         172.17.0.1:41234   172.17.0.2:43434 users:(("python3",pid=338983,fd=4))
+-- /proc/net/tcp of host listener process netns (hex, host view) --
+  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode                                                     
+   0: 0100007F:C0DE 00000000:0000 0A 00000000:00000000 00:00000000 00000000  1000        0 52325308 1 0000000000000000 100 0 0 10 0                  
+   1: 0100007F:2161 00000000:0000 0A 00000000:00000000 00:00000000 00000000     0        0 25048848 1 0000000000000000 100 0 0 10 0                  
+   2: FEFFFF0A:0035 00000000:0000 0A 00000000:00000000 00:00000000 00000000     0        0 10254 1 0000000000000000 100 0 0 10 0                     
+   3: 0100007F:B093 00000000:0000 0A 00000000:00000000 00:00000000 00000000  1000        0 38919576 1 0000000000000000 100 0 0 10 0                  
+   4: 3600007F:0035 00000000:0000 0A 00000000:00000000 00:00000000 00000000   991        0 2307 1 0000000000000000 100 0 0 10 5                      
+   5: 0100007F:B20B 00000000:0000 0A 00000000:00000000 00:00000000 00000000  1000        0 3579368 1 0000000000000000 100 0 0 10 0                   
+   6: 3500007F:0035 00000000:0000 0A 00000000:00000000 00:00000000 00000000   991        0 2305 1 0000000000000000 100 0 0 10 5                      
+   7: 0100007F:1538 00000000:0000 0A 00000000:00000000 00:00000000 00000000     0        0 25047850 1 0000000000000000 100 0 0 10 0                  
+   8: 0100007F:B5E7 00000000:0000 0A 00000000:00000000 00:00000000 00000000  1000        0 35284251 1 0000000000000000 100 0 0 10 0                  
+   9: 00000000:A112 00000000:0000 0A 00000000:00000000 00:00000000 00000000  1000        0 54292494 1 0000000000000000 100 0 0 10 0                  
+  10: 0100007F:1F90 00000000:0000 0A 00000000:00000000 00:00000000 00000000  1000        0 25105012 1 0000000000000000 100 0 0 10 0                  
+  11: 0100007F:1F9B 00000000:0000 0A 00000000:00000000 00:00000000 00000000  1000        0 43494812 1 0000000000000000 100 0 0 10 0                  
+  12: 0100007F:B20B 0100007F:AFC8 01 00000000:00000000 00:00000000 00000000  1000        0 50965601 1 0000000000000000 20 4 30 10 -1                 
+  13: 0100007F:1538 0100007F:BC4A 01 00000000:00000000 02:000001EA 00000000     0        0 53851794 2 0000000000000000 20 4 27 10 -1                 
+  14: 0100007F:B12E 0100007F:1538 01 00000000:00000000 02:000001AF 00000000  1000        0 54050346 2 0000000000000000 20 4 0 10 -1                  
+  15: 0100007F:B674 0100007F:1538 01 00000000:00000000 02:00000329 00000000  1000        0 53681620 2 0000000000000000 20 4 20 10 -1                 
+  16: 0100007F:B782 0100007F:1538 01 00000000:00000000 02:00000214 00000000  1000        0 53709809 3 0000000000000000 20 4 0 10 -1                  
+  17: 0100007F:B7EE 0100007F:1538 01 00000000:00000000 02:00000528 00000000  1000        0 54112232 2 0000000000000000 20 4 28 10 -1                 
+  18: 0100007F:B802 0100007F:1538 01 00000000:00000000 02:00000284 00000000  1000        0 53881622 2 0000000000000000 20 4 0 10 -1                  
+  19: 0100007F:BB20 0100007F:1538 01 00000000:00000000 02:00000083 00000000  1000        0 53679871 2 0000000000000000 20 4 28 10 -1                 
+  20: 0100007F:BC4A 0100007F:1538 01 00000000:00000000 02:000001EA 00000000  1000        0 53850012 2 0000000000000000 20 4 26 10 -1                 
+  21: 0100007F:BD48 0100007F:1538 01 00000000:00000000 02:00000084 00000000  1000        0 53808642 2 0000000000000000 20 4 26 10 -1                 
+  22: 010013AC:AEF4 030013AC:1538 01 00000000:00000000 02:00000214 00000000     0        0 53739126 3 0000000000000000 20 4 0 10 -1                  
+  23: 010013AC:B038 030013AC:1538 01 00000000:00000000 02:00000329 00000000     0        0 53697828 2 0000000000000000 20 4 20 10 -1                 
+  24: 0100007F:1538 0100007F:B12E 01 00000000:00000000 02:000001B4 00000000     0        0 54044032 2 0000000000000000 22 4 1 10 -1                  
+  25: 0100007F:1538 0100007F:BB20 01 00000000:00000000 02:0000009D 00000000     0        0 53672082 2 0000000000000000 22 4 29 10 -1                 
+  26: 0100007F:AFBC 0100007F:B20B 01 00000000:00000000 00:00000000 00000000  1000        0 50949785 1 0000000000000000 20 4 30 10 -1                 
+  27: 0100007F:AFBE 0100007F:B20B 01 0000002A:00000000 01:00000015 00000000  1000        0 50952044 2 0000000000000000 22 4 29 10 -1                 
+  28: 0100007F:AFC2 0100007F:B20B 01 00000000:00000000 00:00000000 00000000  1000        0 50928440 2 0000000000000000 21 4 30 10 -1                 
+  29: 0100007F:AFC8 0100007F:B20B 01 00000000:00000000 00:00000000 00000000  1000        0 50928477 2 0000000000000000 20 4 30 10 -1                 
+  30: 010013AC:B640 030013AC:1538 01 00000000:00000000 02:000001AF 00000000     0        0 54044034 2 0000000000000000 20 4 0 10 -1                  
+  31: 010013AC:B83C 030013AC:1538 01 00000000:00000000 02:00000528 00000000     0        0 54144344 2 0000000000000000 20 4 28 10 -1                 
+  32: 010013AC:BA54 030013AC:1538 01 00000000:00000000 02:00000283 00000000     0        0 53882029 2 0000000000000000 20 4 0 10 -1                  
+  33: 010013AC:BA5E 030013AC:1538 01 00000000:00000000 02:00000084 00000000     0        0 53672084 2 0000000000000000 20 4 28 10 -1                 
+  34: 010013AC:BBD8 030013AC:1538 01 00000000:00000000 02:000001EA 00000000     0        0 53851796 2 0000000000000000 20 4 26 10 -1                 
+  35: 010013AC:BBE0 030013AC:1538 01 00000000:00000000 02:00000084 00000000     0        0 53813287 2 0000000000000000 20 4 26 10 -1                 
+  36: 0100007F:BD60 0100007F:B20B 01 00000000:00000000 00:00000000 00000000  1000        0 21829071 1 0000000000000000 20 4 28 10 -1                 
+  37: 0100007F:BD70 0100007F:B20B 01 00000000:00000000 00:00000000 00000000  1000        0 21806738 1 0000000000000000 22 4 30 126 97                
+  38: 010011AC:B216 040011AC:1538 06 00000000:00000000 03:0000056F 00000000     0        0 0 3 0000000000000000                                      
+  39: 010011AC:B21C 040011AC:1538 06 00000000:00000000 03:0000056F 00000000     0        0 0 3 0000000000000000                                      
+  40: 010011AC:B226 040011AC:1538 06 00000000:00000000 03:00000516 00000000     0        0 0 3 0000000000000000                                      
+  41: 010011AC:B22C 040011AC:1538 06 00000000:00000000 03:0000056F 00000000     0        0 0 3 0000000000000000                                      
+  42: 010011AC:B232 040011AC:1538 06 00000000:00000000 03:0000056F 00000000     0        0 0 3 0000000000000000                                      
+  43: 010011AC:B23A 040011AC:1538 06 00000000:00000000 03:0000056F 00000000     0        0 0 3 0000000000000000                                      
+  44: 010011AC:B23E 040011AC:1538 06 00000000:00000000 03:0000056E 00000000     0        0 0 3 0000000000000000                                      
+  45: 0100007F:B20B 0100007F:AFBC 01 00000000:00000000 00:00000000 00000000  1000        0 50964753 1 0000000000000000 20 4 30 10 -1                 
+  46: 010013AC:B0C8 020013AC:2161 01 00000000:00000000 02:000001A4 00000000     0        0 53396816 2 0000000000000000 20 4 30 10 -1                 
+  47: 010013AC:BC16 020013AC:2161 01 00000000:00000000 02:00000282 00000000     0        0 54264332 2 0000000000000000 20 4 30 10 -1                 
+  48: 0100007F:B20B 0100007F:BD60 01 00000000:00000000 00:00000000 00000000  1000        0 21824448 2 0000000000000000 20 4 30 10 217                
+  49: 0100007F:1538 0100007F:B7EE 01 00000000:00000000 02:0000052D 00000000     0        0 54133699 2 0000000000000000 22 4 29 10 -1                 
+  50: 0100007F:2161 0100007F:B3EC 01 00000000:00000000 02:000001BE 00000000     0        0 53396814 2 0000000000000000 21 4 31 10 -1                 
+  51: 010011AC:B724 030011AC:1F90 06 00000000:00000000 03:00000296 00000000     0        0 0 3 0000000000000000                                      
+  52: 010011AC:B730 030011AC:1F90 06 00000000:00000000 03:0000059F 00000000     0        0 0 3 0000000000000000                                      
+  53: 0100007F:B20B 0100007F:BD70 01 00000000:00000000 00:00000000 00000000  1000        0 21828603 1 0000000000000000 20 4 0 10 117                 
+  54: 0100007F:2161 0100007F:B71E 01 00000000:00000000 02:00000284 00000000     0        0 54278401 2 0000000000000000 21 4 31 10 -1                 
+  55: 0100007F:B3EC 0100007F:2161 01 00000000:00000000 02:00000085 00000000  1000        0 53398839 2 0000000000000000 20 4 30 10 -1                 
+  56: 0100007F:B71E 0100007F:2161 01 00000000:00000000 02:000008C2 00000000  1000        0 54280197 2 0000000000000000 20 4 30 10 -1                 
+  57: 0100007F:1538 0100007F:B782 01 00000000:00000000 02:00000218 00000000     0        0 53739124 3 0000000000000000 22 4 1 10 -1                  
+  58: 0100007F:1538 0100007F:B674 01 00000000:00000000 02:00000392 00000000     0        0 53697826 2 0000000000000000 21 4 21 10 -1                 
+  59: 0100007F:B0B0 0100007F:2A3A 01 00000000:00000000 02:00000DD5 00000000  1000        0 54285095 2 0000000000000000 20 4 30 46 36                 
+  60: 0100007F:B13E 0100007F:2A3A 01 00000000:00000000 02:000005E8 00000000  1000        0 54283376 2 0000000000000000 20 4 0 45 37                  
+  61: 0100007F:B42A 0100007F:2A3A 01 00000000:00000000 02:00000897 00000000  1000        0 54252907 2 0000000000000000 20 4 33 10 -1                 
+  62: 0100007F:B438 0100007F:2A3A 01 00000000:00000000 02:00000854 00000000  1000        0 54252908 2 0000000000000000 20 4 30 10 -1                 
+  63: 0100007F:B43A 0100007F:2A3A 01 00000000:00000000 02:000007FE 00000000  1000        0 54252909 2 0000000000000000 20 4 32 10 -1                 
+  64: 0100007F:1538 0100007F:BD48 01 00000000:00000000 02:0000009D 00000000     0        0 53807753 2 0000000000000000 21 4 27 10 -1                 
+  65: 0100007F:1538 0100007F:B802 01 00000000:00000000 02:00000284 00000000     0        0 53882027 2 0000000000000000 21 4 1 10 -1                  
+  66: 0100007F:B20B 0100007F:AFBE 01 00000000:00000000 00:00000000 00000000  1000        0 50947891 3 0000000000000000 21 4 31 10 -1                 
+  67: 0100007F:B20B 0100007F:AFC2 01 00000000:00000000 00:00000000 00000000  1000        0 50965593 2 0000000000000000 20 4 31 10 -1                 
+  68: 010011AC:A112 020011AC:A9AA 01 00000000:00000000 00:00000000 00000000  1000        0 54283170 1 0000000000000000 20 0 0 10 -1                  
+-- docker inspect probe container networks (host view) --
+8901407b88f540434d3a89c7701952856e0e66f3c5a0ce9d638c90a9ef8bc486 state=running ip=172.17.0.2 
+-- docker top (PID in container) --
+UID                 PID                 PPID                C                   STIME               TTY                 TIME                CMD
+dream               339111              339087              3                   11:54               ?                   00:00:00            /sbin/docker-init -- /bin/bash /drill-scratch/probe-entry.sh
+dream               339133              339111              0                   11:54               ?                   00:00:00            /bin/bash /drill-scratch/probe-entry.sh
+dream               339150              339133              0                   11:54               ?                   00:00:00            sleep 2
+container_probe_rc: 0
+== host listener stopped: 2026-10-07T03:54:34Z (pid 338983 killed) ==
+container_probe_rc: 0
+
+### SECTION 2: in-container probe log (raw: evidence/probe-container.out) ###
+captured_at_utc: 2026-10-07T03:54:27Z
+hostname: 8901407b88f5
+bash_version: 5.2.37(1)-release
+== /etc/hosts ==
+127.0.0.1	localhost
+::1	localhost ip6-localhost ip6-loopback
+fe00::	ip6-localnet
+ff00::	ip6-mcastprefix
+ff02::1	ip6-allnodes
+ff02::2	ip6-allrouters
+172.17.0.1	host.docker.internal
+172.17.0.2	8901407b88f5
+== getent hosts host.docker.internal ==
+172.17.0.1      host.docker.internal
+== ip -o addr ==
+ip command unavailable
+== /proc/net/route ==
+Iface	Destination	Gateway 	Flags	RefCnt	Use	Metric	Mask		MTU	Window	IRTT                                                       
+eth0	00000000	010011AC	0003	0	0	0	00000000	0	0	0                                                                               
+eth0	000011AC	00000000	0001	0	0	0	0000FFFF	0	0	0                                                                               
+== /proc/net/dev ==
+Inter-|   Receive                                                |  Transmit
+ face |bytes    packets errs drop fifo frame compressed multicast|bytes    packets errs drop fifo colls carrier compressed
+    lo:       0       0    0    0    0     0          0         0        0       0    0    0    0     0       0          0
+  eth0:     212       3    0    0    0     0          0         0      164       3    0    0    0     0       0          0
+== /proc/net/fib_trie (first 80 lines) ==
+Main:
+  +-- 0.0.0.0/0 3 0 5
+     |-- 0.0.0.0
+        /0 universe UNICAST
+     +-- 127.0.0.0/8 2 0 2
+        +-- 127.0.0.0/31 1 0 0
+           |-- 127.0.0.0
+              /8 host LOCAL
+           |-- 127.0.0.1
+              /32 host LOCAL
+        |-- 127.255.255.255
+           /32 link BROADCAST
+     +-- 172.17.0.0/16 2 0 2
+        +-- 172.17.0.0/30 2 0 2
+           |-- 172.17.0.0
+              /16 link UNICAST
+           |-- 172.17.0.2
+              /32 host LOCAL
+        |-- 172.17.255.255
+           /32 link BROADCAST
+Local:
+  +-- 0.0.0.0/0 3 0 5
+     |-- 0.0.0.0
+        /0 universe UNICAST
+     +-- 127.0.0.0/8 2 0 2
+        +-- 127.0.0.0/31 1 0 0
+           |-- 127.0.0.0
+              /8 host LOCAL
+           |-- 127.0.0.1
+              /32 host LOCAL
+        |-- 127.255.255.255
+           /32 link BROADCAST
+     +-- 172.17.0.0/16 2 0 2
+        +-- 172.17.0.0/30 2 0 2
+           |-- 172.17.0.0
+              /16 link UNICAST
+           |-- 172.17.0.2
+              /32 host LOCAL
+        |-- 172.17.255.255
+           /32 link BROADCAST
+== network namespace inodes ==
+self: net:[4026532379]
+pid1: net:[4026532379]
+pid_self: 17
+== LIVE DIAL: bash /dev/tcp/host.docker.internal/41234 ==
+connect ok (fd 3 open)
+-- /proc/net/tcp while the connection is OPEN --
+  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode                                                     
+   0: 020011AC:A9AA 010011AC:A112 01 00000000:00000000 00:00000000 00000000  1000        0 54280570 1 0000000000000000 20 0 0 10 -1                  
+-- /proc/net/tcp6 while the connection is OPEN --
+  sl  local_address                         remote_address                        st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode
+connection closed
+== GO-LEVEL DIAL (same net.Dial the anchor capture uses) ==
+local=172.17.0.2:52952 local_ip=172.17.0.2 local_port=52952 local_ip_is_loopback=false
+remote=172.17.0.1:41234 remote_ip=172.17.0.1 remote_port=41234
+go_probe_rc=0
+probe entry done
+probe_entry_rc=0
+
+### SECTION 3: in-container Go-level dial (raw: evidence/probe-go.out) ###
+local=172.17.0.2:52952 local_ip=172.17.0.2 local_port=52952 local_ip_is_loopback=false
+remote=172.17.0.1:41234 remote_ip=172.17.0.1 remote_port=41234
+go_probe_rc=0
+
+### SECTION 4: ANNOTATION (DERIVED - not raw output; hex -> dotted-IP decode) ###
+
+Decoding rule for /proc/net/tcp: every IPv4 address is one little-endian 32-bit
+word in hex (e.g. 020011AC -> AC.11.00.02 = 172.17.0.2), the port is big-endian
+hex (e.g. A112 = 41234), and the 3rd field st is the socket state (01 = ESTABLISHED,
+06 = TIME_WAIT, 0A = LISTEN).
+
+S4.1 synthetic probe dial (section 2, connection held open 6s):
+  container netns line:  020011AC:A9AA 010011AC:A112 01
+    local  = 172.17.0.2:43434   (container eth0 address; non-loopback)
+    remote = 172.17.0.1:41234   (docker0 gateway = host.docker.internal)
+  host netns mirror of the same connection (section 1, host /proc/net/tcp):
+    010011AC:A112 020011AC:A9AA 01  (local 172.17.0.1:41234 <- remote 172.17.0.2:43434)
+  host ss mirror: ESTAB 172.17.0.1:41234 <- 172.17.0.2:43434 (python3 listener)
+  Go-level net.Dial in the same container (section 3):
+    local=172.17.0.2:52952 local_ip_is_loopback=false ; remote=172.17.0.1:41234
+
+S4.2 REAL control connection of the drill test inside the wrapper (raw:
+    tuple-watch/tuple-watch.out; /proc/<wrapper-container-pid>/net/tcp while the
+    test held the dedicated TargetLock pgx connection to the testcontainers
+    control DB, published port 44673 = AE81):
+    020011AC:9144 010011AC:AE81 01  ->  local 172.17.0.2:37188  remote 172.17.0.1:44673
+    020011AC:914A 010011AC:AE81 01  ->  local 172.17.0.2:37194  remote 172.17.0.1:44673
+    host ss of the same published port: 172.17.0.1:44673 <- 172.17.0.2:37188 / :37194
+    => the control connection's CLIENT-local tuple (the tuple the anchor capture
+       projects as LocalAddress/LocalPort) is 172.17.0.2:PORT = NOT loopback.
+
+S4.3 same test on the HOST path (raw: ../host/tuple-watch.out; published port
+    44675 = AE83):
+    0100007F:B758 0100007F:AE83 01 -> local 127.0.0.1:46936 remote 127.0.0.1:44675
+    0100007F:B75A 0100007F:AE83 01 -> local 127.0.0.1:46938 remote 127.0.0.1:44675
+    instrumented with fd owners: users:(("recovery.test",pid=344264,fd=8/fd=9))
+    => on the host path the same connection's client-local tuple IS loopback
+       (127.0.0.1), which is exactly what control-anchor-mini_linux_test.go:162
+       asserts.
+
+S4.4 network namespace identity:
+  inside the wrapper container: /proc/self/ns/net = /proc/1/ns/net = net:[4026532379]
+  on the host: /proc/self/ns/net = net:[4026531833]
+  => the wrapper container has its own netns (no split between pid 1 and the test
+     process inside it); the container address 172.17.0.2/16 belongs to that netns.
+
+S4.5 address binding chain inside the wrapper container:
+  /etc/hosts: 172.17.0.1 host.docker.internal ; 172.17.0.2 <container-hostname>
+  host: docker0 = 172.17.0.1/16 (bridge IPAM gateway = host-gateway),
+        container IP = 172.17.0.2 (docker inspect), CLI `ip` absent -> /proc/net/fib_trie
+        shows 172.17.0.2/32 host LOCAL on eth0.

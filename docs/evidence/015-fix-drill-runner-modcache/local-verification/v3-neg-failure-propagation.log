@@ -1,0 +1,5 @@
+pg_restore (PostgreSQL) 18.6 (Debian 18.6-1.pgdg13+2)
+pg_dump (PostgreSQL) 18.6 (Debian 18.6-1.pgdg13+2)
+ok  	github.com/xtianxx/txharbor/scripts/drillcoverage	0.014s
+Pinned-image tools and host Docker connectivity verified.
+stat /workspace/internal/definitely-missing-package: directory not found

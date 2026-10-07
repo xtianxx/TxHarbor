@@ -1,0 +1,26 @@
+[2026-10-07T01:57:04Z] CMD: go build ./...
+[2026-10-07T01:57:11Z] RET: rc=0 elapsed=7s out=build.out rcfile=build.rc
+[2026-10-07T01:57:11Z] CMD: gofmt -l internal/recovery/
+[2026-10-07T01:57:11Z] RET: rc=0 elapsed=0s out=gofmt.out rcfile=gofmt.rc
+[2026-10-07T01:57:11Z] CMD: go vet -tags drill ./internal/recovery/
+[2026-10-07T01:57:12Z] RET: rc=0 elapsed=1s out=vet.out rcfile=vet.rc
+[2026-10-07T01:57:12Z] CMD: go test -tags drill -count=1 -json ./internal/recovery/ -run 'TestDrillCarrier'
+[2026-10-07T01:57:16Z] RET: rc=0 elapsed=4s out=identity-unit.go-test.json rcfile=identity-unit.rc
+[2026-10-07T01:57:16Z] CMD: go test -race -tags drill -count=1 -json ./internal/recovery/ -run 'TestDrillCarrier'
+[2026-10-07T01:57:37Z] RET: rc=0 elapsed=21s out=identity-unit-race.go-test.json rcfile=identity-unit-race.rc
+[2026-10-07T01:57:37Z] CMD: go test -tags drill -count=1 -json ./internal/recovery/ -run 'TestDrillProvisionNativePGToolsCarrierSeal|TestDrillArmRefusesReplacedELFAndPreStartTamper'
+[2026-10-07T01:57:51Z] RET: rc=0 elapsed=14s out=carrier-real-docker.go-test.json rcfile=carrier-real-docker.rc
+[2026-10-07T01:57:51Z] CMD: go test -tags drill -list 'TestDrillCarrier' ./internal/recovery/
+[2026-10-07T01:57:55Z] RET: rc=0 elapsed=4s out=tests.list.txt rcfile=tests.list.rc
+[2026-10-07T01:57:55Z] CMD: sha256sum internal/recovery/targetwriter_drillbridge_linux_test.go internal/recovery/targetwriter_drillbridge_identity_linux_test.go
+[2026-10-07T01:57:55Z] RET: rc=0 elapsed=0s out=source-files.sha256 rcfile=source-files.rc
+[2026-10-07T01:57:55Z] AUX: cp /tmp/017_poll.log docs/evidence/017-carrier-identity-r1-strict-classifier/logs/poll.log (prereq gate record, rc=0)
+[2026-10-07T01:57:55Z] VERIFY: post-run git status --porcelain=v2:
+1 .M N... 100644 100644 100644 0758ea94acaa11d8115dfe044e7422d8f6292357 0758ea94acaa11d8115dfe044e7422d8f6292357 internal/recovery/targetwriter_drillbridge_identity_linux_test.go
+1 .M N... 100644 100644 100644 5f555d0a6d5b2dd2f4859fea5b3501bfe595f97c 5f555d0a6d5b2dd2f4859fea5b3501bfe595f97c internal/recovery/targetwriter_drillbridge_linux_test.go
+? docs/evidence/017-carrier-identity-r1-strict-classifier/
+[2026-10-07T01:57:55Z] VERIFY: post-run sha256 of test files:
+03d38e4d015e104807cebb57babcfc894ece21ca625d683ce397beaadd39742e  internal/recovery/targetwriter_drillbridge_linux_test.go
+174703df592b1c4b3afad5b27366b71d8dd1bf4ef4fe15637b21f2d5e06f0bf7  internal/recovery/targetwriter_drillbridge_identity_linux_test.go
+[2026-10-07T01:58:49Z] AUX: python3 stats program (embedded verbatim in logs/statistics.txt) -> logs/statistics.txt
+[2026-10-07T01:58:49Z] AUX: rc=0

@@ -1,0 +1,77 @@
+# remote run 37562840720 - read-only evidence extract (NO drill was re-run in this batch)
+captured_at_utc: 2026-10-07T04:12:41Z
+repo: xtianxx/TxHarbor   run: 37562840720 (branch fix/drill-runner-modcache-prime)
+
+== gh run view 37562840720 --repo xtianxx/TxHarbor ==
+X fix/drill-runner-modcache-prime Recovery Drill xtianxx/TxHarbor#42 · 37562840720
+X full recovery drill (S1-S12 + F1-F7, Docker) in 50m54s (ID 112603804843)   [step: full recovery drill layer (pinned native-tool runner) = X]
+
+== gh run download 37562840720 -n drill-evidence-37562840720 -> run.laVV8y/coverage.json (fields) ==
+run_id = run.laVV8y
+commit = fee2d904eb6e013ee046c4375f395df143957a9c
+tree_fingerprint = sha256:d553b118cc1070cf212c71c333274439ddeef7ea8ae7d127dfb0ccd3777b2339
+go_test_exit_status = 1
+checker_result = PASS   checker_exit_status = 0
+overall_result = FAIL
+required_cases = 22 entries, status Counter({'PASS': 22})
+required_cases contains TestControlAnchorCaptureMatchesActualControlOwner = False
+required_cases packages = ['github.com/xtianxx/txharbor/internal/recovery']
+optional_skips = ['TestBorrowedAuthEntryProbeFDChildProcess']
+
+== gh run view 37562840720 --log-failed (lines below have the '<job>\t<step>\t<ts>Z ' prefix stripped) ==
+grep -c 'is not a loopback TCP endpoint'  => 1
+{"Time":"2026-10-07T02:39:11.968776642Z","Action":"output","Package":"github.com/xtianxx/txharbor/internal/recovery","Test":"TestControlAnchorCaptureMatchesActualControlOwner","Output":"    control-anchor-mini_linux_test.go:163: anchor local tuple is not a loopback TCP endpoint\n"}
+Action=fail packages:
+"Action":"fail","Package":"github.com/xtianxx/txharbor/internal/recovery"
+Action=fail tests in internal/recovery:
+"Action":"fail","Package":"github.com/xtianxx/txharbor/internal/recovery","Test":"TestControlAnchorCaptureMatchesActualControlOwner"
+{"Time":"2026-10-07T03:28:04.262117288Z","Action":"output","Package":"github.com/xtianxx/txharbor/internal/recovery","Output":"FAIL\tgithub.com/xtianxx/txharbor/internal/recovery\t2954.206s\n"}
+"Output":"ok  \tgithub.com/xtianxx/txharbor/internal/app/reconcileadmin\t0.006s\n"
+"Output":"ok  \tgithub.com/xtianxx/txharbor/internal/app/recoveryadmin\t0.382s\n"
+"Output":"ok  \tgithub.com/xtianxx/txharbor/internal/app\t1.075s\n"
+"Output":"ok  \tgithub.com/xtianxx/txharbor/internal/cache\t0.347s\n"
+"Output":"ok  \tgithub.com/xtianxx/txharbor/internal/config\t0.050s\n"
+"Output":"ok  \tgithub.com/xtianxx/txharbor/internal/db\t0.015s\n"
+"Output":"ok  \tgithub.com/xtianxx/txharbor/internal/eth\t0.946s\n"
+"Output":"ok  \tgithub.com/xtianxx/txharbor/internal/events\t0.094s\n"
+"Output":"ok  \tgithub.com/xtianxx/txharbor/internal/execution\t0.057s\n"
+"Output":"ok  \tgithub.com/xtianxx/txharbor/internal/health\t0.126s\n"
+"Output":"ok  \tgithub.com/xtianxx/txharbor/internal/indexer\t1.571s\n"
+"Output":"ok  \tgithub.com/xtianxx/txharbor/internal/jointwire\t0.006s\n"
+"Output":"ok  \tgithub.com/xtianxx/txharbor/internal/logx\t0.003s\n"
+"Output":"ok  \tgithub.com/xtianxx/txharbor/internal/metrics\t0.179s\n"
+"Output":"ok  \tgithub.com/xtianxx/txharbor/internal/nonce\t0.068s\n"
+"Output":"ok  \tgithub.com/xtianxx/txharbor/internal/ratelimit\t0.095s\n"
+"Output":"ok  \tgithub.com/xtianxx/txharbor/internal/reconciliation\t0.024s\n"
+"Output":"ok  \tgithub.com/xtianxx/txharbor/internal/recovery/controlstore\t0.010s\n"
+"Output":"ok  \tgithub.com/xtianxx/txharbor/internal/signer\t8.608s\n"
+"Output":"ok  \tgithub.com/xtianxx/txharbor/internal/txlifecycle\t0.072s\n"
+"Output":"ok  \tgithub.com/xtianxx/txharbor/internal/withdrawal\t0.019s\n"
+"Output":"ok  \tgithub.com/xtianxx/txharbor/scripts/drillcoverage\t0.013s\n"
+make: *** [Makefile:76: test-drill] Error 1
+All required drill scenarios and restore-dependent subtests passed.
+##[error]Process completed with exit code 2.
+
+== full required_cases list (22, in artifact order) ==
+ 1. PASS github.com/xtianxx/txharbor/internal/recovery  TestDrillArmRefusesReplacedELFAndPreStartTamper
+ 2. PASS github.com/xtianxx/txharbor/internal/recovery  TestDrillTargetWitnessOldReconnectRejected
+ 3. PASS github.com/xtianxx/txharbor/internal/recovery  TestDrillTargetWitnessOldRoleLoginDuringRestoreAcceptanceFailsClosed
+ 4. PASS github.com/xtianxx/txharbor/internal/recovery  TestDrillTargetWitnessObserverTerminationDuringRestoreAcceptanceFailsClosed
+ 5. PASS github.com/xtianxx/txharbor/internal/recovery  TestT058DrillE2EBackupAdvanceRestoreRefuseThenRelease
+ 6. PASS github.com/xtianxx/txharbor/internal/recovery  TestT058DrillGapCannotBeClosedStaysPaused
+ 7. PASS github.com/xtianxx/txharbor/internal/recovery  TestT058DrillEventLayerKafkaBrokerOffsetDivergence
+ 8. PASS github.com/xtianxx/txharbor/internal/recovery  TestT058DrillEventEffectRecovery
+ 9. PASS github.com/xtianxx/txharbor/internal/recovery  TestT058WithdrawalEffectRestoreRetry
+10. PASS github.com/xtianxx/txharbor/internal/recovery  TestT059F1BackupUnusableCorruptTruncatedUnverified
+11. PASS github.com/xtianxx/txharbor/internal/recovery  TestT059F2RestoreInterruptionNotRestoredRebuildRerunIdempotent
+12. PASS github.com/xtianxx/txharbor/internal/recovery  TestT059F3IncompatibleProgramRefusedNoSilentDowngrade
+13. PASS github.com/xtianxx/txharbor/internal/recovery  TestT059F4ExternalLeadZeroReplayZeroAuthorityWrites
+14. PASS github.com/xtianxx/txharbor/internal/recovery  TestT059F5IsolationUnprovenRefusedAndNotInferred
+15. PASS github.com/xtianxx/txharbor/internal/recovery  TestT059F6UnprovableGapStaysUnknownWithPackageAndEscalation
+16. PASS github.com/xtianxx/txharbor/internal/recovery  TestT059F7UnauthorizedInsufficientStaleApprovalsRefused
+17. PASS github.com/xtianxx/txharbor/internal/recovery  TestT060DrillRepeatedVerifyApproveReleaseCloseNoFlips
+18. PASS github.com/xtianxx/txharbor/internal/recovery  TestT060DrillRestoreReentryConvergesWithSingleState
+19. PASS github.com/xtianxx/txharbor/internal/recovery  TestT060DrillInstanceCloseOnlyWhenAllReleasedAndIdempotent
+20. PASS github.com/xtianxx/txharbor/internal/recovery  TestT059F1BackupUnusableCorruptTruncatedUnverified/corrupt-verification
+21. PASS github.com/xtianxx/txharbor/internal/recovery  TestT059F1BackupUnusableCorruptTruncatedUnverified/edited-verified-manifest
+22. PASS github.com/xtianxx/txharbor/internal/recovery  TestT059F3IncompatibleProgramRefusedNoSilentDowngrade/incompatible-restore
