@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "generated_at": "2026-10-07T14:01:08.048287787Z",
+  "generated_at": "2026-10-07T14:35:22.574166719Z",
   "root": "/home/dream/product_env/TxHarbor/docs/evidence/019-normal-query-seg/raw",
   "factor_definition": "R = limiter_on（限流开关）；G = background_on（后台负载开关）；R1G1:nocoll = collect=false 的开销对照臂（不进因子对比）。",
   "factor_disclaimer": "差值对比（禁止相加/占比证明）：全部因子效应都是同一指标、同一 ID 集合上的臂间差值；分位数不可加，占比不构成因果或收益证明。",

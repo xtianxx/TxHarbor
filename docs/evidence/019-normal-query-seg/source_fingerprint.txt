@@ -35,7 +35,7 @@ edd4aca863159dae07d838083f0778b0f0d61cee29496f43848f5b3b8d641c44  docs/evidence/
 e84caa20fc7999d5ab148cb96d8344793310ef8272b8c6f74e2fdf7895179baa  docs/evidence/019-normal-query-seg/smoke/summary.json
 3a633127503a9703fe96b3d4bfc5d260e89b17653c4eef6e5ce9ea6c37313b89  docs/evidence/019-normal-query-seg/smoke/summary.md
 
-# v2 = rule-share signed floor (F1) + generator wording (F3/F4) — current; raw JSONL/logs untouched.
+# v2 = rule-share signed floor (F1) + generator wording (F3/F4) — superseded by v3 below; kept as history.
 # updated_at: 2026-10-07T14:05:00Z
 fc2c460ce430bfe812a5cdd58ad333626832ccd525b0c72aa31ebc8b3796a5aa  internal/perf/seg_stats.go
 ef7fee74a18fa8049d8a03372d1f3ec1e7952394cdea734e7029195d7c6d92a7  internal/perf/seg_analyze_test.go
@@ -45,3 +45,14 @@ af020d8d36c4ebe5fe359bb05f3c865e2b0e6d4db73ea1aa75ec079e32fbe43d  docs/evidence/
 b8a900489555474f2b123265a01b09b3e7190b3baddb279d66b8467a087f88c9  docs/evidence/019-normal-query-seg/raw/summary.md
 799c23c63fa581f367467728eb8e555bf5d1a104bf1392a5e86ca46bad598760  docs/evidence/019-normal-query-seg/smoke/summary.json
 5114d872c458ddbacb59a87b1cf09b94df3f1eda27a53f9280c6af5668c15352  docs/evidence/019-normal-query-seg/smoke/summary.md
+
+# v3 = F2/F4 wording only (README scopes + generator phase/no-ID text) — current; raw JSONL/logs untouched.
+# updated_at: 2026-10-07T14:36:00Z
+6fe86384a7b540a8a4a71dd4dad1eda6948fbce45e774b040fe145ed969ff047  internal/perf/seg_stats.go
+ef7fee74a18fa8049d8a03372d1f3ec1e7952394cdea734e7029195d7c6d92a7  internal/perf/seg_analyze_test.go
+cad80bbb91e83d269cacdb55b9202fb7a2279ceac2e7e24bfcffa57510317882  scripts/perfseg/run_batch.sh
+7b5d270ccb5aab82094e81b74d5fcbb0b3fd1c2827466cbcaab12eff60c67c23  docs/evidence/019-normal-query-seg/README.md
+2903bb5a0216379ebec0105704bb2d322baaf0680f691b12952ff24c563f15ba  docs/evidence/019-normal-query-seg/raw/summary.json
+e187a1a1f294f1dcdf615ec46c756290106c829f0c50abf81d1392f73284bf97  docs/evidence/019-normal-query-seg/raw/summary.md
+191fdef5d0db2e476df6728e6691f96c00f2c8a004f9d6e037d77d4e715d1be0  docs/evidence/019-normal-query-seg/smoke/summary.json
+7caa798ced620b247ea3866c14dbf5ed5a5ca2a599a8f768d9794d3367683bbd  docs/evidence/019-normal-query-seg/smoke/summary.md

@@ -59,7 +59,7 @@ TXHARBOR_SEG_ANALYZE_DIR=$PWD/docs/evidence/019-normal-query-seg/raw \
 | 客户端 query p95 | +11.3（−2.9/+14.7/+11.3） | −13.9（−15.2/−13.9/+71.7） | +25.7（+8.1/+46.4/+25.7） | +17.8（−4.2/+17.8/+86.0） |
 | below_admit p95 | −2.6（−2.6/−4.7/−2.6） | −24.2（−28.4/−24.2/+75.8） | +19.7（+19.7/+37.9/−1.3） | +18.4（−6.1/+18.4/+77.0） |
 
-- `admit` 全窗 p95：R1 臂 **6.07–19.97ms**（全 ID，含预热与 create；query-only 口径上界 20.23ms；含 burst 排队）；**规则口径（R1G0、[0s,8s) 相位、排除 burst）p95 中位 1.423ms（逐重复最大 1.522ms）** —— 健康态单次决策等待为毫秒级。
+- `admit` p95（**全采集期＝预热＋稳态**，非仅 12s 稳态窗）：R1 臂 **6.07–19.97ms**（全类 n=510/单元，含预热与 create；query-only n=470/单元，同样含预热，上界 20.23ms；含 burst 排队）；若只取 12s 稳态窗则 r3 R1G1 为 20.63ms（全类 n=414）/20.69ms（query n=390）——两种口径不得混用；**规则口径（R1G0、[0s,8s) 相位、排除 burst）p95 中位 1.423ms（逐重复最大 1.522ms）** —— 健康态单次决策等待为毫秒级。
 - `pg_total`（每请求语句耗时和）p95 中位 13.2–16.3ms；各因子对其影响 ≤~8ms（区间宽）。
 - 开销对照（nocoll）：p95 = 97.5 / 105.5 / 98.0（中位 98.0）vs 稳态 R1G1 76.2/94.4/167.6 —— 未配对异时参考，不能证明采集开销可忽略或给出上界（n 小，仅方向性）。
 - 不变量（分析器）：`server_total ≥ admit+below_admit(±0.05ms)` 6120 项、`sum(pgq) ≤ below_admit+1ms` 6120 项、`admit_skipped 仅在 limiter_off` 2820 项，**违规 0**；配对完整（稳态 client id 全部有 server_total）；无 >200ms 的离群样本（r3 R1G1 的 burst 簇 185–195ms 除外）。
@@ -70,6 +70,7 @@ TXHARBOR_SEG_ANALYZE_DIR=$PWD/docs/evidence/019-normal-query-seg/raw \
 - WSL2 wall clock 在运行中发生**回拨**：批次 12 个采集单元（另有 3 个 nocoll）中检出 6 次（2.06–3.03s），其中 4 次作用于窗口（`phase_method=step_corrected`，raw 8.93–9.89s → corrected 11.96–12.04s）、2 次发生在预热期（`applies_to_window=false`，相位保持 wall，窗口本就正确）；批次前冒烟样本 `smoke/` 检出 −2.4388s（id 111→112）。
 - 所有**时长**指标（客户端 DurationMS、段 dur_ns、pgq dur_ns）基于单调时钟，不受回拨影响；受影响的是 wall 时间戳派生的**相位分桶**与窗口跨度。
 - 分析器（`seg_stats.go`）按 id 升序检测步进；仅对 `first_affected_id > first_steady_id`（窗口内）的步进做单步校正（`summary.clock_steps`、`window_seconds_corrected`）；预热期步进不施加窗口校正（样本与 window_start 同位移，差值不变）。校正残差 ≤~0.1s。
+- 无 perf_id 的样本（本批具体范围）：12 个采集单元中仅 deposit 类 12 条/单元（不进入客户端 query 相位）；3 个 nocoll 单元全部 426 条/单元无 perf_id，其中 390 条 query 按**原始 wall 标签**入桶（`[39,100,250]`，另 1 条在 [0,12s) 之外），不参与 ID 校正。服务端 segments（含 create 类）均带 id，按统一口径校正。
 - 4 个 step_corrected 单元中 3 个（r1 R0G0、r2 R0G0、r2 R0G1）因 burst 落于 8s 边界前后呈 `[42,152,196]`（burst 被计入 [4s,8s)）；其余 9 个稳态单元为 `[39–42,100,250–251]`。规则1 所用 R1G0 三个重复均为 wall/干净分布。
 - 无 ~1s 级停顿痕迹（无 >200ms 样本）；回拨来源为宿主/虚拟化时钟同步，非本仓库代码。
 
