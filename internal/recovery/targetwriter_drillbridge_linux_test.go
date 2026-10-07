@@ -765,13 +765,94 @@ type drillCarrierStoreClass string
 const (
 	drillCarrierStoreClassic    drillCarrierStoreClass = "classic-overlay2"
 	drillCarrierStoreContainerd drillCarrierStoreClass = "containerd-snapshotter"
+
+	// drillCarrierStoreContainerdDriverType is the exact DriverStatus
+	// driver-type value of the containerd image store. It is only ever
+	// compared for equality against a decoded JSON string token; no
+	// substring, prefix, suffix or regexp match on the raw DriverStatus text
+	// is permitted (a substring test would wrongly admit e.g. v10, a wrapped
+	// string or an unrelated key carrying the same text).
+	drillCarrierStoreContainerdDriverType = "io.containerd.snapshotter.v1"
 )
 
+// drillCarrierStatusToken decodes one DriverStatus token. The token must be a
+// JSON string: the raw bytes are trimmed and must be delimited by quotes on
+// both ends before the JSON decoder is allowed to decode it, so numbers,
+// booleans, null, objects and arrays are refused instead of being coerced.
+func drillCarrierStatusToken(raw json.RawMessage) (string, bool) {
+	trimmed := bytes.TrimSpace(raw)
+	if len(trimmed) < 2 || trimmed[0] != '"' || trimmed[len(trimmed)-1] != '"' {
+		return "", false
+	}
+	var value string
+	if err := json.Unmarshal(trimmed, &value); err != nil {
+		return "", false
+	}
+	return value, true
+}
+
 // drillCarrierStoreClassify derives the store class from docker info driver
-// facts. The containerd snapshotter marker is checked first because the c8d
-// store also reports a driver whose status carries driver-type.
+// facts. The DriverStatus text is parsed as the documented [][]string matrix
+// and only an exact driver-type marker is accepted; the raw text is never
+// searched for substrings. The decision order is fail-closed:
+//
+//  1. structure: the status must decode as a JSON array of driver status rows
+//     (a bare string, an object, truncated JSON, null and [] are all refused);
+//  2. every row must have exactly two entries (one- or three-element rows are
+//     refused);
+//  3. every entry must be a JSON string token (bytes.TrimSpace plus outer
+//     quote check, then a JSON decode into a string; number/null/object/array
+//     tokens are refused);
+//  4. the rows whose key is exactly "driver-type" are collected: a value that
+//     is not exactly drillCarrierStoreContainerdDriverType is refused
+//     (covering v10, wrapped strings, empty strings and the like) and more
+//     than one such row is refused as a duplicate or conflicting marker
+//     (v1+v1 and v1+v10 both fail);
+//  5. exactly one driver-type row with the exact marker selects the containerd
+//     store, even when the reported driver is overlay2: the marker outranks the
+//     driver name;
+//  6. without any driver-type row only the exact driver "overlay2" (surrounding
+//     whitespace trimmed) is the classic store;
+//  7. anything else (vfs, an overlayfs driver without the marker, an empty
+//     driver) is refused.
+//
+// Evidence: docs/evidence/017-carrier-identity-r1-strict-classifier/ pins this
+// classifier strictness; docs/evidence/016-carrier-image-identity/ pins the
+// content-chain constants consumed by drillVerifyCarrierIdentity below.
 func drillCarrierStoreClassify(driver, driverStatusJSON string) (drillCarrierStoreClass, error) {
-	if strings.Contains(driverStatusJSON, "io.containerd.snapshotter.v1") {
+	var rows [][]json.RawMessage
+	if err := json.Unmarshal([]byte(driverStatusJSON), &rows); err != nil {
+		return "", fmt.Errorf("docker image store driver status is not a JSON array of driver status rows: %v", err)
+	}
+	if len(rows) == 0 {
+		return "", errors.New("docker image store driver status is empty; store class is undecidable")
+	}
+	var driverTypeValues []string
+	for _, row := range rows {
+		if len(row) != 2 {
+			return "", fmt.Errorf("docker image store driver status row has %d entries, want exactly 2", len(row))
+		}
+		key, ok := drillCarrierStatusToken(row[0])
+		if !ok {
+			return "", errors.New("docker image store driver status key is not a JSON string")
+		}
+		value, ok := drillCarrierStatusToken(row[1])
+		if !ok {
+			return "", errors.New("docker image store driver status value is not a JSON string")
+		}
+		if key == "driver-type" {
+			driverTypeValues = append(driverTypeValues, value)
+		}
+	}
+	for _, value := range driverTypeValues {
+		if value != drillCarrierStoreContainerdDriverType {
+			return "", fmt.Errorf("docker image store driver-type %q is not the recognized containerd snapshotter marker", value)
+		}
+	}
+	if len(driverTypeValues) > 1 {
+		return "", fmt.Errorf("docker image store driver status has %d driver-type rows; duplicate or conflicting markers are refused", len(driverTypeValues))
+	}
+	if len(driverTypeValues) == 1 {
 		return drillCarrierStoreContainerd, nil
 	}
 	if strings.TrimSpace(driver) == "overlay2" {

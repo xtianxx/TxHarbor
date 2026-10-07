@@ -1,0 +1,22 @@
+{"Time":"2026-10-07T09:57:40.979578304+08:00","Action":"start","Package":"github.com/xtianxx/txharbor/internal/recovery"}
+{"Time":"2026-10-07T09:57:41.05884321+08:00","Action":"output","Package":"github.com/xtianxx/txharbor/internal/recovery","Output":"2026/10/07 09:57:41 github.com/testcontainers/testcontainers-go - Connected to docker: \n"}
+{"Time":"2026-10-07T09:57:41.058942597+08:00","Action":"output","Package":"github.com/xtianxx/txharbor/internal/recovery","Output":"  Server Version: 29.6.1\n"}
+{"Time":"2026-10-07T09:57:41.058961289+08:00","Action":"output","Package":"github.com/xtianxx/txharbor/internal/recovery","Output":"  API Version: 1.55\n"}
+{"Time":"2026-10-07T09:57:41.058967405+08:00","Action":"output","Package":"github.com/xtianxx/txharbor/internal/recovery","Output":"  Operating System: Ubuntu 24.04.4 LTS\n"}
+{"Time":"2026-10-07T09:57:41.058973026+08:00","Action":"output","Package":"github.com/xtianxx/txharbor/internal/recovery","Output":"  Total Memory: 15915 MB\n"}
+{"Time":"2026-10-07T09:57:41.058978305+08:00","Action":"output","Package":"github.com/xtianxx/txharbor/internal/recovery","Output":"  Testcontainers for Go Version: v0.44.0\n"}
+{"Time":"2026-10-07T09:57:41.058984345+08:00","Action":"output","Package":"github.com/xtianxx/txharbor/internal/recovery","Output":"  Resolved Docker Host: unix:///var/run/docker.sock\n"}
+{"Time":"2026-10-07T09:57:41.058994142+08:00","Action":"output","Package":"github.com/xtianxx/txharbor/internal/recovery","Output":"  Resolved Docker Socket Path: /var/run/docker.sock\n"}
+{"Time":"2026-10-07T09:57:41.058999223+08:00","Action":"output","Package":"github.com/xtianxx/txharbor/internal/recovery","Output":"  Test SessionID: 080d53ecbdc8aa1a2e55b37549a7cef862d4eb071e344e5c0f9c1ef8fa6964f4\n"}
+{"Time":"2026-10-07T09:57:41.059004259+08:00","Action":"output","Package":"github.com/xtianxx/txharbor/internal/recovery","Output":"  Test ProcessID: f6090ef8-bf8c-40b7-bff8-982884760dfd\n"}
+{"Time":"2026-10-07T09:57:41.064986183+08:00","Action":"run","Package":"github.com/xtianxx/txharbor/internal/recovery","Test":"TestDrillProvisionNativePGToolsCarrierSeal"}
+{"Time":"2026-10-07T09:57:41.065083762+08:00","Action":"output","Package":"github.com/xtianxx/txharbor/internal/recovery","Test":"TestDrillProvisionNativePGToolsCarrierSeal","Output":"=== RUN   TestDrillProvisionNativePGToolsCarrierSeal\n"}
+{"Time":"2026-10-07T09:57:44.778658967+08:00","Action":"output","Package":"github.com/xtianxx/txharbor/internal/recovery","Test":"TestDrillProvisionNativePGToolsCarrierSeal","Output":"--- PASS: TestDrillProvisionNativePGToolsCarrierSeal (3.71s)\n"}
+{"Time":"2026-10-07T09:57:44.778762168+08:00","Action":"pass","Package":"github.com/xtianxx/txharbor/internal/recovery","Test":"TestDrillProvisionNativePGToolsCarrierSeal","Elapsed":3.71}
+{"Time":"2026-10-07T09:57:44.778785719+08:00","Action":"run","Package":"github.com/xtianxx/txharbor/internal/recovery","Test":"TestDrillArmRefusesReplacedELFAndPreStartTamper"}
+{"Time":"2026-10-07T09:57:44.778794646+08:00","Action":"output","Package":"github.com/xtianxx/txharbor/internal/recovery","Test":"TestDrillArmRefusesReplacedELFAndPreStartTamper","Output":"=== RUN   TestDrillArmRefusesReplacedELFAndPreStartTamper\n"}
+{"Time":"2026-10-07T09:57:51.591893912+08:00","Action":"output","Package":"github.com/xtianxx/txharbor/internal/recovery","Test":"TestDrillArmRefusesReplacedELFAndPreStartTamper","Output":"--- PASS: TestDrillArmRefusesReplacedELFAndPreStartTamper (6.81s)\n"}
+{"Time":"2026-10-07T09:57:51.59200043+08:00","Action":"pass","Package":"github.com/xtianxx/txharbor/internal/recovery","Test":"TestDrillArmRefusesReplacedELFAndPreStartTamper","Elapsed":6.81}
+{"Time":"2026-10-07T09:57:51.59202645+08:00","Action":"output","Package":"github.com/xtianxx/txharbor/internal/recovery","Output":"PASS\n"}
+{"Time":"2026-10-07T09:57:51.593975518+08:00","Action":"output","Package":"github.com/xtianxx/txharbor/internal/recovery","Output":"ok  \tgithub.com/xtianxx/txharbor/internal/recovery\t10.614s\n"}
+{"Time":"2026-10-07T09:57:51.594045292+08:00","Action":"pass","Package":"github.com/xtianxx/txharbor/internal/recovery","Elapsed":10.614}
