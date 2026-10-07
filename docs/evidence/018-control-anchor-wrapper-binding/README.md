@@ -59,7 +59,7 @@ internal/recovery/targetwriter_drillbridge_linux_test.go:458   (DrillOpenOriginE
 
 ### 1.4 去掉 override 的对照同样失败（override 不是唯一成因）
 
-同一 wrapper 装配、只去掉 `TESTCONTAINERS_HOST_OVERRIDE`（保留 socket override）的对照运行，仍在同一行失败：见 `MANIFEST.txt` §“Control variant without TESTCONTAINERS_HOST_OVERRIDE”（源：`.evidence/drill-runner-env/topology-repro/wrapper/no-override/run.out`，`run.rc = 1`，窗口 `2026-10-07T03:56:49Z → 03:56:57Z`）。原因在
+同一 wrapper 装配、只去掉 `TESTCONTAINERS_HOST_OVERRIDE`（保留 socket override）的对照运行，仍在同一行失败：见 `MANIFEST.txt` §“Control variant without TESTCONTAINERS_HOST_OVERRIDE”（源：`.evidence/drill-runner-env/topology-repro/wrapper/no-override/run.out`——树外溯源、仅供参考、不替代入仓证据；仓内承重证据即上文 `MANIFEST.txt` 摘要。`run.rc = 1`，窗口 `2026-10-07T03:56:49Z → 03:56:57Z`）。原因在
 `docker.go:1636-1647`：`core.InAContainer()`（`internal/core/docker_host.go:320` 的 `DockerEnvFile = "/.dockerenv"`，判定见 `:324-333`）为真时，testcontainers 改为在容器内**推断默认网络网关 IP**：
 `:1641` `p.getGatewayIP(ctx, defaultNetwork)`，失败则 `:1643` `core.DefaultGatewayIP()`；后者（`internal/core/docker_host.go:46-48`）是 `sh -c "ip route|awk '/default/ { print $3 }'"`，而该镜像里**没有 `ip`**（`probe.log:123` “ip command unavailable”），最终落到 `:1646-1647` 的 `ip = "localhost"`（容器内 localhost 仍是容器自身，控制连接仍从容器接口发出）。因此 loopback 假设的失效来自**容器化拓扑本身**，与 override 无关。
 
@@ -146,8 +146,8 @@ wrapper 容器（`logs/postfix-wrapper/run.log`）：
 - **独立 netns**：容器内 `/proc/self/ns/net == /proc/1/ns/net == net:[4026532379]`，宿主 `/proc/self/ns/net == net:[4026531833]`（`probe.log:174-177`、`S4.4 :234-239`）；容器内 `/proc/self` 是 pid 17（`:176-177`），与宿主 docker top 里的 pid 不同 → 独立 PID 名空间。
 - **地址**：容器 `/etc/hosts` 含 `172.17.0.1 host.docker.internal`、`172.17.0.2 <container-hostname>`（`:118-119`、`S4.5 :241`）；镜像无 `ip`（`:123`），由 `/proc/net/fib_trie` 可见 `172.17.0.2/32 host LOCAL` on eth0、`172.17.0.0/16 link`（`S4.5 :243-244`）；宿主 `docker0 172.17.0.1/16`（`:18,242`），`docker inspect` 容器 IP `172.17.0.2`（`:96-97`）。
 - **探针实测拨号**：`/proc/net/tcp` 行 `020011AC:A9AA 010011AC:A112 st=01`（`:180-182`）→ local `172.17.0.2:43434`（容器接口，非 loopback）、remote `172.17.0.1:41234`（宿主网关），宿主镜像行 `010011AC:A112 020011AC:A9AA st=01` 与 `ss ESTAB 172.17.0.1:41234 <- 172.17.0.2:43434`（`:210-211`）；容器内 Go `net.Dial`（与锚点捕获相同的调用）`local=172.17.0.2:52952 local_ip_is_loopback=false remote=172.17.0.1:41234`（`:186-188`、`SECTION 3 :193-196`）。
-- **真实控制连接**（wrapper 内，`S4.2 :215-224`，原始 `wrapper/tuple-watch/…`）`020011AC:9144 010011AC:AE81 01` / `020011AC:914A 010011AC:AE81 01` → local `172.17.0.2:37188/37194` remote `172.17.0.1:44673`；宿主同端口镜像 `172.17.0.1:44673 <- 172.17.0.2:37188/:37194`。
-- **真实控制连接**（宿主，`S4.3 :225-233`，原始 `host/tuple-watch.out`）`0100007F:B758/B75A 0100007F:AE83 01` → local `127.0.0.1:46936/:46938` remote `127.0.0.1:44675`，fd 属主 `users:(("recovery.test",pid=344264,fd=8/fd=9))` → **宿主侧确实 loopback**（这正是 `:162` 想断言的东西，因此原断言只在宿主拓扑下偶然成立）。
+- **真实控制连接**（wrapper 内，`S4.2 :215-224`；原始观测流溯源 `.evidence/drill-runner-env/topology-repro/wrapper/tuple-watch/…`——该原始流本身在树外、仅供参考、不替代入仓证据；同组数值的仓内派生注释见 `logs/wrapper-prefix/probe.log:215-224`，修复后实测见 `logs/postfix-wrapper/run.log` 的 accepted 行）`020011AC:9144 010011AC:AE81 01` / `020011AC:914A 010011AC:AE81 01` → local `172.17.0.2:37188/37194` remote `172.17.0.1:44673`；宿主同端口镜像 `172.17.0.1:44673 <- 172.17.0.2:37188/:37194`。
+- **真实控制连接**（宿主，`S4.3 :225-233`；原始观测流溯源 `.evidence/drill-runner-env/topology-repro/host/tuple-watch.out`——该原始流本身在树外、仅供参考、不替代入仓证据；同组数值的仓内派生注释见 `logs/wrapper-prefix/probe.log:225-233`（`:198-199` 标记为 ANNOTATION/DERIVED），摘要见 `MANIFEST.txt:28-30`；另一轮运行的独立 loopback 支撑见 `logs/postfix-host/run.log` 的 accepted 行）`0100007F:B758/B75A 0100007F:AE83 01` → local `127.0.0.1:46936/:46938` remote `127.0.0.1:44675`，fd 属主 `users:(("recovery.test",pid=344264,fd=8/fd=9))` → **宿主侧确实 loopback**（这正是 `:162` 想断言的东西，因此原断言只在宿主拓扑下偶然成立）。
 - 段 4（`:198-244`）是唯一派生内容（hex→点分 IP 解码），已显式标注；段 1-3 为原始日志逐字拼接（`probe.log:1-9`）。
 
 ---
@@ -206,11 +206,13 @@ wrapper 容器（`logs/postfix-wrapper/run.log`）：
 | `logs/race/env.txt` | `451e4ebd5bc37ce166f94e9d1a8bb29feb5f7a6f2111ad4aee80c8c81e272d23` | 本批新产出 |
 | `logs/proc-fd-permission-probe.txt` | `a71976b23e47756938b8b086c533e3ec903ded9db04cb008a97201ca9e4076f2` | 本批新产出 |
 | `logs/remote-run-37562840720-extract.txt` | `3e80cb7659839e777adf0f26e1b34e388a045ce1e667ac50f72e8977a24cd7ff` | 本批新产出（远程工件只读摘要） |
-| `env.txt` | `5917eab859a3af7480f1bde0d59ee2742208ed4ec4ecb658688210f64d7ff10f` | 本批新产出 |
+| `env.txt` | `9a3eb7caaf948664376bafb603fafeacdb8db25aacb6d35787f5d448cc477928` | 本批新产出 |
 
 所有“对应源”项的复制均逐文件 `sha256` 复核为**字节相同**（上表两侧同值；复核命令见 §6.3）。`SHA256SUMS` 覆盖本目录除自身外的全部文件，`sha256sum -c SHA256SUMS` 通过（见 §6.3）。
 
-> 注：证据副本扩展名由 `.out` 改为 `.log`（仓库 `.gitignore` 排除 `*.out`，017 轮起按此约定处理）；文件字节与 `sha256` 不变（见上表）；表中“对应源”列的 `.out` 名是 `.evidence` 暂存目录中的原始源文件。
+> **入仓补齐披露（两提交）**：本目录首次入仓提交 `320fabe4fd245febcc1f7514271e9f590b45b124` 的清单曾因仓库 `.gitignore` 的 `*.out` 规则**漏入 6 份核心运行日志**（`host-prefix/run`、`wrapper-prefix/run`、`wrapper-prefix/probe`、`postfix-host/run`、`postfix-wrapper/run`、`race/run`），其 `SHA256SUMS` 行因此**引用了树外文件**；后继提交 `0ae563c576316425826466674f0789b552a2bc52` 按 017 轮已入仓的同一约定（`.out` 不入仓）将副本改名 `.log` 并补齐入仓、同步修正 README/env 引用、重算清单（19/19）。**日志字节未变**——两提交清单中对应六项散列逐一全等；**提交历史未改写**——`320fabe` 原样保留且为 `0ae563c` 的祖先，无 amend/rebase/squash。
+>
+> 表中“对应源”列的 `.out` 名一律是 `.evidence/drill-runner-env/topology-repro/` 内的**树外原始溯源**，仅说明对应关系并提供交叉复核路径（race 项无树外源、属本批新产出，其字节不变同样由两提交清单散列全等证明）；**来源引用不替代入仓证据**，承重证据一律以本目录入仓文件为准。
 
 ### 6.3 复核命令
 
@@ -221,7 +223,7 @@ sha256sum -c SHA256SUMS
 grep -riE 'token|auth|password|secret' logs/ env.txt   # 脱敏扫描
 ```
 
-脱敏：`grep -riE 'token|auth|password|secret' logs/ env.txt README.md MANIFEST.txt` 的全部命中都是**非凭据**文本——测试名中的 `Auth`/`Authority`/`Unauthorized` 子串（`logs/remote-run-37562840720-extract.txt` 的 `TestBorrowedAuthEntryProbeFDChildProcess`、`TestT059F4…AuthorityWrites`、`TestT059F7Unauthorized…`）、§6.3 本行命令自身、以及 `MANIFEST.txt` 的“No secrets …”声明；**无任何凭据值**。PG 口令为仓库公开虚构值 `txharbor`（本目录日志中亦未出现），未引入其它凭据；日志中只有 loopback/RFC1918 地址、容器 id、镜像摘要、工具版本与测试输出。
+脱敏与保留范围：对 `logs/`、`env.txt`、`README.md`、`MANIFEST.txt` 扫描认证材料（`password|token|secret|api[_-]?key|-----BEGIN` 及 `auth` 子串）**未命中任何凭据值**——`auth` 的全部命中均为非凭据文本（测试名 `Auth`/`Authority`/`Unauthorized` 子串，见 `logs/remote-run-37562840720-extract.txt` 的 `TestBorrowedAuthEntryProbeFDChildProcess`、`TestT059F4…AuthorityWrites`、`TestT059F7Unauthorized…`；§6.3 本行命令自身；`MANIFEST.txt` 的“No secrets …”声明）；PG 口令为仓库公开虚构值 `txharbor`（本目录日志中亦未出现）。本目录**并非完全匿名**：为保留可复核的诊断来源信息，日志/env 按**原始字节**入仓，其中保留本机账户名（`dream`：`logs/wrapper-prefix/probe.log:100-102`、`logs/proc-fd-permission-probe.txt:10`）、宿主名（`DESKTOP-TXT123`：`logs/host-prefix/env.txt:40`、`logs/race/env.txt:13`）与绝对路径（`/home/dream/...`：`logs/host-prefix/env.txt:4,9`、`logs/race/env.txt:11`、`logs/wrapper-prefix/cmd.txt:1`）；本轮不修改这些日志字节，如需匿名化须另行整体处理并重算清单。
 
 ---
 
@@ -233,5 +235,6 @@ grep -riE 'token|auth|password|secret' logs/ env.txt   # 脱敏扫描
   - **必验集合 22/22 PASS**（同文件 `required_cases` 共 22 项、`status` 全 `PASS`；本测试 `TestControlAnchorCaptureMatchesActualControlOwner` **不在** `required_cases` 内 → 非必验；摘录与 22 项清单见 `logs/remote-run-37562840720-extract.txt:16-17,55-77`）；
   - 失败面收敛：`--log-failed` 中唯一失败包 = `internal/recovery`（`Output: FAIL\tgithub.com/xtianxx/txharbor/internal/recovery\t2954.206s`，`extract:28`），该包内唯一失败测试 = 本测试（`control-anchor-mini_linux_test.go:163: anchor local tuple is not a loopback TCP endpoint`，`extract:22-23`），传播为 `make: *** [Makefile:76: test-drill] Error 1`（`extract:51`）、`Process completed with exit code 2`；日志同时包含 `All required drill scenarios and restore-dependent subtests passed.`（`extract:52`）
   - 即：远程 FAIL 的成因是本批修复的这**一个非必验测试**在 wrapper 拓扑下的宿主 loopback 假设；本批只做该点局部修复，**不冒称完整 drill 通过**。
+- **树外溯源不替代入仓证据**：`.evidence/drill-runner-env/topology-repro/` 为只读、git-excluded 的原始溯源；承重证据一律以本目录入仓文件（六份 `.log`、`run.rc`、`env.txt`、`MANIFEST.txt`、`SHA256SUMS`）为准，来源引用仅用于交叉复核路径说明。
 - 不改必验集合、不改预算、不改 `check.go`、不改任何源码（仅 `internal/recovery/control-anchor-mini_linux_test.go` 一个测试文件）；未修改 `.evidence/` 内任何源文件（本目录全部内容为复制件或本批新产出）。
 - 未验证项：提交后的 git blob 指纹（由主报告按 commit 核实）；远程 CI 上的复跑结果（本批未触发）。
