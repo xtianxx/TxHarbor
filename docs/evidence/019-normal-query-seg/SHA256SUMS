@@ -1,4 +1,4 @@
-5702a34cb7d5f981f45752af696d64f796da4ea99d0a5fa3e79164cd686c2eae  ./README.md
+af020d8d36c4ebe5fe359bb05f3c865e2b0e6d4db73ea1aa75ec079e32fbe43d  ./README.md
 9550ab076001d8f192a4e07aac67e6332ede7ac59c03645484772fc128bbb1ac  ./raw/logs/overhead1.log.gz
 9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa  ./raw/logs/overhead1.rc
 ea23725932312228305469ecb04cf3723ebe84cbaa97719f4c30b2a5b146845d  ./raw/logs/overhead2.log.gz
@@ -145,13 +145,13 @@ a3161303805b934317bd3c4551e03b3953c793f9fa78982e9eacf708955b6414  ./raw/repeat3/
 2287e7db2217c104d04c039206a14dfd7c5307960f500b90234b3248e6fad67a  ./raw/repeat3/R1G1/serve_stderr.log.gz
 002275ac53dc55fa74eaa2530361f23aade1c47d5912444c86c1e6a6d50c0f6b  ./raw/repeat3/R1G1/server_segments.jsonl.gz
 0980d5d2b204df347fa62265ec586b89e08688f230299582f10c6e79b1ace79f  ./raw/repeat3/R1G1/warmup_samples.jsonl.gz
-012c6b0ffbf06213ed2f93b09140d96cfe6cde8234ac1bcab3c57b5bacda542c  ./raw/summary.json
-edd4aca863159dae07d838083f0778b0f0d61cee29496f43848f5b3b8d641c44  ./raw/summary.md
+9bd61f37160f41a9e5cab8a8d1161603121e3d8be4a478c0be18c88c3e048362  ./raw/summary.json
+b8a900489555474f2b123265a01b09b3e7190b3baddb279d66b8467a087f88c9  ./raw/summary.md
 b944d6ad89625ae39f35e8555c336099fb1ac31f3f0f4c8d2b92e6b50811cdaa  ./smoke/README.txt
 28a4b70a79dfc0b15be91fa230368ee3d6e1bf455c2a282d3e226e90d65e2388  ./smoke/client_samples.jsonl.gz
 e8a9de259f1bb3f70c1c5bf5d4a7f025ee1c9266df83c87150334996a214ad64  ./smoke/meta.json
 12bd6ab6023e1d6cc2f15947059f6106932e1f5a30f600dcbf3da2afdbcf62c4  ./smoke/server_segments.jsonl.gz
-e84caa20fc7999d5ab148cb96d8344793310ef8272b8c6f74e2fdf7895179baa  ./smoke/summary.json
-3a633127503a9703fe96b3d4bfc5d260e89b17653c4eef6e5ce9ea6c37313b89  ./smoke/summary.md
+799c23c63fa581f367467728eb8e555bf5d1a104bf1392a5e86ca46bad598760  ./smoke/summary.json
+5114d872c458ddbacb59a87b1cf09b94df3f1eda27a53f9280c6af5668c15352  ./smoke/summary.md
 f887f39344864c0d8705c3190fc107fb71cc9c098e088ae81c3739a2cd785e0d  ./smoke/warmup_samples.jsonl.gz
-07dde8264cdcc2780d225e8f799d7811f09ad14f97a0106dd33e9f02e804d4dc  ./source_fingerprint.txt
+5bb8cae8a16bc2f9c452fbc22f9b4824c7776c70007f4008d2176e2813cb6d07  ./source_fingerprint.txt

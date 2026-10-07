@@ -2415,7 +2415,7 @@ func segRuleREffect(effects []segMetricEffects) segRuleCheck {
 func segRuleREffectShare(effects []segMetricEffects) segRuleCheck {
 	check := segRuleCheck{
 		Rule: "候选规则，非裁决：客户端 query p95 的 R 效应 @G1 占总差（R1G1−R0G0）≥50%",
-		Note: "占比仅作候选规则标注，不构成因果或收益证明；总差 ≤0.05ms 的重复不计入。",
+		Note: "占比仅作候选规则标注，不构成因果或收益证明；总差（R1G1−R0G0）≤0.05ms（含非正值，此时占比无定义）的重复不计入。",
 	}
 	metric := segFindMetric(effects, "client_query_p95_ms")
 	if metric == nil {
@@ -2436,7 +2436,11 @@ func segRuleREffectShare(effects []segMetricEffects) segRuleCheck {
 	}
 	var pairs []segRepeatValue
 	for _, p := range total.PerRepeat {
-		if math.Abs(p.Value) < segRuleShareFloorMS {
+		// Signed floor, not |total|: the share is undefined for a
+		// non-positive or near-zero total difference (dividing by a
+		// negative total flips the sign of the ratio, which says nothing
+		// about a ≥50% R effect), so such repeats are dropped.
+		if p.Value <= segRuleShareFloorMS {
 			continue
 		}
 		effect, ok := byRepeat[p.Repeat]
@@ -2448,7 +2452,7 @@ func segRuleREffectShare(effects []segMetricEffects) segRuleCheck {
 	check.PerRepeat = pairs
 	if len(pairs) == 0 {
 		check.Status = segRuleInsufficient
-		check.Observed = fmt.Sprintf("总差（R1G1−R0G0）在全部重复内都 < %.2fms", segRuleShareFloorMS)
+		check.Observed = fmt.Sprintf("总差（R1G1−R0G0）在全部重复内都 ≤ %.2fms（含非正值，占比无定义）", segRuleShareFloorMS)
 		return check
 	}
 	vals := segSortedValues(pairs)
@@ -2801,7 +2805,7 @@ func segRenderMarkdown(rep *segReport) string {
 	}
 	b.WriteString("\n")
 
-	b.WriteString("相位口径：相位分桶基于**校正后标签**（详见 §11 时钟步进与校正）；phase_method=wall 表示未检测到回拨。\n\n")
+	b.WriteString("相位口径：相位分桶基于**校正后标签**（详见 §11 时钟步进与校正）；phase_method=wall 表示本窗口未施加时钟校正（可能检出回拨但均发生在稳态窗口之前）。\n\n")
 	b.WriteString("## 2. 每臂×重复：客户端与相位\n\n")
 	rows := [][]string{}
 	for _, arm := range rep.Arms {
@@ -3009,7 +3013,7 @@ func segRenderMarkdown(rep *segReport) string {
 	b.WriteString("## 11. 时钟步进与校正（wall clock 回拨）\n\n")
 	b.WriteString("- 检测口径：每臂 server_total 记录按 **id 升序**取相邻标签差 Δ；Δ<−50ms 记为回拨步进并校正；Δ>+500ms 记为「可疑前跳/停顿」（ambiguous=true），只披露不校正。\n")
 	b.WriteString("- 适用范围：**仅当** first_affected_id > first_steady_id（稳态 client perf_id 最小值；预热样本不参与该判定）时，步进才视为作用于窗口；预热期回拨不校正（window_start 与稳态标签同处位移后的时基），window_start 永不校正。\n")
-	b.WriteString("- 校正口径：以适用步进的边界 id 为序，对 id > boundary_id 的记录标签加 Σ|回拨|；segments 与带 perf_id 的客户端样本统一校正，无 id 的样本不参与相位。\n")
+	b.WriteString("- 校正口径：以适用步进的边界 id 为序，对 id > boundary_id 的记录标签加 Σ|回拨|；相位仅覆盖 query 类样本；无 perf_id 的 query 样本（本批为 3 个 nocoll 单元）以原始 wall 标签入桶、不参与 ID 校正；segments 与带 perf_id 的客户端样本统一校正。\n")
 	b.WriteString("- 相位：相位分桶一律使用**校正后标签**与 window_start；原始 wall 相位计数保留为 `client_query_phases_wall` 供审计。\n")
 	b.WriteString("- 窗口：window_seconds 为原始 wall 时长；window_seconds_corrected = 原始 + Σ(作用于窗口的回拨 |Δ|)（无适用步进时即为原始值）；作用于窗口的可疑前跳则标注不可判定原因。\n")
 	b.WriteString("- 限制：前跳不可判（停顿/GC/事件循环阻塞与时钟前跳不可区分）；跨机绝对时间不可比；时长类指标（duration_ms / dur_ns）取自单调时钟，不受回拨影响；Σ|Δ| 含一次正常请求间隔，校正后标签可能仍偏早约一个间隔（≈0.1s），相位归类可用、精确时刻不可复原。\n\n")

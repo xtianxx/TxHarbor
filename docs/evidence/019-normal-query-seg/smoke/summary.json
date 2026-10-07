@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "generated_at": "2026-10-07T12:33:34.935298575Z",
+  "generated_at": "2026-10-07T14:02:27.85788758Z",
   "root": "/home/dream/product_env/TxHarbor/.evidence/seg-smoke",
   "factor_definition": "R = limiter_on（限流开关）；G = background_on（后台负载开关）；R1G1:nocoll = collect=false 的开销对照臂（不进因子对比）。",
   "factor_disclaimer": "差值对比（禁止相加/占比证明）：全部因子效应都是同一指标、同一 ID 集合上的臂间差值；分位数不可加，占比不构成因果或收益证明。",
@@ -1172,7 +1172,7 @@
       "rule": "候选规则，非裁决：客户端 query p95 的 R 效应 @G1 占总差（R1G1−R0G0）≥50%",
       "status": "证据不足",
       "observed": "R@G1 或总差的重复级数值缺失",
-      "note": "占比仅作候选规则标注，不构成因果或收益证明；总差 ≤0.05ms 的重复不计入。"
+      "note": "占比仅作候选规则标注，不构成因果或收益证明；总差（R1G1−R0G0）≤0.05ms（含非正值，此时占比无定义）的重复不计入。"
     }
   ],
   "pairing_totals": {

@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "generated_at": "2026-10-07T12:29:52.013797178Z",
+  "generated_at": "2026-10-07T14:01:08.048287787Z",
   "root": "/home/dream/product_env/TxHarbor/docs/evidence/019-normal-query-seg/raw",
   "factor_definition": "R = limiter_on（限流开关）；G = background_on（后台负载开关）；R1G1:nocoll = collect=false 的开销对照臂（不进因子对比）。",
   "factor_disclaimer": "差值对比（禁止相加/占比证明）：全部因子效应都是同一指标、同一 ID 集合上的臂间差值；分位数不可加，占比不构成因果或收益证明。",
@@ -11374,13 +11374,9 @@
     },
     {
       "rule": "候选规则，非裁决：客户端 query p95 的 R 效应 @G1 占总差（R1G1−R0G0）≥50%",
-      "status": "满足",
-      "observed": "跨重复中位数占比=73.6%（逐重复 n=3）",
+      "status": "不满足",
+      "observed": "跨重复中位数占比=15.3%（逐重复 n=2）",
       "per_repeat": [
-        {
-          "repeat": 1,
-          "value": 2.1529362629894986
-        },
         {
           "repeat": 2,
           "value": -0.4296302685651264
@@ -11390,8 +11386,8 @@
           "value": 0.7360435363306839
         }
       ],
-      "median_ms": 0.736044,
-      "note": "占比仅作候选规则标注，不构成因果或收益证明；总差 ≤0.05ms 的重复不计入。"
+      "median_ms": 0.153207,
+      "note": "占比仅作候选规则标注，不构成因果或收益证明；总差（R1G1−R0G0）≤0.05ms（含非正值，此时占比无定义）的重复不计入。"
     }
   ],
   "pairing_totals": {

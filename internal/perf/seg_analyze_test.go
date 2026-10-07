@@ -1171,3 +1171,103 @@ func TestSegAnalyzeSyntheticClock(t *testing.T) {
 		t.Fatalf("write summary: %v", err)
 	}
 }
+
+// TestSegAnalyzeRuleShareSignedFloor pins the signed floor of the candidate
+// rule "客户端 query p95 的 R 效应 @G1 占总差（R1G1−R0G0）≥50%" (rule 3).
+//
+// The share is undefined when the total difference (R1G1−R0G0) is
+// non-positive or ≤ segRuleShareFloorMS, so such repeats must be dropped from
+// the cross-repeat sample. Regression: the |total| filter kept the frozen
+// batch's repeat 1 (total −7.0634ms, ratio −15.20705/−7.0634 = +2.1530), which
+// inflated the median from 0.1532 to 0.7360 and flipped the verdict to 满足.
+func TestSegAnalyzeRuleShareSignedFloor(t *testing.T) {
+	effects := func(total, rAtG1 []segRepeatValue) []segMetricEffects {
+		series := func(values []segRepeatValue) segSeries {
+			return segSeries{PerRepeat: values, MedianMS: segFinitePtr(segPercentile(segSortedValues(values), 50))}
+		}
+		return []segMetricEffects{{
+			Metric: "client_query_p95_ms",
+			Effects: map[string]segSeries{
+				"R_at_G1":                 series(rAtG1),
+				"total_diff_R0G0_to_R1G1": series(total),
+			},
+		}}
+	}
+
+	// Case A mirrors the frozen evidence (docs/evidence/019-normal-query-seg/raw):
+	// repeat 1's total is negative, so its ratio is a pure sign artifact.
+	t.Run("negative total is dropped", func(t *testing.T) {
+		check := segRuleREffectShare(effects(
+			[]segRepeatValue{
+				{Repeat: 1, Value: -7.0634},
+				{Repeat: 2, Value: 32.4614},
+				{Repeat: 3, Value: 97.37155},
+			},
+			[]segRepeatValue{
+				{Repeat: 1, Value: -15.20705},
+				{Repeat: 2, Value: -13.9464},
+				{Repeat: 3, Value: 71.6697},
+			},
+		))
+		if got := check.Status; got != segRuleViolated {
+			t.Errorf("status = %s, want %s (median %v, observed %q)", got, segRuleViolated, check.MedianMS, check.Observed)
+		}
+		if len(check.PerRepeat) != 2 {
+			t.Fatalf("per_repeat n = %d (%v), want 2 (repeat 1's non-positive total must not contribute a ratio)",
+				len(check.PerRepeat), check.PerRepeat)
+		}
+		for _, p := range check.PerRepeat {
+			if p.Repeat != 2 && p.Repeat != 3 {
+				t.Errorf("per_repeat contains repeat %d (value %.6f), want only repeats 2/3", p.Repeat, p.Value)
+			}
+		}
+		// Exact ratio median = 0.15320663388…, stored as segRound6 → 0.153207.
+		segSynthApprox(t, "share median without repeat 1", check.MedianMS, 0.153207)
+	})
+
+	// Case B: every total (signed) is ≤ segRuleShareFloorMS, including a
+	// negative magnitude well above it and the boundary value itself.
+	t.Run("no repeat clears the floor", func(t *testing.T) {
+		check := segRuleREffectShare(effects(
+			[]segRepeatValue{
+				{Repeat: 1, Value: -3.0},
+				{Repeat: 2, Value: segRuleShareFloorMS},
+				{Repeat: 3, Value: -0.01},
+			},
+			[]segRepeatValue{
+				{Repeat: 1, Value: -0.06},
+				{Repeat: 2, Value: -0.1},
+				{Repeat: 3, Value: -0.02},
+			},
+		))
+		if got := check.Status; got != segRuleInsufficient {
+			t.Errorf("status = %s, want %s (median %v, observed %q)", got, segRuleInsufficient, check.MedianMS, check.Observed)
+		}
+		if len(check.PerRepeat) != 0 {
+			t.Errorf("per_repeat = %v, want empty (all totals ≤ %.2fms under the signed floor)", check.PerRepeat, segRuleShareFloorMS)
+		}
+		if !strings.Contains(check.Observed, "≤ 0.05ms") || !strings.Contains(check.Observed, "非正") {
+			t.Errorf("observed = %q, want the signed-floor wording", check.Observed)
+		}
+	})
+
+	// Case C: positive totals keep the normal path (no accidental damage).
+	t.Run("positive totals still satisfy", func(t *testing.T) {
+		check := segRuleREffectShare(effects(
+			[]segRepeatValue{
+				{Repeat: 1, Value: 10},
+				{Repeat: 2, Value: 12},
+				{Repeat: 3, Value: 11},
+			},
+			[]segRepeatValue{
+				{Repeat: 1, Value: 6},
+				{Repeat: 2, Value: 7.2},
+				{Repeat: 3, Value: 7.15},
+			},
+		))
+		if got := check.Status; got != segRuleSatisfied {
+			t.Errorf("status = %s, want %s (observed %q)", got, segRuleSatisfied, check.Observed)
+		}
+		segSynthApprox(t, "share median all-positive", check.MedianMS, 0.6)
+	})
+}

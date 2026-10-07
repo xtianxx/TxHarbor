@@ -37,7 +37,7 @@ TXHARBOR_SEG_ANALYZE_DIR=$PWD/docs/evidence/019-normal-query-seg/raw \
   go test -tags perf -count=1 -run '^TestSegAnalyze$' ./internal/perf
 ```
 
-- 顺序：repeat1 `R0G0,R1G0,R0G1,R1G1`；repeat2 `R1G0,R0G1,R1G1,R0G0`；repeat3 `R0G1,R1G1,R0G0,R1G0`（轮转平衡）。退出码见 `raw/logs/summary.tsv`（全部 0）。
+- 顺序：repeat1 `R0G0,R1G0,R0G1,R1G1`；repeat2 `R1G0,R0G1,R1G1,R0G0`；repeat3 `R0G1,R1G1,R0G0,R1G0`（轮转平衡）。退出码见 `raw/logs/summary.tsv`（仅覆盖其归档的 5 次调用，全部 0）；`raw/repeat0/R1G1:nocoll` 来自修正前的调用，其原日志与退出码已被覆盖、未归档。
 - 负载（固定 profile，bench 输入非 SLO）：预热 8s（首档 10rps、无 burst，样本单列于 `warmup_samples.jsonl`，不并入稳态）；稳态 12s：查询阶梯 10→25→50 rps（0/4/8s）+ 50 请求 burst@8s；create 2rps；deposit 1rps。每臂每重复稳态 n=390 query；全量状态码/错误均记录。
 - 注意：批次首次执行时 `run_batch.sh` 将两次开销运行写入同一目录（后者覆盖前者，遗留 `raw/repeat0/R1G1:nocoll`）。脚本已修正（开销 repeat=10/11），并按修正后的脚本补跑两次开销（repeat10/11）；`raw/repeat0/R1G1:nocoll` 作为遗留单元保留（分析器将其计入 nocoll 侧）。
 
@@ -59,11 +59,11 @@ TXHARBOR_SEG_ANALYZE_DIR=$PWD/docs/evidence/019-normal-query-seg/raw \
 | 客户端 query p95 | +11.3（−2.9/+14.7/+11.3） | −13.9（−15.2/−13.9/+71.7） | +25.7（+8.1/+46.4/+25.7） | +17.8（−4.2/+17.8/+86.0） |
 | below_admit p95 | −2.6（−2.6/−4.7/−2.6） | −24.2（−28.4/−24.2/+75.8） | +19.7（+19.7/+37.9/−1.3） | +18.4（−6.1/+18.4/+77.0） |
 
-- `admit` 全窗 p95：R1 臂 6.1–19.2ms（含 burst 排队）；**规则口径（R1G0、[0s,8s) 相位、排除 burst）p95 中位 1.423ms（逐重复最大 1.522ms）** —— 健康态单次决策等待为毫秒级。
+- `admit` 全窗 p95：R1 臂 **6.07–19.97ms**（全 ID，含预热与 create；query-only 口径上界 20.23ms；含 burst 排队）；**规则口径（R1G0、[0s,8s) 相位、排除 burst）p95 中位 1.423ms（逐重复最大 1.522ms）** —— 健康态单次决策等待为毫秒级。
 - `pg_total`（每请求语句耗时和）p95 中位 13.2–16.3ms；各因子对其影响 ≤~8ms（区间宽）。
-- 开销对照（nocoll）：p95 = 97.5 / 105.5 / 98.0（中位 98.0）vs 稳态 R1G1 76.2/94.4/167.6 —— 无可见系统性采集开销（n 小，仅方向性）。
+- 开销对照（nocoll）：p95 = 97.5 / 105.5 / 98.0（中位 98.0）vs 稳态 R1G1 76.2/94.4/167.6 —— 未配对异时参考，不能证明采集开销可忽略或给出上界（n 小，仅方向性）。
 - 不变量（分析器）：`server_total ≥ admit+below_admit(±0.05ms)` 6120 项、`sum(pgq) ≤ below_admit+1ms` 6120 项、`admit_skipped 仅在 limiter_off` 2820 项，**违规 0**；配对完整（稳态 client id 全部有 server_total）；无 >200ms 的离群样本（r3 R1G1 的 burst 簇 185–195ms 除外）。
-- 候选规则（**非裁决**，见 summary.candidate_rules）：规则1「健康态 admit p95 ≤2ms」满足（1.423ms）；规则2「|R 效应| ≥10ms」满足但方向不一致（@G0 +11.3 / @G1 −13.9）；规则3「R@G1 占总差 ≥50%」标注满足（73.6%），**占比不构成因果或收益证明**。
+- 候选规则（**非裁决**，见 summary.candidate_rules）：规则1「健康态 admit p95 ≤2ms」满足（1.423ms）；规则2「|R 效应| ≥10ms」满足但方向不一致（@G0 +11.3 / @G1 −13.9）；规则3「R@G1 占总差 ≥50%」**不满足**（按披露口径剔除非正总差后，逐重复 −43.0% / +73.6%，中位 15.3%），**占比不构成因果或收益证明**。
 
 ## 4. 时钟步进与校正（环境发现）
 
@@ -77,7 +77,7 @@ TXHARBOR_SEG_ANALYZE_DIR=$PWD/docs/evidence/019-normal-query-seg/raw \
 
 - 单机、合成固定 profile、3 重复；不构成生产容量/SLO 结论；旧 47.5/72.7ms（89ef787）仍为历史测量，本批次未复现其路径定义。
 - R0 仅关闭查询类准入跳；Redis 其余装配与 creates 的准入仍在，且 R0 下 limiter 可用性状态不再由查询流量驱动。
-- 相位统计受 wall 时钟步进残差影响（逐单元披露）；PG acquire 无单请求归因；nocoll 与稳态无配对重复（离散对照）。
+- 相位统计受 wall 时钟步进残差影响（逐单元披露）；PG acquire 无单请求归因；nocoll 与稳态无配对重复（离散对照）；未配对异时参考，不能证明采集开销可忽略或给出上界。
 - 未测：故障矩阵、长时间窗口、跨主机、>3 重复的方差、生产阈值裁决。
 
 ## 6. 目录
