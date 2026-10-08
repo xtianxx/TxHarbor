@@ -2,7 +2,7 @@
 
 - 证据根：`docs/evidence/013-supplement/consumer-seg`
 - 运行：10 个（on=4, off=4, pristine=2, unknown=0）
-- 生成时间：2026-10-08T11:09:47+08:00（唯一非确定性字段；其余输出对同一证据树可复现）
+- 生成时间：2026-10-08T13:40:19+08:00（唯一非确定性字段；其余输出对同一证据树可复现）
 - 输出：本文件与 `summary_all.json`；每轮 `runs/<label>/summary.json`
 
 ## 0. 口径（冻结 v1）

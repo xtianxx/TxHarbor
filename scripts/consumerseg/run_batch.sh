@@ -7,7 +7,9 @@
 #
 # Usage: scripts/consumerseg/run_batch.sh <evidence-dir> [plan]
 #
-#   <evidence-dir>  batch root; created if missing
+#   <evidence-dir>  batch root; must not exist — this invocation claims it
+#                   atomically (single mkdir, no parents) before writing
+#                   anything, and never reuses or cleans up an existing path
 #   [plan]          space-separated modes (pristine|on|off), in run order.
 #                   Default: pristine on off off on on off off on pristine
 #                   (a pristine bookend, then four on/off pairs, then the
@@ -26,11 +28,16 @@
 #   <dir>/source_fingerprint.txt branch/HEAD/status + sha256 of every source in
 #                                play (the harness, the seam and go.mod)
 #
-# Discipline: one bounded invocation at a time (timeout 2700s inside a 40m
-# test timeout), the first failure aborts the batch (the remaining modes are
-# not started) and the summary is printed before exiting non-zero. Only the
-# very first invocation of a batch may pull/build the test images; every later
-# mode reuses them.
+# Discipline: the batch root is claimed with a single `mkdir` before any file
+# is written — an existing directory (empty or not), a plain file or a symlink
+# (dangling or not) is refused with exit 2 and left untouched, so a batch is
+# never resumed into, mixed with or appended to an earlier one. One bounded
+# invocation at a time (timeout 2700s inside a 40m test timeout), the first
+# failure aborts the batch (the remaining modes are not started) and the
+# summary is printed before exiting non-zero. Only the very first invocation
+# of a batch may pull/build the test images; every later mode reuses them.
+# Exit codes: 2 = usage error or refused target, 1 = a failed invocation
+# mid-batch.
 set -euo pipefail
 
 DEFAULT_PLAN="pristine on off off on on off off on pristine"
@@ -41,19 +48,13 @@ POSTGRES_IMAGE="postgres:18.6-trixie"
 
 if [[ $# -lt 1 || $# -gt 2 ]]; then
 	echo "usage: $0 <evidence-dir> [plan]" >&2
+	echo "  <evidence-dir>: must not exist; created atomically (no parents)" >&2
 	echo "  plan: space-separated modes (pristine|on|off); default: \"$DEFAULT_PLAN\"" >&2
 	exit 2
 fi
 
-REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd -P)"
-mkdir -p "$1"
-EVIDENCE_DIR="$(cd "$1" && pwd -P)"
-LOGS_DIR="$EVIDENCE_DIR/logs"
-RUNS_DIR="$EVIDENCE_DIR/runs"
-mkdir -p "$LOGS_DIR" "$RUNS_DIR"
-SUMMARY="$LOGS_DIR/summary.tsv"
-cd "$REPO_ROOT"
-
+# The plan is pure string work, so it is validated before anything is created:
+# a bad or empty plan must never leave an empty batch root behind.
 PLAN="${2:-$DEFAULT_PLAN}"
 read -r -a MODES <<<"$PLAN"
 if [[ "${#MODES[@]}" -eq 0 ]]; then
@@ -69,6 +70,27 @@ for mode in "${MODES[@]}"; do
 		;;
 	esac
 done
+
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd -P)"
+
+# The batch root is claimed atomically before any file is written: `mkdir`
+# without -p fails on an existing directory (empty or not), plain file or
+# symlink (dangling or not), and only the invocation that created the directory
+# goes on. Nothing under <evidence-dir> is ever appended to or cleaned up.
+if ! mkdir_error="$(mkdir "$1" 2>&1)"; then
+	if [[ -e "$1" || -L "$1" ]]; then
+		printf 'consumer seg batch: %s already exists; refusing to reuse it (use a fresh evidence dir)\n' "$1" >&2
+	else
+		printf 'consumer seg batch: cannot create %s: %s\n' "$1" "$mkdir_error" >&2
+	fi
+	exit 2
+fi
+EVIDENCE_DIR="$(cd "$1" && pwd -P)"
+LOGS_DIR="$EVIDENCE_DIR/logs"
+RUNS_DIR="$EVIDENCE_DIR/runs"
+mkdir -p "$LOGS_DIR" "$RUNS_DIR"
+SUMMARY="$LOGS_DIR/summary.tsv"
+cd "$REPO_ROOT"
 
 printf 'consumer seg batch: evidence=%s repo=%s head=%s\n' \
 	"$EVIDENCE_DIR" "$REPO_ROOT" "$(git rev-parse HEAD 2>/dev/null || echo unknown)"
@@ -125,15 +147,10 @@ done < <(find scripts/consumerseg/analyze -name '*.go' -print 2>/dev/null | sort
 } >"$EVIDENCE_DIR/source_fingerprint.txt" 2>&1
 
 # --- one invocation per planned mode ---------------------------------------
-# The summary is created once per evidence directory and appended on every
-# further invocation, and an existing run directory/label refuses to be
-# overwritten: a resumed batch would otherwise silently mix runs measured with
-# different source revisions. Start a new batch in a fresh directory.
-if [[ -f "$SUMMARY" ]]; then
-	echo "consumer seg batch: appending to existing $SUMMARY" >&2
-else
-	printf 'label\tmode\tn\trc\tstarted\tended\n' >"$SUMMARY"
-fi
+# The batch root was claimed exclusively above, so this summary and every round
+# label are written exactly once per batch: a resumed batch can never mix runs
+# measured with different source revisions into an existing directory.
+printf 'label\tmode\tn\trc\tstarted\tended\n' >"$SUMMARY"
 
 failed=0
 total="${#MODES[@]}"
@@ -143,10 +160,6 @@ for i in "${!MODES[@]}"; do
 	label="$(printf 'r%02d_%s' "$index" "$mode")"
 	run_dir="$RUNS_DIR/$label"
 	log="$LOGS_DIR/$label.log"
-	if [[ -e "$run_dir" || -e "$log" ]]; then
-		printf 'consumer seg batch: refusing to overwrite existing %s (start a fresh evidence dir)\n' "$run_dir" >&2
-		exit 2
-	fi
 	mkdir -p "$run_dir"
 	started="$(date -u +%FT%T.%NZ)"
 
@@ -192,7 +205,7 @@ for i in "${!MODES[@]}"; do
 
 	# Compress the bulk evidence of this round (the exit code, the report and
 	# the anchors stay plaintext). -n keeps gzip byte-reproducible; -f keeps
-	# the runner non-interactive when a run directory is reused.
+	# the runner non-interactive.
 	shopt -s nullglob
 	csv_files=("$run_dir"/*.csv)
 	shopt -u nullglob

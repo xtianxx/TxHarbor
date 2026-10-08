@@ -457,6 +457,57 @@ process,1,50,100,0,1,INSERT 0 1
 	}
 }
 
+// TestPreEpochSpanFailsOverlapCheck pins the overlap_ok boolean to the
+// pre-epoch branch: a top-level span with t_us < 0 must fail the check, not
+// only add a detail line. The fixture stays otherwise clean — no pairwise
+// overlaps, no negative durations, and one real zero-duration point event
+// inside the window (a fact counted as ZeroDurations, never as a defect).
+func TestPreEpochSpanFailsOverlapCheck(t *testing.T) {
+	root := t.TempDir()
+	label := "r11_on"
+	writeJSON(t, root, "runs/"+label+"/meta.json", map[string]any{
+		"mode": "on", "n": 1, "seg_enabled": true,
+		"drops": map[string]any{"loop_unpaired": 0, "samples_dropped": 0},
+	})
+	counts := countsAll(1)
+	counts["sql_spans"] = 2
+	writeJSON(t, root, "runs/"+label+"/anchors.json", anchorsFixture(1000, 2000, 2400, true, counts))
+	writeFile(t, root, "runs/"+label+"/loop.csv", `kind,seq,t_us,dur_us,i1,i2,s1
+poll,,-20,10,1,,
+process,1,2000,20,0,1,INSERT 0 1
+rebalance,,2200,0,,,
+lag,,2500,20,,,
+`)
+	writeFile(t, root, "runs/"+label+"/sql.csv", `seq,t_us,dur_us,kind,sql,err
+1,2000,1,begin,BEGIN,0
+1,2018,1,commit,COMMIT,0
+`)
+	writeFile(t, root, "runs/"+label+"/exit_code", "0\n")
+
+	all := analyze(t, root)
+	r := runNamed(t, all, label)
+	// The pre-epoch span is the only anomalous span: the window [2000,2400)
+	// sees no pairwise overlap, no negative duration, and the zero-duration
+	// point event at 2200us clips as full.
+	if r.Tail.PreEpochSpans != 1 || r.Tail.OverlapPairs != 0 || r.Tail.NegativeDurations != 0 {
+		t.Fatalf("pre-epoch/overlap/negative = %d/%d/%d, want 1/0/0",
+			r.Tail.PreEpochSpans, r.Tail.OverlapPairs, r.Tail.NegativeDurations)
+	}
+	if r.Tail.ZeroDurations != 1 || r.Tail.FullSpans != 2 || r.Tail.OutsideSpans != 2 {
+		t.Fatalf("zero/full/outside = %d/%d/%d, want 1/2/2",
+			r.Tail.ZeroDurations, r.Tail.FullSpans, r.Tail.OutsideSpans)
+	}
+	if r.Checks.OverlapOK {
+		t.Fatal("overlap_ok = true, want false: a pre-epoch span must fail the check, not only add a detail")
+	}
+	if _, ok := detailWith(r, "epoch 之前的 t_us span=1"); !ok {
+		t.Fatalf("pre-epoch detail missing: %v", r.Checks.Details)
+	}
+	if _, ok := anomalyWith(all, label, "overlap_ok"); !ok {
+		t.Fatalf("overlap anomaly missing: %+v", all.Anomalies)
+	}
+}
+
 func TestStatsKnownSmallSampleAndTxSkipped(t *testing.T) {
 	root := t.TempDir()
 	label := "r04_on"

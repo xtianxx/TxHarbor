@@ -1,7 +1,7 @@
 {
   "schema": "013-supplement/consumer-seg/analysis/1",
   "evidence_dir": "docs/evidence/013-supplement/consumer-seg",
-  "generated_at": "2026-10-08T11:09:47+08:00",
+  "generated_at": "2026-10-08T13:40:19+08:00",
   "runs": [
     {
       "label": "r01_pristine",

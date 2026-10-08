@@ -20,7 +20,7 @@
 | recoder/tracer | `backlog_drain_seg_recorder_test.go`：span 配对、批记录数回填（由 process span 窗口推导）、pgx QueryTracer（仅 marked ctx 记录；未标记查询零分配转发） |
 | 臂语义 | `on`=记录 span/SQL/CSV + tracer；`off`=相同接缝调用与计数、不存 span 不挂 tracer（匹配对照）；`pristine`=无接缝二进制（书挡参照） |
 | 离线分析 | `scripts/consumerseg/analyze/`（stdlib；`-dir <evidence>` 写 `analysis/summary.md|json` 与每轮 `runs/<label>/summary.json`） |
-| 批次 runner | `scripts/consumerseg/run_batch.sh`（串行、逐轮 log/.rc/exit_code、env 快照、batch 级 environment/fingerprint；首次失败即中止；拒绝覆盖既有 run） |
+| 批次 runner | `scripts/consumerseg/run_batch.sh`（串行、逐轮 log/.rc/exit_code、env 快照、batch 级 environment/fingerprint；首次失败即中止；目标根须不存在，由脚本原子独占创建，已存在即退出 2） |
 | 边界审计 | 接缝文件不含 broker 词表（T016 扫描）/不 import franz-go（T085）；`go test ./internal/events/` 与 `TestT085EventsImportBoundary` 全绿 |
 
 测点覆盖（格式 v1，monotonic µs relative to epoch；wall 仅环境记录）：
@@ -30,7 +30,7 @@
 - 发布完成判据 = DB 观察 `pending=0`（Broker ack 经 ProduceSync 后 mark 落库，已被包含）；观察延迟=末轮发布结束→观察到 0 的差值（逐轮 663–4400µs）。
 - 消费完成判据 = `applied=N`（效果事务 COMMIT；含 inbox/versions/effect/progress 同事务）；**Kafka 自动提交不是效果完成边界**（`lag_final` 记录了读出时刻的位点落后，0–33 条）。
 - `39.60−1.59` 式减法仅得到「发布排空之后的追赶尾巴」；重叠期已消费量（`applied_at_publish_done` 219–256）说明 39.60s 内消费全程与发布并行。
-- 等待时间不得预设为零：`poll` 等待被实测（含少数 ~0.37–0.47s 的 fetch 等待，逐轮总窗内覆盖 20–81ms）。
+- 等待时间不得预设为零：`poll` 等待被实测，但两个窗口**分列且不得混用**——**尾窗** `[publish_done, poll_confirm]` 内 `poll` 覆盖 20497/80829/36809/61020µs（20–81ms；r02/r05/r06/r09），**总窗** `[drain_start, poll_confirm]` 内覆盖 414068/447783/503617/521530µs；两窗差额来自发布重叠期的长 fetch 等待（逐轮 ~0.37–0.47s 的首次 poll，只计入总窗、不属于 tail）。
 
 ## 2. 固定实验条件
 
@@ -90,6 +90,20 @@ N=10000；全部原参数保持（测试硬编码值，均记录在每轮 `meta.
 
 读数：ON 与 OFF（同接缝、不同采集）逐指标几乎相同（+0.04%～+0.35%）；pristine（无接缝二进制）更低 2.0–2.3s（~4.8%），但其两次书挡自身相差 2.12s（39.52/41.64）→ 该差值只能列为「可能包含接缝调度/记录开销与环境漂移，本批不可分解」，不作结论。
 
+**配对差值（on−off，秒）**——配对规则：plan `pristine on off off | on on off off | on pristine`（runner 头注释声明的四对相邻 on/off）；算法：逐对差值 = on − off，四值中位 = 排序后两中间值的平均（与分析器 `rank = p·(n−1)` 线性插值一致），组中位差 = median(on) − median(off)。下表由 anchors.json 的整数 µs 读数计算（同源 report.json 浮点秒在 10⁻⁷s 量级有 ≤1µs 量化差）：
+
+| 对 | publish_s Δ | tail_s Δ | total_s Δ |
+|---|---|---|---|
+| r02−r03 | −0.148237 | −0.002428 | −0.150665 |
+| r05−r04 | −0.006612 | +0.309987 | +0.303375 |
+| r06−r07 | −0.175190 | +0.300019 | +0.124829 |
+| r09−r08 | +0.140835 | −0.703380 | −0.562545 |
+| 配对差中位 | −0.0774245 | +0.1487955 | −0.0129180 |
+| 组中位差 | −0.0745020 | +0.1487955 | +0.0188755 |
+
+- total 的 **+0.0189s（≈+0.019s）是组中位差**，而配对差中位为 **−0.0129180s**（符号相反）——两个统计量必须分开引用；tail 两种算法恰好都 ≈+0.1488s（巧合，不代表统计量相同）。
+- 不得把任一个统称「配对开销」：ON/OFF 只衡量**细分采集的增量**（OFF 臂仍在同一接缝上记账，只是不落 span、不挂 tracer）；pristine 两次书挡（n=2、自差 2.12s）不足以分解测点开销。
+
 ### 3.2 ON 分段（µs；完整表见 `analysis/summary.md` §3）
 
 | run | process mean/p50/p95 | tx_total mean/p50/p95 | commit mean/p95 | begin mean | poll 次数/最大 | lag(观察) mean |
@@ -101,7 +115,7 @@ N=10000；全部原参数保持（测试硬编码值，均记录在每轮 `meta.
 
 - 7 条业务语句（inbox_insert/version_read/effect_insert/version_upsert/progress_update + begin/commit）均值逐轮 ≈4.25ms，占 `tx_total` ≈98.8%、占 `process` ≈97.6%（r02：4254 vs 4304 vs 4355µs）。
 - `mark` 均值 2.6–2.7µs；`rebalance` 0；批大小：records/批 ≤500（均值 ≈455；22 批覆盖 10000；含 1 次 0 记录 poll）。
-- 连接获取：`acquire_count≈10950–11008`（≈N 个事件事务 + 约 950 次观察/断言查询各取一次）、`empty_acquire=2`、`canceled=0`、累计获取等待 16–21ms（≈tail 的 0.04%，见每轮 `report.json` `pool_final`）——池上限（8）不是并发约束（单消费者 goroutine）；逐事件获取耗时未单独隔离（见缺测）。
+- 连接获取：`acquire_count=10944–11008`（N 个事件事务 + 944–1008 次观察/断言查询各取一次）、`empty_acquire=2`、`canceled=0`（全部 ON/OFF 轮；见每轮 `report.json` `pool_final`）。`pool_final.acquire_duration_seconds` 是 pgx v5.11.0 `Stat().AcquireDuration()` 的**全部成功 acquire 累计耗时**（含建池/seed/monitor/断言查询，全轮快照；ON 轮 16.007887/17.700651/20.600273/18.440113ms，OFF 最大 r07 23.248503ms）——它不是排队专用等待：排队指标 `EmptyAcquireWaitTime()` **未采集**，池排队份额未测。池上限（8）不是并发约束（单消费者 goroutine）；逐事件获取耗时未单独隔离（见缺测）。
 
 ### 3.3 tail 裁剪分解（ON；窗口=[publish_done, poll_confirm]）
 
@@ -112,7 +126,7 @@ N=10000；全部原参数保持（测试硬编码值，均记录在每轮 `meta.
 | r06_on | 42937633 | 42603704 | 36809 | 26210 | 239559 | 42906282 | 31351 (0.073%) |
 | r09_on | 42034687 | 41694509 | 61020 | 26296 | 223586 | 42005411 | 29276 (0.070%) |
 
-读数：裁剪后顶层互斥 span 覆盖 tail 的 99.93%；其中 `process` 贡献 99.3–99.5%（每事件一个 span，10000 个），`lag`(refreshLag) ~0.5–0.6%，poll 等待 ≤0.19%，mark ≤0.06%，residual ≤0.073%（span 边界的 µs 量化与循环外缝隙）。
+读数：裁剪后顶层互斥 span 覆盖 tail 的 99.93%；其中 `process` 贡献 99.09–99.28%（窗内覆盖/tail：42333632/42641170、42550540/42942427、42603704/42937633、41694509/42034687；每事件一个 span），`lag`(refreshLag) ~0.5–0.6%，poll 等待 ≤0.19%，mark 0.060–0.063%（25667/25658/26210/26296µs ÷ 各自 tail），residual ≤0.073%（span 边界的 µs 量化与循环外缝隙）。**§3.2 的 process 分位来自全程 10000 个 span，与本节「窗内覆盖/tail」不同口径，不得混用。**
 
 ### 3.4 计数、共享观测与发布周期
 
@@ -123,9 +137,9 @@ N=10000；全部原参数保持（测试硬编码值，均记录在每轮 `meta.
 ## 4. 归因支持度（只到实测刻度；不作 SLO/根因宣判）
 
 **被实测支持的**（全部来自子段实测，非聚合外推）：
-- tail ≈ Σ(`process`)：99.3–99.5%（裁剪后），残差 0.07%；
+- tail ≈ Σ(`process`)：99.09–99.28%（裁剪后），残差 ≤0.073%；
 - `process` 内部 ≈ 单事件事务：`tx_total` 占 process 98.8%，其中 7 条语句合计占 tx_total 98.8%（begin/commit/6 业务语句均为实测 p50/p95/p99）；
-- poll 等待、refreshLag、mark 合计 ≤0.7% —— 等待被实测而非假设为零；auto-commit 位点落后在读出时刻 0–33 条（观察值）。
+- poll 等待、refreshLag、mark 合计占 tail 逐轮 0.649/0.841/0.705/0.740%（r02/r05/r06/r09：276743/42641170、360937/42942427、302578/42937633、310902/42034687）——等待被实测而非假设为零；auto-commit 位点落后在读出时刻 0–33 条（观察值）。
 
 **未被支持的**：
 - 不采用「批处理占 tail ≥99% ⇒ 事务根因」式推理；上述为逐层实测子段的并置，不构成跨层因果证明；
@@ -135,7 +149,7 @@ N=10000；全部原参数保持（测试硬编码值，均记录在每轮 `meta.
 
 ## 5. 缺测
 
-- 逐事件连接获取等待（仅逐 tick 池累计）；
+- 逐事件连接获取耗时与池排队份额（`EmptyAcquireWaitTime()` 未采集；池仅提供逐 tick 累计计数与全轮累计耗时）；
 - 服务端提交瞬时与 PG 内部执行剖析（pg_stat_statements 等未接）；
 - 跨机/多实例/生产负载回放；长稳（小时级）；
 - pristine 臂无分段（按协议只有 report.json）；OFF 臂无 loop/sql/publish（协议）；
@@ -149,7 +163,8 @@ N=10000；全部原参数保持（测试硬编码值，均记录在每轮 `meta.
 docs/evidence/013-supplement/consumer-seg/
   runs/<label>/{meta.json,anchors.json,report.json,exit_code,samples.csv.gz[,loop.csv.gz,sql.csv.gz,publish.csv.gz]}
   logs/<label>.log.gz, logs/<label>.rc, logs/<label>.env, logs/summary.tsv, logs/runner.log
-  environment.txt, source_fingerprint.txt, SHA256SUMS
+  environment.txt, source_fingerprint.txt, source_fingerprint_current.txt, SHA256SUMS
+  CORRECTIONS.md, checks/
   analysis/{summary.md,summary_all.json}
   smoke/{runs/r01_on,runs/r02_off}/…, smoke/logs/…, smoke/analysis/…
 ```
@@ -162,7 +177,9 @@ TXHARBOR_BACKLOG_DRAIN_N=50 TXHARBOR_BACKLOG_SEG=1 \
 TXHARBOR_BACKLOG_SEG_DIR=<dir>/smoke/runs/r01_on TXHARBOR_BACKLOG_REPORT=<dir>/smoke/runs/r01_on/report.json \
   go test -race -tags "integration_backlog perf" -count=1 -timeout 40m -run '^TestBacklogDrainSeg$' -v ./internal/events/
 
-# 2) 批次（串行；默认 plan=pristine on off off on on off off on pristine；必须用全新证据目录）
+# 2) 批次（串行；默认 plan=pristine on off off on on off off on pristine）
+#    目标根 <dir> 必须不存在：脚本以单次 mkdir 原子独占创建（不建父目录）；已存在（含空目录/符号链接）即拒绝并以退出码 2 结束，
+#    不覆盖、不清理；plan 校验先于创建，更换 plan 也不得复用旧根。
 scripts/consumerseg/run_batch.sh <dir>
 
 # 3) 离线分析（可重算统计）
@@ -173,11 +190,17 @@ go run ./scripts/consumerseg/analyze -dir <dir>
 zcat <dir>/runs/r02_on/loop.csv.gz | head
 ```
 
-- 源码身份：`source_fingerprint.txt` 记录批次时刻的 HEAD/脏树状态与全部相关文件 sha256；本目录提交后与工作树一致（核验见下）。
-- 独立核验：本批附独立复算记录（见交付报告；重算脚本为只读 python/jq）。
+- 源码身份：`source_fingerprint.txt` 记录批次时刻的 HEAD/脏树状态与全部相关文件 sha256；`source_fingerprint_current.txt` 记录本轮（源码修正后）的对应指纹；本目录提交后与工作树一致（核验见下）。
+- 独立核验：本轮可定位依据为同目录 `CORRECTIONS.md` 与 `checks/`（只读复算/核查的脚本与输出）；**原批次的独立复算为会话内记录、未归档**。
+
+证据披露：
+- 旧 smoke 批（`smoke/`，2026-10-08 02:44–02:45Z，N=50、`-race`）：只有逐轮 `.env`/`.log.gz`/`.rc`，**没有批次级 `environment.txt`/`source_fingerprint.txt`**——其源码身份绑定弱于主批（主批有批次级环境快照与逐文件 sha256 指纹），其数值只作冒烟参考。
+- 旧 recorder、分析器、审计（T016/T085）及 race 声明的执行**没有独立归档日志**（仅在会话内记录，未归档）：本轮不补造日志，也不用当前（源码已变更的）运行冒充历史执行。
+- 曲线（`analysis/summary.md` §6 的 samples 十分位）的分母是**各采样序列自身的最大值**：「100%」= 该序列样本内的最大值，不是 N 完成——applied 采样序列最大仅 9994/9984/9972/9965（r02/r04/r06/r08），smoke 为 42/40（N=50）。业务终态 N 由 counts/anchors 独立展示（ON/OFF 轮 applied=N=10000），不得以曲线补终点采样。
 
 ## 7. 声明
 
 - 本目录与批次不触碰生产参数、CI、部署；不构成优化实施。
 - 一切百分比/分解仅诊断参考，不登记为生产 SLO 或批准阈值。
+- 原始件字节不变：`runs/`（meta/anchors/report/*.csv）、`logs/`（.env/.rc/.log.gz）、`environment.txt`、`source_fingerprint.txt` 与采集时指纹一致；本轮变更仅源码（runner/分析器）与文档/派生说明（本 README、`CORRECTIONS.md`、`checks/`、`source_fingerprint_current.txt`）。
 - 「历史值」对照：2026-09-24 基线 `d2bf559` 的 1.59s/39.60s 为旧装置旧环境数值，本批 pristine 实测 1.75–1.82s/39.52–41.64s（同口径仅顶层），**新旧不合并统计**。

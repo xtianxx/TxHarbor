@@ -1185,6 +1185,7 @@ func buildChecks(lr *loadedRun, rs *runSummary) checksBlock {
 			fail("overlap_ok", "负数时长 span=%d", rs.Tail.NegativeDurations)
 		}
 		if rs.Tail.PreEpochSpans != 0 {
+			ck.OverlapOK = false
 			fail("overlap_ok", "epoch 之前的 t_us span=%d", rs.Tail.PreEpochSpans)
 		}
 	} else {

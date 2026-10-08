@@ -1,0 +1,18 @@
+generated_at: 2026-10-08T05:42:40.431763895Z
+Thu Oct  8 05:42:40 UTC 2026
+Linux DESKTOP-TXT123 6.18.33.2-microsoft-standard-WSL2 #1 SMP PREEMPT_DYNAMIC Thu Jun 18 21:54:43 UTC 2026 x86_64 GNU/Linux
+go version go1.26.5 linux/amd64
+nproc: 16
+branch: perf/consumer-catchup-seg
+head: 27cc51d0801862f85c1ae04fd1fc74a4d300e80a
+--- git status --porcelain ---
+ M docs/evidence/013-supplement/consumer-seg/README.md
+ M docs/evidence/013-supplement/consumer-seg/analysis/summary.md
+ M docs/evidence/013-supplement/consumer-seg/analysis/summary_all.json
+ M scripts/consumerseg/analyze/analyze.go
+ M scripts/consumerseg/analyze/analyze_test.go
+ M scripts/consumerseg/run_batch.sh
+?? .omp/
+?? docs/evidence/013-supplement/consumer-seg/CORRECTIONS.md
+?? docs/evidence/013-supplement/consumer-seg/checks/
+?? scripts/consumerseg/run_batch_guard_test.sh

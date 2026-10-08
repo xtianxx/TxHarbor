@@ -1,0 +1,12 @@
+analyze: evidence=docs/evidence/013-supplement/consumer-seg runs=10 (off=4, on=4, pristine=2) anomalies=0 skipped=0
+  r01_pristine   group=pristine collection=pristine checks: anchors=FAIL counts=OK drops=OK overlap=OK nesting=OK report=OK
+  r02_on         group=on       collection=seg      checks: anchors=OK counts=OK drops=OK overlap=OK nesting=OK report=OK
+  r03_off        group=off      collection=seg      checks: anchors=OK counts=OK drops=OK overlap=OK nesting=OK report=OK
+  r04_off        group=off      collection=seg      checks: anchors=OK counts=OK drops=OK overlap=OK nesting=OK report=OK
+  r05_on         group=on       collection=seg      checks: anchors=OK counts=OK drops=OK overlap=OK nesting=OK report=OK
+  r06_on         group=on       collection=seg      checks: anchors=OK counts=OK drops=OK overlap=OK nesting=OK report=OK
+  r07_off        group=off      collection=seg      checks: anchors=OK counts=OK drops=OK overlap=OK nesting=OK report=OK
+  r08_off        group=off      collection=seg      checks: anchors=OK counts=OK drops=OK overlap=OK nesting=OK report=OK
+  r09_on         group=on       collection=seg      checks: anchors=OK counts=OK drops=OK overlap=OK nesting=OK report=OK
+  r10_pristine   group=pristine collection=pristine checks: anchors=FAIL counts=OK drops=OK overlap=OK nesting=OK report=OK
+wrote 10 per-run summary.json; docs/evidence/013-supplement/consumer-seg/analysis/summary_all.json and docs/evidence/013-supplement/consumer-seg/analysis/summary.md

@@ -1,0 +1,135 @@
+consumer seg guard fixture (013 review item 1: batch-root protection)
+repo: /home/dream/product_env/TxHarbor
+runner under test: /home/dream/product_env/TxHarbor/scripts/consumerseg/run_batch.sh
+  sha256: 38b226768205179583ff6d943777401d08db8c91ad89700e3e89f8d2ad9a8389
+sandbox: /tmp/consumerseg-guard-sandbox.gpndIK (also used as TMPDIR; removed on exit)
+go stand-in: /tmp/consumerseg-guard-sandbox.gpndIK/bin/go
+
+--- case 1: pre-fix runner rewrites the witnesses of an existing batch dir (defect reproduction)
+    extracted scripts/consumerseg/run_batch.sh at 27cc51d0801862f85c1ae04fd1fc74a4d300e80a into the sandbox (work tree untouched)
+    pre-fix rc=2
+    pre-fix stderr: consumer seg batch: appending to existing /tmp/consumerseg-guard-sandbox.gpndIK/oldbatch/logs/summary.tsv
+consumer seg batch: refusing to overwrite existing /tmp/consumerseg-guard-sandbox.gpndIK/oldbatch/runs/r01_pristine (start a fresh evidence dir)
+    environment.txt        e27114cc759ca2bf92bddf3e97b91838c4a041792f8056415984427b39826e13 -> 4aac9b2d9ff2521d208590496324bdaea7d69c5f154a6227bdcdd2fcb8f4c1ef
+    source_fingerprint.txt d28ab60d2ea3eefa6d0b86a4ffaf20c2481935f172d2ec7956f155983b42464c -> e1b177bf7f1ae067f3f1593c5a8c9fb7d8d2a1fa820f31c7ada624eb9ad3b884
+    ok: pre-fix runner exit code: 2
+    ok: pre-fix refusal happens only in the per-round loop: /tmp/consumerseg-guard-sandbox.gpndIK/last.stderr contains 'refusing to overwrite existing'
+    ok: environment.txt rewritten before the refusal (defect): changed
+    ok: source_fingerprint.txt rewritten before the refusal (defect): changed
+    ok: summary.tsv untouched by the pre-fix run: unchanged
+    ok: no round log for the refused round: /tmp/consumerseg-guard-sandbox.gpndIK/oldbatch/logs/r01_pristine.log absent
+PASS: 1: pre-fix runner truncates both witnesses then refuses (rc=2) — defect reproduced
+
+--- case 2: an existing empty directory and an existing plain file are refused
+    empty dir rc=2
+    stderr: consumer seg batch: /tmp/consumerseg-guard-sandbox.gpndIK/work/empty/root already exists; refusing to reuse it (use a fresh evidence dir)
+    ok: empty dir exit code: 2
+    ok: entries left under the refused dir: 0
+    ok: message says the target exists: /tmp/consumerseg-guard-sandbox.gpndIK/last.stderr contains 'already exists'
+    ok: message points at a fresh evidence dir: /tmp/consumerseg-guard-sandbox.gpndIK/last.stderr contains 'fresh evidence dir'
+    plain file rc=2
+    stderr: consumer seg batch: /tmp/consumerseg-guard-sandbox.gpndIK/work/plainfile/root already exists; refusing to reuse it (use a fresh evidence dir)
+    ok: plain file exit code: 2
+    ok: plain file hash unchanged: 063e11e8aa5834cab039c49537fa1001c2b27e81b90a2ce0e4aaa428faf676d5
+PASS: 2: existing empty directory and plain file refused (rc=2), both untouched
+
+--- case 3: existing populated batch directory is refused, tree byte-identical
+    rc=2
+    stderr: consumer seg batch: /tmp/consumerseg-guard-sandbox.gpndIK/work/data/root already exists; refusing to reuse it (use a fresh evidence dir)
+    ok: exit code: 2
+    ok: populated batch dir: tree byte-identical
+PASS: 3: populated batch directory refused (rc=2), bytes unchanged
+
+--- case 4: symlink targets are refused (directory symlink and dangling symlink)
+    directory symlink rc=2
+    stderr: consumer seg batch: /tmp/consumerseg-guard-sandbox.gpndIK/work/symlink/link_to_dir already exists; refusing to reuse it (use a fresh evidence dir)
+    ok: directory symlink exit code: 2
+    ok: directory symlink refusal message: /tmp/consumerseg-guard-sandbox.gpndIK/last.stderr contains 'already exists'
+    ok: link text preserved: /tmp/consumerseg-guard-sandbox.gpndIK/work/symlink/target
+    ok: symlink target directory: tree byte-identical
+    dangling symlink rc=2
+    stderr: consumer seg batch: /tmp/consumerseg-guard-sandbox.gpndIK/work/symlink/dangling already exists; refusing to reuse it (use a fresh evidence dir)
+    ok: dangling symlink exit code: 2
+    ok: dangling symlink refusal message: /tmp/consumerseg-guard-sandbox.gpndIK/last.stderr contains 'already exists'
+    ok: dangling link text preserved: /tmp/consumerseg-guard-sandbox.gpndIK/work/symlink/nowhere
+    ok: dangling link target not created: /tmp/consumerseg-guard-sandbox.gpndIK/work/symlink/nowhere absent
+PASS: 4: directory symlink and dangling symlink refused (rc=2), targets untouched
+
+--- case 5: existing directory is refused even for a different plan
+    requested plan "on off" on an existing default-plan batch rc=2
+    stderr: consumer seg batch: /tmp/consumerseg-guard-sandbox.gpndIK/work/plan/root already exists; refusing to reuse it (use a fresh evidence dir)
+    ok: exit code for a different plan: 2
+    ok: pre-existing batch dir: tree byte-identical
+    ok: no new run directory for the other plan: /tmp/consumerseg-guard-sandbox.gpndIK/work/plan/root/runs/r01_on absent
+PASS: 5: different plan on an existing root refused (rc=2), tree unchanged
+
+--- case 6: fresh root runs the short plan to completion
+    rc=0
+    stdout tail: consumer seg batch: all 2 invocations ok; evidence under /tmp/consumerseg-guard-sandbox.gpndIK/work/happy/root
+    ok: exit code: 0
+    ok: summary: /tmp/consumerseg-guard-sandbox.gpndIK/work/happy/root/logs/summary.tsv
+    ok: summary line count (header + 2 rows): 3
+    ok: summary rows (label/mode/n/rc): r01_on	on	10000	0
+r02_off	off	10000	0
+    ok: runs/r01_on/exit_code: 0
+    ok: runs/r02_off/exit_code: 0
+    ok: round 1 log: /tmp/consumerseg-guard-sandbox.gpndIK/work/happy/root/logs/r01_on.log.gz
+    ok: round 2 log: /tmp/consumerseg-guard-sandbox.gpndIK/work/happy/root/logs/r02_off.log.gz
+    ok: round 1 log left uncompressed: /tmp/consumerseg-guard-sandbox.gpndIK/work/happy/root/logs/r01_on.log absent
+    ok: valid gzip: /tmp/consumerseg-guard-sandbox.gpndIK/work/happy/root/logs/r01_on.log.gz
+    ok: valid gzip: /tmp/consumerseg-guard-sandbox.gpndIK/work/happy/root/logs/r02_off.log.gz
+    ok: round 1 log came from the go stand-in (no real drill was started)
+    ok: environment.txt generated: /tmp/consumerseg-guard-sandbox.gpndIK/work/happy/root/environment.txt contains 'generated_at:'
+    ok: source_fingerprint.txt generated: /tmp/consumerseg-guard-sandbox.gpndIK/work/happy/root/source_fingerprint.txt contains 'sha256sum'
+    ok: runner reported the batch complete: /tmp/consumerseg-guard-sandbox.gpndIK/last.stdout contains 'all 2 invocations ok'
+PASS: 6: fresh root ran the short plan end to end (rc=0), artifacts complete
+
+--- case 7: four concurrent invocations of one fresh root: exactly one winner
+    round 1: exit codes 0 2 2 2
+    ok: round 1 winners (rc=0): 1
+    ok: round 1 refusals (rc=2): 3
+    ok: round 1 other exit codes: 0
+    ok: round 1 summary line count: 3
+    ok: round 1 summary rows (label/mode/n/rc): r01_on	on	10000	0
+r02_off	off	10000	0
+    ok: round 1 duplicate labels: 
+    ok: round 1 environment.txt files: 1
+    ok: round 1 source_fingerprint.txt files: 1
+    ok: round 1 environment.txt complete: /tmp/consumerseg-guard-sandbox.gpndIK/work/race1/root/environment.txt contains 'generated_at:'
+    ok: round 1 source_fingerprint.txt complete: /tmp/consumerseg-guard-sandbox.gpndIK/work/race1/root/source_fingerprint.txt contains 'sha256sum'
+    ok: round 1 run dirs: r01_on r02_off
+    ok: round 1 logs dir contents: r01_on.env r01_on.log.gz r01_on.rc r02_off.env r02_off.log.gz r02_off.rc summary.tsv
+    ok: round 1 valid gzip: r01_on.log.gz
+    ok: round 1 valid gzip: r02_off.log.gz
+    round 2: exit codes 2 0 2 2
+    ok: round 2 winners (rc=0): 1
+    ok: round 2 refusals (rc=2): 3
+    ok: round 2 other exit codes: 0
+    ok: round 2 summary line count: 3
+    ok: round 2 summary rows (label/mode/n/rc): r01_on	on	10000	0
+r02_off	off	10000	0
+    ok: round 2 duplicate labels: 
+    ok: round 2 environment.txt files: 1
+    ok: round 2 source_fingerprint.txt files: 1
+    ok: round 2 environment.txt complete: /tmp/consumerseg-guard-sandbox.gpndIK/work/race2/root/environment.txt contains 'generated_at:'
+    ok: round 2 source_fingerprint.txt complete: /tmp/consumerseg-guard-sandbox.gpndIK/work/race2/root/source_fingerprint.txt contains 'sha256sum'
+    ok: round 2 run dirs: r01_on r02_off
+    ok: round 2 logs dir contents: r01_on.env r01_on.log.gz r01_on.rc r02_off.env r02_off.log.gz r02_off.rc summary.tsv
+    ok: round 2 valid gzip: r01_on.log.gz
+    ok: round 2 valid gzip: r02_off.log.gz
+PASS: 7: concurrent race — exactly one winner per round, artifacts self-consistent
+
+--- case 8 (extra): an invalid plan leaves no root; a missing parent says so
+    unknown mode rc=2
+    stderr: unknown mode in plan: bogus (want pristine|on|off)
+    ok: unknown mode exit code: 2
+    ok: no root left behind by the invalid plan: /tmp/consumerseg-guard-sandbox.gpndIK/work/args/root absent
+    missing parent rc=2
+    stderr: consumer seg batch: cannot create /tmp/consumerseg-guard-sandbox.gpndIK/work/missing/deep/root: mkdir: cannot create directory ‘/tmp/consumerseg-guard-sandbox.gpndIK/work/missing/deep/root’: No such file or directory
+    ok: missing parent exit code: 2
+    ok: missing parent message reports a creation failure: /tmp/consumerseg-guard-sandbox.gpndIK/last.stderr contains 'cannot create'
+    ok: nothing created below the missing parent: /tmp/consumerseg-guard-sandbox.gpndIK/work/missing absent
+PASS: 8 (extra): invalid plan and missing parent both refused (rc=2), nothing written
+
+===== guard fixture result: 8 passed, 0 failed, 0 skipped =====
+guard fixture: OK
