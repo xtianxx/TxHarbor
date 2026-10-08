@@ -1,0 +1,6 @@
+=== RUN   TestPreEpochSpanFailsOverlapCheck
+    analyze_test.go:501: overlap_ok = true, want false: a pre-epoch span must fail the check, not only add a detail
+--- FAIL: TestPreEpochSpanFailsOverlapCheck (0.01s)
+FAIL
+FAIL	github.com/xtianxx/txharbor/scripts/consumerseg/analyze	0.010s
+FAIL

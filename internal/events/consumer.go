@@ -1117,7 +1117,9 @@ func (k *KafkaConsumer) Run(ctx context.Context) error {
 		if ctx.Err() != nil {
 			return nil
 		}
+		perfConsumerPollStart()
 		fetches := k.Client.PollRecords(ctx, k.pollBatch)
+		perfConsumerPollDone()
 		if fetches.IsClientClosed() {
 			return nil
 		}
@@ -1131,12 +1133,14 @@ func (k *KafkaConsumer) Run(ctx context.Context) error {
 		iter := fetches.RecordIter()
 		for !iter.Done() {
 			record := iter.Next()
+			perfConsumerProcessStart(record.Partition, record.Offset)
 			result, err := k.Consumer.Process(ctx, Message{
 				Topic:     record.Topic,
 				Partition: int(record.Partition),
 				Offset:    record.Offset,
 				Value:     record.Value,
 			})
+			perfConsumerProcessDone(result, err)
 			if err != nil {
 				if ctx.Err() != nil {
 					return nil
@@ -1146,13 +1150,17 @@ func (k *KafkaConsumer) Run(ctx context.Context) error {
 				// redelivered instead of being lost.
 				return fmt.Errorf("consume %s[%d]@%d: %w", record.Topic, record.Partition, record.Offset, err)
 			}
-			_ = result
 			// The effect (or the durable quarantine) is committed; only now
 			// may the Kafka offset be marked for commit.
+			perfConsumerMarkStart(record.Partition, record.Offset)
 			k.Client.MarkCommitRecords(record)
+			perfConsumerMarkDone()
 		}
 		k.Client.AllowRebalance()
+		perfConsumerRebalanceDone()
+		perfConsumerRefreshLagStart()
 		k.refreshLag(ctx)
+		perfConsumerRefreshLagDone()
 	}
 }
 

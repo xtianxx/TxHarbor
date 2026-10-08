@@ -1,0 +1,365 @@
+{
+  "label": "r02_off",
+  "group": "off",
+  "collection": "seg",
+  "dir": "runs/r02_off",
+  "mode": "off",
+  "n": 50,
+  "n_source": "meta",
+  "exit_code": 0,
+  "exit_code_source": "exit_code",
+  "seg_enabled": false,
+  "timing_source": "anchors",
+  "publish_s": 0.317958,
+  "tail_s": 0.402936,
+  "total_s": 0.720894,
+  "e2e_rate": 69.358325,
+  "publish_rate": 157.253474,
+  "applied_at_publish_done": 0,
+  "latency_us": {
+    "publish_observe_latency_us": 1907,
+    "publish_done_latency_us": 1913,
+    "consume_confirm_latency_us": null,
+    "applied_cb_latency_us": null
+  },
+  "anchors": {
+    "drain_start_us": 9532676,
+    "publish": {
+      "first_cycle_start_us": 9533682,
+      "last_cycle_end_us": 9848721,
+      "pending_zero_observed_us": 9850628,
+      "publish_done_us": 9850634,
+      "cycles": 1,
+      "claimed": 50,
+      "acked": 50,
+      "released": 0,
+      "blocked": 0,
+      "applied_at_publish_done": 0
+    },
+    "consume": {
+      "poll_confirm_us": 10253570,
+      "consumer_stopped_us": 10288676,
+      "applied_at_confirm": 50,
+      "last_commit_end_us": null,
+      "last_applied_cb_us": null,
+      "not_collected": [
+        "last_commit_end_us",
+        "last_applied_cb_us"
+      ]
+    },
+    "counts": {
+      "observed_process": 50,
+      "observed_applied": 50,
+      "observed_duplicate": 0,
+      "observed_version_skip": 0,
+      "observed_quarantined": 0,
+      "observed_errors": 0,
+      "sql_spans": 0,
+      "sql_unattributed": 0,
+      "applied_cb": 50
+    },
+    "lag_final": {
+      "0": 0,
+      "1": 0,
+      "2": 0,
+      "3": 0,
+      "4": 2,
+      "5": 6
+    },
+    "seg_enabled": false
+  },
+  "segments": {
+    "collected": false,
+    "loop_kinds_us": {
+      "lag": null,
+      "mark": null,
+      "poll": null,
+      "process": null,
+      "rebalance": null
+    },
+    "sql_kinds_us": {
+      "begin": null,
+      "commit": null,
+      "effect_insert": null,
+      "inbox_insert": null,
+      "other": null,
+      "progress_update": null,
+      "quarantine_insert": null,
+      "rollback": null,
+      "version_probe": null,
+      "version_read": null,
+      "version_upsert": null
+    },
+    "tx_total_us": null,
+    "tx_events": 0,
+    "tx_skipped": 0,
+    "loop_rows": 0,
+    "sql_rows": 0,
+    "loop_parse_errors": 0,
+    "sql_parse_errors": 0,
+    "unknown_loop_rows": 0,
+    "sql_unattributed": 0,
+    "sql_rows_without_process": 0,
+    "nesting": {
+      "events_checked": 0,
+      "sum_violations": 0,
+      "tx_violations": 0
+    }
+  },
+  "tail": {
+    "collected": false,
+    "top_spans": 0,
+    "full_spans": 0,
+    "partial_spans": 0,
+    "outside_spans": 0,
+    "coverage_us": 0,
+    "raw_full_spans_us": 0,
+    "overlap_pairs": 0,
+    "overlap_spans": 0,
+    "negative_durations": 0,
+    "zero_durations": 0,
+    "pre_epoch_spans": 0
+  },
+  "counts": {
+    "anchors": {
+      "observed_process": 50,
+      "observed_applied": 50,
+      "observed_duplicate": 0,
+      "observed_version_skip": 0,
+      "observed_quarantined": 0,
+      "observed_errors": 0,
+      "sql_spans": 0,
+      "sql_unattributed": 0,
+      "applied_cb": 50
+    },
+    "report": {
+      "consumer_applied": 50,
+      "process_observed": 50,
+      "sql_span_count": 0
+    },
+    "drops": {
+      "loop_unpaired": 0,
+      "samples_dropped": 0,
+      "source": "meta"
+    },
+    "identity_ok": true,
+    "applied_equals_n": true
+  },
+  "curve": {
+    "collected": true,
+    "samples": 3,
+    "applied": [
+      {
+        "pct": 10,
+        "t_us": 10133166,
+        "t_ms": 600.49
+      },
+      {
+        "pct": 20,
+        "t_us": 10133166,
+        "t_ms": 600.49
+      },
+      {
+        "pct": 30,
+        "t_us": 10133166,
+        "t_ms": 600.49
+      },
+      {
+        "pct": 40,
+        "t_us": 10133166,
+        "t_ms": 600.49
+      },
+      {
+        "pct": 50,
+        "t_us": 10133166,
+        "t_ms": 600.49
+      },
+      {
+        "pct": 60,
+        "t_us": 10133166,
+        "t_ms": 600.49
+      },
+      {
+        "pct": 70,
+        "t_us": 10133166,
+        "t_ms": 600.49
+      },
+      {
+        "pct": 80,
+        "t_us": 10133166,
+        "t_ms": 600.49
+      },
+      {
+        "pct": 90,
+        "t_us": 10133166,
+        "t_ms": 600.49
+      },
+      {
+        "pct": 100,
+        "t_us": 10133166,
+        "t_ms": 600.49
+      }
+    ],
+    "published": [
+      {
+        "pct": 10,
+        "t_us": 9933681,
+        "t_ms": 401.005
+      },
+      {
+        "pct": 20,
+        "t_us": 9933681,
+        "t_ms": 401.005
+      },
+      {
+        "pct": 30,
+        "t_us": 9933681,
+        "t_ms": 401.005
+      },
+      {
+        "pct": 40,
+        "t_us": 9933681,
+        "t_ms": 401.005
+      },
+      {
+        "pct": 50,
+        "t_us": 9933681,
+        "t_ms": 401.005
+      },
+      {
+        "pct": 60,
+        "t_us": 9933681,
+        "t_ms": 401.005
+      },
+      {
+        "pct": 70,
+        "t_us": 9933681,
+        "t_ms": 401.005
+      },
+      {
+        "pct": 80,
+        "t_us": 9933681,
+        "t_ms": 401.005
+      },
+      {
+        "pct": 90,
+        "t_us": 9933681,
+        "t_ms": 401.005
+      },
+      {
+        "pct": 100,
+        "t_us": 9933681,
+        "t_ms": 401.005
+      }
+    ],
+    "progress": [
+      {
+        "pct": 10,
+        "t_us": 10133166,
+        "t_ms": 600.49
+      },
+      {
+        "pct": 20,
+        "t_us": 10133166,
+        "t_ms": 600.49
+      },
+      {
+        "pct": 30,
+        "t_us": 10133166,
+        "t_ms": 600.49
+      },
+      {
+        "pct": 40,
+        "t_us": 10133166,
+        "t_ms": 600.49
+      },
+      {
+        "pct": 50,
+        "t_us": 10133166,
+        "t_ms": 600.49
+      },
+      {
+        "pct": 60,
+        "t_us": 10133166,
+        "t_ms": 600.49
+      },
+      {
+        "pct": 70,
+        "t_us": 10133166,
+        "t_ms": 600.49
+      },
+      {
+        "pct": 80,
+        "t_us": 10133166,
+        "t_ms": 600.49
+      },
+      {
+        "pct": 90,
+        "t_us": 10133166,
+        "t_ms": 600.49
+      },
+      {
+        "pct": 100,
+        "t_us": 10133166,
+        "t_ms": 600.49
+      }
+    ]
+  },
+  "partitions": {
+    "collected": false,
+    "by_partition": null,
+    "process_spans": 0,
+    "error_outcomes": 0,
+    "lag_final": {
+      "0": 0,
+      "1": 0,
+      "2": 0,
+      "3": 0,
+      "4": 2,
+      "5": 6
+    },
+    "lag_final_source": "anchors"
+  },
+  "publish": {
+    "collected": false,
+    "rows": 0,
+    "productive_cycles": 0,
+    "boundary_rows": 0,
+    "claimed": 0,
+    "acked": 0,
+    "released": 0,
+    "blocked": 0,
+    "last_cycle_terminal": false,
+    "invariant_violations": 0,
+    "unclassified_rows": 0,
+    "parse_errors": 0
+  },
+  "pool_final_samples": {
+    "samples": 3,
+    "acquire_count": 72,
+    "empty_acquire_count": 1,
+    "acquire_duration_seconds": 0.021295,
+    "canceled_acquire_count": 0,
+    "total_conns": 2,
+    "idle_conns": 1
+  },
+  "checks": {
+    "anchors_complete": true,
+    "counts_ok": true,
+    "drops_ok": true,
+    "overlap_ok": true,
+    "nesting_ok": true,
+    "report_vs_anchors_ok": true,
+    "files_missing": [],
+    "details": [
+      "note: overlap_ok: loop.csv 未采集（未评估）",
+      "note: nesting_ok: loop.csv/sql.csv 未采集（未评估）",
+      "note: report_vs_anchors_ok: last_commit_end_seconds, last_applied_cb_seconds = 0 哨兵（该观测未采集，如 OFF 臂无 tracer/回调行）；report 对应值同为 0，按一致处理，不构成偏移比较"
+    ]
+  },
+  "not_collected": [
+    "未采集: loop.csv（loop 分段）",
+    "未采集: sql.csv（SQL 分段）",
+    "未采集: publish.csv（发布周期）"
+  ]
+}

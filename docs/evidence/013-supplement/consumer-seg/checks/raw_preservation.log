@@ -1,0 +1,41 @@
+baseline revision: 27cc51d0801862f85c1ae04fd1fc74a4d300e80a
+baseline files: 127; current files: 158
+changed (3):
+  ./README.md
+  ./analysis/summary.md
+  ./analysis/summary_all.json
+added (31):
+  ./CORRECTIONS.md
+  ./checks/analyzer_gofmt.log
+  ./checks/analyzer_gofmt.rc
+  ./checks/analyzer_pkg.log
+  ./checks/analyzer_pkg.rc
+  ./checks/analyzer_pkg_race.log
+  ./checks/analyzer_pkg_race.rc
+  ./checks/analyzer_pre_epoch_after.log
+  ./checks/analyzer_pre_epoch_after.rc
+  ./checks/analyzer_pre_epoch_before.log
+  ./checks/analyzer_pre_epoch_before.rc
+  ./checks/bash_n.log
+  ./checks/bash_n.rc
+  ./checks/build.log
+  ./checks/build.rc
+  ./checks/build_perf.log
+  ./checks/build_perf.rc
+  ./checks/commands.tsv
+  ./checks/environment.txt
+  ./checks/fixture_root_guard.log
+  ./checks/fixture_root_guard.rc
+  ./checks/gofmt.log
+  ./checks/gofmt.rc
+  ./checks/raw_preservation.log
+  ./checks/raw_preservation.py
+  ./checks/raw_preservation.rc
+  ./checks/regen_analysis.log
+  ./checks/regen_analysis.rc
+  ./checks/vet_analyze.log
+  ./checks/vet_analyze.rc
+  ./source_fingerprint_current.txt
+removed (0): []
+raw set (runs/, logs/, environment.txt, source_fingerprint.txt, smoke/) changed: NONE
+VERDICT: raw evidence byte-identical

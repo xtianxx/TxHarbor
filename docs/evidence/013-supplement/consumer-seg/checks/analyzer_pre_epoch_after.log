@@ -1,0 +1,4 @@
+=== RUN   TestPreEpochSpanFailsOverlapCheck
+--- PASS: TestPreEpochSpanFailsOverlapCheck (0.00s)
+PASS
+ok  	github.com/xtianxx/txharbor/scripts/consumerseg/analyze	0.009s

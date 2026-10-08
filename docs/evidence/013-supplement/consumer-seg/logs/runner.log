@@ -1,0 +1,36 @@
+consumer seg batch: evidence=/home/dream/product_env/TxHarbor/docs/evidence/013-supplement/consumer-seg repo=/home/dream/product_env/TxHarbor head=1e09c61e91ac8d98384cd5a994152c69834a7cfa
+consumer seg batch: plan=pristine on off off on on off off on pristine
+==> [1/10] r01_pristine (mode=pristine) started 2026-10-08T02:53:59.317122398Z
+consumer seg batch: r01_pristine ok (log=/home/dream/product_env/TxHarbor/docs/evidence/013-supplement/consumer-seg/logs/r01_pristine.log.gz)
+==> [2/10] r02_on (mode=on) started 2026-10-08T02:55:29.623372069Z
+consumer seg batch: r02_on ok (log=/home/dream/product_env/TxHarbor/docs/evidence/013-supplement/consumer-seg/logs/r02_on.log.gz)
+==> [3/10] r03_off (mode=off) started 2026-10-08T02:57:02.775990833Z
+consumer seg batch: r03_off ok (log=/home/dream/product_env/TxHarbor/docs/evidence/013-supplement/consumer-seg/logs/r03_off.log.gz)
+==> [4/10] r04_off (mode=off) started 2026-10-08T02:58:35.812801340Z
+consumer seg batch: r04_off ok (log=/home/dream/product_env/TxHarbor/docs/evidence/013-supplement/consumer-seg/logs/r04_off.log.gz)
+==> [5/10] r05_on (mode=on) started 2026-10-08T03:00:10.607801000Z
+consumer seg batch: r05_on ok (log=/home/dream/product_env/TxHarbor/docs/evidence/013-supplement/consumer-seg/logs/r05_on.log.gz)
+==> [6/10] r06_on (mode=on) started 2026-10-08T03:01:43.944646796Z
+consumer seg batch: r06_on ok (log=/home/dream/product_env/TxHarbor/docs/evidence/013-supplement/consumer-seg/logs/r06_on.log.gz)
+==> [7/10] r07_off (mode=off) started 2026-10-08T03:03:18.141546975Z
+consumer seg batch: r07_off ok (log=/home/dream/product_env/TxHarbor/docs/evidence/013-supplement/consumer-seg/logs/r07_off.log.gz)
+==> [8/10] r08_off (mode=off) started 2026-10-08T03:04:52.117571523Z
+consumer seg batch: r08_off ok (log=/home/dream/product_env/TxHarbor/docs/evidence/013-supplement/consumer-seg/logs/r08_off.log.gz)
+==> [9/10] r09_on (mode=on) started 2026-10-08T03:06:25.292957408Z
+consumer seg batch: r09_on ok (log=/home/dream/product_env/TxHarbor/docs/evidence/013-supplement/consumer-seg/logs/r09_on.log.gz)
+==> [10/10] r10_pristine (mode=pristine) started 2026-10-08T03:08:00.715604693Z
+consumer seg batch: r10_pristine ok (log=/home/dream/product_env/TxHarbor/docs/evidence/013-supplement/consumer-seg/logs/r10_pristine.log.gz)
+
+consumer seg batch summary (/home/dream/product_env/TxHarbor/docs/evidence/013-supplement/consumer-seg/logs/summary.tsv):
+label	mode	n	rc	started	ended
+r01_pristine	pristine	10000	0	2026-10-08T02:53:59.317122398Z	2026-10-08T02:55:29.616961575Z
+r02_on	on	10000	0	2026-10-08T02:55:29.623372069Z	2026-10-08T02:57:02.619425437Z
+r03_off	off	10000	0	2026-10-08T02:57:02.775990833Z	2026-10-08T02:58:35.804360780Z
+r04_off	off	10000	0	2026-10-08T02:58:35.812801340Z	2026-10-08T03:00:10.599391384Z
+r05_on	on	10000	0	2026-10-08T03:00:10.607801000Z	2026-10-08T03:01:43.792249200Z
+r06_on	on	10000	0	2026-10-08T03:01:43.944646796Z	2026-10-08T03:03:17.975234542Z
+r07_off	off	10000	0	2026-10-08T03:03:18.141546975Z	2026-10-08T03:04:52.108756071Z
+r08_off	off	10000	0	2026-10-08T03:04:52.117571523Z	2026-10-08T03:06:25.283970531Z
+r09_on	on	10000	0	2026-10-08T03:06:25.292957408Z	2026-10-08T03:08:00.572543345Z
+r10_pristine	pristine	10000	0	2026-10-08T03:08:00.715604693Z	2026-10-08T03:09:32.955409737Z
+consumer seg batch: all 10 invocations ok; evidence under /home/dream/product_env/TxHarbor/docs/evidence/013-supplement/consumer-seg

@@ -1,0 +1,235 @@
+{
+  "label": "r10_pristine",
+  "group": "pristine",
+  "collection": "pristine",
+  "dir": "runs/r10_pristine",
+  "n": 10000,
+  "n_source": "report",
+  "exit_code": 0,
+  "exit_code_source": "exit_code",
+  "timing_source": "report",
+  "publish_s": 1.820255,
+  "tail_s": 41.637972,
+  "total_s": 43.458227,
+  "e2e_rate": 230.106028,
+  "publish_rate": 5493.735768,
+  "applied_at_publish_done": null,
+  "latency_us": {
+    "publish_observe_latency_us": null,
+    "publish_done_latency_us": null,
+    "consume_confirm_latency_us": null,
+    "applied_cb_latency_us": null
+  },
+  "anchors": {
+    "missing": [
+      "anchors.json"
+    ]
+  },
+  "segments": {
+    "collected": false,
+    "loop_kinds_us": {
+      "lag": null,
+      "mark": null,
+      "poll": null,
+      "process": null,
+      "rebalance": null
+    },
+    "sql_kinds_us": {
+      "begin": null,
+      "commit": null,
+      "effect_insert": null,
+      "inbox_insert": null,
+      "other": null,
+      "progress_update": null,
+      "quarantine_insert": null,
+      "rollback": null,
+      "version_probe": null,
+      "version_read": null,
+      "version_upsert": null
+    },
+    "tx_total_us": null,
+    "tx_events": 0,
+    "tx_skipped": 0,
+    "loop_rows": 0,
+    "sql_rows": 0,
+    "loop_parse_errors": 0,
+    "sql_parse_errors": 0,
+    "unknown_loop_rows": 0,
+    "sql_unattributed": 0,
+    "sql_rows_without_process": 0,
+    "nesting": {
+      "events_checked": 0,
+      "sum_violations": 0,
+      "tx_violations": 0
+    }
+  },
+  "tail": {
+    "collected": false,
+    "top_spans": 0,
+    "full_spans": 0,
+    "partial_spans": 0,
+    "outside_spans": 0,
+    "coverage_us": 0,
+    "raw_full_spans_us": 0,
+    "overlap_pairs": 0,
+    "overlap_spans": 0,
+    "negative_durations": 0,
+    "zero_durations": 0,
+    "pre_epoch_spans": 0
+  },
+  "counts": {
+    "report": {
+      "consumer_applied": 10000,
+      "process_observed": null,
+      "sql_span_count": null
+    },
+    "drops": {
+      "source": "absent"
+    }
+  },
+  "curve": {
+    "collected": false,
+    "samples": 0,
+    "applied": [
+      {
+        "pct": 10
+      },
+      {
+        "pct": 20
+      },
+      {
+        "pct": 30
+      },
+      {
+        "pct": 40
+      },
+      {
+        "pct": 50
+      },
+      {
+        "pct": 60
+      },
+      {
+        "pct": 70
+      },
+      {
+        "pct": 80
+      },
+      {
+        "pct": 90
+      },
+      {
+        "pct": 100
+      }
+    ],
+    "published": [
+      {
+        "pct": 10
+      },
+      {
+        "pct": 20
+      },
+      {
+        "pct": 30
+      },
+      {
+        "pct": 40
+      },
+      {
+        "pct": 50
+      },
+      {
+        "pct": 60
+      },
+      {
+        "pct": 70
+      },
+      {
+        "pct": 80
+      },
+      {
+        "pct": 90
+      },
+      {
+        "pct": 100
+      }
+    ],
+    "progress": [
+      {
+        "pct": 10
+      },
+      {
+        "pct": 20
+      },
+      {
+        "pct": 30
+      },
+      {
+        "pct": 40
+      },
+      {
+        "pct": 50
+      },
+      {
+        "pct": 60
+      },
+      {
+        "pct": 70
+      },
+      {
+        "pct": 80
+      },
+      {
+        "pct": 90
+      },
+      {
+        "pct": 100
+      }
+    ]
+  },
+  "partitions": {
+    "collected": false,
+    "by_partition": null,
+    "process_spans": 0,
+    "error_outcomes": 0
+  },
+  "publish": {
+    "collected": false,
+    "rows": 0,
+    "productive_cycles": 0,
+    "boundary_rows": 0,
+    "claimed": 0,
+    "acked": 0,
+    "released": 0,
+    "blocked": 0,
+    "last_cycle_terminal": false,
+    "invariant_violations": 0,
+    "unclassified_rows": 0,
+    "parse_errors": 0
+  },
+  "checks": {
+    "anchors_complete": false,
+    "counts_ok": true,
+    "drops_ok": true,
+    "overlap_ok": true,
+    "nesting_ok": true,
+    "report_vs_anchors_ok": true,
+    "files_missing": [],
+    "details": [
+      "note: anchors_complete: anchors.json 未采集（pristine 运行按协议仅含 report.json + exit_code）",
+      "note: counts_ok: anchors.counts 未采集（未评估）",
+      "note: drops_ok: drops 未采集（未评估）",
+      "note: overlap_ok: loop.csv 未采集（未评估）",
+      "note: nesting_ok: loop.csv/sql.csv 未采集（未评估）",
+      "note: report_vs_anchors_ok: anchors.json 未采集（未评估）"
+    ]
+  },
+  "not_collected": [
+    "未采集: meta.json（运行元数据）",
+    "未采集: anchors.json（单调基准/检测锚点）",
+    "未采集: samples.csv（200ms 采样曲线/连接池）",
+    "未采集: loop.csv（loop 分段）",
+    "未采集: sql.csv（SQL 分段）",
+    "未采集: publish.csv（发布周期）"
+  ]
+}
