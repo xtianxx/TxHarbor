@@ -6,6 +6,11 @@
 
 ## [Unreleased]
 
+> **状态更新（2026-10-08）**：下列条目记录的是**合并前**的分支状态。此后 013（PR #25）、
+> 014（PR #27）、015（PR #38/#39）均已合入 main；「远程 CI 运行待核验」的表述已被后续
+> 运行取代（见 `docs/verification-matrix.md`）。三者**均未部署**，T000-P 保持 OPEN。
+> 条目原文按记录保留，不追溯改写。
+
 ### Added
 
 - 013 Reliable Event Infrastructure（分支 `013-reliable-event-infrastructure`，

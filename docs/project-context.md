@@ -1,5 +1,9 @@
 # TxHarbor 项目背景（2026-09-19 快照）
 
+> **历史快照提示**：本文件为 2026-09-19 的状态快照；其中 013 等阶段状态已被后续合并取代
+> （013 PR #25、014 PR #27、015 PR #38/#39 已合入 main；均未部署，T000-P 保持 OPEN）。
+> 当前状态以 `README.md`、`CHANGELOG.md` 与 `docs/verification-matrix.md` 为准。
+
 生产级 EVM 钱包与交易基础设施，monorepo：API / Indexer / Worker / Signer /
 PostgreSQL / Redis / Kafka / EVM RPC。详见 `agent.md` 与
 `.specify/memory/constitution.md`（v1.1.0，2026-09-12 批准）。
