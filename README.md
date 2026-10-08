@@ -5,6 +5,8 @@
 隔离签名到交易生命周期与执行 worker。PostgreSQL 是唯一事实来源；私钥只存在于
 Signer；不可逆的资金动作不在 HTTP 处理器内执行。
 
+> 简历/展示材料（30 秒介绍、5 分钟演示讲稿、面试问答与证据索引）：[docs/portfolio.md](docs/portfolio.md)
+
 ## 定位与价值
 
 - **充值链**：持续索引区块头与白名单 ERC-20 Transfer 日志，识别充值观察记录，
