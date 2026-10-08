@@ -1,0 +1,30 @@
+generated_at: 2026-10-08T02:53:59.134431025Z
+branch: perf/consumer-catchup-seg
+head: 1e09c61e91ac8d98384cd5a994152c69834a7cfa
+head_subject: perf(measure): 019 正常查询路径四条件分段测量批次与证据（R/G 分离）+ 分析器修正 (#43)
+go: go version go1.26.5 linux/amd64
+kernel: Linux 6.18.33.2-microsoft-standard-WSL2 x86_64
+--- git status --porcelain (snapshot) ---
+ M internal/events/consumer.go
+?? .omp/
+?? docs/evidence/013-supplement/consumer-seg/
+?? internal/events/backlog_drain_seg_integration_test.go
+?? internal/events/backlog_drain_seg_recorder_test.go
+?? internal/events/perf_seam_none.go
+?? internal/events/perf_seam_perf.go
+?? scripts/consumerseg/
+--- sha256sum ---
+265bba8fadb1cd41e0ace44faad9a97729b2c1807bd66b0ea5b19d9b92e93a21  internal/events/consumer.go
+ff426491743832b347f50ba71a542c0fd5db0e12d0275ab5e6c063423f27128c  internal/events/perf_seam_none.go
+f2e07e21f584b0b39c53acb3f3d836994fa42d83ffc8c01c9b18750e10d26fe1  internal/events/perf_seam_perf.go
+4c542c19b12707fa47ab70ae3a82845f4e7da321234e5b828924f572e9dd3554  internal/events/backlog_drain_integration_test.go
+8f819b448abe5b48f1c73f9506c36d7ee9385b7085621b32bfbbee11c07f6a04  scripts/consumerseg/run_batch.sh
+38de0161c0b298a5f220a4b92a2b0635ffa8d9380afb55e2c9d392f039e3b40e  go.mod
+615c3545498a0f82bf00b3f4c1cd3e0aa733052e2d31d14240f62699ad7d32a5  internal/events/backlog_drain_seg_integration_test.go
+f78fed0d3c4dcb1969993d6a0c1b5b61c73742817fc8b5b807d6d6122d37a79f  internal/events/backlog_drain_seg_recorder_test.go
+b7fa9c39c977828ab34b33653d6ea48e7d1f0952d30f7224550235218665493d  scripts/consumerseg/analyze/analyze.go
+8ea25985ceb49801bf6724dc424cb4b9ca9561125e097da58a32919595dab162  scripts/consumerseg/analyze/analyze_test.go
+ab77c9806b12e158b97f0a6a3f2219fa39a2434c1a97971e48cc8807428e8e1a  scripts/consumerseg/analyze/load.go
+cc5111e3b409043211d54ad065083d01ffd62c5eac9eaeaf17cb8e75f78b91c2  scripts/consumerseg/analyze/main.go
+c140529354c951fb895fddbe258e7badc61327c1953eefa6fb061821b8629a33  scripts/consumerseg/analyze/render.go
+7f92a49055f0e8d3828774498cee26584e3042be24fb6bbd9afc27366e9fb942  scripts/consumerseg/analyze/stats.go
