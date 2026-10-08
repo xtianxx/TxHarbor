@@ -400,9 +400,26 @@ type Env struct {
 	stopped bool
 }
 
-// startEnv boots the dependencies for one path, applies the real migrations,
-// starts the real serve command and seeds the deterministic dataset.
+// EnvOpts selects the optional harness surfaces. The zero value runs the
+// dependencies and the serve command without the background runtimes;
+// startEnv passes Background=true exactly for the full-stack path, so its
+// committed behavior is unchanged.
+type EnvOpts struct {
+	// Background starts the real event-publisher and event-consumer command
+	// loops (the full-stack background runtimes).
+	Background bool
+}
+
+// startEnv boots the dependencies for one path with the committed defaults
+// (background runtimes on exactly for the full-stack path).
 func startEnv(t *testing.T, ctx context.Context, path Path, run int, profile Profile, evidence *EvidenceWriter) *Env {
+	return startEnvWith(t, ctx, path, run, profile, evidence, EnvOpts{Background: path == PathFullStack})
+}
+
+// startEnvWith boots the dependencies for one path, applies the real
+// migrations, starts the real serve command and seeds the deterministic
+// dataset. opts selects the optional surfaces (the background runtimes).
+func startEnvWith(t *testing.T, ctx context.Context, path Path, run int, profile Profile, evidence *EvidenceWriter, opts EnvOpts) *Env {
 	t.Helper()
 	testcontainers.SkipIfProviderIsNotHealthy(t)
 
@@ -507,7 +524,7 @@ func startEnv(t *testing.T, ctx context.Context, path Path, run int, profile Pro
 
 	env.seed(t, ctx, env.sender)
 
-	if path == PathFullStack {
+	if opts.Background && path == PathFullStack {
 		env.startRuntimes(t, ctx)
 	}
 
@@ -971,15 +988,28 @@ func (e *Env) ensureKafkaUp(ctx context.Context) error {
 
 // --- HTTP helpers ------------------------------------------------------------
 
-// doRequest issues one authenticated request against the real listener.
+// perfIDHeader echoes the server-minted per-request perf id (absent on
+// ordinary builds).
+const perfIDHeader = "X-TXHarbor-Perf-Id"
+
+// doRequest issues one authenticated request against the real listener and
+// discards the perf request id (unchanged call-site behavior).
 func (e *Env) doRequest(ctx context.Context, method, path, body string) (int, []byte, error) {
+	status, raw, _, err := e.doRequestEx(ctx, method, path, body)
+	return status, raw, err
+}
+
+// doRequestEx issues one authenticated request against the real listener and
+// returns the server-minted perf id read from the X-TXHarbor-Perf-Id response
+// header (0 when the header is absent or unparsable).
+func (e *Env) doRequestEx(ctx context.Context, method, path, body string) (int, []byte, uint64, error) {
 	var reader io.Reader
 	if body != "" {
 		reader = strings.NewReader(body)
 	}
 	req, err := http.NewRequestWithContext(ctx, method, e.BaseURL+path, reader)
 	if err != nil {
-		return 0, nil, err
+		return 0, nil, 0, err
 	}
 	if body != "" {
 		req.Header.Set("Content-Type", "application/json")
@@ -987,14 +1017,18 @@ func (e *Env) doRequest(ctx context.Context, method, path, body string) (int, []
 	req.Header.Set("Authorization", "Bearer "+e.APIKey)
 	resp, err := e.client.Do(req)
 	if err != nil {
-		return 0, nil, err
+		return 0, nil, 0, err
 	}
 	defer resp.Body.Close()
 	raw, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 	if err != nil {
-		return 0, nil, err
+		return 0, nil, 0, err
 	}
-	return resp.StatusCode, raw, nil
+	var perfID uint64
+	if id, err := strconv.ParseUint(strings.TrimSpace(resp.Header.Get(perfIDHeader)), 10, 64); err == nil {
+		perfID = id
+	}
+	return resp.StatusCode, raw, perfID, nil
 }
 
 // --- load generator ----------------------------------------------------------
@@ -1009,6 +1043,9 @@ type Sample struct {
 	OK         bool      `json:"ok"`
 	ErrClass   string    `json:"err_class,omitempty"`
 	ErrText    string    `json:"err_text,omitempty"`
+	// PerfID is the server-minted per-request id echoed in the
+	// X-TXHarbor-Perf-Id response header (0/omitted without the perf seam).
+	PerfID uint64 `json:"perf_id,omitempty"`
 }
 
 // ClassStats is the per-class aggregation of one window.
@@ -1242,7 +1279,8 @@ func (e *Env) queryOnce(ctx context.Context, state FaultState) Sample {
 	id := e.QueryIDs[idx]
 	start := time.Now()
 	sample := Sample{At: start.UTC(), State: string(state), Class: "query"}
-	status, _, err := e.doRequest(ctx, http.MethodGet, "/withdrawals/"+id, "")
+	status, _, perfID, err := e.doRequestEx(ctx, http.MethodGet, "/withdrawals/"+id, "")
+	sample.PerfID = perfID
 	sample.DurationMS = float64(time.Since(start).Microseconds()) / 1000
 	if err != nil {
 		sample.ErrClass = "transport"
@@ -1265,7 +1303,8 @@ func (e *Env) createOnce(ctx context.Context, state FaultState) Sample {
 	n := e.grantSeq.Add(1)
 	key := fmt.Sprintf("perf-%s-%d", state, n)
 	authID := fmt.Sprintf("perf-auth-%d", n)
-	status, _, err := e.doRequest(ctx, http.MethodPost, "/withdrawals", e.createBody(key, authID))
+	status, _, perfID, err := e.doRequestEx(ctx, http.MethodPost, "/withdrawals", e.createBody(key, authID))
+	sample.PerfID = perfID
 	sample.DurationMS = float64(time.Since(start).Microseconds()) / 1000
 	if err != nil {
 		sample.ErrClass = "transport"

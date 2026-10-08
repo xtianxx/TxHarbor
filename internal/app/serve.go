@@ -310,6 +310,10 @@ func Serve(ctx context.Context, d Deps) int {
 		degradation.rpcBudget = rpcBudget
 	}
 
+	// Segment-measurement seam (no-op in an ordinary build): registered after
+	// the 013 wiring so the saved limiter client is the limiter's own client.
+	perfRegisterServeResources(pool, limiterClient)
+
 	// 5c. Indexer: startup-unique lease owner plus the header and log scanners,
 	// both behind one coordinator (a single acquisition loop and a single
 	// heartbeat, research R1). RPC outcomes feed only the indexer metrics;
@@ -540,7 +544,7 @@ func Serve(ctx context.Context, d Deps) int {
 	mux.Handle("/", recoveryHealthAnnotation(recoveryWiring, health.NewServer(agg, m.Handler()).Handler()))
 
 	srv := &http.Server{
-		Handler:           mux,
+		Handler:           perfWrapServeHandler(mux),
 		ReadHeaderTimeout: cfg.ProbeTimeout,
 		// WriteTimeout bounds response writes on the shared probe listener
 		// (009 T013 007-route review: 007 withdrawal routes share this

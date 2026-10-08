@@ -30,6 +30,7 @@ func OpenPool(ctx context.Context, dsn string, pingTimeout time.Duration) (*pgxp
 	cfg.MaxConnLifetime = poolMaxConnLifetime
 	cfg.MaxConnIdleTime = poolMaxConnIdleTime
 	cfg.HealthCheckPeriod = poolHealthCheckPeriod
+	perfAttachQueryTracer(cfg)
 
 	pool, err := pgxpool.NewWithConfig(ctx, cfg)
 	if err != nil {

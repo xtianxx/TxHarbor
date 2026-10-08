@@ -1,0 +1,1279 @@
+{
+  "schema_version": 1,
+  "generated_at": "2026-10-07T14:35:26.466379759Z",
+  "root": "/home/dream/product_env/TxHarbor/.evidence/seg-smoke",
+  "factor_definition": "R = limiter_on（限流开关）；G = background_on（后台负载开关）；R1G1:nocoll = collect=false 的开销对照臂（不进因子对比）。",
+  "factor_disclaimer": "差值对比（禁止相加/占比证明）：全部因子效应都是同一指标、同一 ID 集合上的臂间差值；分位数不可加，占比不构成因果或收益证明。",
+  "arms": [
+    {
+      "repeat": 99,
+      "arm": "R1G1",
+      "dir": "/home/dream/product_env/TxHarbor/.evidence/seg-smoke/repeat99/R1G1",
+      "meta_present": true,
+      "commit": "7587116eb895003fcf7a2fd91fcbd2a0939d6f05",
+      "limiter_on": true,
+      "background_on": true,
+      "collect": true,
+      "window_start": "2026-10-07T11:26:56.41640289Z",
+      "window_end": "2026-10-07T11:27:05.937817243Z",
+      "window_origin": "meta",
+      "window_seconds": 9.521414,
+      "files": [
+        "meta.json",
+        "client_samples.jsonl",
+        "warmup_samples.jsonl",
+        "server_segments.jsonl"
+      ],
+      "client_query": {
+        "n": 390,
+        "status": {
+          "total": 390,
+          "ok_2xx": 390,
+          "non_2xx": 0,
+          "transport_errors": 0,
+          "no_status": 0,
+          "errors": 0,
+          "by_status": {
+            "200": 390
+          }
+        },
+        "latency": {
+          "count": 390,
+          "p50_ms": 8.7535,
+          "p95_ms": 114.283,
+          "p99_ms": 133.76507,
+          "min_ms": 6.315,
+          "max_ms": 137.941
+        }
+      },
+      "other_classes": {
+        "create": {
+          "n": 24,
+          "status": {
+            "total": 24,
+            "ok_2xx": 24,
+            "non_2xx": 0,
+            "transport_errors": 0,
+            "no_status": 0,
+            "errors": 0,
+            "by_status": {
+              "201": 24
+            }
+          },
+          "latency": {
+            "count": 24,
+            "p50_ms": 17.2125,
+            "p95_ms": 39.64405,
+            "p99_ms": 47.08382,
+            "min_ms": 14.289,
+            "max_ms": 48.732
+          }
+        },
+        "deposit": {
+          "n": 12,
+          "status": {
+            "total": 12,
+            "ok_2xx": 0,
+            "non_2xx": 0,
+            "transport_errors": 0,
+            "no_status": 12,
+            "errors": 0,
+            "by_status": {
+              "no_status": 12
+            }
+          },
+          "latency": {
+            "count": 12,
+            "p50_ms": 57.4775,
+            "p95_ms": 63.063,
+            "p99_ms": 65.3598,
+            "min_ms": 55.959,
+            "max_ms": 65.934
+          }
+        }
+      },
+      "client_query_phases": [
+        {
+          "label": "[0s,4s)",
+          "n": 42,
+          "status": {
+            "total": 42,
+            "ok_2xx": 42,
+            "non_2xx": 0,
+            "transport_errors": 0,
+            "no_status": 0,
+            "errors": 0,
+            "by_status": {
+              "200": 42
+            }
+          },
+          "latency": {
+            "count": 42,
+            "p50_ms": 9.3635,
+            "p95_ms": 12.1062,
+            "p99_ms": 17.91076,
+            "min_ms": 7.282,
+            "max_ms": 19.413
+          }
+        },
+        {
+          "label": "[4s,8s)",
+          "n": 152,
+          "status": {
+            "total": 152,
+            "ok_2xx": 152,
+            "non_2xx": 0,
+            "transport_errors": 0,
+            "no_status": 0,
+            "errors": 0,
+            "by_status": {
+              "200": 152
+            }
+          },
+          "latency": {
+            "count": 152,
+            "p50_ms": 8.7565,
+            "p95_ms": 127.6288,
+            "p99_ms": 135.57593,
+            "min_ms": 6.315,
+            "max_ms": 137.941
+          }
+        },
+        {
+          "label": "[8s,12s)",
+          "n": 196,
+          "status": {
+            "total": 196,
+            "ok_2xx": 196,
+            "non_2xx": 0,
+            "transport_errors": 0,
+            "no_status": 0,
+            "errors": 0,
+            "by_status": {
+              "200": 196
+            }
+          },
+          "latency": {
+            "count": 196,
+            "p50_ms": 8.6765,
+            "p95_ms": 13.29725,
+            "p99_ms": 17.55605,
+            "min_ms": 6.959,
+            "max_ms": 42.869
+          }
+        }
+      ],
+      "client_query_phases_wall": [
+        {
+          "label": "[0s,4s)",
+          "n": 91,
+          "status": {
+            "total": 91,
+            "ok_2xx": 91,
+            "non_2xx": 0,
+            "transport_errors": 0,
+            "no_status": 0,
+            "errors": 0,
+            "by_status": {
+              "200": 91
+            }
+          },
+          "latency": {
+            "count": 91,
+            "p50_ms": 8.465,
+            "p95_ms": 11.719,
+            "p99_ms": 16.1154,
+            "min_ms": 6.594,
+            "max_ms": 19.413
+          }
+        },
+        {
+          "label": "[4s,8s)",
+          "n": 213,
+          "status": {
+            "total": 213,
+            "ok_2xx": 213,
+            "non_2xx": 0,
+            "transport_errors": 0,
+            "no_status": 0,
+            "errors": 0,
+            "by_status": {
+              "200": 213
+            }
+          },
+          "latency": {
+            "count": 213,
+            "p50_ms": 8.497,
+            "p95_ms": 123.9956,
+            "p99_ms": 135.4982,
+            "min_ms": 6.315,
+            "max_ms": 137.941
+          }
+        },
+        {
+          "label": "[8s,12s)",
+          "n": 74,
+          "status": {
+            "total": 74,
+            "ok_2xx": 74,
+            "non_2xx": 0,
+            "transport_errors": 0,
+            "no_status": 0,
+            "errors": 0,
+            "by_status": {
+              "200": 74
+            }
+          },
+          "latency": {
+            "count": 74,
+            "p50_ms": 9.857,
+            "p95_ms": 13.50955,
+            "p99_ms": 15.76788,
+            "min_ms": 7.431,
+            "max_ms": 17.26
+          }
+        }
+      ],
+      "client_query_outside_window": 0,
+      "client_query_outside_window_wall": 12,
+      "phase_method": "step_corrected",
+      "clock_steps": [
+        {
+          "boundary_id": 111,
+          "first_affected_id": 112,
+          "delta_ms": -2438.758665,
+          "kind": "backward",
+          "ambiguous": false,
+          "applies_to_window": true,
+          "label_before": "2026-10-07T11:26:57.717285685Z",
+          "label_after": "2026-10-07T11:26:55.27852702Z",
+          "correction_ms": 2438.758665
+        }
+      ],
+      "clock_steps_backward": 1,
+      "clock_steps_applied": 1,
+      "clock_steps_forward_suspect": 0,
+      "clock_steps_note": "检测到 1 次回拨中 1 次作用于窗口（合计 2438.759ms）：边界之后的标签已校正，本次移原始 wall 相位保留在 client_query_phases_wall",
+      "window_seconds_corrected": 11.960173,
+      "window_seconds_corrected_note": "原始 wall 窗口 + 作用于窗口的回拨校正 2438.759ms",
+      "segments": {
+        "admit": {
+          "count": 510,
+          "p50_ms": 1.137243,
+          "p95_ms": 6.711205,
+          "p99_ms": 18.271334,
+          "min_ms": 0.730871,
+          "max_ms": 25.50278
+        },
+        "admit_skipped": {
+          "count": 0
+        },
+        "below_admit": {
+          "count": 510,
+          "p50_ms": 6.811694,
+          "p95_ms": 79.576438,
+          "p99_ms": 92.80057,
+          "min_ms": 4.709414,
+          "max_ms": 115.925005
+        },
+        "server_total": {
+          "count": 510,
+          "p50_ms": 7.926711,
+          "p95_ms": 86.286736,
+          "p99_ms": 113.924019,
+          "min_ms": 5.568013,
+          "max_ms": 134.565273
+        }
+      },
+      "segment_phases": {
+        "admit": [
+          {
+            "label": "[0s,4s)",
+            "latency": {
+              "count": 50,
+              "p50_ms": 1.196083,
+              "p95_ms": 1.6446,
+              "p99_ms": 1.757103,
+              "min_ms": 0.877847,
+              "max_ms": 1.805862
+            }
+          },
+          {
+            "label": "[4s,8s)",
+            "latency": {
+              "count": 160,
+              "p50_ms": 1.142875,
+              "p95_ms": 11.939825,
+              "p99_ms": 23.102626,
+              "min_ms": 0.768494,
+              "max_ms": 25.50278
+            }
+          },
+          {
+            "label": "[8s,12s)",
+            "latency": {
+              "count": 204,
+              "p50_ms": 1.136353,
+              "p95_ms": 1.700393,
+              "p99_ms": 2.088197,
+              "min_ms": 0.758404,
+              "max_ms": 3.136885
+            }
+          }
+        ],
+        "admit_skipped": [
+          {
+            "label": "[0s,4s)",
+            "latency": {
+              "count": 0
+            }
+          },
+          {
+            "label": "[4s,8s)",
+            "latency": {
+              "count": 0
+            }
+          },
+          {
+            "label": "[8s,12s)",
+            "latency": {
+              "count": 0
+            }
+          }
+        ],
+        "below_admit": [
+          {
+            "label": "[0s,4s)",
+            "latency": {
+              "count": 50,
+              "p50_ms": 7.357196,
+              "p95_ms": 16.07142,
+              "p99_ms": 17.09377,
+              "min_ms": 5.508634,
+              "max_ms": 17.167047
+            }
+          },
+          {
+            "label": "[4s,8s)",
+            "latency": {
+              "count": 160,
+              "p50_ms": 6.725067,
+              "p95_ms": 92.172282,
+              "p99_ms": 96.633186,
+              "min_ms": 4.709414,
+              "max_ms": 115.925005
+            }
+          },
+          {
+            "label": "[8s,12s)",
+            "latency": {
+              "count": 204,
+              "p50_ms": 6.56627,
+              "p95_ms": 13.177032,
+              "p99_ms": 26.466584,
+              "min_ms": 5.008712,
+              "max_ms": 39.327265
+            }
+          }
+        ],
+        "server_total": [
+          {
+            "label": "[0s,4s)",
+            "latency": {
+              "count": 50,
+              "p50_ms": 8.63118,
+              "p95_ms": 17.692546,
+              "p99_ms": 18.263034,
+              "min_ms": 6.479962,
+              "max_ms": 18.265294
+            }
+          },
+          {
+            "label": "[4s,8s)",
+            "latency": {
+              "count": 160,
+              "p50_ms": 7.884931,
+              "p95_ms": 99.785011,
+              "p99_ms": 117.230296,
+              "min_ms": 5.568013,
+              "max_ms": 134.565273
+            }
+          },
+          {
+            "label": "[8s,12s)",
+            "latency": {
+              "count": 204,
+              "p50_ms": 7.754372,
+              "p95_ms": 14.28051,
+              "p99_ms": 27.947659,
+              "min_ms": 5.917048,
+              "max_ms": 41.835662
+            }
+          }
+        ]
+      },
+      "segment_pre_burst": {
+        "admit": {
+          "count": 210,
+          "p50_ms": 1.152506,
+          "p95_ms": 11.317649,
+          "p99_ms": 23.004348,
+          "min_ms": 0.768494,
+          "max_ms": 25.50278
+        },
+        "admit_skipped": {
+          "count": 0
+        },
+        "below_admit": {
+          "count": 210,
+          "p50_ms": 6.875362,
+          "p95_ms": 89.436763,
+          "p99_ms": 93.221643,
+          "min_ms": 4.709414,
+          "max_ms": 115.925005
+        },
+        "server_total": {
+          "count": 210,
+          "p50_ms": 8.092833,
+          "p95_ms": 96.027298,
+          "p99_ms": 116.108157,
+          "min_ms": 5.568013,
+          "max_ms": 134.565273
+        }
+      },
+      "segment_outside_window": {
+        "admit": 96,
+        "below_admit": 96,
+        "server_total": 96
+      },
+      "paired_segments": {
+        "ids": 510,
+        "ids_with_admit": 510,
+        "ids_with_admit_skipped": 0,
+        "ids_with_admit_and_below_admit": 510,
+        "server_total": {
+          "count": 510,
+          "p50_ms": 7.926711,
+          "p95_ms": 86.286736,
+          "p99_ms": 113.924019,
+          "min_ms": 5.568013,
+          "max_ms": 134.565273
+        },
+        "admit": {
+          "count": 510,
+          "p50_ms": 1.137243,
+          "p95_ms": 6.711205,
+          "p99_ms": 18.271334,
+          "min_ms": 0.730871,
+          "max_ms": 25.50278
+        },
+        "admit_skipped": {
+          "count": 0
+        },
+        "below_admit": {
+          "count": 510,
+          "p50_ms": 6.811694,
+          "p95_ms": 79.576438,
+          "p99_ms": 92.80057,
+          "min_ms": 4.709414,
+          "max_ms": 115.925005
+        }
+      },
+      "pg_total_per_request": {
+        "count": 414,
+        "p50_ms": 6.545795,
+        "p95_ms": 15.106569,
+        "p99_ms": 23.053635,
+        "min_ms": 4.572523,
+        "max_ms": 44.975736
+      },
+      "pgq": {
+        "total": 3890,
+        "errors": 0,
+        "distinct_prefixes": 20,
+        "latency": {
+          "count": 3890,
+          "p50_ms": 0.931149,
+          "p95_ms": 1.920627,
+          "p99_ms": 3.469018,
+          "min_ms": 0.482368,
+          "max_ms": 14.847593
+        },
+        "top_prefixes": [
+          {
+            "prefix": "SELECT caller_id, label, can_create…",
+            "count": 510,
+            "p50_ms": 0.947356,
+            "p95_ms": 1.940502
+          },
+          {
+            "prefix": "SELECT key_id, caller_id, key_hash…",
+            "count": 510,
+            "p50_ms": 1.094618,
+            "p95_ms": 2.185821
+          },
+          {
+            "prefix": "SELECT 1 FROM reorg_recovery_events…",
+            "count": 470,
+            "p50_ms": 0.870404,
+            "p95_ms": 1.851024
+          },
+          {
+            "prefix": "SELECT recovery_id, phase, policy_seq,…",
+            "count": 470,
+            "p50_ms": 0.869327,
+            "p95_ms": 1.911806
+          },
+          {
+            "prefix": "SELECT request_id, caller_id, chain_id,…",
+            "count": 470,
+            "p50_ms": 0.963303,
+            "p95_ms": 1.952877
+          },
+          {
+            "prefix": "begin isolation level repeatable…",
+            "count": 470,
+            "p50_ms": 0.867916,
+            "p95_ms": 1.654126
+          },
+          {
+            "prefix": "rollback",
+            "count": 470,
+            "p50_ms": 0.848385,
+            "p95_ms": 1.666249
+          },
+          {
+            "prefix": "INSERT INTO event_obligation (…",
+            "count": 40,
+            "p50_ms": 1.076416,
+            "p95_ms": 2.194775
+          }
+        ]
+      },
+      "pg_statements_per_request": {
+        "requests": 414,
+        "requests_without_pgq": 0,
+        "by_statements": {
+          "15": 24,
+          "7": 390
+        },
+        "mean": 7.463768,
+        "p50": 7,
+        "p95": 15,
+        "max": 15
+      },
+      "warmup": {
+        "samples": 104,
+        "note": "预热样本单独小节，不并入稳态统计",
+        "query": {
+          "n": 80,
+          "status": {
+            "total": 80,
+            "ok_2xx": 80,
+            "non_2xx": 0,
+            "transport_errors": 0,
+            "no_status": 0,
+            "errors": 0,
+            "by_status": {
+              "200": 80
+            }
+          },
+          "latency": {
+            "count": 80,
+            "p50_ms": 8.875,
+            "p95_ms": 15.3869,
+            "p99_ms": 24.80161,
+            "min_ms": 6.967,
+            "max_ms": 26.73
+          }
+        },
+        "by_class": {
+          "create": {
+            "n": 16,
+            "status": {
+              "total": 16,
+              "ok_2xx": 16,
+              "non_2xx": 0,
+              "transport_errors": 0,
+              "no_status": 0,
+              "errors": 0,
+              "by_status": {
+                "201": 16
+              }
+            },
+            "latency": {
+              "count": 16,
+              "p50_ms": 16.479,
+              "p95_ms": 32.084,
+              "p99_ms": 39.9944,
+              "min_ms": 14.053,
+              "max_ms": 41.972
+            }
+          },
+          "deposit": {
+            "n": 8,
+            "status": {
+              "total": 8,
+              "ok_2xx": 0,
+              "non_2xx": 0,
+              "transport_errors": 0,
+              "no_status": 8,
+              "errors": 0,
+              "by_status": {
+                "no_status": 8
+              }
+            },
+            "latency": {
+              "count": 8,
+              "p50_ms": 58.5355,
+              "p95_ms": 73.3732,
+              "p99_ms": 79.02584,
+              "min_ms": 55.721,
+              "max_ms": 80.439
+            }
+          },
+          "query": {
+            "n": 80,
+            "status": {
+              "total": 80,
+              "ok_2xx": 80,
+              "non_2xx": 0,
+              "transport_errors": 0,
+              "no_status": 0,
+              "errors": 0,
+              "by_status": {
+                "200": 80
+              }
+            },
+            "latency": {
+              "count": 80,
+              "p50_ms": 8.875,
+              "p95_ms": 15.3869,
+              "p99_ms": 24.80161,
+              "min_ms": 6.967,
+              "max_ms": 26.73
+            }
+          }
+        }
+      },
+      "pairing": {
+        "client_samples": 426,
+        "client_without_perf_id": 12,
+        "client_ids": 414,
+        "server_total_ids": 510,
+        "client_without_server_total": 0,
+        "server_total_without_client": 96,
+        "server_total_without_below_admit": 0,
+        "below_admit_without_server_total": 0,
+        "server_total_without_admit_or_below_admit": 0,
+        "admit_without_server_total": 0,
+        "admit_skipped_without_server_total": 0,
+        "pgq_without_client": 96,
+        "duplicate_ids": {
+          "admit": 0,
+          "admit_skipped": 0,
+          "below_admit": 0,
+          "client": 0,
+          "pgq": 0,
+          "server_total": 0
+        },
+        "missing_segment_counts": {
+          "admit": 0,
+          "admit_skipped": 510,
+          "below_admit": 0,
+          "server_total": 0
+        },
+        "extra_segment_counts": {
+          "admit": 0,
+          "admit_skipped": 0,
+          "below_admit": 0,
+          "server_total": 96
+        }
+      },
+      "invariants": {
+        "checks": [
+          {
+            "name": "server_total_ge_admit_plus_below_admit(±0.05ms)",
+            "checked": 510,
+            "violations": 0
+          },
+          {
+            "name": "sum(pgq)_le_below_admit_plus_1ms",
+            "checked": 510,
+            "violations": 0
+          },
+          {
+            "name": "admit_skipped_only_when_limiter_off",
+            "checked": 0,
+            "violations": 0
+          }
+        ],
+        "violations": null,
+        "violation_counts": {},
+        "violations_truncated": false
+      },
+      "line_errors": 0,
+      "warnings": [
+        "wall clock 回拨 1 次作用于窗口（合计 2438.759ms）：已按 |Δ| 校正标签（phase_method=step_corrected）",
+        "288 条段记录落在窗口 [window_start, window_start+12s) 之外，相位分桶已忽略（检查时钟偏差或窗口原点）"
+      ]
+    }
+  ],
+  "repeat_p95_spread": {
+    "R1G1": {
+      "admit_p95_ms": {
+        "per_repeat": [
+          {
+            "repeat": 99,
+            "value": 6.711205
+          }
+        ],
+        "median_ms": 6.711205,
+        "min_ms": 6.711205,
+        "max_ms": 6.711205,
+        "range_ms": 0
+      },
+      "below_admit_p95_ms": {
+        "per_repeat": [
+          {
+            "repeat": 99,
+            "value": 79.576438
+          }
+        ],
+        "median_ms": 79.576438,
+        "min_ms": 79.576438,
+        "max_ms": 79.576438,
+        "range_ms": 0
+      },
+      "client_query_p95_ms": {
+        "per_repeat": [
+          {
+            "repeat": 99,
+            "value": 114.283
+          }
+        ],
+        "median_ms": 114.283,
+        "min_ms": 114.283,
+        "max_ms": 114.283,
+        "range_ms": 0
+      },
+      "pg_total_p95_ms": {
+        "per_repeat": [
+          {
+            "repeat": 99,
+            "value": 15.106569
+          }
+        ],
+        "median_ms": 15.106569,
+        "min_ms": 15.106569,
+        "max_ms": 15.106569,
+        "range_ms": 0
+      },
+      "server_total_p95_ms": {
+        "per_repeat": [
+          {
+            "repeat": 99,
+            "value": 86.286736
+          }
+        ],
+        "median_ms": 86.286736,
+        "min_ms": 86.286736,
+        "max_ms": 86.286736,
+        "range_ms": 0
+      }
+    }
+  },
+  "clock_steps": [
+    {
+      "repeat": 99,
+      "arm": "R1G1",
+      "backward_steps": 1,
+      "applied_steps": 1,
+      "forward_suspect_steps": 0,
+      "phase_method": "step_corrected",
+      "steps": [
+        {
+          "boundary_id": 111,
+          "first_affected_id": 112,
+          "delta_ms": -2438.758665,
+          "kind": "backward",
+          "ambiguous": false,
+          "applies_to_window": true,
+          "label_before": "2026-10-07T11:26:57.717285685Z",
+          "label_after": "2026-10-07T11:26:55.27852702Z",
+          "correction_ms": 2438.758665
+        }
+      ],
+      "note": "检测到 1 次回拨中 1 次作用于窗口（合计 2438.759ms）：边界之后的标签已校正，本次移原始 wall 相位保留在 client_query_phases_wall"
+    }
+  ],
+  "factor_effects": [
+    {
+      "metric": "client_query_p95_ms",
+      "definition": "稳态客户端 query 类 p95（含全部状态码与错误响应）",
+      "levels": {
+        "R0G0": {
+          "missing_repeats": [
+            99
+          ]
+        },
+        "R0G1": {
+          "missing_repeats": [
+            99
+          ]
+        },
+        "R1G0": {
+          "missing_repeats": [
+            99
+          ]
+        },
+        "R1G1": {
+          "per_repeat": [
+            {
+              "repeat": 99,
+              "value": 114.283
+            }
+          ],
+          "median_ms": 114.283,
+          "min_ms": 114.283,
+          "max_ms": 114.283,
+          "range_ms": 0
+        }
+      },
+      "effects": {
+        "G_at_R0": {
+          "missing_repeats": [
+            99
+          ]
+        },
+        "G_at_R1": {
+          "missing_repeats": [
+            99
+          ]
+        },
+        "R_at_G0": {
+          "missing_repeats": [
+            99
+          ]
+        },
+        "R_at_G1": {
+          "missing_repeats": [
+            99
+          ]
+        },
+        "interaction": {
+          "missing_repeats": [
+            99
+          ]
+        },
+        "total_diff_R0G0_to_R1G1": {
+          "missing_repeats": [
+            99
+          ]
+        }
+      }
+    },
+    {
+      "metric": "server_total_p95_ms",
+      "definition": "server_total 段 p95（全部 ID）",
+      "levels": {
+        "R0G0": {
+          "missing_repeats": [
+            99
+          ]
+        },
+        "R0G1": {
+          "missing_repeats": [
+            99
+          ]
+        },
+        "R1G0": {
+          "missing_repeats": [
+            99
+          ]
+        },
+        "R1G1": {
+          "per_repeat": [
+            {
+              "repeat": 99,
+              "value": 86.286736
+            }
+          ],
+          "median_ms": 86.286736,
+          "min_ms": 86.286736,
+          "max_ms": 86.286736,
+          "range_ms": 0
+        }
+      },
+      "effects": {
+        "G_at_R0": {
+          "missing_repeats": [
+            99
+          ]
+        },
+        "G_at_R1": {
+          "missing_repeats": [
+            99
+          ]
+        },
+        "R_at_G0": {
+          "missing_repeats": [
+            99
+          ]
+        },
+        "R_at_G1": {
+          "missing_repeats": [
+            99
+          ]
+        },
+        "interaction": {
+          "missing_repeats": [
+            99
+          ]
+        },
+        "total_diff_R0G0_to_R1G1": {
+          "missing_repeats": [
+            99
+          ]
+        }
+      }
+    },
+    {
+      "metric": "admit_p95_ms",
+      "definition": "admit 段 p95",
+      "levels": {
+        "R0G0": {
+          "missing_repeats": [
+            99
+          ]
+        },
+        "R0G1": {
+          "missing_repeats": [
+            99
+          ]
+        },
+        "R1G0": {
+          "missing_repeats": [
+            99
+          ]
+        },
+        "R1G1": {
+          "per_repeat": [
+            {
+              "repeat": 99,
+              "value": 6.711205
+            }
+          ],
+          "median_ms": 6.711205,
+          "min_ms": 6.711205,
+          "max_ms": 6.711205,
+          "range_ms": 0
+        }
+      },
+      "effects": {
+        "G_at_R0": {
+          "missing_repeats": [
+            99
+          ]
+        },
+        "G_at_R1": {
+          "missing_repeats": [
+            99
+          ]
+        },
+        "R_at_G0": {
+          "missing_repeats": [
+            99
+          ]
+        },
+        "R_at_G1": {
+          "missing_repeats": [
+            99
+          ]
+        },
+        "interaction": {
+          "missing_repeats": [
+            99
+          ]
+        },
+        "total_diff_R0G0_to_R1G1": {
+          "missing_repeats": [
+            99
+          ]
+        }
+      }
+    },
+    {
+      "metric": "below_admit_p95_ms",
+      "definition": "below_admit 段 p95",
+      "levels": {
+        "R0G0": {
+          "missing_repeats": [
+            99
+          ]
+        },
+        "R0G1": {
+          "missing_repeats": [
+            99
+          ]
+        },
+        "R1G0": {
+          "missing_repeats": [
+            99
+          ]
+        },
+        "R1G1": {
+          "per_repeat": [
+            {
+              "repeat": 99,
+              "value": 79.576438
+            }
+          ],
+          "median_ms": 79.576438,
+          "min_ms": 79.576438,
+          "max_ms": 79.576438,
+          "range_ms": 0
+        }
+      },
+      "effects": {
+        "G_at_R0": {
+          "missing_repeats": [
+            99
+          ]
+        },
+        "G_at_R1": {
+          "missing_repeats": [
+            99
+          ]
+        },
+        "R_at_G0": {
+          "missing_repeats": [
+            99
+          ]
+        },
+        "R_at_G1": {
+          "missing_repeats": [
+            99
+          ]
+        },
+        "interaction": {
+          "missing_repeats": [
+            99
+          ]
+        },
+        "total_diff_R0G0_to_R1G1": {
+          "missing_repeats": [
+            99
+          ]
+        }
+      }
+    },
+    {
+      "metric": "pg_total_p95_ms",
+      "definition": "每请求 PG 语句耗时合计的 p95（仅含 ≥1 条 pgq 的请求）",
+      "levels": {
+        "R0G0": {
+          "missing_repeats": [
+            99
+          ]
+        },
+        "R0G1": {
+          "missing_repeats": [
+            99
+          ]
+        },
+        "R1G0": {
+          "missing_repeats": [
+            99
+          ]
+        },
+        "R1G1": {
+          "per_repeat": [
+            {
+              "repeat": 99,
+              "value": 15.106569
+            }
+          ],
+          "median_ms": 15.106569,
+          "min_ms": 15.106569,
+          "max_ms": 15.106569,
+          "range_ms": 0
+        }
+      },
+      "effects": {
+        "G_at_R0": {
+          "missing_repeats": [
+            99
+          ]
+        },
+        "G_at_R1": {
+          "missing_repeats": [
+            99
+          ]
+        },
+        "R_at_G0": {
+          "missing_repeats": [
+            99
+          ]
+        },
+        "R_at_G1": {
+          "missing_repeats": [
+            99
+          ]
+        },
+        "interaction": {
+          "missing_repeats": [
+            99
+          ]
+        },
+        "total_diff_R0G0_to_R1G1": {
+          "missing_repeats": [
+            99
+          ]
+        }
+      }
+    }
+  ],
+  "overhead_compare": {
+    "base": "R1G1",
+    "variant": "R1G1:nocoll",
+    "present": false,
+    "base_side": {
+      "n_total": 0,
+      "p50_ms": {},
+      "p95_ms": {},
+      "p99_ms": {}
+    },
+    "variant_side": {
+      "n_total": 0,
+      "p50_ms": {},
+      "p95_ms": {},
+      "p99_ms": {}
+    },
+    "delta_p50_ms": {},
+    "delta_p95_ms": {},
+    "delta_p99_ms": {},
+    "note": "差值对比（禁止相加/占比证明）：同一重复内 nocoll 与 steady 的客户端 query 分位数差值；无配对重复则不产出差值。"
+  },
+  "candidate_rules": [
+    {
+      "rule": "候选规则，非裁决：正常态（窗口 [0s,8s)，排除 burst 档）admit p95 ≤ 2ms",
+      "status": "证据不足",
+      "observed": "未找到 limiter_on=true/background_on=false 的臂",
+      "note": "正常态口径取相位分桶 [0s,4s)+[4s,8s)；[8s,12s) 与固定 burst 重叠，故排除。评估臂：limiter_on=true/background_on=false。"
+    },
+    {
+      "rule": "候选规则，非裁决：客户端 query p95 的 |R 效应| ≥ 10ms（R@G0 与 R@G1）",
+      "status": "证据不足",
+      "observed": "R@G0/R@G1 均无可用重复（臂或分位数缺失）",
+      "note": "R 效应是同一指标、同一重复内的臂间差值（差值对比（禁止相加/占比证明））；两个水平都可用的重复才计入。"
+    },
+    {
+      "rule": "候选规则，非裁决：客户端 query p95 的 R 效应 @G1 占总差（R1G1−R0G0）≥50%",
+      "status": "证据不足",
+      "observed": "R@G1 或总差的重复级数值缺失",
+      "note": "占比仅作候选规则标注，不构成因果或收益证明；总差（R1G1−R0G0）≤0.05ms（含非正值，此时占比无定义）的重复不计入。"
+    }
+  ],
+  "pairing_totals": {
+    "client_samples": 426,
+    "client_without_perf_id": 12,
+    "client_ids": 414,
+    "server_total_ids": 510,
+    "client_without_server_total": 0,
+    "server_total_without_client": 96,
+    "server_total_without_below_admit": 0,
+    "below_admit_without_server_total": 0,
+    "server_total_without_admit_or_below_admit": 0,
+    "admit_without_server_total": 0,
+    "admit_skipped_without_server_total": 0,
+    "pgq_without_client": 96,
+    "duplicate_ids": {
+      "admit": 0,
+      "admit_skipped": 0,
+      "below_admit": 0,
+      "client": 0,
+      "pgq": 0,
+      "server_total": 0
+    },
+    "missing_segment_counts": {
+      "admit": 0,
+      "admit_skipped": 510,
+      "below_admit": 0,
+      "server_total": 0
+    },
+    "extra_segment_counts": {
+      "admit": 0,
+      "admit_skipped": 0,
+      "below_admit": 0,
+      "server_total": 96
+    }
+  },
+  "invariants": {
+    "checks": [
+      {
+        "name": "server_total_ge_admit_plus_below_admit(±0.05ms)",
+        "checked": 510,
+        "violations": 0
+      },
+      {
+        "name": "sum(pgq)_le_below_admit_plus_1ms",
+        "checked": 510,
+        "violations": 0
+      },
+      {
+        "name": "admit_skipped_only_when_limiter_off",
+        "checked": 0,
+        "violations": 0
+      }
+    ],
+    "violations": null,
+    "violation_counts": {},
+    "violations_truncated": false
+  },
+  "completeness": {
+    "cells": 1,
+    "repeats": [
+      99
+    ],
+    "arms_by_repeat": {
+      "99": [
+        "R1G1"
+      ]
+    },
+    "expected_steady_arms": [
+      "R0G0",
+      "R1G0",
+      "R0G1",
+      "R1G1"
+    ],
+    "missing_steady_arms_by_repeat": {
+      "99": [
+        "R0G0",
+        "R1G0",
+        "R0G1"
+      ]
+    },
+    "line_errors": 0
+  },
+  "discipline": [
+    "选样偏差控制：全部客户端样本（含 429/503/500 等非 2xx 与 transport 错误）均计入状态计数与分位数分母；不做选择性剔除，错误响应不计为缺失。",
+    "p95 不可相加：分位数不可加；跨段/跨项比较只允许同一 ID 集合上的差值（差值对比（禁止相加/占比证明））。",
+    "分段占比≠贡献证明：某段占总时长的比例大，不构成该段是收益来源的证明。",
+    "单机合成负载非生产 SLO：单机、in-process 合成负载的绝对值不代表生产 SLO，仅用于同一环境内的受控对比。",
+    "历史数值：89ef787 的 47.5/72.7ms 为历史测量，本轮不得标为当前 main 的实测数值。"
+  ],
+  "limitations": [
+    "相位分桶 [0s,4s)/[4s,8s)/[8s,12s) 相对 meta.window_start；固定 burst 在 8s 触发，第三档 [8s,12s) 与 burst 重叠，不可视为纯稳态。",
+    "预热样本只做单独小节，不并入稳态统计。",
+    "pgq 语句级记录仅在 TXHARBOR_PERF_SEG_TRACE=1 时存在；pgq 缺失不等于没有 PG 活动。",
+    "perf_id 为服务端逐请求铸造；缺少 perf_id 的客户端样本无法配对，单独计数。",
+    "计时嵌套：server_total ⊇ {admit ⊕ below_admit ⊕ 包装开销}，below_admit ⊇ 查询等，pgq 语句 ⊆ below_admit；禁止把各段相加当作总时长。",
+    "因子效应为差值（R 效应 @G0/@G1、G 效应 @R0/@R1、交互），由臂间差值定义；不得对分位数做加和或占比证明。",
+    "时钟步进：wall clock 回拨（按 server_total 的 id 序检测，阈值 \u003c−50ms）按 |Δ| 对边界之后的标签做校正，并披露原始 wall 相位（client_query_phases_wall）；前跳（\u003e+500ms）与停顿/GC 不可区分（ambiguous），只披露不校正；跨机绝对时间不可比；时长类指标（duration_ms / dur_ns）取自单调时钟，不受回拨影响。",
+    "校正精度受相邻请求间隔限制：Σ|Δ| 含一次正常间隔，校正后标签可能仍偏早约一个间隔（≈0.1s）；相位归类可用，精确时刻不可复原。",
+    "适用范围：只有 first_affected_id \u003e first_steady_id（稳态 client perf_id 最小值）的步进才作用于窗口；预热期回拨不校正，window_start 永不校正。",
+    "若批次把预热流量也写进 server_segments.jsonl，其段记录落在窗口之外并被相位分桶排除，逐段计数见 segment_outside_window。"
+  ],
+  "warnings": []
+}

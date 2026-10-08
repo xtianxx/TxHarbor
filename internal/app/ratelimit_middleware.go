@@ -101,7 +101,7 @@ func (m *rateLimitMiddleware) ServeHTTP(w http.ResponseWriter, r *http.Request) 
 	if r.Method != http.MethodGet && r.Method != http.MethodHead {
 		class = m.post
 	}
-	if err := m.policy.Admit(r.Context(), class); err != nil {
+	if err := admitWithPerf(r.Context(), m.policy, class, r); err != nil {
 		writeRetryableRefusal(w, err)
 		return
 	}
@@ -146,7 +146,7 @@ func guardRoute(policy *ratelimit.Policy, degradation *degradationState, post, g
 	if policy == nil {
 		return inner
 	}
-	return &rateLimitMiddleware{policy: policy, post: post, get: get, next: inner}
+	return &rateLimitMiddleware{policy: policy, post: post, get: get, next: perfWrapBelowAdmit(inner)}
 }
 
 // rpcBudgetAdapter maps ratelimit.RPCBudget onto the eth.BudgetGate seam, so

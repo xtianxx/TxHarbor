@@ -1,0 +1,284 @@
+{
+  "repeat": 1,
+  "order_index": 2,
+  "arm": {
+    "name": "R0G1",
+    "limiter_on": false,
+    "background_on": true,
+    "collect": true
+  },
+  "commit": "7587116eb895003fcf7a2fd91fcbd2a0939d6f05",
+  "go_version": "go1.26.5",
+  "started_at": "2026-10-07T11:51:45.587377429Z",
+  "finished_at": "2026-10-07T11:52:35.049232789Z",
+  "setup_seconds": 18.041039668,
+  "warmup_start": "2026-10-07T11:52:03.628425465Z",
+  "warmup_end": "2026-10-07T11:52:09.262975406Z",
+  "window_start": "2026-10-07T11:52:09.349787165Z",
+  "window_end": "2026-10-07T11:52:21.405988707Z",
+  "env_spec": {
+    "path": "full_stack",
+    "run": 1,
+    "commit": "7587116eb895003fcf7a2fd91fcbd2a0939d6f05",
+    "go_version": "go1.26.5",
+    "pg_image": "postgres:18.6-trixie",
+    "anvil_image": "ghcr.io/foundry-rs/foundry:v1.8.1",
+    "kafka_image": "confluentinc/confluent-local:7.9.10",
+    "redis_image": "redis:8.2.10-alpine",
+    "kafka_topic": "txharbor.events.v1",
+    "kafka_partitions": 6,
+    "redis_addr": "localhost:46285",
+    "started_at": "2026-10-07T11:52:03.628089177Z",
+    "layer": "perf",
+    "profile": {
+      "Warmup": 8000000000,
+      "StateWindow": 12000000000,
+      "QueryLadder": [
+        {
+          "Offset": 0,
+          "RPS": 10
+        },
+        {
+          "Offset": 4000000000,
+          "RPS": 25
+        },
+        {
+          "Offset": 8000000000,
+          "RPS": 50
+        }
+      ],
+      "Burst": {
+        "At": 8000000000,
+        "Size": 50
+      },
+      "CreateRPS": 2,
+      "DepositRPS": 1
+    },
+    "dataset_scale": "seed_requests=20 grants=360 query_ladder=[{0s 10} {4s 25} {8s 50}] burst=50@8s create_rps=2 deposit_rps=1 state_window=12s",
+    "config": {
+      "TXHARBOR_CONFIRMATION_DEPTH": "1",
+      "TXHARBOR_EVENTS_CAPACITY_DRAIN_TARGET_WINDOW": "5m",
+      "TXHARBOR_EVENTS_CAPACITY_HARD_LIMIT": "200000",
+      "TXHARBOR_EVENTS_CAPACITY_RESERVE": "1000",
+      "TXHARBOR_EVENTS_CAPACITY_SOFT_LIMIT": "100000",
+      "TXHARBOR_EVENTS_CONSUMER_GAP_WAIT": "2s",
+      "TXHARBOR_EVENTS_CONSUMER_POLL_INTERVAL": "200ms",
+      "TXHARBOR_EVENTS_ENABLED": "true",
+      "TXHARBOR_EVENTS_PUBLISHER_POLL_INTERVAL": "200ms",
+      "TXHARBOR_RATELIMIT_NEW_WITHDRAWAL": "500/100",
+      "TXHARBOR_RATELIMIT_QUERY": "500/100"
+    }
+  },
+  "env_map_redacted": {
+    "TXHARBOR_CHAIN_ID": "31337",
+    "TXHARBOR_CONFIRMATION_DEPTH": "1",
+    "TXHARBOR_DEPOSIT_CONTRACTS": "0x1111111111111111111111111111111111111111:0",
+    "TXHARBOR_DEPOSIT_START_HEIGHT": "0",
+    "TXHARBOR_DEPOSIT_WATCH_ADDRESSES": "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:0",
+    "TXHARBOR_EVENTS_CAPACITY_DRAIN_TARGET_WINDOW": "5m",
+    "TXHARBOR_EVENTS_CAPACITY_HARD_LIMIT": "200000",
+    "TXHARBOR_EVENTS_CAPACITY_MAX_SHUTDOWN_WINDOW": "1h",
+    "TXHARBOR_EVENTS_CAPACITY_RESERVE": "1000",
+    "TXHARBOR_EVENTS_CAPACITY_RETENTION": "168h",
+    "TXHARBOR_EVENTS_CAPACITY_SOFT_LIMIT": "100000",
+    "TXHARBOR_EVENTS_CONSUMER_GAP_WAIT": "2s",
+    "TXHARBOR_EVENTS_CONSUMER_POLL_INTERVAL": "200ms",
+    "TXHARBOR_EVENTS_ENABLED": "true",
+    "TXHARBOR_EVENTS_PUBLISHER_POLL_INTERVAL": "200ms",
+    "TXHARBOR_HTTP_ADDR": "127.0.0.1:46561",
+    "TXHARBOR_KAFKA_BROKERS": "localhost:45725",
+    "TXHARBOR_KAFKA_TOPIC": "txharbor.events.v1",
+    "TXHARBOR_LOG_CONTRACTS": "0x1111111111111111111111111111111111111111",
+    "TXHARBOR_LOG_START_HEIGHT": "0",
+    "TXHARBOR_PG_DSN": "\u003credacted\u003e",
+    "TXHARBOR_RATELIMIT_NEW_WITHDRAWAL": "500/100",
+    "TXHARBOR_RATELIMIT_OPERATOR": "500/100",
+    "TXHARBOR_RATELIMIT_QUERY": "500/100",
+    "TXHARBOR_RATELIMIT_RPC": "500/100",
+    "TXHARBOR_RATELIMIT_WRITE": "500/100",
+    "TXHARBOR_REDIS_ADDR": "localhost:46285",
+    "TXHARBOR_REDIS_TIMEOUT": "1s",
+    "TXHARBOR_REORG_MAX_DEPTH": "100",
+    "TXHARBOR_RPC_URL": "http://localhost:44706",
+    "TXHARBOR_START_HEIGHT": "0"
+  },
+  "pool_stat_before": {
+    "serve": {
+      "total_conns": 6,
+      "acquired_conns": 0,
+      "idle_conns": 6,
+      "max_conns": 8,
+      "acquire_count": 1429,
+      "acquire_duration_ns": 83137598,
+      "empty_acquire_count": 5,
+      "canceled_acquire_count": 0,
+      "new_conns_count": 6
+    },
+    "harness": {
+      "total_conns": 1,
+      "acquired_conns": 0,
+      "idle_conns": 1,
+      "max_conns": 16,
+      "acquire_count": 428,
+      "acquire_duration_ns": 16255788,
+      "empty_acquire_count": 1,
+      "canceled_acquire_count": 0,
+      "new_conns_count": 1
+    }
+  },
+  "pool_stat_after": {
+    "serve": {
+      "total_conns": 8,
+      "acquired_conns": 0,
+      "idle_conns": 8,
+      "max_conns": 8,
+      "acquire_count": 4074,
+      "acquire_duration_ns": 3763449025,
+      "empty_acquire_count": 230,
+      "canceled_acquire_count": 0,
+      "new_conns_count": 8
+    },
+    "harness": {
+      "total_conns": 1,
+      "acquired_conns": 0,
+      "idle_conns": 1,
+      "max_conns": 16,
+      "acquire_count": 433,
+      "acquire_duration_ns": 16261184,
+      "empty_acquire_count": 1,
+      "canceled_acquire_count": 0,
+      "new_conns_count": 1
+    }
+  },
+  "limiter_pool_before": {
+    "hits": 83,
+    "misses": 2,
+    "timeouts": 0,
+    "total_conns": 2,
+    "idle_conns": 2,
+    "stale_conns": 0
+  },
+  "limiter_pool_after": {
+    "hits": 175,
+    "misses": 2,
+    "timeouts": 0,
+    "total_conns": 2,
+    "idle_conns": 2,
+    "stale_conns": 0
+  },
+  "durable_before": {
+    "at": "2026-10-07T11:52:09.263075208Z",
+    "outbox_pending": 2,
+    "outbox_published": 43,
+    "outbox_blocked": 0,
+    "outbox_attempt_sum": 43,
+    "outbox_oldest_age_seconds": 0.053491,
+    "consumer_progress_rows": 6,
+    "catchup_gap": 0,
+    "ledger_rows": 43,
+    "kafka_end_offsets": 43,
+    "kafka_committed": 41
+  },
+  "durable_after": {
+    "at": "2026-10-07T11:52:21.405998552Z",
+    "outbox_pending": 0,
+    "outbox_published": 96,
+    "outbox_blocked": 0,
+    "outbox_attempt_sum": 96,
+    "outbox_oldest_age_seconds": 0,
+    "consumer_progress_rows": 6,
+    "catchup_gap": 1,
+    "ledger_rows": 95,
+    "kafka_end_offsets": 96,
+    "kafka_committed": 94
+  },
+  "metrics_scrape": {
+    "before": {
+      "ratelimit_denied": 0,
+      "ratelimit_unavailable": 0,
+      "cache_hits": 0,
+      "cache_misses": 0,
+      "cache_fallbacks": 0,
+      "capacity_refusals": 0,
+      "capacity_soft_breaches": 0,
+      "capacity_hard_breaches": 0,
+      "outbox_pending_gauge": 2,
+      "outbox_oldest_age_gauge": -0.003248000000000001
+    },
+    "after": {
+      "ratelimit_denied": 0,
+      "ratelimit_unavailable": 0,
+      "cache_hits": 0,
+      "cache_misses": 0,
+      "cache_fallbacks": 0,
+      "capacity_refusals": 0,
+      "capacity_soft_breaches": 0,
+      "capacity_hard_breaches": 0,
+      "outbox_pending_gauge": 2,
+      "outbox_oldest_age_gauge": 0.15321099999999999
+    }
+  },
+  "resources": {
+    "before": {
+      "at": "2026-10-07T11:52:09.340387982Z",
+      "cpu_seconds": 9.29,
+      "rss_bytes": 58777600,
+      "disk_read_bytes": 4096,
+      "disk_write_bytes": 2084864,
+      "net_rx_bytes": 15451399838,
+      "net_tx_bytes": 17573543800,
+      "heap_alloc_bytes": 5993440,
+      "goroutines": 50,
+      "pg_total_conns": 1,
+      "pg_acquired_conns": 0
+    },
+    "after": {
+      "at": "2026-10-07T11:52:21.443262152Z",
+      "cpu_seconds": 11.31,
+      "rss_bytes": 62447616,
+      "disk_read_bytes": 4096,
+      "disk_write_bytes": 2084864,
+      "net_rx_bytes": 15456853413,
+      "net_tx_bytes": 17579959930,
+      "heap_alloc_bytes": 7456832,
+      "goroutines": 203,
+      "pg_total_conns": 1,
+      "pg_acquired_conns": 0
+    },
+    "cpu_seconds_delta": 2.0200000000000014,
+    "rss_bytes_after": 62447616,
+    "disk_read_bytes_delta": 0,
+    "disk_write_bytes_delta": 0,
+    "net_rx_bytes_delta": 5453575,
+    "net_tx_bytes_delta": 6416130
+  },
+  "runtime_progress": {
+    "kafka_end_offsets": 96,
+    "kafka_committed": 94
+  },
+  "log_counts": {
+    "publish_failures_logged": 0,
+    "quarantine_logged": 0
+  },
+  "counts": {
+    "client_samples": 426,
+    "warmup_samples": 104,
+    "seg_records": 1530,
+    "pg_records": 3890,
+    "query_samples": 390,
+    "errors": 0,
+    "status_counts": {
+      "0": 12,
+      "200": 390,
+      "201": 24
+    }
+  },
+  "notes": [
+    "order_index 为本调用内的臂序号（0 基）；跨调用的全局顺序由 run_batch.sh 的固定调用顺序决定",
+    "warmup 样本只写入 warmup_samples.jsonl，绝不并入稳态统计",
+    "counts.errors/status_counts 覆盖稳态窗口的全部类别样本；query_samples 只数 query 类",
+    "server_segments.jsonl 同时含 seg/pgq 记录，覆盖预热+稳态窗口（按 meta 时间戳分桶；接缝只插桩 /withdrawals 路径）",
+    "meta 额外键 log_counts 与 metrics_scrape{before,after} 为本批次补充证据",
+    "本臂 limiter_on=false：查询类准入不走限流器"
+  ]
+}
