@@ -1,0 +1,52 @@
+raw-preservation audit regression fixture (013 review closure P2)
+repo: /home/dream/product_env/TxHarbor
+script under test: /home/dream/product_env/TxHarbor/docs/evidence/013-supplement/consumer-seg/checks/raw_preservation.py
+  sha256: 28fb3ac3e7b6a8bc0741c8475e7f621f52d6b2bad3d11cc7e37dfcf152c2411f
+fixture repo: /tmp/raw-preservation-sandbox.3HiguN/fixture at e45a65b9c3afa55dcfd57ba5ebfdc2301f4ac4c0
+
+pre-fix copy adaptation (only the baseline-revision constant is rewritten):
+  --- /tmp/raw-preservation-sandbox.3HiguN/prefix_original.py	2026-10-08 15:28:27.634322895 +0800
+  +++ /tmp/raw-preservation-sandbox.3HiguN/raw_preservation_prefix.py	2026-10-08 15:28:27.638322893 +0800
+  @@ -15,7 +15,7 @@
+   import subprocess
+   import sys
+   
+  -BASELINE_REV = "27cc51d0801862f85c1ae04fd1fc74a4d300e80a"
+  +BASELINE_REV = "e45a65b9c3afa55dcfd57ba5ebfdc2301f4ac4c0"
+   RAW_PREFIXES = ("./runs/", "./logs/", "./environment.txt", "./source_fingerprint.txt", "./smoke/")
+   
+   
+PASS: pre-fix copy differs from the extracted original in exactly one line
+
+=== phase 1: pre-fix script (defect reproduction; rc=0 expected on raw add/remove/rename) ===
+--- pre-fix delete: rc=0; VERDICT: raw evidence byte-identical
+PASS: pre-fix delete is missed (rc=0)
+--- pre-fix add: rc=0; VERDICT: raw evidence byte-identical
+PASS: pre-fix add is missed (rc=0)
+--- pre-fix rename: rc=0; VERDICT: raw evidence byte-identical
+PASS: pre-fix rename is missed (rc=0)
+--- pre-fix modify: rc=1; VERDICT: RAW EVIDENCE CHANGED - INVESTIGATE
+PASS: pre-fix modification is still detected (rc=1)
+
+=== phase 2: fixed script (rc expectations) ===
+--- unchanged: rc=0; VERDICT: raw evidence byte-identical
+PASS: unchanged raw set succeeds (rc=0)
+PASS: unchanged output says byte-identical
+--- modify runs/r01_x/meta.json: rc=1; VERDICT: RAW EVIDENCE CHANGED - INVESTIGATE
+PASS: modification fails (rc=1)
+PASS: modification listed under raw changed
+--- delete logs/r01_x.rc: rc=1; VERDICT: RAW EVIDENCE CHANGED - INVESTIGATE
+PASS: deletion fails (rc=1)
+PASS: deletion listed under raw removed
+--- add runs/r02_y.json: rc=1; VERDICT: RAW EVIDENCE CHANGED - INVESTIGATE
+PASS: raw addition fails (rc=1)
+PASS: addition listed under raw added
+--- rename runs/r01_x/meta.json -> meta2.json: rc=1; VERDICT: RAW EVIDENCE CHANGED - INVESTIGATE
+PASS: rename fails (removal + addition) (rc=1)
+--- modify smoke/runs/r01/meta.json: rc=1; VERDICT: RAW EVIDENCE CHANGED - INVESTIGATE
+PASS: smoke modification fails (rc=1)
+--- add non-raw checks/note.log: rc=0; VERDICT: raw evidence byte-identical
+PASS: non-raw addition succeeds (rc=0)
+PASS: non-raw addition keeps byte-identical verdict
+
+===== raw-preservation fixture result: 17 passed, 0 failed, 0 skipped =====

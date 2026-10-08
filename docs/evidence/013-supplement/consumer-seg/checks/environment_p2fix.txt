@@ -1,0 +1,19 @@
+generated_at: 2026-10-08T07:29:30.852967787Z
+cwd: /home/dream/product_env/TxHarbor
+Thu Oct  8 07:29:30 UTC 2026
+Linux DESKTOP-TXT123 6.18.33.2-microsoft-standard-WSL2 #1 SMP PREEMPT_DYNAMIC Thu Jun 18 21:54:43 UTC 2026 x86_64 GNU/Linux
+go version go1.26.5 linux/amd64
+Python 3.12.3
+GNU bash, version 5.2.21(1)-release (x86_64-pc-linux-gnu)
+branch: perf/consumer-catchup-seg
+head: c4bee0c445ef191a4b66901c101443856a6a5a7a
+--- git status --porcelain ---
+ M docs/evidence/013-supplement/consumer-seg/checks/commands.tsv
+ M docs/evidence/013-supplement/consumer-seg/checks/raw_preservation.py
+?? .omp/
+?? docs/evidence/013-supplement/consumer-seg/checks/environment_p2fix.txt
+?? docs/evidence/013-supplement/consumer-seg/checks/raw_preservation_regression.log
+?? docs/evidence/013-supplement/consumer-seg/checks/raw_preservation_regression.rc
+?? docs/evidence/013-supplement/consumer-seg/checks/raw_preservation_rerun.log
+?? docs/evidence/013-supplement/consumer-seg/checks/raw_preservation_rerun.rc
+?? docs/evidence/013-supplement/consumer-seg/checks/raw_preservation_test.sh

@@ -12,3 +12,8 @@
 0	bash scripts/consumerseg/run_batch_guard_test.sh docs/evidence/013-supplement/consumer-seg/checks  (log checks/fixture_root_guard.log)
 0	python3 checks/raw_preservation.py docs/evidence/013-supplement/consumer-seg  (log checks/raw_preservation.log)
 0	sha256sum -c SHA256SUMS  (pass 1 + pass 2; log checks/manifest_check.log)
+0	python3 docs/evidence/013-supplement/consumer-seg/checks/raw_preservation.py docs/evidence/013-supplement/consumer-seg  (cwd=repo root; fixed script; log checks/raw_preservation_rerun.log)
+0	bash docs/evidence/013-supplement/consumer-seg/checks/raw_preservation_test.sh docs/evidence/013-supplement/consumer-seg/checks  (cwd=repo root; log checks/raw_preservation_regression.log)
+0	bash -n docs/evidence/013-supplement/consumer-seg/checks/raw_preservation_test.sh  (cwd=repo root; log checks/p2fix_bash_n.log)
+0	python3 -c 'import ast; ast.parse(open("docs/evidence/013-supplement/consumer-seg/checks/raw_preservation.py").read()); print("syntax ok")'  (cwd=repo root; log checks/p2fix_py_syntax.log)
+0	sha256sum -c SHA256SUMS  (cwd=docs/evidence/013-supplement/consumer-seg; P2 round final pass; log checks/manifest_check.log)

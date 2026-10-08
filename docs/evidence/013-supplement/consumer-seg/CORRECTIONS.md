@@ -46,18 +46,46 @@
 - `fixture_root_guard.log/.rc`——runner 根保护夹具（8 用例：缺陷复现/空目录/数据目录/符号链接/换 plan/新根全流程/并发争用/参数错误）
 - `regen_analysis.log/.rc`——离线重生成
 - `build.log/.rc`、`build_perf.log/.rc`、`vet_analyze.log/.rc`、`gofmt.log/.rc`、`bash_n.log/.rc`
-- `raw_preservation.py`（只读审计脚本，可重跑）+ `raw_preservation.log/.rc`；`manifest_check.log/.rc`
-- `environment.txt`、`commands.tsv`（本轮命令 → 退出码 → 日志对照表）
+- `raw_preservation.py`（只读审计脚本，可重跑；P2 修复见 §6）+ `raw_preservation.log/.rc`（**修前**脚本产出，历史保留）
+- `raw_preservation_test.sh`（P2 回归夹具）+ `raw_preservation_regression.log/.rc`；`raw_preservation_rerun.log/.rc`（修后真实归档复核）；`environment_p2fix.txt`
+- `p2fix_bash_n.log/.rc`、`p2fix_py_syntax.log/.rc`（P2 轮脚本语法检查，cwd=仓库根）
+- `environment.txt`、`commands.tsv`（命令 → 退出码 → 日志对照表；P2 轮新增条目含 cwd）
 
 ## 5. 身份与指纹
 
 - `source_fingerprint.txt`：**采集时**指纹（字节不变，对应提交 `27cc51d` 的工作树）。
 - `source_fingerprint_current.txt`：本轮修正后（run_batch.sh / analyze.go / analyze_test.go 变更后）的对应指纹，
-  与刷新后的 `SHA256SUMS` 配套。
+  与刷新后的 `SHA256SUMS` 配套；P2 轮已刷新（extras 增列 `raw_preservation.py`、`raw_preservation_test.sh` 与
+  `run_batch_guard_test.sh`）。
 - `SHA256SUMS`（本轮刷新）覆盖除自身与 `checks/manifest_check.{log,rc}`（manifest 生成后的核验产物，
   按构造不可自指）外的全部证据文件；核验见 `checks/manifest_check.log`（rc=0）。
 
-## 6. 未决（不补造）
+## 6. P2 修复：`raw_preservation.py` 的增删漏判（本轮）
+
+发现（只读 review `c4bee0c`，P2）：`checks/raw_preservation.py` 的失败判据只统计“两侧均存在且哈希不同”的
+原始文件；原始集合内的**新增/删除/重命名**虽被打印却不影响退出码，可让归档完整性审计漏报。
+
+修复：`raw_changed` / `raw_added` / `raw_removed` 任一非空即返回 1；重命名按“删除 + 新增”处理；仅当保护集合
+（runs/、logs/、environment.txt、source_fingerprint.txt、smoke/）无增删改时才输出
+`raw evidence byte-identical`；非原始范围的新增（修正说明、checks/、清单）仍允许。保护集合与读取错误处理
+未改动（git/文件错误仍直接非零中止）。新增 `RAW_PRESERVATION_REV` 环境变量供隔离夹具选择基线修订
+（默认仍为 `27cc51d…`）。
+
+回归（真实脚本、临时 Git 夹具、真实归档只读）：
+- `checks/raw_preservation_test.sh` → `checks/raw_preservation_regression.log`（rc=0，**17 passed / 0 failed / 0 skipped**）：
+  修前脚本对删除/新增/重命名均漏判（rc=0 且输出 byte-identical，红例复现），对内容修改仍能捕获；
+  修后脚本：不变→0；内容修改/删除/新增/重命名/smoke 修改→1；仅新增非原始文件（checks/note.log）→0。
+  夹具仅在沙箱内重写修前副本的基线常量一行（日志含 diff 断言，判据未动）。
+- 真实归档复核：`checks/raw_preservation_rerun.log`（rc=0）——保护集合 changed/added/removed 均 NONE。
+- 历史说明：`checks/raw_preservation.log`（`c4bee0c` 轮）由**修前**脚本产生，保持原样未改写；其
+  byte-identical 结论已由上述修后复核独立重证。
+- 可直接复制的审计命令（cwd=仓库根）：
+  `python3 docs/evidence/013-supplement/consumer-seg/checks/raw_preservation.py docs/evidence/013-supplement/consumer-seg`
+- 本轮命令/环境：`checks/commands.tsv`（新增条目，含 cwd）、`checks/environment_p2fix.txt`。
+- 清单核验：`checks/manifest_check.log/.rc` 已按本轮最终清单重刷（167 条全部匹配，rc=0；上一版内容保留在提交
+  `c4bee0c` 中），排除项仍为 `{SHA256SUMS, checks/manifest_check.{log,rc}}` 三项、未扩大到原始记录。
+
+## 7. 未决（不补造）
 
 精确测试 argv/GOFLAGS、smoke `-race` 构建归属、recorder/分析器/审计的执行记录、远程权限/PR/CI、
 物理提交瞬时、逐事件池等待、跨机/生产归因——本批从未测得，仅如实披露。

@@ -1,23 +1,22 @@
-generated_at: 2026-10-08T05:45:50.514970203Z
-note: current-tree fingerprint after the 013 review-closure round (see CORRECTIONS.md)
+generated_at: 2026-10-08T07:29:31.316021567Z
+note: current-tree fingerprint after the review-closure rounds (CORRECTIONS.md §5–§6); refreshed in the P2-fix round
 note: source_fingerprint.txt is the capture-time fingerprint and stays byte-identical
 branch: perf/consumer-catchup-seg
-head: 27cc51d0801862f85c1ae04fd1fc74a4d300e80a
-head_subject: test(perf): 013 消费者追赶分段测量批次与证据（N=10000；on/off 配对 + pristine 书挡）
+head: c4bee0c445ef191a4b66901c101443856a6a5a7a
+head_subject: fix(perf): 013 分段测量 review 闭合（#1–#8：runner 根保护、分析器检查布尔、README 口径、证据披露）
 go: go version go1.26.5 linux/amd64
 kernel: Linux 6.18.33.2-microsoft-standard-WSL2 x86_64
 --- git status --porcelain (snapshot) ---
- M docs/evidence/013-supplement/consumer-seg/README.md
- M docs/evidence/013-supplement/consumer-seg/analysis/summary.md
- M docs/evidence/013-supplement/consumer-seg/analysis/summary_all.json
- M scripts/consumerseg/analyze/analyze.go
- M scripts/consumerseg/analyze/analyze_test.go
- M scripts/consumerseg/run_batch.sh
+ M docs/evidence/013-supplement/consumer-seg/checks/commands.tsv
+ M docs/evidence/013-supplement/consumer-seg/checks/raw_preservation.py
+ M docs/evidence/013-supplement/consumer-seg/source_fingerprint_current.txt
 ?? .omp/
-?? docs/evidence/013-supplement/consumer-seg/CORRECTIONS.md
-?? docs/evidence/013-supplement/consumer-seg/checks/
-?? docs/evidence/013-supplement/consumer-seg/source_fingerprint_current.txt
-?? scripts/consumerseg/run_batch_guard_test.sh
+?? docs/evidence/013-supplement/consumer-seg/checks/environment_p2fix.txt
+?? docs/evidence/013-supplement/consumer-seg/checks/raw_preservation_regression.log
+?? docs/evidence/013-supplement/consumer-seg/checks/raw_preservation_regression.rc
+?? docs/evidence/013-supplement/consumer-seg/checks/raw_preservation_rerun.log
+?? docs/evidence/013-supplement/consumer-seg/checks/raw_preservation_rerun.rc
+?? docs/evidence/013-supplement/consumer-seg/checks/raw_preservation_test.sh
 --- sha256sum ---
 265bba8fadb1cd41e0ace44faad9a97729b2c1807bd66b0ea5b19d9b92e93a21  internal/events/consumer.go
 ff426491743832b347f50ba71a542c0fd5db0e12d0275ab5e6c063423f27128c  internal/events/perf_seam_none.go
@@ -33,5 +32,7 @@ ab77c9806b12e158b97f0a6a3f2219fa39a2434c1a97971e48cc8807428e8e1a  scripts/consum
 cc5111e3b409043211d54ad065083d01ffd62c5eac9eaeaf17cb8e75f78b91c2  scripts/consumerseg/analyze/main.go
 c140529354c951fb895fddbe258e7badc61327c1953eefa6fb061821b8629a33  scripts/consumerseg/analyze/render.go
 7f92a49055f0e8d3828774498cee26584e3042be24fb6bbd9afc27366e9fb942  scripts/consumerseg/analyze/stats.go
---- extra (this round's regression fixture; not in the capture-time list) ---
+--- extra (rounds' regression fixtures and audit scripts; not in the capture-time list) ---
 e2e04928d53dbd4fe0696f5c2162ae61b28bcc2306617d45e441e519e4d850db  scripts/consumerseg/run_batch_guard_test.sh
+28fb3ac3e7b6a8bc0741c8475e7f621f52d6b2bad3d11cc7e37dfcf152c2411f  docs/evidence/013-supplement/consumer-seg/checks/raw_preservation.py
+cd1e0134b85eca57b7ad2ff47759b4d7c0c9b92fa491670937515384c9fea892  docs/evidence/013-supplement/consumer-seg/checks/raw_preservation_test.sh
