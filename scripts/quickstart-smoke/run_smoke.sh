@@ -21,8 +21,13 @@
 #   - all inherited TXHARBOR_* variables are dropped before loading
 #     .env.example, so a running development stack or a local .env cannot
 #     leak into the run;
+#   - COMPOSE_PROFILES is dropped and every Compose call runs with
+#     --env-file /dev/null, so a caller's profile selection or a development
+#     .env cannot add services; `up` names postgres and anvil explicitly and
+#     no other service can start;
 #   - the binary is built into the evidence directory (no repo pollution).
 #
+# Requires: bash, docker compose, go, curl (health probes).
 # Usage: bash scripts/quickstart-smoke/run_smoke.sh [evidence-dir]
 # Exit:  0 = PASS, non-zero = first failing step; see SUMMARY.txt in the
 #        evidence directory (also holds logs, probes and compose output).
@@ -43,7 +48,7 @@ fi
 mkdir -p "$evidence_dir"
 evidence_dir="$(cd "$evidence_dir" && pwd)"
 
-compose=(docker compose -p "$project" -f "$repo_root/compose.yaml" -f "$repo_root/scripts/quickstart-smoke/compose.smoke.yaml")
+compose=(docker compose -p "$project" --env-file /dev/null -f "$repo_root/compose.yaml" -f "$repo_root/scripts/quickstart-smoke/compose.smoke.yaml")
 summary="$evidence_dir/SUMMARY.txt"
 serve_pid=""
 stack_started=0
@@ -86,6 +91,7 @@ log "isolation: per-run project=$project ports pg=$pg_port anvil=$anvil_port htt
 
 # 1) Preflight: tools present, isolation ports free.
 command -v docker >/dev/null || fail "docker not found"
+command -v curl >/dev/null || fail "curl not found (required for the /livez, /readyz and /metrics probes)"
 docker compose version >"$evidence_dir/compose-version.txt" 2>&1 || fail "docker compose unavailable"
 port_busy() { (exec 3<>"/dev/tcp/127.0.0.1/$1") 2>/dev/null; }
 for p in "$pg_port" "$anvil_port" "$http_port"; do
@@ -95,6 +101,7 @@ log "preflight ok: ports $pg_port/$anvil_port/$http_port free"
 
 # 2) Environment: .env.example only, caller TXHARBOR_* dropped, ports overridden.
 while IFS= read -r key; do unset "$key"; done < <(env | sed -n 's/^\(TXHARBOR_[A-Z0-9_]*\)=.*/\1/p')
+unset COMPOSE_PROFILES # a caller's profile selection must not add services to the smoke stack
 cp "$repo_root/.env.example" "$evidence_dir/quickstart.env"
 set -a; . "$evidence_dir/quickstart.env"; set +a
 export TXHARBOR_PG_DSN="postgres://txharbor:txharbor@127.0.0.1:${pg_port}/txharbor?sslmode=disable"
@@ -111,7 +118,7 @@ log "build ok"
 name="$(sed -n 's/^name:[[:space:]]*//p' "$evidence_dir/compose-config.yaml" | head -n 1 | tr -d '"')"
 [ "$name" = "$project" ] || fail "compose project resolved to '$name', expected '$project'"
 stack_started=1
-"${compose[@]}" up -d --wait --wait-timeout 180 >"$evidence_dir/compose-up.log" 2>&1 || fail "compose up failed"
+"${compose[@]}" up -d --wait --wait-timeout 180 postgres anvil >"$evidence_dir/compose-up.log" 2>&1 || fail "compose up failed"
 "${compose[@]}" ps >"$evidence_dir/compose-ps.txt" 2>&1 || true
 log "compose up ok: project=$name (containers: $(docker ps --filter "label=com.docker.compose.project=$project" --format '{{.Names}}' | tr '\n' ' '))"
 

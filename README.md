@@ -108,7 +108,7 @@ flowchart LR
 
 ## 4. Getting Started
 
-依赖：Go 1.26.5（`go.mod`）、Docker + Docker Compose；bash / zsh（Linux、macOS 或 WSL2）。
+依赖：Go 1.26.5（`go.mod`）、Docker + Docker Compose；bash / zsh（Linux、macOS 或 WSL2）；`make smoke-quickstart` 另需 `curl`（健康探针）。
 
 ```bash
 cp .env.example .env          # serve 必填键已生效；signer / worker / 事件键按需取消注释
