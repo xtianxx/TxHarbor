@@ -108,7 +108,7 @@ log "build ok"
 
 # 4) Start the isolated stack and prove the project name is scoped.
 "${compose[@]}" config >"$evidence_dir/compose-config.yaml"
-name="$("${compose[@]}" config --format json | python3 -c 'import json,sys; print(json.load(sys.stdin).get("name",""))')"
+name="$(sed -n 's/^name:[[:space:]]*//p' "$evidence_dir/compose-config.yaml" | head -n 1 | tr -d '"')"
 [ "$name" = "$project" ] || fail "compose project resolved to '$name', expected '$project'"
 stack_started=1
 "${compose[@]}" up -d --wait --wait-timeout 180 >"$evidence_dir/compose-up.log" 2>&1 || fail "compose up failed"
