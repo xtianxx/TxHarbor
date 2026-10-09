@@ -3,8 +3,9 @@
 > **事实边界**：本文件描述当前实现的配置加载行为（`internal/config/config.go`）与模板
 > （`.env.example`）。项目未部署、T000-P 保持 OPEN。所有阈值类取值一律「待测/待裁决」，
 > 模板中出现的数值是测量示例或部署输入，**不是生产阈值**。
-> **NOT VERIFIED**：本文件未通过实际启动进程/CLI 验证键组合；核对方式为源码常量、加载分支与
-> 模板注释的静态对照。
+> **验证状态**：`serve` 的冷启动路径（001–006 必填键组合）已由 `make smoke-quickstart`
+> （`scripts/quickstart-smoke/`，隔离环境）实际启动验证；其余键组合与 CLI 仍为源码常量、
+> 加载分支与模板注释的静态对照（**NOT VERIFIED**）。
 
 ## 1. 加载规则
 
@@ -13,8 +14,8 @@
   格式错误同样在加载期报错。
 - **fail-closed 的条件必填**：某些键只在特定模式/开关下必填（见下各节），缺失即拒绝启动或拒绝执行。
 - **凭据脱敏**：启动回显与日志经 `internal/logx.Redact` 处理；凭据不进入日志/错误/指标。
-- **模板覆盖范围**：`.env.example` 完整覆盖 001–005 的必填键，并登记 013 键（**默认全部注释**）；
-  006 起的键需按下文补齐——**仅照抄模板不足以完整启动**。
+- **模板覆盖范围**：`.env.example` 覆盖 001–006 的必填键，`serve` 可直接用模板启动；007–015 的键
+  以登记形式提供（signer / worker / 事件 / 管理 CLI，**默认注释**，按需启用）。
 
 ## 2. 所有进程共享的必填键（`serve` / `migrate`）
 
@@ -30,13 +31,13 @@
 | `TXHARBOR_DEPOSIT_CONTRACTS` | 充值合约白名单（`address[:effective]`；空列表拒绝） | 拒绝启动 |
 | `TXHARBOR_DEPOSIT_WATCH_ADDRESSES` | 监控收款地址（`address[:effective]`；空列表拒绝） | 拒绝启动 |
 | `TXHARBOR_CONFIRMATION_DEPTH` | 确认深度 N（正整数，无默认） | 拒绝启动 |
-| `TXHARBOR_REORG_MAX_DEPTH` | 重组最大深度（006，正整数，无默认；模板未含） | `serve` 拒绝启动 |
+| `TXHARBOR_REORG_MAX_DEPTH` | 重组最大深度（006，正整数，无默认；模板已含） | `serve` 拒绝启动 |
 
 常用可选键（含默认值）：`TXHARBOR_HTTP_ADDR`（`127.0.0.1:8080`）、`TXHARBOR_STARTUP_TIMEOUT`（30s）、
 `TXHARBOR_PROBE_INTERVAL`（2s）、`TXHARBOR_PROBE_TIMEOUT`（5s）、`TXHARBOR_SHUTDOWN_TIMEOUT`（15s）、
 `TXHARBOR_MIGRATE_LOCK_TIMEOUT`（30s）、`TXHARBOR_INDEX_RPC_TIMEOUT`（5s）、`TXHARBOR_INDEX_POLL_INTERVAL`（1s）、
 `TXHARBOR_INDEX_RETRY_INITIAL`（200ms）、`TXHARBOR_INDEX_RETRY_MAX`（30s）、`TXHARBOR_LOG_BATCH_BLOCKS`（500）、
-`TXHARBOR_DEPOSIT_BATCH_BLOCKS`（500）。
+`TXHARBOR_DEPOSIT_BATCH_BLOCKS`（500）、`TXHARBOR_REORG_REPLAY_BATCH`（500）。
 
 ## 3. `signer-serve`（009）
 

@@ -1,0 +1,16 @@
+# Quick Start smoke-test override: isolated host ports so a smoke run never
+# collides with a running development stack (the base file maps 5432/8545).
+# Host ports come from SMOKE_PG_PORT / SMOKE_ANVIL_PORT (defaults below), so the
+# same values the runner uses for its DSN/RPC are the ones Compose actually
+# publishes. Use together with the base file and a per-run project name:
+#   docker compose -p txharbor-smoke-<run> -f compose.yaml \
+#     -f scripts/quickstart-smoke/compose.smoke.yaml up -d
+# The per-run project scopes the data volume (txharbor-smoke-<run>_pgdata), and
+# `down -v` removes only that project's containers and volumes.
+services:
+  postgres:
+    ports: !override
+      - "127.0.0.1:${SMOKE_PG_PORT:-55432}:5432"
+  anvil:
+    ports: !override
+      - "127.0.0.1:${SMOKE_ANVIL_PORT:-58545}:8545"
