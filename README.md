@@ -2,7 +2,7 @@
 
 面向 EVM / ERC-20 充值与提现的开发与验证阶段的基础设施项目（Go monorepo，单一二进制多子命令）：
 把**失败场景下的资金正确性**当作一等公民来设计和验证——幂等、链重组、交易结果未知、
-进程崩溃、可靠事件投递。**未生产部署，不宣称 production-ready**（见 §7）。
+进程崩溃、可靠事件投递。**未生产部署，不宣称 production-ready**（见 §6）。
 
 ## 1. Overview
 
@@ -10,7 +10,7 @@ TxHarbor 是一个可本地运行、可复现的 **EVM / ERC-20 充值与提现�
 设施中最难做对的部分——链上索引与确认、链重组恢复、提现接收与执行、nonce 与交易生命周期、
 隔离签名、可靠事件投递、跨源对账与备份恢复——作为一等公民实现，并用自动化测试与归档证据验证。
 
-核心原则与信任边界见 §3；实现细节（状态机、表结构、事件词汇、配置键）见 `docs/`（§8）。
+核心原则与信任边界见 §3；实现细节（状态机、表结构、事件词汇、配置键）见 `docs/`（§7）。
 
 ## 2. Features
 
@@ -29,7 +29,7 @@ TxHarbor 是一个可本地运行、可复现的 **EVM / ERC-20 充值与提现�
   恢复按能力分级放行；故障矩阵与灾备演练逐场景判定。
 
 机制、状态机与事件词汇见 [docs/architecture.md](docs/architecture.md)；各能力的测试入口与证据
-索引见 §6。
+索引见 §5。
 
 ## 3. Architecture
 
@@ -71,11 +71,11 @@ flowchart LR
 **权威性**：PostgreSQL 是唯一权威状态源；Redis / Kafka 非权威（故障不改变资金事实）。
 
 **Signer 信任边界**：私钥只在 `signer-serve`（独立进程与独立监听器，默认 `127.0.0.1:8091`），
-签名结果经 HTTP 返回业务进程；该边界是**进程级隔离，不构成网络隔离或数据库权限隔离**（见 §7）。
+签名结果经 HTTP 返回业务进程；该边界是**进程级隔离，不构成网络隔离或数据库权限隔离**（见 §6）。
 
 | 进程 | 子命令 | 职责 |
 | --- | --- | --- |
-| 业务进程 | `serve` | 五条索引流（header / log / deposit / confirmation / recovery）在同一租约循环与心跳下运行；提现接收与 nonce 只读接口、执行准入、健康与指标 |
+| 业务进程 | `serve` | 索引流（区块头 / 日志 / 充值 / 确认 / 重组恢复）在同一租约循环与心跳下运行；提现接收与 nonce 只读接口、执行准入、健康与指标 |
 | 签名进程 | `signer-serve` | 独立监听器（默认 `127.0.0.1:8091`）；`development` 加载本地密钥文件，`production` 无 provider 即拒绝启动 |
 | 执行进程 | `withdrawal-worker` | 领取 / 续租、交易生命周期与 Signer 调用、状态投影与恢复追踪 |
 | 事件进程 | `event-publisher` / `event-consumer` | 事务性 Outbox 至少一次发布；幂等消费（inbox 去重 / 版本守卫 / 隔离与重放） |
@@ -111,14 +111,23 @@ flowchart LR
 依赖：Go 1.26.5（`go.mod`）、Docker + Docker Compose；bash / zsh（Linux、macOS 或 WSL2）。
 
 ```bash
-cp .env.example .env          # 模板覆盖基础 / 充值链必填键，并登记事件基础设施键（默认注释）
+cp .env.example .env          # serve 必填键已生效；signer / worker / 事件键按需取消注释
 set -a; source .env; set +a   # 按需修改后加载
 
 docker compose up -d                 # PostgreSQL(127.0.0.1:5432) + Anvil(127.0.0.1:8545)
 go run ./cmd/txharbor migrate up     # 应用全部迁移（embed 在二进制）；serve 不会自动迁移
 go run ./cmd/txharbor migrate status # 查看迁移状态（current_version / pending）
-go run ./cmd/txharbor serve          # 业务进程（默认 127.0.0.1:8080）
+```
 
+启动业务进程（**长运行进程，在当前终端前台保持运行**）：
+
+```bash
+go run ./cmd/txharbor serve          # 默认监听 127.0.0.1:8080
+```
+
+**另开一个终端**执行健康检查：
+
+```bash
 curl -fsS http://127.0.0.1:8080/livez    # {"status":"alive"}
 curl -fsS http://127.0.0.1:8080/readyz   # chain / db / rpc / version 检查
 curl -fsS http://127.0.0.1:8080/metrics  # Prometheus 指标（txharbor_* 系列）
@@ -126,8 +135,8 @@ curl -fsS http://127.0.0.1:8080/metrics  # Prometheus 指标（txharbor_* 系列
 
 **必填配置**：
 
-- `serve`：`.env.example` 的全部必填键（10 个 `Required` 键 + `TXHARBOR_REORG_MAX_DEPTH`）均可直接
-  使用模板中的开发值；缺任一项则拒绝启动（fail-closed）；
+- `serve`：模板已包含全部必填键（基础配置 + `TXHARBOR_REORG_MAX_DEPTH`，均为可用的开发值）；
+  缺任一项则拒绝启动（fail-closed）；
 - `signer-serve`：模板已登记 9 个签名策略键（链 / 发送方 / 资产 / 收款方 / 金额与 gas 费用上限，
   缺失拒绝启动）与 `MODE`（默认 `production`；无 KMS/HSM provider 即拒绝启动，`development` 模式
   另需 `KEY_FILE`），运行该进程时取消注释并填入真实值；
@@ -145,20 +154,16 @@ curl -fsS http://127.0.0.1:8080/metrics  # Prometheus 指标（txharbor_* 系列
 
 **验证状态**：完整冷启动（`compose up` → `migrate up` → `serve` → 健康端点 / 指标）由
 `make smoke-quickstart` 在**隔离环境**（独立 Compose 项目、端口与数据卷）验证通过，脚本见
-`scripts/quickstart-smoke/`（详见 §6）。
+`scripts/quickstart-smoke/`（详见 §5）。
 
-## 5. Example Workflows
+## 5. Testing & Verification
 
-**仓库没有独立的交互式 Demo**。端到端行为由自动化测试层覆盖，按主线走查：充值链（索引与重组
-恢复）→ PostgreSQL 集成层；提现链（接收与执行）→ E2E 层；故障恢复 → Fault 与 Drill 独立层。
-各层入口、依赖条件与状态口径统一见 §6。
-
-**手工分步演示**（启动栈 → 签发调用方凭据 → 供给授权 → `POST /withdrawals` → 运行 worker →
-观察链上结果）尚无脚本化实现，步骤形状见 `specs/007-withdrawal-creation/quickstart.md`、
-`specs/008-nonce-manager/quickstart.md`、`specs/011-withdrawal-executor/quickstart.md`。
-**NOT VERIFIED**：手工路径未执行；脚本化方案见 §7 Roadmap。
-
-## 6. Testing & Verification
+**仓库没有独立的交互式 Demo**：端到端行为由自动化测试层覆盖（入口见下表）。按主线走查时，
+充值链（索引与重组恢复）对应 PostgreSQL 集成层、提现链（接收与执行）对应 E2E 层、故障恢复对应
+Fault 与 Drill 独立层。手工分步演示（启动栈 → 签发调用方凭据 → 供给授权 → `POST /withdrawals`
+→ 运行 worker → 观察链上结果）尚无脚本化实现，步骤形状见 `specs/007-withdrawal-creation/quickstart.md`、
+`specs/008-nonce-manager/quickstart.md`、`specs/011-withdrawal-executor/quickstart.md`；
+**NOT VERIFIED**：手工路径未执行（脚本化方案见 §6 Roadmap）。
 
 | 入口 | 用途 | Docker |
 | --- | --- | --- |
@@ -167,8 +172,8 @@ curl -fsS http://127.0.0.1:8080/metrics  # Prometheus 指标（txharbor_* 系列
 | `make test-integration` | PostgreSQL 层集成（testcontainers） | 是 |
 | `make test-integration-redis` / `make test-integration-kafka` | Redis / Kafka 层集成 | 是 |
 | `make test-e2e` | 核心充提全链（全栈 + Anvil） | 是 |
-| `make test-fault` / `make test-perf` | 五态故障矩阵 / 性能对照测量（独立层，不进普通 PR） | 是 |
-| `make test-drill` | 灾备演练 S1–S12 + F1–F7（独立通道；需真实 PG / Anvil、事件场景需 Kafka、宿主 `pg_dump` / `pg_restore`） | 是 |
+| `make test-fault` / `make test-perf` | 故障注入矩阵 / 性能对照测量（独立层，不进普通 PR） | 是 |
+| `make test-drill` | 灾备演练（独立通道；需真实 PG / Anvil、事件场景需 Kafka、宿主 `pg_dump` / `pg_restore`） | 是 |
 | `make smoke-quickstart` | Quick Start 冷启动冒烟（隔离 Compose 项目 / 端口 / 卷，仅用模板环境；不参与普通 PR CI） | 是 |
 | `make lint` / `make build` | gofmt + vet（双标签）/ 构建 | 否 |
 
@@ -178,18 +183,18 @@ curl -fsS http://127.0.0.1:8080/metrics  # Prometheus 指标（txharbor_* 系列
 - **状态口径**：**PASS**（该树 / 该运行有留存证据）· **FAIL**（有失败证据，含原因未确认者）·
   **NOT RUN**（该次未执行，不得读作通过）· **NOT VERIFIED**（无留存证据或未复跑）。逐层证据、
   历史运行与失败披露见 **[docs/verification-matrix.md](docs/verification-matrix.md)**。
-- **分层守卫**：Redis / Kafka / Contract / E2E / Fault / Perf / Drill 入口带 `require_tagged_tests`
-  守卫（无对应 tag 测试报 NOT RUN 并非零退出）；drill 另由 JSON 检查器逐场景要求 PASS。
+- **分层守卫**：Redis / Kafka / Contract / E2E / Fault / Perf / Drill 入口在缺少对应构建标签测试时
+  报告 **NOT RUN** 并非零退出（不空跑通过）；drill 逐场景要求 PASS（缺失 / 跳过即失败）。
 - **历史证据 ≠ 当前 HEAD**：已留存 CI 运行均针对各自历史 head；当前 HEAD 各层未复跑 → NOT VERIFIED。
-- **取证**：同字节重播 / 费用替换的具名载体为 `internal/txlifecycle/replay_integration_test.go`
-  与 `internal/txlifecycle/replacement_integration_test.go`。
+- **取证**：同字节重播 / 费用替换等执行细节的具名测试载体在 `internal/txlifecycle/`（replay /
+  replacement 集成测试）。
 - **验证纪律**：原始归档（清单 / 指纹）+ 独立复算；性能只做测量与定位（`perf` 构建标签接缝，
   普通构建 no-op）。
 
 CI：[Actions](https://github.com/xtianxx/TxHarbor/actions)（普通 PR 分层门禁 + 独立通道
 fault-perf / drill）。
 
-## 7. Limitations & Roadmap
+## 6. Limitations & Roadmap
 
 **限制**：
 
@@ -212,7 +217,7 @@ fault-perf / drill）。
 2. 手工充提路径的脚本化 Demo（复用现有测试夹具，见 §5）；
 3. 独立通道（Fault / Perf / Drill）与冷启动冒烟（`make smoke-quickstart`）的常规运行与归档维护。
 
-## 8. Documentation
+## 7. Documentation
 
 | 读者任务 | 文档 |
 | --- | --- |
