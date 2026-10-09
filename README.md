@@ -1,17 +1,16 @@
 # TxHarbor
 
-面向 EVM / ERC-20 充值与提现的开发演练项目（Go monorepo，单一二进制多子命令）：
+面向 EVM / ERC-20 充值与提现的开发与验证阶段的基础设施项目（Go monorepo，单一二进制多子命令）：
 把**失败场景下的资金正确性**当作一等公民来设计和验证——幂等、链重组、交易结果未知、
 进程崩溃、可靠事件投递。**未生产部署，不宣称 production-ready**（见 §7）。
 
 ## 1. Overview
 
-TxHarbor 是一个可本地运行、可复现的 **EVM / ERC-20 充值与提现基础设施演练项目**：把资金基础
+TxHarbor 是一个可本地运行、可复现的 **EVM / ERC-20 充值与提现基础设施项目**：把资金基础
 设施中最难做对的部分——链上索引与确认、链重组恢复、提现接收与执行、nonce 与交易生命周期、
 隔离签名、可靠事件投递、跨源对账与备份恢复——作为一等公民实现，并用自动化测试与归档证据验证。
 
-目标读者是开发者、贡献者与技术评审者：本 README 负责项目概览、快速上手与文档导航；实现细节
-（状态机、表结构、事件词汇、配置键）在 `docs/` 中展开（见 §8）。核心原则与信任边界见 §3。
+核心原则与信任边界见 §3；实现细节（状态机、表结构、事件词汇、配置键）见 `docs/`（§8）。
 
 ## 2. Features
 
@@ -125,18 +124,17 @@ curl -fsS http://127.0.0.1:8080/readyz   # chain / db / rpc / version 检查
 curl -fsS http://127.0.0.1:8080/metrics  # Prometheus 指标（txharbor_* 系列）
 ```
 
-**必填配置（照抄模板不足以启动）**：
+**必填配置**：
 
-- `serve`：`.env.example` 中 `Required` 的 10 个键 **加上 `TXHARBOR_REORG_MAX_DEPTH`**（重组最大
-  深度，无默认值，缺失即拒绝启动）；
-- `signer-serve`：9 个签名策略键（链 / 发送方 / 资产 / 收款方 / 金额与 gas 费用上限）；`MODE` 默认
-  `production`（无 KMS/HSM provider 即拒绝启动），`development` 模式另需 `KEY_FILE`；
-- `withdrawal-worker`：`TXHARBOR_TX_SIGNER_URL` / `TXHARBOR_TX_SIGNER_CREDENTIAL`（+ 继承的
-  DSN / RPC）。
+- `serve`：`.env.example` 的全部必填键（10 个 `Required` 键 + `TXHARBOR_REORG_MAX_DEPTH`）均可直接
+  使用模板中的开发值；缺任一项则拒绝启动（fail-closed）；
+- `signer-serve`：模板已登记 9 个签名策略键（链 / 发送方 / 资产 / 收款方 / 金额与 gas 费用上限，
+  缺失拒绝启动）与 `MODE`（默认 `production`；无 KMS/HSM provider 即拒绝启动，`development` 模式
+  另需 `KEY_FILE`），运行该进程时取消注释并填入真实值；
+- `withdrawal-worker`：模板已登记 `TXHARBOR_TX_SIGNER_URL` / `TXHARBOR_TX_SIGNER_CREDENTIAL`
+  （凭据由 `signer-auth` 签发后填入），运行该进程时取消注释。
 
-逐键说明、默认值与恢复 CLI 键集见 [docs/configuration.md](docs/configuration.md)。模板尚未包含
-`TXHARBOR_REORG_MAX_DEPTH`（事件基础设施键已以注释形式登记、默认不生效）——补全作为独立任务，
-见 §7 Roadmap。
+逐键说明、默认值与恢复 CLI 键集见 [docs/configuration.md](docs/configuration.md)。
 
 可选叠加：
 
@@ -145,8 +143,9 @@ curl -fsS http://127.0.0.1:8080/metrics  # Prometheus 指标（txharbor_* 系列
   （启用时必填键见配置参考）；
 - 恢复 CLI：`recovery-admin`（需独立控制库与主体配置，见配置参考 §7）。
 
-**验证状态**：健康端点与 `migrate status` 的响应形状与实现一致；完整冷启动（`compose up →
-migrate up → serve`）**未验证** → **NOT VERIFIED**。
+**验证状态**：完整冷启动（`compose up` → `migrate up` → `serve` → 健康端点 / 指标）由
+`make smoke-quickstart` 在**隔离环境**（独立 Compose 项目、端口与数据卷）验证通过，脚本见
+`scripts/quickstart-smoke/`（详见 §6）。
 
 ## 5. Example Workflows
 
@@ -170,6 +169,7 @@ migrate up → serve`）**未验证** → **NOT VERIFIED**。
 | `make test-e2e` | 核心充提全链（全栈 + Anvil） | 是 |
 | `make test-fault` / `make test-perf` | 五态故障矩阵 / 性能对照测量（独立层，不进普通 PR） | 是 |
 | `make test-drill` | 灾备演练 S1–S12 + F1–F7（独立通道；需真实 PG / Anvil、事件场景需 Kafka、宿主 `pg_dump` / `pg_restore`） | 是 |
+| `make smoke-quickstart` | Quick Start 冷启动冒烟（隔离 Compose 项目 / 端口 / 卷，仅用模板环境；不参与普通 PR CI） | 是 |
 | `make lint` / `make build` | gofmt + vet（双标签）/ 构建 | 否 |
 
 > ⚠️ **`make db-reset` 会删除数据**（等价 `docker compose down -v`，移除 PostgreSQL 数据卷且不可
@@ -209,10 +209,8 @@ fault-perf / drill）。
 **Roadmap（主要工程方向，未实施）**：
 
 1. 生产化门禁：KMS/HSM provider、TLS 终止方案与生产阈值裁决；
-2. `.env.example` 模板补全（至少包含 `TXHARBOR_REORG_MAX_DEPTH`）与 Quick Start 冒烟脚本
-   （一条命令验证 compose → migrate → serve → 健康端点 / 指标）；
-3. 手工充提路径的脚本化 Demo（复用现有测试夹具，见 §5）；
-4. 独立通道（Fault / Perf / Drill）的常规运行与归档维护。
+2. 手工充提路径的脚本化 Demo（复用现有测试夹具，见 §5）；
+3. 独立通道（Fault / Perf / Drill）与冷启动冒烟（`make smoke-quickstart`）的常规运行与归档维护。
 
 ## 8. Documentation
 
@@ -233,6 +231,6 @@ internal/                业务实现（充值索引 / 提现与执行 / nonce /
 migrations/              goose 迁移（embed 进二进制）
 specs/                   各阶段规格（spec / plan / tasks / data-model / contracts / ADR）
 docs/                    architecture / configuration / verification-matrix / ops / evidence
-scripts/                 测量与演练工具（consumerseg / perfseg / drillcoverage / pgintegration）
+scripts/                 测量、演练与冒烟工具（consumerseg / perfseg / drillcoverage / pgintegration / quickstart-smoke）
 .github/workflows/       ci.yml（普通 PR + main 分层门禁）、fault-perf.yml、drill.yml（独立通道）
 ```

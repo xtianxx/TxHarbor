@@ -1,4 +1,4 @@
-.PHONY: test test-race test-integration test-integration-redis test-integration-kafka test-contract test-e2e test-fault test-perf test-drill db-reset lint build
+.PHONY: test test-race test-integration test-integration-redis test-integration-kafka test-contract test-e2e test-fault test-perf test-drill db-reset lint build smoke-quickstart
 
 # require_tagged_tests guards a layered target: when no test file carries the
 # build tag yet, the layer reports NOT RUN and exits non-zero instead of
@@ -88,6 +88,12 @@ test-drill:
 	if [ $$go_status -ne 0 ]; then cat "$$events"; fi; \
 	go run scripts/drillcoverage/check.go "$$events" "$$report" "$$go_status" ./... "$$run_id" "$$started"; check_status=$$?; \
 	if [ $$go_status -ne 0 ]; then exit $$go_status; fi; exit $$check_status
+
+# Quick Start cold-start smoke test: fresh isolated Compose project, ports and
+# volumes, environment built from .env.example only; a running development
+# stack is never touched (see scripts/quickstart-smoke/run_smoke.sh).
+smoke-quickstart:
+	bash scripts/quickstart-smoke/run_smoke.sh
 
 # Explicit database wipe: removes the named volume (data is kept otherwise).
 db-reset:
