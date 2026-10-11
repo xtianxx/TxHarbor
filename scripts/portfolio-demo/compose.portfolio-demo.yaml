@@ -1,0 +1,24 @@
+# TxHarbor portfolio demo: port-isolation overlay.
+#
+# Used together with the repo base compose.yaml and a per-run compose project
+# (txharbor-demo-<run-id>), so the demo NEVER touches the default `txharbor`
+# stack, its containers, its named volume `txharbor_pgdata` or its host ports
+# 5432/8545:
+#
+#   docker --context "$DOCKER_CONTEXT" compose -p txharbor-demo-<run-id> \
+#     --env-file /dev/null \
+#     -f compose.yaml -f scripts/portfolio-demo/compose.portfolio-demo.yaml \
+#     up -d --wait --wait-timeout 180 postgres anvil
+#
+# This file overrides ONLY the published host ports. Images, commands,
+# healthchecks, volumes and networks stay exactly as defined by the base file.
+# `!override` (compose >= 2.24.4) replaces the base ports list instead of
+# appending to it; without it compose would merge both mappings and keep the
+# base 5432/8545 bindings.
+services:
+  postgres:
+    ports: !override
+      - "127.0.0.1:${PORTFOLIO_PG_PORT:-55436}:5432"
+  anvil:
+    ports: !override
+      - "127.0.0.1:${PORTFOLIO_ANVIL_PORT:-58547}:8545"

@@ -1,0 +1,19 @@
+# Provenance: MinimalERC20 demo fixture (NOT FOR PRODUCTION)
+
+solc_version=0.8.30+commit.73712a01
+solc_url=https://binaries.soliditylang.org/linux-amd64/solc-linux-amd64-v0.8.30+commit.73712a01
+solc_sha256=f3e987dc6ecebd4bd350c48edcbc320b46cf9e3109bd3fc3d88f1acaf4c428f7
+solc_manifest_url=https://binaries.soliditylang.org/linux-amd64/list.json
+solc_manifest_sha256=ee1a2b4811bd1225c220cd2342e2b49a58cbe18f5687f230f456c443b29497d6
+settings_evm_version=cancun
+settings_optimizer=false
+settings_via_ir=false
+settings_metadata_bytecode_hash=none
+settings_metadata_append_cbor=false
+compile_command=solc --standard-json < compile-input.json > output.json
+sha256_source=136f4d82bdb02dd0e6715ddc20f2fd8b237284ac201ce4a40c2ff3d679312e8f
+sha256_compile_input=47d98f2224e767e92168f5ee54421d202f29cc7a97212f762baa90a29536a803
+sha256_abi=5060bb412f2d02cfb3dccf9e64e05a11248bcc26a2c9b5b24c7a69ecf34628c6
+sha256_creation=37f500d712da4e61864543318207c42491a573e843b843b51decb71cb5c76041
+sha256_runtime=6c0a8d3371b8f724aa2a02519ba0b778786bacba450113e452e213b0a604c8bd
+note=solc binary sha256 verified against the official binaries.soliditylang.org list.json entry; the manifest authenticity itself (TLS/domain only) is not independently cross-checked.
