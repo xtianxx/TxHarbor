@@ -8,9 +8,9 @@
 - **提现与交易**：接收与异步执行分离，nonce 预留与持久绑定；结果未知时按链上事实对账，私钥限定于独立 Signer 进程。
 - **可靠事件**：业务状态与 Outbox 同事务写入，至少一次投递；消费侧去重、版本守卫、有界重试与隔离重放。
 
-[启动与健康检查](#4-getting-started) · [架构与设计取舍](docs/architecture.md) · [测试入口](#5-testing--verification) · [验证证据](docs/verification-matrix.md) · [v1.0.0 本地工程版本](https://github.com/xtianxx/TxHarbor/releases/tag/v1.0.0)
+[启动与健康检查](#4-getting-started) · [架构与设计取舍](docs/architecture.md) · [测试入口](#5-testing--verification) · [验证证据](docs/verification-matrix.md) · [5 分钟讲稿](docs/portfolio.md) · [真实演示证据](docs/evidence/portfolio-demo/run04w-20261011130031/README.md) · [v1.0.0 本地工程版本](https://github.com/xtianxx/TxHarbor/releases/tag/v1.0.0)
 
-**项目状态**：开发与验证阶段，未生产部署，不维护用户余额账本。v1.0.0 为历史本地工程版本，当前主线新增能力及各层验证状态以文档和对应运行记录为准。启动示例用于运行服务与检查健康状态；交互式充提 Demo 尚未脚本化（见 §5）。
+**项目状态**：开发与验证阶段，未生产部署，不维护用户余额账本。v1.0.0 为历史本地工程版本，当前主线新增能力及各层验证状态以文档和对应运行记录为准。启动示例用于运行服务与检查健康状态；**本地隔离的真实充提演示已由 CLI 编排脚本完成**（见 §5；是命令行脚本，不是图形界面或全交互产品）：2026-10-11 的 `run04w` 在源码 HEAD `11d698c75edf14e28e7075300ca082fe6dc9a308` 上完成 A（Pending → `N=3` Confirmed）/ B（真实签名付款、同 key 重放、30s 有界稳定）/ N5 拒绝与最终 verify 并留存脱敏证据；**其他 HEAD 层未在本轮运行**。
 
 ## 1. Overview
 
@@ -166,12 +166,24 @@ curl -fsS http://127.0.0.1:8080/metrics  # Prometheus 指标（txharbor_* 系列
 
 ## 5. Testing & Verification
 
-**仓库没有独立的交互式 Demo**：端到端行为由自动化测试层覆盖（入口见下表）。按主线走查时，
-充值链（索引与重组恢复）对应 PostgreSQL 集成层、提现链（接收与执行）对应 E2E 层、故障恢复对应
-Fault 与 Drill 独立层。手工分步演示（启动栈 → 签发调用方凭据 → 供给授权 → `POST /withdrawals`
-→ 运行 worker → 观察链上结果）尚无脚本化实现，步骤形状见 `specs/007-withdrawal-creation/quickstart.md`、
-`specs/008-nonce-manager/quickstart.md`、`specs/011-withdrawal-executor/quickstart.md`；
-**NOT VERIFIED**：手工路径未执行（脚本化方案见 §6 Roadmap）。
+**端到端行为仍由自动化测试层覆盖（入口见下表）**：按主线走查时，充值链（索引与重组恢复）对应
+PostgreSQL 集成层、提现链（接收与执行）对应 E2E 层、故障恢复对应 Fault 与 Drill 独立层。
+
+**手工分步演示已脚本化（本地隔离真实演示）**：入口
+[`scripts/portfolio-demo/README.md`](scripts/portfolio-demo/README.md)，编排脚本
+`scripts/portfolio-demo/run_demo.sh`（`run_all`：preflight → setup → A → B → verify；另有
+`--preflight-only` 守卫检查与 N1–N4 负例演练）。2026-10-11 的 `run04w-20261011130031` 在源码 HEAD
+`11d698c75edf14e28e7075300ca082fe6dc9a308`（**不是**收录证据的文档提交）上通过：A 真实 ERC-20
+充值 Pending → 深度 `N-1` 仍 Pending → `N=3` Confirmed；B 真实提现（201 创建/准入 → 隔离 signer
+签名 + worker 广播上链 → 同 caller/同 idempotency_key 重放 200 且不重复 → 30s 有界窗口与停 worker
+后快照稳定）；N5 401/403/409 拒绝不误增；最终 verify 以 **raw 32-byte topic** 的 `eth_getLogs`
+证明唯一付款并与回执逐字段一致。脱敏证据包（22 个原始字节复制 + 来源/哈希清单）见
+[`docs/evidence/portfolio-demo/run04w-20261011130031/`](docs/evidence/portfolio-demo/run04w-20261011130031/README.md)，
+讲解节奏见 [`docs/portfolio.md`](docs/portfolio.md)。口径：本地隔离、**非生产**；不运行 events
+pipeline（Outbox 为事务性**写入**，不是投递）；授权存在**一行受控 SQL 例外**
+（`withdrawal_authorization_scopes`），故**不是**「纯 CLI 闭环」；「约 5 分钟」指预备完成后的讲解，
+**不是**冷启动承诺。手工分步路径的步骤形状仍见 `specs/007-withdrawal-creation/quickstart.md`、
+`specs/008-nonce-manager/quickstart.md`、`specs/011-withdrawal-executor/quickstart.md`。
 
 | 入口 | 用途 | Docker |
 | --- | --- | --- |
@@ -194,6 +206,7 @@ Fault 与 Drill 独立层。手工分步演示（启动栈 → 签发调用方�
 - **分层守卫**：Redis / Kafka / Contract / E2E / Fault / Perf / Drill 入口在缺少对应构建标签测试时
   报告 **NOT RUN** 并非零退出（不空跑通过）；drill 逐场景要求 PASS（缺失 / 跳过即失败）。
 - **历史证据 ≠ 当前 HEAD**：已留存 CI 运行均针对各自历史 head；当前 HEAD 各层未复跑 → NOT VERIFIED。
+  （演示证据是明确例外：`run04w` 的源码 HEAD 为 `11d698c`，收录证据的文档提交不参与该次运行。）
 - **取证**：同字节重播 / 费用替换等执行细节的具名测试载体在 `internal/txlifecycle/`（replay /
   replacement 集成测试）。
 - **验证纪律**：原始归档（清单 / 指纹）+ 独立复算；性能只做测量与定位（`perf` 构建标签接缝，
@@ -219,11 +232,14 @@ fault-perf / drill）。
 - **许可证待定**：仓库暂无独立 LICENSE 文件；许可证选择为独立待决事项（依赖与许可说明见
   [THIRD_PARTY.md](THIRD_PARTY.md)）。
 
+**已交付（原 Roadmap 第 2 项）**：手工充提路径的脚本化本地演示 ——
+`scripts/portfolio-demo/run_demo.sh`（入口与证据见 §5 与
+[`scripts/portfolio-demo/README.md`](scripts/portfolio-demo/README.md)）。
+
 **Roadmap（主要工程方向，未实施）**：
 
 1. 生产化门禁：KMS/HSM provider、TLS 终止方案与生产阈值裁决；
-2. 手工充提路径的脚本化 Demo（复用现有测试夹具，见 §5）；
-3. 独立通道（Fault / Perf / Drill）与冷启动冒烟（`make smoke-quickstart`）的常规运行与归档维护。
+2. 独立通道（Fault / Perf / Drill）与冷启动冒烟（`make smoke-quickstart`）的常规运行与归档维护。
 
 ## 7. Documentation
 
