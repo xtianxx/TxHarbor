@@ -668,3 +668,40 @@ stdout/stderr/rc、negative-controls 原始日志、source hashes）。
 **状态**：真实重跑 **NOT RUN**（未授权）；B 成功提款/完成态重放/30s 观察窗/verify 仍 **NOT RUN**；
 原 04-postfix 失败结论与 04-* 取证证据**未改未抹**。Spec Kit：轻量 bug 修复人工记载，未调用任何命令、
 无 hook、未新增 feature。
+
+## 19. getLogs 过滤修复（RESUME-04-LOGFILTERFIX：raw topic）
+
+**症状**：`run04v` 最终 verify 失败——`FAIL: getLogs Transfer(signer->recipient) count at head 9:
+want [1] got [4]`（`run_rc=1`、`cleanup_rc=0`）；该 run 的 A 全绿、B 全绿至 B6（完成态重放/30s 窗口/停
+worker 后快照一致、余额与 totalSupply 守恒、回执逐字段一致）。旧代码在计数断言**之后**才落盘原始 JSON，
+故 run04v 的 raw getLogs **不存在**，那 4 条的具体内容**未知**——本记录不声称见过 mint/fund/deposit/
+withdraw 四条。
+
+**根因（版本证据，非猜测）**：foundry v1.8.1 `crates/cast/src/cmd/logs.rs`：`build_filter` 走
+`build_filter_event_sig`，只把 `event.inputs.filter(indexed)` 与位置参数 zip，因此
+`Transfer(address,address,uint256)`（inputs 无 `indexed`）只产出 topic0，topic1/topic2 变成 wildcard；
+raw topic 由 `build_filter_topics`（rawtopic0/1/2，按 B256 hex 解析）支持。来源：
+`https://raw.githubusercontent.com/foundry-rs/foundry/v1.8.1/crates/cast/src/cmd/logs.rs`
+
+**修复（仅 demo 辅助 scope）**：新增 `check_transfer_log_uniqueness()`（`run_demo.sh`），查询改为传
+**三个 raw 32-byte topic**（`TRANSFER_SIG` + zero-padded signer/recipient，`lower_hex` 规范化），
+token / `--from-block 0` / 固定 observed head 不变、count 目标仍为 **1**；除 count 与 txhash 外，对唯一
+log 严格核对 token address、恰 3 topics 与 topic0/1/2、`data == WITHDRAW`、`removed == false`、
+`transactionHash/blockHash/blockNumber/logIndex` 与**已核 signing receipt 的同一 log** 逐项一致（数值按
+hex/dec 归一）。不筛重复、不缩小到付款 block/单 tx、不客户端只取第一条。
+
+**证据次序修正**：filter metadata 先写本轮 **private 0600**；`cast_logs` 的原始 stdout 在**任何断言之前**
+写 private（失败响应/非 JSON 一律保留），stderr 亦 0600 私有；仅当全部结构+语义检查通过才 `cp` 到
+`public/chain/`，且仍受最终 secret 扫描约束（不把目录名 public 当作已扫描）。
+
+**回归（纯 mock，无 cast/链/docker/PG/网络/真实 CLI）**：`scripts/portfolio-demo/checks/log-filter/
+run_checks.sh` **29/29 PASS**（rc=0）——C1 抽取**真实**函数在 4 条合成 Transfer 链上通过、真实 argv 为
+token + 全链范围 + 三 raw topic、且发布发生在检查之后；C2 从 **pre-fix commit `069a431`** 抽取的签名形式
+在同桩上复现历史 `count 4` 并失败；C3 15 个变异/畸形响应（错 token/topic0/1/2/data/txhash/blockhash/
+blocknumber/logindex、`removed=true`、重复付款、0 条、未收窄 4 条、坏 JSON、`cast logs` rc≠0）全部
+fail-closed 且私有证据保留、**不发布**；C4 生产段 masked-count / wrong-topic 变异对照被捕获。夹具为
+**SYNTHETIC**（地址/哈希/金额为重复数字），桩仅模拟 topic 过滤语义（含签名⇒仅 topic0 的历史语义），
+不称真实 Foundry 运行。证据根 `.evidence/portfolio-demo-checks/04-log-filter-fix/<utc-pid>/`。
+
+**状态**：真实重跑 **NOT RUN**（未授权）；`run04v` 的"部分成功但最终 verify FAIL"**不抹**；原 run04v /
+forensics / principal 证据**未改未覆**。Spec Kit：轻量修复人工记载，未调用命令、无 hook、无 CI 声明。

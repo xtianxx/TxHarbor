@@ -85,6 +85,21 @@ must stay at those defaults for `run_demo.sh`.
 - **The demo proves the evidence itself is clean**: it writes `private/scan-patterns.txt` (0600)
   with the exact secret values of this run and fails the run if any of them — or the marker
   `signed_tx_bytes` — appears anywhere under `public/`. Matched content is never printed.
+- **The `eth_getLogs` uniqueness query uses raw 32-byte topics**, never an event signature:
+  foundry v1.8.1 `cast logs` builds topics only from *indexed* event inputs
+  (`crates/cast/src/cmd/logs.rs`: `build_filter` → `build_filter_event_sig`), so
+  `Transfer(address,address,uint256)` yields topic0 only and leaves topic1/topic2 as wildcards.
+  The query passes `TRANSFER_SIG` plus the zero-padded signer/recipient as topics 0/1/2; the
+  filter metadata and the raw stdout are written to this run's **private** 0600 logs before any
+  assertion, and only copied into `public/chain/` after every field check passed (the final
+  secrets scan still governs what may be shared). Regression without a chain:
+  `checks/log-filter/run_checks.sh` (pure mocks).
+- **Historical status of that check**: the pre-fix run `run04v-20261011120444` passed stage A and
+  stage B through B6 (completed intent, stable replays, conserved balances) but failed the final
+  verify on `getLogs ... count at head 9: want [1] got [4]`; its raw `getLogs` JSON was never
+  retained (the old code wrote it only after the count assertion), so the contents of those four
+  matched logs are unknown. The post-fix real rerun is **NOT RUN**; see
+  `docs/changes/portfolio-demo.md` §19.
 - `private/` is sensitive (keys, credentials, DSN password, full logs). Never commit, paste or
   package it; share `public/` only.
 - The `.evidence/` tree is already git-ignored (`.git/info/exclude`).

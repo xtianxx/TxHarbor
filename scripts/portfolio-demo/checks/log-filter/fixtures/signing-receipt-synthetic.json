@@ -1,0 +1,21 @@
+{
+  "_comment": "SYNTHETIC signing-receipt fixture (companion to chain-logs-synthetic.json). Not a chain capture. The checker reads only blockHash, blockNumber and logs[0].logIndex from it, and those match the synthetic withdrawal log (block 0x9, logIndex 0x0).",
+  "transactionHash": "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "status": "0x1",
+  "from": "0x2222222222222222222222222222222222222222",
+  "to": "0x1111111111111111111111111111111111111111",
+  "blockNumber": "0x9",
+  "blockHash": "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+  "logs": [
+    {
+      "address": "0x1111111111111111111111111111111111111111",
+      "topics": [
+        "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef",
+        "0x0000000000000000000000002222222222222222222222222222222222222222",
+        "0x0000000000000000000000003333333333333333333333333333333333333333"
+      ],
+      "data": "0x00000000000000000000000000000000000000000000003635c9adc5dea00000",
+      "logIndex": "0x0"
+    }
+  ]
+}

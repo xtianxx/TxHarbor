@@ -270,6 +270,91 @@ check_transfer_receipt() {
   require_nonempty "$label logIndex" "$(printf '%s\n' "$rcpt" | json_get 'logs[0].logIndex')"
 }
 
+# check_transfer_log_uniqueness <observed_head> <signing_receipt> <signing_tx>
+# Proves from eth_getLogs that across the whole chain (block 0..observed_head)
+# there is exactly one Transfer(signer -> recipient) and that it is the signing
+# transaction's log, field by field.
+#
+# The filter is passed as three RAW 32-byte topics, never as an event
+# signature: foundry v1.8.1 `cast logs` derives topics only from indexed event
+# inputs (crates/cast/src/cmd/logs.rs: build_filter -> build_filter_event_sig
+# zips event.inputs filtered by `indexed` with the positional args), so
+# "Transfer(address,address,uint256)" — whose inputs carry no `indexed` marker —
+# yields topic0 only and leaves topic1/topic2 as wildcards. Raw topics are
+# parsed by build_filter_topics (rawtopic0/1/2).
+#
+# Evidence order: the filter metadata and the raw stdout/stderr are persisted to
+# this run's PRIVATE 0600 files before any assertion, so a failure or a
+# malformed response stays reproducible; only after every structural and
+# semantic check passes are they copied into public/ (which the final secrets
+# scan still governs).
+check_transfer_log_uniqueness() {
+  local observed_head=$1 signing_receipt=$2 signing_tx=$3
+  local topic_from topic_to filter_file raw_file err_file
+  topic_from=$(lower_hex "0x000000000000000000000000${SIGNER_ADDR#0x}")
+  topic_to=$(lower_hex "0x000000000000000000000000${RECIPIENT#0x}")
+  filter_file="$PRIVATE_DIR/logs/transfer-log-query.filter.txt"
+  raw_file="$PRIVATE_DIR/logs/transfer-log-query.json"
+  err_file="$PRIVATE_DIR/logs/transfer-log-query.err"
+  {
+    printf 'from_block=0\nto_block=%s\naddress=%s\n' "$observed_head" "$TOKEN"
+    printf 'topic0=%s\ntopic1=%s\ntopic2=%s\n' "$TRANSFER_SIG" "$topic_from" "$topic_to"
+  } > "$filter_file"
+  local rc=0
+  # Redirect stdout straight into the private evidence file: a shell variable
+  # would drop trailing newlines and NUL bytes, i.e. it would alter the very
+  # bytes this evidence exists to preserve.
+  cast_logs --address "$TOKEN" --from-block 0 --to-block "$observed_head" \
+    "$TRANSFER_SIG" "$topic_from" "$topic_to" > "$raw_file" 2> "$err_file" || rc=$?
+  chmod 600 "$filter_file" "$raw_file" "$err_file"
+  if (( rc != 0 )); then
+    fail "cast logs (eth_getLogs) failed rc=$rc; raw output and stderr kept private"
+  fi
+  local logs_n
+  logs_n=$(json_count . < "$raw_file") \
+    || fail "getLogs response is not a JSON array (raw kept private)"
+  expect_eq "getLogs Transfer(signer->recipient) count at head $observed_head" "1" "$logs_n"
+  # Type-exact and direct-member exact: json_get renders the JSON string
+  # "false" and the boolean false identically, and a raw grep can be fooled by a
+  # nested decoy member, so the PARSED object's direct member is checked on its
+  # pretty-printed form (two-space indent; nested members sit deeper).
+  "$DEMOCTL" json get --pretty '[0]' < "$raw_file" \
+    | grep -Eq '^  "removed": false,?$' \
+    || fail "getLogs log removed is not the direct JSON boolean false (raw kept private)"
+  expect_eq "getLogs log transactionHash == signing tx" \
+    "$(lower_hex "$signing_tx")" \
+    "$(lower_hex "$(json_get '[0].transactionHash' < "$raw_file")")"
+  expect_eq "getLogs log address == token" "$TOKEN" \
+    "$(lower_hex "$(json_get '[0].address' < "$raw_file")")"
+  expect_eq "getLogs log topic count" "3" \
+    "$(json_count '[0].topics' < "$raw_file")"
+  expect_eq "getLogs log topic0 == Transfer signature" "$TRANSFER_SIG" \
+    "$(json_get '[0].topics[0]' < "$raw_file")"
+  expect_eq "getLogs log topic1 == transfer from (signer)" "$topic_from" \
+    "$(lower_hex "$(json_get '[0].topics[1]' < "$raw_file")")"
+  expect_eq "getLogs log topic2 == transfer to (recipient)" "$topic_to" \
+    "$(lower_hex "$(json_get '[0].topics[2]' < "$raw_file")")"
+  expect_eq "getLogs log data == WITHDRAW amount" "$("$DEMOCTL" uint256 hex "$WITHDRAW")" \
+    "$(json_get '[0].data' < "$raw_file")"
+  expect_eq "getLogs log removed == false" "false" \
+    "$(json_get '[0].removed' < "$raw_file")"
+  # The unique log must be the same log the signing receipt already proved.
+  expect_eq "getLogs log blockHash == signing receipt blockHash" \
+    "$(lower_hex "$(printf '%s\n' "$signing_receipt" | json_get blockHash)")" \
+    "$(lower_hex "$(json_get '[0].blockHash' < "$raw_file")")"
+  expect_uint_eq "getLogs log blockNumber == signing receipt blockNumber" \
+    "$(printf '%s\n' "$signing_receipt" | json_get blockNumber)" \
+    "$(json_get '[0].blockNumber' < "$raw_file")"
+  expect_uint_eq "getLogs log logIndex == signing receipt logIndex" \
+    "$(printf '%s\n' "$signing_receipt" | json_get 'logs[0].logIndex')" \
+    "$(json_get '[0].logIndex' < "$raw_file")"
+  # Every structural and semantic check passed: publish the exact filter and the
+  # raw JSON (still subject to the final secrets scan).
+  cp "$filter_file" "$PUBLIC_DIR/chain/transfer-log-query.filter.txt"
+  cp "$raw_file" "$PUBLIC_DIR/chain/transfer-log-query.json"
+  log "ok: getLogs filter/raw JSON and the final chain snapshot persisted under public/chain"
+}
+
 # cli_secret <label> <cmd...> -- run an admin CLI command under the serve env
 # and print ONLY the minted secret (the raw line, with the secret redacted,
 # goes to the private CLI log; the plaintext never reaches stdout/logs).
@@ -1247,25 +1332,10 @@ verify() {
 
   # eth_getLogs uniqueness at a fixed observed head: across the whole chain
   # there is exactly one Transfer(signer -> recipient), and it is the signing tx.
+  # The filter uses raw 32-byte topics (see check_transfer_log_uniqueness).
   observed_head=$(cast_rpc block-number)
   require_nonempty "observed head" "$observed_head"
-  logs_out=$(cast_logs --address "$TOKEN" --from-block 0 --to-block "$observed_head" \
-    "Transfer(address,address,uint256)" "$SIGNER_ADDR" "$RECIPIENT") \
-    || fail "cast logs (eth_getLogs) failed"
-  logs_n=$(printf '%s\n' "$logs_out" | json_count .)
-  expect_eq "getLogs Transfer(signer->recipient) count at head $observed_head" "1" "$logs_n"
-  logs_hash=$(lower_hex "$(printf '%s\n' "$logs_out" | json_get '[0].transactionHash')")
-  expect_eq "getLogs log transactionHash == signing tx" \
-    "$(lower_hex "$SIGNING_TX_HASH")" "$logs_hash"
-  # Persist the exact filter and the raw JSON so the uniqueness claim is
-  # reproducible from public evidence (the secrets scan runs after all of this).
-  {
-    printf 'from_block=0\nto_block=%s\naddress=%s\n' "$observed_head" "$TOKEN"
-    printf 'topic0=%s\ntopic1=%s\ntopic2=%s\n' "$TRANSFER_SIG" \
-      "0x000000000000000000000000${SIGNER_ADDR#0x}" \
-      "0x000000000000000000000000${RECIPIENT#0x}"
-  } > "$PUBLIC_DIR/chain/transfer-log-query.filter.txt"
-  printf '%s\n' "$logs_out" > "$PUBLIC_DIR/chain/transfer-log-query.json"
+  check_transfer_log_uniqueness "$observed_head" "$signing_receipt" "$SIGNING_TX_HASH"
   # Final chain snapshot: the actual call results at this point (not summary
   # constants), so a reviewer can re-check the balances/nonce/supply directly.
   {
