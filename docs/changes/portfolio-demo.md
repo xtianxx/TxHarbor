@@ -532,3 +532,28 @@ render 端口集按真实行为固定为 {55436,58547}（profile 服务不参与
 **回归证据**：`scripts/portfolio-demo/checks/finalfix/run_checks.sh`（严格 mock curl，无 daemon/网络/
 监听）**14/14 PASS**；日志 `.evidence/portfolio-demo-checks/03-finalfix/`（独立新根；03-fix 旧日志未覆盖）。
 仍 **NOT RUN**：完整 demo、真实负例、真实 SQL/产品入口（待 RESUME-04）。
+
+## 16. 钱包输出解析修复（RESUME-04-WALLETFIX）
+
+**边界披露（先行）**：RESUME-04 失败定位时，我执行了 **2 次 `docker run --rm`** 诊断
+（第 1 次被镜像 entrypoint `/bin/sh -c` 吞掉参数、rc=2；第 2 次 `--entrypoint cast` 复现成功、rc=0），
+每次创建并由 `--rm` **自动删除 1 个临时诊断容器**。这**超出**当时"只读诊断/禁删除"的授权；
+旧容器/卷/网络未变**不抵消**该越界。此后严禁 `docker run --rm`/rm/down/prune/删除任何资源。
+
+**失败与根因（RESUME-04，原始证据保留）**：`run04-20261011084854` 在 setup 的
+`cast wallet new` 处 `FAIL: cannot parse the signer address`；固定镜像 foundry v1.8.1 将机器对
+`0x<addr>\t0x<key>` 写 stdout、人类行（含 key）写 stderr，而旧实现只捕获 stdout 并按
+`^Address:` 解析 → 空。A/B/N5 未到达；N2/N3/N4 真实拒绝 PASS；run-exit=1 / cleanup=0。
+
+**修复**：`lib.sh` 新增 `wallet_new_capture`（stdout/stderr 分别落 private 0600 文件，不经终端/
+公开日志）与 `wallet_parse_pair`（严格：恰 1 行、恰 2 个 TAB 列、addr 0x+40hex、key 0x+64hex；
+拒空/多行/多列/含空格或冒号的人类格式/坏 hex；失败只报私有路径、不回显原文）；`run_demo.sh`
+改用两者，address 小写、`KEY_SIGNER` 0600、`unset WALLET_KEY`；公证据仅 address。
+
+**回归**：`scripts/portfolio-demo/checks/wallet/run_checks.sh`（纯 mock，模拟 v1.8.1 双流结构，
+DUMMY 假值）全部 PASS：happy（addr 正确、key 文件 0600、双流分离）、函数自身 stdout/stderr 无
+key 泄漏、非零退出、坏 schema（多行/多列/坏 addr/坏 key/空/人类格式）全部拒绝且不写可用 key、
+case 日志不含 dummy key。证据根：`.evidence/portfolio-demo-checks/walletfix/<utc-pid>/`（独占新根）。
+
+**状态**：真实重试 **NOT RUN**（待 supervisor 授权新 run；本修复轮无 Docker/服务/网络调用）；
+03 系列证据复用，04 失败证据原样保留。

@@ -661,19 +661,17 @@ EOF
   fi
 
   log "== setup: one-time signer key (cast wallet new, anvil image)"
-  local key_out addr priv
-  key_out=$(with_timeout 30 "${CAST[@]}" wallet new) || fail "cast wallet new failed"
-  addr=$(printf '%s\n' "$key_out" | sed -n 's/^Address:[[:space:]]*//p' | head -n 1)
-  priv=$(printf '%s\n' "$key_out" | sed -n 's/^Private key:[[:space:]]*//p' | head -n 1)
-  if [[ ! "$addr" =~ ^0x[0-9a-fA-F]{40}$ ]]; then
-    fail "cannot parse the signer address out of cast wallet new"
-  fi
-  if [[ ! "$priv" =~ ^0x[0-9a-fA-F]{64}$ ]]; then
-    fail "cannot parse the signer private key out of cast wallet new"
-  fi
-  SIGNER_ADDR=$(lower_hex "$addr")
-  ( umask 077; printf '%s\n' "$priv" > "$KEY_SIGNER" )
+  # Capture BOTH streams into private 0600 files (the human stderr lines also
+  # carry the key) and parse only the machine pair from stdout; nothing from
+  # the command reaches this script's stdout/stderr.
+  wallet_new_capture "$PRIVATE_DIR/logs/wallet-new.out" "$PRIVATE_DIR/logs/wallet-new.err" \
+    || fail "cast wallet new failed (private capture: $PRIVATE_DIR/logs/wallet-new.out|.err)"
+  wallet_parse_pair "$PRIVATE_DIR/logs/wallet-new.out" \
+    || fail "cast wallet new stdout was not the expected address<TAB>key pair (private capture: $PRIVATE_DIR/logs/wallet-new.out)"
+  SIGNER_ADDR="$WALLET_ADDR"
+  ( umask 077; printf '%s\n' "$WALLET_KEY" > "$KEY_SIGNER" )
   chmod 600 "$KEY_SIGNER"
+  unset WALLET_KEY
 
   log "== setup: fund the signer with FUND from the deployer"
   local fund_out

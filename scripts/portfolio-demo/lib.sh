@@ -318,6 +318,58 @@ scan_public_for_secrets() {
   esac
 }
 
+# --- one-time signer key: capture + strict parse (pinned foundry v1.8.1) ----
+# Verified on the pinned image (foundry v1.8.1): `cast wallet new` writes the
+# machine pair "0x<addr>\t0x<key>" as its ONLY stdout line, while the human
+# lines (which also carry the key) go to stderr. Both streams are captured
+# into the given private 0600 files; nothing is echoed to the caller's
+# stdout/stderr and neither stream is ever merged into a public log.
+wallet_new_capture() { # wallet_new_capture <stdout-file> <stderr-file>
+  local out=$1 err=$2
+  ( umask 077; : >"$out" ) && chmod 600 "$out"
+  ( umask 077; : >"$err" ) && chmod 600 "$err"
+  with_timeout 30 "${CAST[@]}" wallet new >"$out" 2>"$err"
+}
+
+# wallet_parse_pair <stdout-file> -- strict parse of the single stdout line:
+# exactly two TAB-separated columns (0x+40hex address, 0x+64hex key). Rejects
+# empty input, multiple lines, extra columns, spaces/colons (the human format)
+# and malformed hex. Sets WALLET_ADDR (lowercased) and WALLET_KEY; prints
+# nothing and never embeds the raw text in an error message.
+wallet_parse_pair() {
+  local out=$1 line addr key extra
+  local -a lines=()
+  WALLET_ADDR=""
+  WALLET_KEY=""
+  [[ -f "$out" ]] || { warn "wallet stdout capture missing: $out"; return 1; }
+  mapfile -t lines < "$out"
+  if (( ${#lines[@]} != 1 )); then
+    warn "wallet stdout must be exactly one line (got ${#lines[@]}); see $out"
+    return 1
+  fi
+  line=${lines[0]}
+  if [[ "$line" == *" "* || "$line" == *":"* ]]; then
+    warn "wallet stdout is not the machine pair (space/colon present); see $out"
+    return 1
+  fi
+  IFS=$'\t' read -r addr key extra <<<"$line"
+  if [[ -n "${extra:-}" || -z "${addr:-}" || -z "${key:-}" ]]; then
+    warn "wallet stdout must have exactly two TAB-separated columns; see $out"
+    return 1
+  fi
+  if [[ ! "$addr" =~ ^0x[0-9a-fA-F]{40}$ ]]; then
+    warn "wallet stdout column 1 is not 0x+40hex; see $out"
+    return 1
+  fi
+  if [[ ! "$key" =~ ^0x[0-9a-fA-F]{64}$ ]]; then
+    warn "wallet stdout column 2 is not 0x+64hex; see $out"
+    return 1
+  fi
+  WALLET_ADDR=$(lower_hex "$addr")
+  WALLET_KEY="$key"
+  return 0
+}
+
 # untrack_pid <pid> -- drop a reaped PID from the OWNED_PIDS array so the EXIT
 # trap never waits on it a second time.
 untrack_pid() {
