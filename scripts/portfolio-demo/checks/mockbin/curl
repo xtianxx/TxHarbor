@@ -1,0 +1,12 @@
+#!/usr/bin/env bash
+# Mock `curl` for the RESUME-03-FIX regression suite. run_checks.sh puts this
+# directory first on PATH; the mock never opens a socket. It records the argv
+# (so a check can assert the hardened flags http_post must pass) and answers
+# the documented shape: HTTP status 000, empty body, exit 0.
+set -uo pipefail
+
+: "${MOCK_LOG:=/dev/null}"
+
+printf 'curl %s\n' "$*" >> "$MOCK_LOG"
+printf '000\n'
+exit 0

@@ -1,0 +1,39 @@
+#!/usr/bin/env bash
+# Mock `cast wallet new` (pinned foundry v1.8.1 stream shape). DUMMY values
+# only; no real key material ever exists here. stdout carries the single
+# machine pair line; stderr carries the human lines (which also name the key).
+# MOCK_MODE selects the shape under test.
+set -u
+addr="0x1111111111111111111111111111111111111111"
+key="0x2222222222222222222222222222222222222222222222222222222222222222"
+case "${MOCK_MODE:-happy}" in
+  happy)
+    printf '%s\t%s\n' "$addr" "$key"
+    printf 'Successfully created new keypair.\nAddress:     %s\nPrivate key: %s\n' "$addr" "$key" >&2
+    ;;
+  exit7)
+    printf 'mock wallet failure\n' >&2
+    exit 7
+    ;;
+  multiline)
+    printf '%s\t%s\n%s\t%s\n' "$addr" "$key" "$addr" "$key"
+    ;;
+  extracol)
+    printf '%s\t%s\textra\n' "$addr" "$key"
+    ;;
+  badaddr)
+    printf '0x1234\t%s\n' "$key"
+    ;;
+  badkey)
+    printf '%s\t0xzz\n' "$addr"
+    ;;
+  empty)
+    :
+    ;;
+  human)
+    printf 'Successfully created new keypair.\nAddress: %s\nPrivate key: %s\n' "$addr" "$key"
+    ;;
+  *)
+    exit 9
+    ;;
+esac

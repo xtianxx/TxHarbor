@@ -7,9 +7,11 @@
 // (indexer_lease) as its single lock object — BEGIN → SET LOCAL
 // statement_timeout='5s' → ensure the row → SELECT … FOR UPDATE → post-lock
 // rechecks → COMMIT, the same 5-step shape as internal/indexer/reorgcommit.go
-// lockRecoveryChain. 008 never acquires or renews the lease and never writes
-// indexer_lease; it only serializes on the row so admission is linearizable
-// against 006 recovery establishment.
+// lockRecoveryChain. 008 never acquires, renews, or fences the lease, and its
+// only write to indexer_lease is the ON CONFLICT DO NOTHING first
+// materialization of a born-expired placeholder (a lock anchor, never a
+// lease); it only serializes on the row so admission is linearizable against
+// 006 recovery establishment.
 //
 // The indexer's constants are package-private and internal/indexer is out of
 // 008's change scope, so the identical statements are declared locally here
@@ -50,9 +52,20 @@ const localWriteGuard = "SET LOCAL statement_timeout = '5s'"
 // Coordination + gate SQL. Every string is a local declaration (see the file
 // doc); names/shapes mirror internal/indexer's write protocol.
 const (
+	// coordPlaceholderExpirySeconds is the first-materialization expiry offset
+	// for the shared coordination row. It is strictly negative on purpose: the
+	// row must be born already expired on the database clock, so 008
+	// materializes an inert lock anchor and nothing else. A live placeholder
+	// (e.g. now() + 3600) would silently block the indexer's expiry-based
+	// acquisition, because 002's CAS takes over only expires_at < now(); a bare
+	// now() would sit on that same strict-< boundary.
+	coordPlaceholderExpirySeconds = -3600.0
+
 	// ensureCoordRowSQL is write-protocol step 2: idempotently make sure the
 	// coordination row exists so step 3 always has a row to lock. 008 never
-	// renews or fences the lease.
+	// acquires, renews, or fences the lease, and never touches an existing
+	// row: the only write 008 may ever perform here is the ON CONFLICT DO
+	// NOTHING first materialization of the born-expired placeholder above.
 	ensureCoordRowSQL = `
 INSERT INTO indexer_lease (chain_id, owner_id, fencing_token, expires_at)
 VALUES ($1, $2, $3, now() + make_interval(secs => $4))
@@ -140,13 +153,15 @@ func (g GateState) Refusal() Outcome {
 
 // lockChain runs the shared 5-step coordination framing for one 008 write
 // transaction: statement guard → ensure coordination row → FOR UPDATE lock.
-// It takes no lease and writes nothing: the INSERT is ON CONFLICT DO NOTHING
-// and only materialises the shared row when it does not exist yet.
+// It takes no lease: the INSERT is ON CONFLICT DO NOTHING and, when the chain
+// has no row yet, materializes only a born-expired placeholder
+// (coordPlaceholderExpirySeconds). It never acquires, renews, updates, or
+// fences an existing lease — a live lease is left exactly as it is.
 func lockChain(ctx context.Context, tx txQuerier, chainID int64) error {
 	if _, err := tx.Exec(ctx, localWriteGuard); err != nil {
 		return fmt.Errorf("nonce transaction statement guard: %w", err)
 	}
-	if _, err := tx.Exec(ctx, ensureCoordRowSQL, chainID, "nonce-008", int64(0), float64(3600)); err != nil {
+	if _, err := tx.Exec(ctx, ensureCoordRowSQL, chainID, "nonce-008", int64(0), coordPlaceholderExpirySeconds); err != nil {
 		return fmt.Errorf("ensure coordination row: %w", err)
 	}
 	var (

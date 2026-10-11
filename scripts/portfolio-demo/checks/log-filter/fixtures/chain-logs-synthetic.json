@@ -1,0 +1,65 @@
+{
+  "_comment": "SYNTHETIC fixture for scripts/portfolio-demo/checks/log-filter/run_checks.sh. Not a chain capture: addresses, hashes and amounts are made up (repeated digits). It mirrors the four Transfer logs of a demo-shaped run: constructor mint, FUND (deployer->signer), DEPOSIT (deployer->watch), withdrawal (signer->recipient).",
+  "logs": [
+    {
+      "address": "0x1111111111111111111111111111111111111111",
+      "topics": [
+        "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef",
+        "0x0000000000000000000000000000000000000000000000000000000000000000",
+        "0x0000000000000000000000004444444444444444444444444444444444444444"
+      ],
+      "data": "0x00000000000000000000000000000000000000000000d3c21bcecceda1000000",
+      "blockNumber": "0x1",
+      "blockHash": "0xcccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "transactionHash": "0xdddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+      "transactionIndex": "0x0",
+      "logIndex": "0x0",
+      "removed": false
+    },
+    {
+      "address": "0x1111111111111111111111111111111111111111",
+      "topics": [
+        "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef",
+        "0x0000000000000000000000004444444444444444444444444444444444444444",
+        "0x0000000000000000000000002222222222222222222222222222222222222222"
+      ],
+      "data": "0x00000000000000000000000000000000000000000000010f0cf064dd59200000",
+      "blockNumber": "0x2",
+      "blockHash": "0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+      "transactionHash": "0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+      "transactionIndex": "0x0",
+      "logIndex": "0x0",
+      "removed": false
+    },
+    {
+      "address": "0x1111111111111111111111111111111111111111",
+      "topics": [
+        "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef",
+        "0x0000000000000000000000004444444444444444444444444444444444444444",
+        "0x0000000000000000000000005555555555555555555555555555555555555555"
+      ],
+      "data": "0x00000000000000000000000000000000000000000000029d394a5d6305440000",
+      "blockNumber": "0x4",
+      "blockHash": "0xabababababababababababababababababababababababababababababababab",
+      "transactionHash": "0xcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd",
+      "transactionIndex": "0x0",
+      "logIndex": "0x0",
+      "removed": false
+    },
+    {
+      "address": "0x1111111111111111111111111111111111111111",
+      "topics": [
+        "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef",
+        "0x0000000000000000000000002222222222222222222222222222222222222222",
+        "0x0000000000000000000000003333333333333333333333333333333333333333"
+      ],
+      "data": "0x00000000000000000000000000000000000000000000003635c9adc5dea00000",
+      "blockNumber": "0x9",
+      "blockHash": "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "transactionHash": "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "transactionIndex": "0x0",
+      "logIndex": "0x0",
+      "removed": false
+    }
+  ]
+}

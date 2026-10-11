@@ -358,3 +358,25 @@ as the only clock**; money/EVM quantities integer-only (`big.Int` / `NUMERIC(78,
   uniqueness; representation left to plan), repo convention (`NUMERIC(78,0)` in 000004–000007).
 - **Alternatives considered**: `BIGINT` (overflows the EVM uint64 nonce range at 2^63; NUMERIC is
   the repo's lossless convention); `bytea`/hex text storage (loses numeric ordering/comparison).
+
+## R14 — Coordination-row materialization: born-expired placeholder only (2026-10-11 clarification)
+
+- **Decision**: R1's "never writes `indexer_lease`" is tightened to its accurate form. 008's
+  framing may materialize the row **only** when the chain has none (`INSERT … ON CONFLICT
+  (chain_id) DO NOTHING`, T006), and that first materialization is a **born-expired placeholder**:
+  `now() + make_interval(secs => -3600)` (`coordPlaceholderExpirySeconds` in
+  `internal/nonce/coord.go`), owner `nonce-008`, fencing token 0, so `expires_at < now()` the
+  instant it commits. 008 still never acquires, renews, updates, or fences an existing lease and
+  never treats the token as authority; the lock order is unchanged (coordination row → domain rows).
+- **Rationale**: 002's `Lease.Acquire` CAS takes over only `expires_at < now()`. A live
+  placeholder (the pre-fix `now() + 3600`) therefore refused the indexer's acquisition for its
+  whole lifetime: observed in the portfolio demo run `run04r-20261011090209` (no `lease acquired`
+  log, zero `eth_getLogs`, deposit never observed) and reproduced at row level by
+  `internal/indexer/lease_placeholder_integration_test.go`.
+- **Alternatives considered**: not materializing the row at all (the `FOR UPDATE` then has no row
+  to lock on a fresh chain, breaking the shared 5-step shape); `now()` or a zero offset (sits on
+  the strict `<` boundary and can compare equal within the same transaction clock); changing
+  `Acquire`, exempting the owner, or reordering serve startup (widens 002's contract / hides the
+  defect instead of fixing it).
+- **Scope note**: rows already initialized by the pre-fix code keep their live placeholder until it
+  expires; the fix changes first materialization only (no retroactive rewrite of existing rows).
