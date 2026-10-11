@@ -54,8 +54,18 @@ A successful run prints `EVIDENCE: .evidence/portfolio-demo/<run-id>` when the s
 can never read as a pass. Every failure prints `FAIL: …` (or `RESULT: FAIL exit=<rc>`) and exits
 non-zero; polling always has a deadline, so a hung step fails instead of hanging.
 
-**Status: NOT RUN.** This batch ships the harness plus static and mocked checks only; the demo
-itself has not been executed (awaiting authorization).
+**Status: verified.** The last real run — `run04w-20261011130031` on 2026-10-11, at source
+HEAD `11d698c75edf14e28e7075300ca082fe6dc9a308` — completed all stages (A, B, N5 refusals, final
+verify), passed the public secrets scan, and exited `run_rc=0` / `exit_code=0` / `cleanup_rc=0`
+(`RESULT: PASS`; wall clock 132 s on an already-prepared host — not a cold-start promise). A
+curated, tracked excerpt of its public evidence (raw byte copies + provenance + `SHA256SUMS`)
+lives in
+[`docs/evidence/portfolio-demo/run04w-20261011130031/`](../../docs/evidence/portfolio-demo/run04w-20261011130031/README.md);
+the full original tree stays in the local git-ignored `.evidence/portfolio-demo/run04w-20261011130031/`.
+The talk track that walks through those files is §2.2 of
+[`docs/portfolio.md`](../../docs/portfolio.md). The negative-case drills (N1–N4) below were **not**
+re-run in that round. Runs are still per-id and disposable: this status describes one local
+execution, not a guarantee that other machines have reproduced it.
 
 Optional environment inputs: `PORTFOLIO_RUN_ID` (default `UTC-timestamp-PID`) and
 `TXHARBOR_DEMO_TOOLS_DIR`. Host ports are fixed by the script (`55436`, `58547`, `18081`, `18091`);
@@ -98,8 +108,8 @@ must stay at those defaults for `run_demo.sh`.
   stage B through B6 (completed intent, stable replays, conserved balances) but failed the final
   verify on `getLogs ... count at head 9: want [1] got [4]`; its raw `getLogs` JSON was never
   retained (the old code wrote it only after the count assertion), so the contents of those four
-  matched logs are unknown. The post-fix real rerun is **NOT RUN**; see
-  `docs/changes/portfolio-demo.md` §19.
+  matched logs are unknown. The post-fix real rerun **passed** (`run04w-20261011130031`, see
+  `docs/changes/portfolio-demo.md` §19–§20) — the pre-fix failure record is kept, not rewritten.
 - `private/` is sensitive (keys, credentials, DSN password, full logs). Never commit, paste or
   package it; share `public/` only.
 - The `.evidence/` tree is already git-ignored (`.git/info/exclude`).

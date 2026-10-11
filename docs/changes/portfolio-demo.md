@@ -5,6 +5,14 @@
 > （+ 后续 PR 检查证据留位），合并于本一份文档。**本方案未执行任何 Spec Kit 命令，未构建/
 > 测试、未启动任何服务；本步仅编辑本文档并做只读源码核对。**
 >
+> **初始编制历史（原文保留）**：以上 "plan-only / 未运行" 描述的是**方案最初编制时**的状态；
+> 之后的实现、修复与真实运行记录见 §13–§20，本页**不回写**早期章节。
+> **当前状态入口（2026-10-11）**：实现与本地修复链已完成；最终真实隔离运行
+> `run04w-20261011130031`（执行时 HEAD `11d698c…`，见 §20）A/B/N5 与最终 verify 全部通过、
+> 退出/清理码 0；精选证据包 `docs/evidence/portfolio-demo/run04w-20261011130031/`。
+> **失败历史不抹**：早期失败运行、`run04p`/`run04v`、2 次 `--rm` 诊断、≥7 个 PG 隐式删除、
+> R6 partial(`query_rc=3`)、`run04v` raw getLogs 缺失等保持 §16–§19 原文。
+>
 > **基线**：`main @ 2d170192a45a6c0751c6ac9a8cbeac4508ab8bad`；文档分支
 > `docs/portfolio-demo`（本地，未推送）。`origin/main` 为本地缓存引用，不视为实时远端。
 >
@@ -695,13 +703,78 @@ hex/dec 归一）。不筛重复、不缩小到付款 block/单 tx、不客户�
 `public/chain/`，且仍受最终 secret 扫描约束（不把目录名 public 当作已扫描）。
 
 **回归（纯 mock，无 cast/链/docker/PG/网络/真实 CLI）**：`scripts/portfolio-demo/checks/log-filter/
-run_checks.sh` **29/29 PASS**（rc=0）——C1 抽取**真实**函数在 4 条合成 Transfer 链上通过、真实 argv 为
-token + 全链范围 + 三 raw topic、且发布发生在检查之后；C2 从 **pre-fix commit `069a431`** 抽取的签名形式
-在同桩上复现历史 `count 4` 并失败；C3 15 个变异/畸形响应（错 token/topic0/1/2/data/txhash/blockhash/
-blocknumber/logindex、`removed=true`、重复付款、0 条、未收窄 4 条、坏 JSON、`cast logs` rc≠0）全部
-fail-closed 且私有证据保留、**不发布**；C4 生产段 masked-count / wrong-topic 变异对照被捕获。夹具为
-**SYNTHETIC**（地址/哈希/金额为重复数字），桩仅模拟 topic 过滤语义（含签名⇒仅 topic0 的历史语义），
-不称真实 Foundry 运行。证据根 `.evidence/portfolio-demo-checks/04-log-filter-fix/<utc-pid>/`。
+run_checks.sh` —— **首版 29/29 PASS**（rc=0）；**最终套件 54/54 PASS**（rc=0，`mock-closure3`；
+本节首版统计 29/29 为初版数字，**以最终 54/54 为准**）。C1 抽取**真实**函数在 4 条合成 Transfer 链上
+通过、真实 argv 为 token + 全链范围 + 三 raw topic、且发布发生在检查之后；C2 从 **pre-fix commit
+`069a431`** 抽取的签名形式在同桩上复现历史 `count 4` 并失败；C3 扩至 **18 个**变异/畸形响应
+（错 token/topic0/1/2/data/txhash/blockhash/blocknumber/logindex、`removed=true`、**string-false**、
+**string-false+嵌套 decoy**、重复付款、0 条、未收窄 4 条、坏 JSON、`cast logs` rc≠0）全部
+fail-closed 且私有证据保留、**不发布**，并含**字节级保留**对照（尾随换行/NUL/失败空 stdout）与
+**双 public 产物缺失**断言；C4 生产段 masked-count / wrong-topic 变异对照被捕获，另有对照证明被
+supersede 的 raw-grep 会被嵌套 decoy 击穿。夹具为 **SYNTHETIC**（地址/哈希/金额为重复数字），桩仅
+模拟 topic 过滤语义（含签名⇒仅 topic0 的历史语义），不称真实 Foundry 运行。证据根
+`.evidence/portfolio-demo-checks/04-log-filter-fix/<utc-pid>/`。最终修订经**显式独立 review**
+（未参与修改的审查者，只读；自行重跑 mock 与重算哈希）**APPROVE**，4+1 项 findings 全部闭合。
 
-**状态**：真实重跑 **NOT RUN**（未授权）；`run04v` 的"部分成功但最终 verify FAIL"**不抹**；原 run04v /
-forensics / principal 证据**未改未覆**。Spec Kit：轻量修复人工记载，未调用命令、无 hook、无 CI 声明。
+**状态**：真实重跑**已执行**（§20：`run04w` 通过）；`run04v` 的"部分成功但最终 verify FAIL"**不抹**；
+原 run04v / forensics / principal 证据**未改未覆**。Spec Kit：轻量修复人工记载，未调用命令、无 hook、
+无 CI 声明。
+
+## 20. 终态验收（RESUME-04-LOGFILTER-VERIFY：真实重跑 run04w 全通过）
+
+**授权与执行**：用户显式授权基于 `11d698c75edf14e28e7075300ca082fe6dc9a308`（本地修复链末次提交）
+做**唯一一次**全新隔离真实充提重跑。执行时仓库 `docs/portfolio-demo` @ 同一 SHA、worktree clean；
+命令 `timeout 1200 env PORTFOLIO_RUN_ID=run04w-20261011130031 bash scripts/portfolio-demo/run_demo.sh`；
+UTC `2026-10-11T13:01:02Z → 13:03:14Z`（墙钟 132s）；**`run_rc=0`、`exit_code=0`、`cleanup_rc=0`、
+`RESULT: PASS`**。执行前后均只盘点/未改旧资源（旧 16 个容器 ID/name/state 一致；本轮仅新增
+`1f8b33d419aa`(postgres)/`4de0be7533cd`(anvil) 两个容器，均 stopped/exited 保留，另加本轮卷与网络）。
+
+**结果（全部来自本轮真实 SQL/HTTP/链回执/getLogs；原始证据为 ignored 树）**：
+
+- **A（充值）PASS**：真实 ERC-20 `transfer` → `pending` → 深度 `N-1` 仍 `pending` →
+  `N=3 confirmed`（`confirm_threshold=3`、`confirmations>=3`、`confirm_policy_seq=1`）；
+  链上回执与 DB 断言互证；`serve.log` 含 `lease acquired`。
+- **B（提现）PASS**：创建 201（`wr-2182190d…`）→ 准入 201（`intent-portfolio-1`）→
+  **真实 signer 签名 + worker 广播上链完成**（`signing_tx=0xb81647bc…`）→ 未完重放 200 同 intent、
+  完成态重放 200 同 intent、创建重放 200 同 request → 计数 `requests=intents=nonce_bindings=1`、
+  outbox(request.received)=1；30s 有界窗口与停 worker 后快照**逐字节相同**
+  （`1|1|1|1|3|1000e18|1`）；单 nonce binding；recipient 余额 == WITHDRAW；signer 链上 nonce == 1。
+- **N5（拒绝）PASS**：无 bearer 401（intents 0）；`can_execute=false` 403（intents 0，随后 CLI 恢复）；
+  同 key 异额 409（requests 仍 1）。
+- **最终 verify PASS**：双向余额与 `totalSupply` 守恒；deposit/signing 两份回执逐字段核对；
+  **raw-topic `eth_getLogs` 唯一付款查询**（`from_block=0`、`to_block=9` 固定 head、token、
+  topic0/topic1/topic2 为 32-byte raw topic）count == 1，唯一 log 的 address/3 topics/`data`
+  (=WITHDRAW)/**`removed`=JSON 布尔 false**/txhash/blockhash/blocknumber/logindex 与 signing
+  receipt 的同一 log 一致；`run-metadata.txt`：`git_head=11d698c… dirty_files=0`；final intent
+  `completed`；outbox 6 行全 `pending`（**写入，非投递**）；**public secret 扫描 PASS**。
+- **资源**：仅本轮 project+run_token 双证容器被 `stop`（保留）；无删除、无 `--rm`/down/prune；
+  未发现 ryuk/testcontainers；无残留服务进程。
+
+**证据来源**：运行根 `.evidence/portfolio-demo/run04w-20261011130031/`（ignored，含 `private/`）；
+本轮核验根 `.evidence/portfolio-demo-checks/04-log-filter-verify/20261011130031-79439/`
+（原始 stdout/stderr、commands、前后资源快照）；**精选脱敏证据包**
+`docs/evidence/portfolio-demo/run04w-20261011130031/`（22 个原始字节复制 + `PROVENANCE.md` +
+`SHA256SUMS`，随本批提交）。主会话已独立验收：完整 A/B/verify、26 个 public 文件、metadata 源哈希、
+退出/清理码、资源对照。
+
+**版本区分（重要）**：证据包的 "source SHA" 是**执行时 HEAD** `11d698c…`；收录证据包的那次
+**文档提交**只新增本目录与文字，**不改**任何被运行的字节——引用时不要把文档提交 SHA 当作
+运行版本。
+
+**未达/未跑（不冒充）**：N1–N4 负例本轮 **NOT RUN**（旧结果不得重标为新 PASS）；events pipeline
+未运行（Outbox 仅写入）；链重组恢复、五态故障矩阵、演练套件**不在**本轮范围。
+
+**修复链说明**：nonce 首物化修复 `81aff2ee…`、测试隔离与更正 `6a146924…`、主体身份修复
+`069a431b…`、getLogs raw-topic 修复 `11d698c…` 均为**本地未推送**的修复链（未合入任何远端/PR）；
+"同类其他 1h 续租 writer 范围外问题"不因此自动修复；"worker 拒绝后 intent 停留 `executing`" 的
+更宽问题**不扩入**本节结论。
+
+**任务清单勾选**：仅**本轮有证据**的完成项勾选（A/B/N5/verify/证据包/退出与保留）；未跑项
+（N1–N4、events、重组/故障/演练）保持未勾并注明 NOT RUN。Spec Kit：本步与全流程均**未调用命令**，
+不称 Converged；无 CI/远端动作。
+
+**本批 scope 增补登记（如实记录，不回写原任务历史）**：§1 的 "In scope" 原本仅含 demo 辅助脚本/
+夹具；本次（用户目标的最后展示材料收口）**新增授权**写入以下文件：`docs/portfolio.md`（讲稿与
+索引更新）、本文件（§19 口径更正 + 本 §20）、`scripts/portfolio-demo/README.md`（短指针与状态
+更正）、新增 tracked 精选证据包 `docs/evidence/portfolio-demo/run04w-20261011130031/**`。
+增补不改任何被运行字节、不新增代码/配置/schema，也不改变 §1 的既有边界表述。
