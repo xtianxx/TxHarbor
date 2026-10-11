@@ -594,3 +594,37 @@ case 日志不含 dummy key。证据根：`.evidence/portfolio-demo-checks/walle
 
 **边界声明**：三类回归 PASS **不等于** demo 通过；RESUME-04 的充值失败结论与 B/N5 NOT RUN 状态保持，
 重跑需另行授权。本批未改 schema/migrations/业务契约、未新增依赖、未删除任何容器/卷/网络/DB 数据。
+（**注**：末句关于"未删除容器"的运行边界部分已由 §17.1 撤回更正；生产修复本身不变。）
+
+### 17.1 修正（NONCE-LEASE-FIX-CORRECTION：运行边界与证据准确性）
+
+独立验收指出 §17 的**运行边界声明不成立**，本小节如实更正（不改写上文任何原始记录）：
+
+- **实际发生的隐式资源生命周期**：三类用例此前以 `//go:build integration` 编译，于是每次
+  `go test -tags integration ./internal/indexer/` 都会执行包级 `TestMain`
+  （`internal/indexer/indexer_shared_pg_test.go:127-148` → `runIndexerIntegrationTests` →
+  **无条件** `startSharedIndexerPostgres` → `m.Run()` → `teardownSharedIndexerPostgres`），
+  即创建 testcontainers PostgreSQL（含 Ryuk reaper）并在结束时**终止/删除**。因此"未使用
+  `nonceStartPostgres` 即无容器生命周期"的判断**错误**；上文"未删除任何容器"的措辞对本批测试运行
+  **不成立**，予以撤回。
+- **已确认删除数**：存活 case 日志可确认 **至少 7 个** PG 容器被创建并删除
+  （`02c32c3fc6a1/08ac48c674c8/0a9b4b85f1e7/6b2070acb6b2/6f68cf1790b6/ab56bf64ec80/eefd35eb6b70`）；
+  被同名重跑覆盖的日志其 ID 不可恢复，**总数未知**（不伪称"恰好 7"或"零"）。旧 10 容器/卷/网络
+  未变这一对照仍成立，但**不构成"无越界"**。
+- **修复（C1，最小安全隔离）**：新用例改用**专用 build tag `nonce_lease_fix`**（不与 `integration`
+  并存），从而完全不编译包级 TestMain 及其自动资源路径；**未改**原 TestMain/生产代码/全库测试生命
+  周期，也未添加环境绕过。只读验证：`go list -tags nonce_lease_fix` 含新用例、**不含**
+  `indexer_shared_pg_test.go`、`TestImports` 无 testcontainers；`go test -c` rc=0；对编译产物
+  `go tool nm` 显示 `startSharedIndexerPostgres`/`runIndexerIntegrationTests`/`testcontainers`
+  引用均为 **0**，三个 `TestLeaseFix*` 符号存在。可重复命令：
+  `go test -tags nonce_lease_fix -count=1 -run '^TestLeaseFix' ./internal/indexer/`（默认 CI 未启该
+  tag，**不算验证通过**）。**三个用例在新 tag 下尚未实跑**——旧功能红/绿结果作为行为证据仍有效
+  （生产修复未变，`coord.go` 哈希不变），但其运行边界不合规，安全重跑需单独授权。
+- **C2 期限**：各 case 统一 `context.WithTimeout(…, 60s)`；夹具 setup（迁移+建池）合并 120s 总期限；
+  `leaseFixWaitExpired`/`WaitBlocked` 各自 `WithTimeout(within)` 且轮询 SQL 带该 ctx；case3 回滚用
+  独立 5s cleanup ctx（避免 ctx 过期导致事务/行锁泄漏）；25ms 轮询仅用于判据为数据库值的等待。
+- **C3 可追溯**：下次合法运行会 `t.Logf` 输出 case2 有效/过期行前后四字段、拒与接管最终值，case3
+  两 caller 的 won/token 与最终行（不含 DSN/凭据）；SQL 原值见
+  `correction/<utc-pid>/key-sql-raw.txt`。证据根：
+  `.evidence/portfolio-demo-checks/nonce-lease-fix/correction/<utc-pid>/`（旧 red/green/raw 日志
+  **未覆盖**）。

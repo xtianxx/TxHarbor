@@ -1,8 +1,21 @@
-//go:build integration
+//go:build nonce_lease_fix
 
 // lease_placeholder_integration_test.go owns the regression suite for the
 // coordination-row placeholder contract (008 R1/R4 framing over 002's
 // `indexer_lease`, data-model.md Table 3).
+//
+// Build tag: this suite deliberately does NOT use the `integration` tag. The
+// indexer test package carries a package-level TestMain in
+// indexer_shared_pg_test.go (integration-tagged) that unconditionally starts a
+// shared testcontainers PostgreSQL and terminates it afterwards; compiling
+// under `integration` would attach that container lifecycle — and its
+// deletion — to a suite that is only allowed to touch its own dedicated
+// fixture. The dedicated `nonce_lease_fix` tag selects exactly this file plus
+// the package's pure unit tests, and excludes every integration-tagged file,
+// so no TestMain, no package init, and no testcontainers path is compiled in.
+// Run it as:
+//
+//	go test -tags nonce_lease_fix -count=1 -run '^TestLeaseFix' ./internal/indexer/
 //
 // The contract under test: 008 never acquires, renews, or updates the lease.
 // Its 5-step framing may materialize the shared row on first use, but only as
@@ -68,15 +81,19 @@ var (
 )
 
 // leaseFixPool opens the dedicated fixture pool and applies the embedded
-// migrations once per process.
+// migrations once per process. Setup (migration + pool open) shares one bounded
+// deadline: a stalled server or a hung migration must fail the case, never hang
+// it.
 func leaseFixPool(t *testing.T) *pgxpool.Pool {
 	t.Helper()
 	dsn := os.Getenv(leaseFixDSNEnv)
 	if dsn == "" {
 		t.Skipf("%s is not set; the nonce-lease-fix suite needs its dedicated fresh-PG fixture", leaseFixDSNEnv)
 	}
+	setupCtx, cancel := context.WithTimeout(context.Background(), leaseFixSetupTimeout)
+	defer cancel()
 	leaseFixMigrateOnce.Do(func() {
-		leaseFixMigrateErr = db.MigrateUp(context.Background(), db.MigrateOptions{
+		leaseFixMigrateErr = db.MigrateUp(setupCtx, db.MigrateOptions{
 			DSN:            dsn,
 			LockTimeout:    5 * time.Second,
 			ConnectTimeout: 5 * time.Second,
@@ -85,12 +102,32 @@ func leaseFixPool(t *testing.T) *pgxpool.Pool {
 	if leaseFixMigrateErr != nil {
 		t.Fatalf("migrate fixture database: %v", leaseFixMigrateErr)
 	}
-	pool, err := db.OpenPool(context.Background(), dsn, 5*time.Second)
+	pool, err := db.OpenPool(setupCtx, dsn, 5*time.Second)
 	if err != nil {
 		t.Fatalf("open fixture pool: %v", err)
 	}
 	t.Cleanup(pool.Close)
 	return pool
+}
+
+// leaseFixCaseTimeout bounds one case's whole context; leaseFixSetupTimeout
+// bounds the fixture migration + pool open, and leaseFixCleanupTimeout bounds
+// post-assertion cleanup statements that must not inherit an already cancelled
+// context.
+const (
+	leaseFixSetupTimeout   = 120 * time.Second
+	leaseFixCaseTimeout    = 60 * time.Second
+	leaseFixCleanupTimeout = 5 * time.Second
+)
+
+// leaseFixCaseContext returns the case context: every statement of the case
+// runs under this bounded deadline (Lease.Acquire adds its own 5s bound on top
+// of it).
+func leaseFixCaseContext(t *testing.T) context.Context {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), leaseFixCaseTimeout)
+	t.Cleanup(cancel)
+	return ctx
 }
 
 // leaseFixRow is one `indexer_lease` row read back with the database clock.
@@ -156,50 +193,71 @@ func leaseFixRegister(t *testing.T, ctx context.Context, pool *pgxpool.Pool, cha
 
 // leaseFixWaitExpired waits (bounded, on the database clock only) until the
 // chain's coordination row is observably expired. It never infers ordering
-// from a sleep: the predicate is the same one Lease.Acquire evaluates.
+// from a sleep: the predicate is the same one Lease.Acquire evaluates, the
+// poll queries carry the wait's own deadline, and a stalled server fails the
+// case instead of hanging it.
 func leaseFixWaitExpired(t *testing.T, ctx context.Context, pool *pgxpool.Pool, chainID int64, within time.Duration) {
 	t.Helper()
-	deadline := time.Now().Add(within)
-	var expired bool
-	var expiresAt, dbNow time.Time
+	wctx, cancel := context.WithTimeout(ctx, within)
+	defer cancel()
+	var (
+		expired   bool
+		expiresAt time.Time
+		dbNow     time.Time
+	)
 	for {
-		if err := pool.QueryRow(ctx, `
+		err := pool.QueryRow(wctx, `
 SELECT expires_at < now(), expires_at, now() FROM indexer_lease WHERE chain_id = $1`, chainID).
-			Scan(&expired, &expiresAt, &dbNow); err != nil {
+			Scan(&expired, &expiresAt, &dbNow)
+		if err != nil {
+			if wctx.Err() != nil {
+				t.Fatalf("lease on chain %d still unexpired within %s: expires_at=%s db now=%s",
+					chainID, within, expiresAt.UTC().Format(time.RFC3339Nano), dbNow.UTC().Format(time.RFC3339Nano))
+			}
 			t.Fatalf("poll lease expiry on chain %d: %v", chainID, err)
 		}
 		if expired {
 			return
 		}
-		if time.Now().After(deadline) {
-			t.Fatalf("lease on chain %d still unexpired after %s: expires_at=%s db now=%s",
+		select {
+		case <-wctx.Done():
+			t.Fatalf("lease on chain %d still unexpired within %s: expires_at=%s db now=%s",
 				chainID, within, expiresAt.UTC().Format(time.RFC3339Nano), dbNow.UTC().Format(time.RFC3339Nano))
+		case <-time.After(25 * time.Millisecond):
 		}
-		time.Sleep(25 * time.Millisecond)
 	}
 }
 
 // leaseFixWaitBlockedAcquirers polls PostgreSQL until at least want Acquire
 // statements are observably waiting on a lock, proving both callers are
-// serialized behind the coordination row lock before the holder commits.
+// serialized behind the coordination row lock before the holder commits. The
+// probe queries carry the wait's own deadline so a stalled server cannot hang
+// the case.
 func leaseFixWaitBlockedAcquirers(t *testing.T, ctx context.Context, pool *pgxpool.Pool, want int, within time.Duration) int {
 	t.Helper()
-	deadline := time.Now().Add(within)
-	var last int
+	wctx, cancel := context.WithTimeout(ctx, within)
+	defer cancel()
+	last := 0
 	for {
-		if err := pool.QueryRow(ctx, `
+		err := pool.QueryRow(wctx, `
 SELECT count(*) FROM pg_stat_activity
-WHERE wait_event_type = 'Lock' AND query LIKE '%INSERT INTO indexer_lease%'`).Scan(&last); err != nil {
+WHERE wait_event_type = 'Lock' AND query LIKE '%INSERT INTO indexer_lease%'`).Scan(&last)
+		if err != nil {
+			if wctx.Err() != nil {
+				t.Fatalf("only %d of %d Acquire session(s) blocked on the coordination row lock within %s",
+					last, want, within)
+			}
 			t.Fatalf("probe blocked Acquire sessions: %v", err)
 		}
 		if last >= want {
 			return last
 		}
-		if time.Now().After(deadline) {
+		select {
+		case <-wctx.Done():
 			t.Fatalf("only %d of %d Acquire session(s) blocked on the coordination row lock within %s",
 				last, want, within)
+		case <-time.After(25 * time.Millisecond):
 		}
-		time.Sleep(25 * time.Millisecond)
 	}
 }
 
@@ -208,7 +266,7 @@ WHERE wait_event_type = 'Lock' AND query LIKE '%INSERT INTO indexer_lease%'`).Sc
 // already-expired placeholder, and the indexer's real Lease.Acquire must win
 // it immediately with fencing token 1.
 func TestLeaseFixPlaceholderBornExpiredThenAcquireWins(t *testing.T) {
-	ctx := context.Background()
+	ctx := leaseFixCaseContext(t)
 	pool := leaseFixPool(t)
 	chain := leaseFixChainBase
 	t.Logf("case 1 chain id %d", chain)
@@ -259,7 +317,7 @@ func TestLeaseFixPlaceholderBornExpiredThenAcquireWins(t *testing.T) {
 // lease refuses a second instance, and an expired one is taken over with
 // exactly one fence increment.
 func TestLeaseFixNonceCoordWritePreservesExistingLease(t *testing.T) {
-	ctx := context.Background()
+	ctx := leaseFixCaseContext(t)
 	pool := leaseFixPool(t)
 	chain := leaseFixChainBase + 1
 	t.Logf("case 2 chain id %d", chain)
@@ -274,12 +332,14 @@ func TestLeaseFixNonceCoordWritePreservesExistingLease(t *testing.T) {
 	}
 	t.Logf("seed live lease token %d (insert path)", token)
 	beforeLive := leaseFixReadRow(t, ctx, pool, chain)
+	t.Logf("case2 live row before the 008 write: %s", beforeLive)
 	if beforeLive.expired {
 		t.Fatalf("seeded live lease already expired: %s", beforeLive)
 	}
 
 	leaseFixRegister(t, ctx, pool, chain, "0x2222222222222222222222222222222222222222", fmt.Sprintf("op-lease-fix-preserve-live-%d", chain))
 	afterLive := leaseFixReadRow(t, ctx, pool, chain)
+	t.Logf("case2 live row after the 008 write: %s", afterLive)
 	if afterLive.expired {
 		t.Fatalf("the seeded lease expired before the live-state checks completed: %s", afterLive)
 	}
@@ -293,6 +353,7 @@ func TestLeaseFixNonceCoordWritePreservesExistingLease(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Acquire over a live lease: %v", err)
 	}
+	t.Logf("case2 Acquire over the live lease: won=%t token=%d", wonLoser, tokenLoser)
 	if wonLoser || tokenLoser != 0 {
 		t.Fatalf("Acquire over a live lease = (won=%t token=%d), want (false, 0)", wonLoser, tokenLoser)
 	}
@@ -304,8 +365,11 @@ func TestLeaseFixNonceCoordWritePreservesExistingLease(t *testing.T) {
 	leaseFixWaitExpired(t, ctx, pool, chain, 20*time.Second)
 
 	beforeExpired := leaseFixReadRow(t, ctx, pool, chain)
+	t.Logf("case2 expired row before the 008 write: %s", beforeExpired)
 	leaseFixRegister(t, ctx, pool, chain, "0x3333333333333333333333333333333333333333", fmt.Sprintf("op-lease-fix-preserve-expired-%d", chain))
-	leaseFixAssertRowEqual(t, "008 write over an expired lease", beforeExpired, leaseFixReadRow(t, ctx, pool, chain))
+	afterExpired := leaseFixReadRow(t, ctx, pool, chain)
+	t.Logf("case2 expired row after the 008 write: %s", afterExpired)
+	leaseFixAssertRowEqual(t, "008 write over an expired lease", beforeExpired, afterExpired)
 
 	takeover, err := NewLease(pool, chain, Params{OwnerID: "lease-fix-takeover"})
 	if err != nil {
@@ -319,6 +383,7 @@ func TestLeaseFixNonceCoordWritePreservesExistingLease(t *testing.T) {
 		t.Fatalf("takeover Acquire = (won=%t token=%d), want (true, %d): the fence must advance exactly once", wonTakeover, tokenTakeover, token+1)
 	}
 	final := leaseFixReadRow(t, ctx, pool, chain)
+	t.Logf("case2 takeover: won=%t token=%d row=%s", wonTakeover, tokenTakeover, final)
 	if final.owner != "lease-fix-takeover" || final.token != tokenTakeover || final.expired {
 		t.Fatalf("post-takeover row = %s, want owner=lease-fix-takeover token=%d expired=false", final, tokenTakeover)
 	}
@@ -331,6 +396,7 @@ func TestLeaseFixNonceCoordWritePreservesExistingLease(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Acquire over the taken-over lease: %v", err)
 	}
+	t.Logf("case2 Acquire over the taken-over lease: won=%t token=%d", wonThird, tokenThird)
 	if wonThird || tokenThird != 0 {
 		t.Fatalf("Acquire over the taken-over lease = (won=%t token=%d), want (false, 0)", wonThird, tokenThird)
 	}
@@ -343,7 +409,7 @@ func TestLeaseFixNonceCoordWritePreservesExistingLease(t *testing.T) {
 // holder commits; afterwards exactly one wins and the other neither wins nor
 // overwrites owner/fence.
 func TestLeaseFixCoordLockSerializesConcurrentAcquire(t *testing.T) {
-	ctx := context.Background()
+	ctx := leaseFixCaseContext(t)
 	pool := leaseFixPool(t)
 	chain := leaseFixChainBase + 2
 	t.Logf("case 3 chain id %d", chain)
@@ -356,9 +422,15 @@ func TestLeaseFixCoordLockSerializesConcurrentAcquire(t *testing.T) {
 	}
 	committed := false
 	defer func() {
-		if !committed {
-			_ = tx.Rollback(ctx)
+		if committed {
+			return
 		}
+		// Cleanup must not inherit an expired case context: roll back on its
+		// own bounded deadline so a cancelled context cannot leak the
+		// transaction and its row lock.
+		rctx, rcancel := context.WithTimeout(context.Background(), leaseFixCleanupTimeout)
+		defer rcancel()
+		_ = tx.Rollback(rctx)
 	}()
 	// The repo's canonical 5-step coordination framing (the exact shape 008
 	// copies): statement guard -> ensure the coordination row ->
@@ -402,7 +474,6 @@ func TestLeaseFixCoordLockSerializesConcurrentAcquire(t *testing.T) {
 	committed = true
 
 	got := make([]acquireResult, 0, 2)
-	deadline := time.After(20 * time.Second)
 	for len(got) < 2 {
 		select {
 		case r := <-results:
@@ -410,7 +481,7 @@ func TestLeaseFixCoordLockSerializesConcurrentAcquire(t *testing.T) {
 				t.Fatalf("concurrent Acquire (%s): %v", r.owner, r.err)
 			}
 			got = append(got, r)
-		case <-deadline:
+		case <-ctx.Done():
 			t.Fatalf("timed out collecting concurrent Acquire results: have %d of 2", len(got))
 		}
 	}
@@ -418,6 +489,7 @@ func TestLeaseFixCoordLockSerializesConcurrentAcquire(t *testing.T) {
 	var winner acquireResult
 	winners := 0
 	for _, r := range got {
+		t.Logf("case3 caller %s: won=%t token=%d", r.owner, r.won, r.token)
 		switch {
 		case r.won:
 			winners++
@@ -434,6 +506,7 @@ func TestLeaseFixCoordLockSerializesConcurrentAcquire(t *testing.T) {
 	}
 
 	final := leaseFixReadRow(t, ctx, pool, chain)
+	t.Logf("case3 final row: %s (winner %s)", final, winner.owner)
 	if final.owner != winner.owner || final.token != 1 || final.expired {
 		t.Fatalf("final row = %s, want owner=%s token=1 expired=false: the loser must not overwrite owner/fence", final, winner.owner)
 	}
