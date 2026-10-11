@@ -67,7 +67,8 @@ must stay at those defaults for `run_demo.sh`.
 ```
 .evidence/portfolio-demo/<run-id>/          (0700)
   public/   0700 (files 0600)  summary.txt, resources.txt, run-metadata.txt, run-exit.txt
-                  chain/ (deposit-receipt.json, signing-receipt.json, transfer-log-query.json)
+                  chain/ (deposit-receipt.json, signing-receipt.json, transfer-log-query.json,
+                          transfer-log-query.filter.txt, final-state.txt)
                   http/  (create/admission/replay/negative HTTP bodies + statuses)
                   sql/   (whitelisted read-only query snapshots)
   private/  0700  keys/ (0600 API keys, signer credential, dev signer key)

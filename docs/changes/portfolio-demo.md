@@ -506,3 +506,29 @@ SQL 写面 = 仅 1 条 scope INSERT；危险模式扫描无实质命中；`--com
 83/83 PASS；日志 `.evidence/portfolio-demo-checks/03-fix/`。仍 **NOT RUN**：完整 demo 与真实负例。
 实现偏差：FEE_TOTAL 由 1e16 收敛为 2e15（= MAX_GAS_LIMIT×MAX_FEE_PER_GAS，与 signer 费用界一致）；
 render 端口集按真实行为固定为 {55436,58547}（profile 服务不参与渲染）。
+
+## 15. 窄修记录（RESUME-03-FINALFIX：H1–H5）
+
+在 `a3451e8` 之上追加提交（SHA 见执行报告）；未 amend。逐项：
+
+- **H1**：curl `--disable` 改为**第一参数**（`run_demo.sh` http_post；`lib.sh` 新增 `probe_http_code`
+  并替换 readiness 内联 curl；compile_token 原有两处首参已合规）；严格 mock 校验 argv[0] 并拒绝旧顺序
+  （旧序控制用例证明 mock 能抓住旧 bug）。
+- **H2**：`TXHARBOR_SIGNER_KEY_FILE` 由 `$REPO_ROOT/$KEY_SIGNER` 修正为 `$KEY_SIGNER`（KEY_SIGNER 已为
+  绝对路径，旧写法会产生双前缀）；回归在沙箱用真实 `prepare_evidence_root` + 同一 heredoc 语义生成 env，
+  断言 env 内路径等于现存 0600 的本轮 key 文件。
+- **H3**：`compile_token.sh` 新增 `validate_tools_dir <mode>`（批准根精确匹配；`--verify` 额外接受
+  单个 `runs/<合法runid>` 子路径；逐段校 symlink/类型/本 uid 归属；`build` 与 helper 目标拒 symlink；
+  缺失目录 `mkdir -m 700 -p`，不 chmod 旧目录、不删除）；回归覆盖越界路径、根 symlink、build symlink
+  哨兵不被覆盖、以及一次真实 run-scoped `--verify`（pinned solc sha256 不变）。
+- **H4**：`stop_owned` 重写为逐 PID 有界停止（`pid_alive` 区分 dead/zombie + `graceful_stop`），
+  超时**不再 wait 活进程**、不 KILL，记录 retained 并继续处理其余 PID/容器清理；回归覆盖
+  TERM-ignore 自退出子进程（秒级返回、非零、记录 retained）、正常退出 rc0、失败子进程 rc≠0。
+- **H5**：getLogs 的**过滤器与原始 JSON** 落 `public/chain/transfer-log-query.{filter.txt,json}`；
+  新增 `public/chain/final-state.txt`（真实调用的余额/nonce/totalSupply/head，非 summary 常量）；
+  A 回执绑定 DB `block_number`/`block_hash`，A/B 回执均绑定期望 tx hash；B 观测窗 before/after/stop
+  快照落 `public/sql/b-window-*.out`；秘密扫描仍在所有这些写入之后。
+
+**回归证据**：`scripts/portfolio-demo/checks/finalfix/run_checks.sh`（严格 mock curl，无 daemon/网络/
+监听）**14/14 PASS**；日志 `.evidence/portfolio-demo-checks/03-finalfix/`（独立新根；03-fix 旧日志未覆盖）。
+仍 **NOT RUN**：完整 demo、真实负例、真实 SQL/产品入口（待 RESUME-04）。

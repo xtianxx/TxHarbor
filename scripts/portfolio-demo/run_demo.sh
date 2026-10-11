@@ -95,6 +95,8 @@ REQUEST_ID=""
 SIGNING_TX_HASH=""
 DEPLOY_TX=""
 DEPOSIT_TX=""
+DEPOSIT_BLOCK_NUMBER=""
+DEPOSIT_BLOCK_HASH=""
 NATIVE_FUND_TX=""
 SIGNER_NATIVE_BALANCE=""
 CALLER_KEY=""
@@ -167,7 +169,10 @@ http_post() {
   if [[ "$body" != "-" ]]; then
     args+=(--data-binary "@$body")
   fi
-  curl "${args[@]}" --disable --noproxy '*' --connect-timeout 5 --max-time 30
+  # --disable MUST be the first argument (curl reads .curlrc before parsing any
+  # later flag), followed by the explicit direct-connection and timeout pins,
+  # then the config/output arguments.
+  curl --disable --noproxy '*' --connect-timeout 5 --max-time 30 "${args[@]}"
 }
 
 # require_services_alive -- EVERY poll calls this: a started service that died
@@ -224,13 +229,24 @@ compose_service_block() {
 # and the Transfer log carries exactly three topics -- the event signature plus
 # the zero-padded sender/recipient -- with the uint256 amount as data.
 check_transfer_receipt() {
-  local label=$1 rcpt=$2 sender=$3 recipient=$4 amount=$5
+  local label=$1 rcpt=$2 sender=$3 recipient=$4 amount=$5 want_tx=$6
+  local want_block_hash="${7:-}" want_block_number="${8:-}"
   expect_eq "$label receipt status" "0x1" "$(printf '%s\n' "$rcpt" | json_get status)"
+  expect_eq "$label receipt transactionHash == expected" "$(lower_hex "$want_tx")" \
+    "$(lower_hex "$(printf '%s\n' "$rcpt" | json_get transactionHash)")"
   expect_eq "$label receipt from == sender" "$sender" \
     "$(lower_hex "$(printf '%s\n' "$rcpt" | json_get from)")"
   expect_eq "$label receipt to == token (contract call)" "$TOKEN" \
     "$(lower_hex "$(printf '%s\n' "$rcpt" | json_get to)")"
   require_nonempty "$label receipt blockNumber" "$(printf '%s\n' "$rcpt" | json_get blockNumber)"
+  if [[ -n "$want_block_number" ]]; then
+    expect_uint_eq "$label receipt blockNumber == DB block_number" \
+      "$(printf '%s\n' "$rcpt" | json_get blockNumber)" "$want_block_number"
+  fi
+  if [[ -n "$want_block_hash" ]]; then
+    expect_eq "$label receipt blockHash == DB block_hash" "$(lower_hex "$want_block_hash")" \
+      "$(lower_hex "$(printf '%s\n' "$rcpt" | json_get blockHash)")"
+  fi
   expect_eq "$label log count" "1" "$(printf '%s\n' "$rcpt" | json_count logs)"
   expect_eq "$label log address == token" "$TOKEN" \
     "$(lower_hex "$(printf '%s\n' "$rcpt" | json_get 'logs[0].address')")"
@@ -284,38 +300,32 @@ stop_stack() {
 # exit 0 from each. A PID that ignores TERM is left running (retained) and the
 # cleanup is reported as failed -- no KILL is ever sent.
 stop_owned() {
-  local rc=0 pid st alive
+  local rc=0 pid st grace="${STOP_OWNED_GRACE_SECONDS:-10}" retained=()
   for pid in "${OWNED_PIDS[@]:-}"; do
     if [[ -z "$pid" ]]; then continue; fi
-    if kill -0 "$pid" 2>/dev/null; then
-      kill -TERM "$pid" 2>/dev/null || true
+    if pid_alive "$pid"; then
+      # Bounded per-PID stop: TERM + wait. A PID that ignores TERM is left
+      # running (retained), is never waited on again (no hang) and never killed.
+      if graceful_stop "$pid" "cleanup pid" "$grace"; then st=0; else st=$?; fi
+    elif wait "$pid" 2>/dev/null; then
+      st=0
+    else
+      st=$?
     fi
-  done
-  local deadline=$((SECONDS + 10))
-  while (( SECONDS < deadline )); do
-    alive=0
-    for pid in "${OWNED_PIDS[@]:-}"; do
-      if [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null; then alive=1; fi
-    done
-    if (( alive == 0 )); then break; fi
-    sleep 0.2
-  done
-  for pid in "${OWNED_PIDS[@]:-}"; do
-    if [[ -z "$pid" ]]; then continue; fi
-    if kill -0 "$pid" 2>/dev/null; then
-      warn "cleanup: pid $pid ignored TERM; left running (retained), not killed"
-      rc=1
-    fi
-  done
-  for pid in "${OWNED_PIDS[@]:-}"; do
-    if [[ -z "$pid" ]]; then continue; fi
-    if wait "$pid" 2>/dev/null; then st=0; else st=$?; fi
     if (( st != 0 )); then
-      warn "cleanup: pid $pid exited with status $st"
       rc=1
+      if pid_alive "$pid"; then
+        retained+=("$pid")
+        warn "cleanup: pid $pid did not exit within ${grace}s; left running (retained, not killed)"
+      else
+        warn "cleanup: pid $pid exited with status $st"
+      fi
     fi
   done
   OWNED_PIDS=()
+  if (( ${#retained[@]} > 0 )); then
+    warn "cleanup: retained running PIDs: ${retained[*]} -- left running by policy; review manually"
+  fi
   return "$rc"
 }
 
@@ -704,7 +714,7 @@ EOF
     cat "$ENV_SERVE"
     cat <<EOF
 TXHARBOR_SIGNER_MODE=development
-TXHARBOR_SIGNER_KEY_FILE='$REPO_ROOT/$KEY_SIGNER'
+TXHARBOR_SIGNER_KEY_FILE='$KEY_SIGNER'
 TXHARBOR_SIGNER_CHAINS=31337
 TXHARBOR_SIGNER_SENDERS='$SIGNER_ADDR'
 TXHARBOR_SIGNER_ASSETS='$TOKEN'
@@ -792,9 +802,7 @@ EOF
   local deadline=$((SECONDS + 60)) code
   while :; do
     require_services_alive
-    code=$(curl --silent --output /dev/null --write-out '%{http_code}' \
-      --disable --noproxy '*' --connect-timeout 5 --max-time 5 \
-      "http://127.0.0.1:$HTTP_PORT/readyz" || true)
+    code=$(probe_http_code "http://127.0.0.1:$HTTP_PORT/readyz")
     if [[ "$code" == "200" ]]; then break; fi
     if (( SECONDS >= deadline )); then
       fail "serve did not become ready within 60s; private log: $PRIVATE_DIR/logs/serve.log"
@@ -875,6 +883,10 @@ stage_a() {
     "$(psql_ro "SELECT confirm_policy_seq FROM deposit_observations WHERE tx_hash='$tx'")"
   public_sql deposit-confirmed \
     "SELECT status, block_number, confirm_tip_number, confirm_tip_hash, confirmations, confirm_threshold, confirm_policy_seq, confirmed_at FROM deposit_observations WHERE tx_hash='$tx'"
+  DEPOSIT_BLOCK_NUMBER=$(psql_ro "SELECT block_number FROM deposit_observations WHERE tx_hash='$tx'")
+  DEPOSIT_BLOCK_HASH=$(lower_hex "$(psql_ro "SELECT block_hash FROM deposit_observations WHERE tx_hash='$tx'")")
+  require_nonempty "deposit DB block_number" "$DEPOSIT_BLOCK_NUMBER"
+  require_nonempty "deposit DB block_hash" "$DEPOSIT_BLOCK_HASH"
   printf 'deposit_tx=%s\n' "$tx" > "$PRIVATE_DIR/logs/stage-a.txt"
   log "ok: deposit confirmed at depth N=$CONFIRM_DEPTH"
 }
@@ -1161,6 +1173,10 @@ SQL
   expect_eq "worker graceful exit status" "0" "$st"
   snap3=$(snapshot)
   expect_eq "snapshot after the worker stopped" "$snap1" "$snap3"
+  mkdir -m 700 -p "$PUBLIC_DIR/sql" || fail "cannot create $PUBLIC_DIR/sql"
+  printf '%s\n' "$snap1" > "$PUBLIC_DIR/sql/b-window-before.out"
+  printf '%s\n' "$snap2" > "$PUBLIC_DIR/sql/b-window-after.out"
+  printf '%s\n' "$snap3" > "$PUBLIC_DIR/sql/b-window-after-stop.out"
   attempts_now=$(psql_ro "SELECT count(*) FROM tx_attempts WHERE intent_id='$INTENT_ID'")
   log "diag: tx_attempts after the worker stopped=$attempts_now -- diagnostics only, not compared"
   {
@@ -1200,9 +1216,9 @@ verify() {
   # blockNumber, one log on the token, exactly three topics (Transfer signature
   # + zero-padded from/to), the uint256 amount as data, and a logIndex.
   check_transfer_receipt "stage A deposit receipt" "$deposit_receipt" \
-    "$DEPLOYER" "$WATCH" "$DEPOSIT"
+    "$DEPLOYER" "$WATCH" "$DEPOSIT" "$DEPOSIT_TX" "$DEPOSIT_BLOCK_HASH" "$DEPOSIT_BLOCK_NUMBER"
   check_transfer_receipt "stage B signing receipt" "$signing_receipt" \
-    "$SIGNER_ADDR" "$RECIPIENT" "$WITHDRAW"
+    "$SIGNER_ADDR" "$RECIPIENT" "$WITHDRAW" "$SIGNING_TX_HASH"
 
   # eth_getLogs uniqueness at a fixed observed head: across the whole chain
   # there is exactly one Transfer(signer -> recipient), and it is the signing tx.
@@ -1216,6 +1232,27 @@ verify() {
   logs_hash=$(lower_hex "$(printf '%s\n' "$logs_out" | json_get '[0].transactionHash')")
   expect_eq "getLogs log transactionHash == signing tx" \
     "$(lower_hex "$SIGNING_TX_HASH")" "$logs_hash"
+  # Persist the exact filter and the raw JSON so the uniqueness claim is
+  # reproducible from public evidence (the secrets scan runs after all of this).
+  {
+    printf 'from_block=0\nto_block=%s\naddress=%s\n' "$observed_head" "$TOKEN"
+    printf 'topic0=%s\ntopic1=%s\ntopic2=%s\n' "$TRANSFER_SIG" \
+      "0x000000000000000000000000${SIGNER_ADDR#0x}" \
+      "0x000000000000000000000000${RECIPIENT#0x}"
+  } > "$PUBLIC_DIR/chain/transfer-log-query.filter.txt"
+  printf '%s\n' "$logs_out" > "$PUBLIC_DIR/chain/transfer-log-query.json"
+  # Final chain snapshot: the actual call results at this point (not summary
+  # constants), so a reviewer can re-check the balances/nonce/supply directly.
+  {
+    printf 'observed_head=%s\n' "$observed_head"
+    printf 'total_supply=%s\n' "$(cast_uint "$TOKEN" "totalSupply()(uint256)")"
+    printf 'balance_watch=%s\n' "$(cast_uint "$TOKEN" "balanceOf(address)(uint256)" "$WATCH")"
+    printf 'balance_signer=%s\n' "$(cast_uint "$TOKEN" "balanceOf(address)(uint256)" "$SIGNER_ADDR")"
+    printf 'balance_recipient=%s\n' "$(cast_uint "$TOKEN" "balanceOf(address)(uint256)" "$RECIPIENT")"
+    printf 'balance_deployer=%s\n' "$(cast_uint "$TOKEN" "balanceOf(address)(uint256)" "$DEPLOYER")"
+    printf 'signer_nonce=%s\n' "$(cast_rpc nonce "$SIGNER_ADDR")"
+  } > "$PUBLIC_DIR/chain/final-state.txt"
+  log "ok: getLogs filter/raw JSON and the final chain snapshot persisted under public/chain"
 
   # Transactional outbox write (NOT event delivery): no events pipeline runs
   # here, so every outbox row must still be publish_state='pending'.

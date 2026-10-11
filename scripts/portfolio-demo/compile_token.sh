@@ -207,14 +207,84 @@ verify_artifacts() {
   log "artifact verification ok"
 }
 
+# H3: approve TOOLS_DIR before any mode acts. Only two roots are approved;
+# only --verify may additionally use one runs/<run-id> child of an approved
+# root. Every used component must be a non-symlink, uid-owned directory.
+validate_tools_dir() {
+  local mode="$1" root leaf="" run_id uid component parent
+  local LC_ALL=C
+  local roots=("/tmp/opencode/txharbor-demo-tools" "$REPO_ROOT/.evidence/portfolio-demo-tools")
+  case "$mode" in
+    fetch|compile|verify) ;;
+    *) die "internal: unknown tools-dir mode: $mode" ;;
+  esac
+  case "$TOOLS_DIR" in
+    *//*|*/) die "refusing tools dir with empty path components: $TOOLS_DIR" ;;
+    /*) ;;
+    *) die "refusing relative tools dir: $TOOLS_DIR" ;;
+  esac
+  for root in "${roots[@]}"; do
+    if [ "$TOOLS_DIR" = "$root" ]; then
+      leaf="$root"
+      break
+    fi
+    [ "$mode" = verify ] || continue
+    case "$TOOLS_DIR" in
+      "$root"/runs/*) ;;
+      *) continue ;;
+    esac
+    # Component-exact child: run-id must match ^[a-z0-9][a-z0-9-]{0,63}$.
+    run_id="${TOOLS_DIR#"$root"/runs/}"
+    case "$run_id" in
+      */*|'') die "refusing tools dir (want <root>/runs/<run-id>): $TOOLS_DIR" ;;
+    esac
+    [ "${#run_id}" -le 64 ] || die "refusing run-id longer than 64 chars: $run_id"
+    case "$run_id" in
+      -*|*[!a-z0-9-]*) die "refusing invalid run-id: $run_id" ;;
+    esac
+    leaf="$TOOLS_DIR"
+    break
+  done
+  [ -n "$leaf" ] || die "refusing unapproved tools dir for --$mode: $TOOLS_DIR"
+  uid="$(id -u)"
+  # The root's parent must exist (or be created), be a real dir owned by us.
+  parent="${root%/*}"
+  [ ! -L "$parent" ] || die "refusing symlinked tools-dir parent: $parent"
+  if [ ! -e "$parent" ]; then
+    mkdir -m 700 -p "$parent" || die "cannot create tools-dir parent: $parent"
+  fi
+  [ ! -L "$parent" ] || die "refusing symlinked tools-dir parent: $parent"
+  [ -d "$parent" ] || die "tools-dir parent is not a directory: $parent"
+  [ "$(stat -c %u "$parent")" = "$uid" ] || die "tools-dir parent not owned by uid $uid: $parent"
+  # Root and every component down to the leaf: real dir, current owner,
+  # created 0700 when missing (an existing dir is never chmodded).
+  local components=("$root")
+  [ "$leaf" = "$root" ] || components+=("$root/runs" "$leaf")
+  for component in "${components[@]}"; do
+    [ ! -L "$component" ] || die "refusing symlinked tools-dir component: $component"
+    if [ ! -e "$component" ]; then
+      mkdir -m 700 -p "$component" || die "cannot create tools dir: $component"
+    fi
+    [ ! -L "$component" ] || die "refusing symlinked tools-dir component: $component"
+    [ -d "$component" ] || die "tools-dir component is not a directory: $component"
+    [ "$(stat -c %u "$component")" = "$uid" ] || die "tools-dir component not owned by uid $uid: $component"
+  done
+  # build/ and the per-pid democtl target must never be symlinks.
+  [ ! -L "$leaf/build" ] || die "refusing symlinked build dir: $leaf/build"
+  if [ -e "$leaf/build" ]; then
+    [ -d "$leaf/build" ] || die "build path is not a directory: $leaf/build"
+  fi
+  [ ! -L "$leaf/build/helper.$$/democtl" ] || die "refusing symlinked democtl target: $leaf/build/helper.$$/democtl"
+}
+
 usage() {
   sed -n '2,18p' "$0"
 }
 
 case "${1:---compile}" in
-  --fetch) fetch_solc ;;
-  --compile) compile_fixture ;;
-  --verify) verify_artifacts ;;
+  --fetch) validate_tools_dir fetch; fetch_solc ;;
+  --compile) validate_tools_dir compile; compile_fixture ;;
+  --verify) validate_tools_dir verify; verify_artifacts ;;
   -h|--help) usage ;;
   *) die "usage: $0 [--fetch|--compile|--verify]" ;;
 esac

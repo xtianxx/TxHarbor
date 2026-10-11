@@ -296,6 +296,14 @@ stop_owned_containers() {
   return 0
 }
 
+# probe_http_code <url> -- bounded readiness probe. `--disable` is the FIRST
+# argument (curl must see it before any .curlrc could be read), then the
+# explicit direct-connection pin and timeouts; never prints a body.
+probe_http_code() {
+  curl --disable --noproxy '*' --connect-timeout 2 --max-time 5 \
+    --silent --output /dev/null --write-out '%{http_code}' "$1" || true
+}
+
 # scan_public_for_secrets <public-dir> <patterns-file> -- grep -RFq over the
 # public evidence with the exact secret values (one per line). rc 0 means a
 # secret is present -> fail (the match itself is never printed); rc 1 is the

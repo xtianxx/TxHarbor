@@ -1,0 +1,34 @@
+#!/usr/bin/env bash
+# Strict mock `curl` for the RESUME-03-FINALFIX regression suite.
+#
+# Contract (enforced, not just observed): the demo's hardened call sites MUST
+# pass `--disable` as the FIRST argument -- curl reads .curlrc before parsing
+# any later flag, so a trailing --disable is not equivalent. Every invocation
+# is recorded in $MOCK_LOG as one `argv: [arg] [arg] ...` line plus a verdict
+# line: `OK <argv>` and exit 0 with the documented HTTP status 000, or
+# `VIOLATION <argv>` and exit 2 (the old, pre-fix argument order).
+#
+# This mock never opens a socket, never reads the real curl or any .curlrc and
+# never touches the network.
+set -uo pipefail
+
+: "${MOCK_LOG:=/dev/null}"
+
+{
+  if (( $# > 0 )); then
+    printf 'argv:'
+    printf ' [%s]' "$@"
+    printf '\n'
+  else
+    printf 'argv: (none)\n'
+  fi
+} >>"$MOCK_LOG"
+
+if [[ "${1:-}" != "--disable" ]]; then
+  printf 'VIOLATION %s\n' "$*" >>"$MOCK_LOG"
+  exit 2
+fi
+
+printf 'OK %s\n' "$*" >>"$MOCK_LOG"
+printf '000\n'
+exit 0
