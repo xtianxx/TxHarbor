@@ -628,3 +628,43 @@ case 日志不含 dummy key。证据根：`.evidence/portfolio-demo-checks/walle
   `correction/<utc-pid>/key-sql-raw.txt`。证据根：
   `.evidence/portfolio-demo-checks/nonce-lease-fix/correction/<utc-pid>/`（旧 red/green/raw 日志
   **未覆盖**）。
+
+## 18. 主体身份修复（RESUME-04-PRINCIPALFIX：demo 装配错配）
+
+**根因（已实证，来自 04-refusal-forensics）**：009 submit 路径把 007 grant 读取按认证 `caller_id`
+作用域化，属主不符即 `authorization_invalid`（`contracts/api.md:19,71` 的 403 mismatch 行；
+`internal/signer/gates.go:213-236`）。本次真实 run 中 `withdrawal_authorizations.caller_id=7001`
+（active、经济字段一致、`expires_at=NULL`）而 signer 凭据认证为 `8001`，故 `signing_requests` 行
+`state=rejected / refusal_class=authorization_invalid`、audit `authorization_refused`，step 收敛
+`refused_basis`，intent 停 `executing`，worker 只做分配重放（`withdrawalworker.go:570-596` 仅对
+`claimed/reconciling/revised` 发起 step）→ 240s、0 mines。**demo 装配缺陷，非产品缺陷**。
+
+**撤回记录（如实）**：此前"prepared + 0 signings ⇒ T3 gate grant/scope 拒"的推断**撤回**——
+`internal/txlifecycle/send.go:96-109` 的真实顺序是 `signer.Submit` → `SignAndPersist` → T3 region；
+"空 `signer.log` ⇒ signer 未被调用"亦**撤回**（`internal/app/signerserve.go` 仅在告警时输出）。
+
+**取证边界（如实）**：04-refusal-forensics 的查询为 **partial**（`query_rc=3`）：仅 R1–R5 成功；
+R6 因我写错列名（`signature_results.attempt_id`）报错后 `ON_ERROR_STOP` 终止，**未补跑、不授权再查**。
+`scope`/`policy` 的后续检查**尚未进行**，因此**不得**声称"将来的所有策略类错误已被排除"。
+
+**修复（仅 demo 辅助 scope，无产品改动）**：`run_demo.sh` 中 `SIGNER_CALLER_ID="$CALLER_ID"`（同一
+**逻辑属主**，不是同一秘密、也不是复用角色表；API 密钥、issuer 密钥、signer 凭据仍是三份独立 CLI
+签发、各自 0600 文件，worker 只注入 signer 凭据，issuer 9001 保持独立）；**不**把 grant 反改到 8001
+（会破坏 007 caller）。新增两个纯函数 guard（`lib.sh`）：preflight 在任何 daemon/CLI/证据副作用之前
+`require_signer_principal` 拒绝错配；setup 在 `withdrawal-authz supply` 之后**只读**回读
+`withdrawal_authorizations.caller_id` 并以 `require_grant_principal` fail-closed（无第二条配置写）。
+
+**回归（纯 mock，无 daemon/PG/CLI 真实调用）**：`scripts/portfolio-demo/checks/principal/run_checks.sh`
+**25/25 PASS**（rc=0；20/20 是首版在闭环前的历史结果，两者不混记）——① 旧 7001/8001 拒绝且零
+CLI/docker/证据副作用；② 新 7001/7001 通过，且对**真实脚本抽取的凭据块**（BEGIN/END 标记）以 stub CLI
+断言实际 argv（issue 与 set-can-sign 均 7001、issuer 9001 分离、无 8001）；③ 三份凭据不同文件、0600、
+值互异，并**执行真实 worker 启动片段**断言注入的确为 `KEY_SIGNER_CRED` 且不含 caller/issuer 密钥；
+④ **执行真实回读片段**（matching/missing/foreign/读失败四种）fail-closed、且记录到的查询均为只读
+SELECT。**负向对照**（/tmp 副本，不动仓库）证明断言会在坏接线上失败：`SIGNER_CALLER_ID=8001` rc=1
+（7 处断言失败）、worker 凭据改为 `KEY_ISSUER` rc=1、回读 `|| true` 掩盖 rc=1。证据根
+`.evidence/portfolio-demo-checks/04-principal-fix/<utc-pid>/`（bash -n、`git diff --check`、mock 原始
+stdout/stderr/rc、negative-controls 原始日志、source hashes）。
+
+**状态**：真实重跑 **NOT RUN**（未授权）；B 成功提款/完成态重放/30s 观察窗/verify 仍 **NOT RUN**；
+原 04-postfix 失败结论与 04-* 取证证据**未改未抹**。Spec Kit：轻量 bug 修复人工记载，未调用任何命令、
+无 hook、未新增 feature。

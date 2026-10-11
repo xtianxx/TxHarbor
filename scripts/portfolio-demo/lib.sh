@@ -65,6 +65,48 @@ require_nonempty() {
   fi
 }
 
+# require_signer_principal <caller_id> <signer_caller_id> <issuer_caller_id>
+# Pure identity guard: no daemon, no CLI, no file or evidence side effect.
+# 009 scopes every 007 grant read to the authenticated caller_id
+# (contracts/api.md §2: a foreign-owned grant is a 403 authorization_invalid),
+# so the signer credential must authenticate as the same logical caller that
+# owns the withdrawal authorization, while the issuer stays a separate
+# identity. One logical owner is not one secret: the API key and the signer
+# credential remain two independently issued secrets in two 0600 files.
+require_signer_principal() {
+  local caller=$1 signer=$2 issuer=$3
+  if [[ -z "$caller" || -z "$signer" || -z "$issuer" ]]; then
+    warn "principal guard: empty caller identity (caller=[$caller] signer=[$signer] issuer=[$issuer])"
+    return 1
+  fi
+  if [[ "$signer" != "$caller" ]]; then
+    warn "principal guard: signer principal [$signer] must equal the authorization caller [$caller] (009 ownership)"
+    return 1
+  fi
+  if [[ "$issuer" == "$caller" || "$issuer" == "$signer" ]]; then
+    warn "principal guard: issuer [$issuer] must stay a separate identity from caller [$caller]"
+    return 1
+  fi
+  return 0
+}
+
+# require_grant_principal <observed_grant_caller_id> <signer_caller_id>
+# Fail-closed check of the durable grant owner read back from PostgreSQL: an
+# empty (missing row or unreadable) or differing caller id refuses the run
+# instead of letting 009 reject the signing request 240s later.
+require_grant_principal() {
+  local observed=$1 signer=$2
+  if [[ -z "$observed" ]]; then
+    warn "grant principal: no observed caller_id for the authorization (missing row or unreadable)"
+    return 1
+  fi
+  if [[ "$observed" != "$signer" ]]; then
+    warn "grant principal: observed caller_id [$observed] != signer principal [$signer] (009 would refuse authorization_invalid)"
+    return 1
+  fi
+  return 0
+}
+
 # require_file <label> <path>
 require_file() {
   if [[ ! -f "$2" ]]; then

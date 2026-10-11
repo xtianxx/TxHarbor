@@ -39,7 +39,14 @@ SIGNER_PORT=18091
 CONFIRM_DEPTH=3
 CALLER_ID=7001
 ISSUER_CALLER_ID=9001
-SIGNER_CALLER_ID=8001
+# The 009 signer credential must authenticate as the SAME logical caller that
+# owns the withdrawal authorization: the signer scopes every grant read to the
+# authenticated caller_id and refuses a foreign-owned grant as
+# authorization_invalid (403), which would otherwise surface only as an
+# executing intent with zero mines. One logical owner is not one secret: the
+# API key and the signer credential stay two separate CLI-issued secrets in two
+# separate 0600 files, and the issuer stays its own identity.
+SIGNER_CALLER_ID="$CALLER_ID"
 IDEM="portfolio-demo-1"
 AUTH_ID="auth-portfolio-1"
 INTENT_ID="intent-portfolio-1"
@@ -372,6 +379,12 @@ preflight() {
   #    evidence root is only created after the refuse-only guards below.
   #    EVIDENCE_BASE is the FIXED repo-ignored base (no caller override).
   require_safe_run_id "$RUN_ID"
+  # 0a) Principal guard: pure (no daemon, no CLI, no evidence). A signer
+  #     principal that is not the authorization caller would be refused by 009
+  #     as authorization_invalid only after the intent reached the signer, so
+  #     the mismatch is refused here instead.
+  require_signer_principal "$CALLER_ID" "$SIGNER_CALLER_ID" "$ISSUER_CALLER_ID" \
+    || fail "refused: signer principal must equal the authorization caller $CALLER_ID (009 ownership); no side effect was performed"
   EVIDENCE_BASE="$REPO_ROOT/.evidence/portfolio-demo"
   EVIDENCE_ROOT="$EVIDENCE_BASE/$RUN_ID"
   # Per-run ownership token: exported (the compose overlay labels every
@@ -736,6 +749,10 @@ EOF
   } > "$ENV_WORKER"
   chmod 600 "$ENV_WORKER"
 
+  # BEGIN demo-credentials-block
+  # Extracted verbatim by scripts/portfolio-demo/checks/principal/run_checks.sh
+  # and executed against a stub CLI: the mock regression asserts the REAL argv
+  # (--caller-id 7001 for both the API key and the signer credential).
   log "== setup: issue caller/issuer API keys (private/keys)"
   CALLER_KEY=$(cli_secret "apikey-auth issue caller $CALLER_ID" \
     "$BIN" apikey-auth issue --caller-id "$CALLER_ID" --label demo-caller \
@@ -762,6 +779,7 @@ EOF
   cli_run "signer-auth set-can-sign $SIGNER_CALLER_ID" \
     "$BIN" signer-auth set-can-sign --caller-id "$SIGNER_CALLER_ID" \
     --can-sign true --operator op --reason demo > /dev/null
+  # END demo-credentials-block
 
   log "== setup: nonce registry + upstream grant (mint/register/supply)"
   NONCE_OP=$(cli_run "nonce-admin mint" "$BIN" nonce-admin mint)
@@ -780,6 +798,15 @@ EOF
     --authorization-id "$AUTH_ID" --caller-id "$CALLER_ID" --chain-id 31337 \
     --asset "$TOKEN" --recipient "$RECIPIENT" --amount "$WITHDRAW" \
     --api-key-file "$KEY_ISSUER" --operator op --reason demo > /dev/null
+
+  # Read back the durable grant owner (read-only psql; never a second
+  # configuration write): the signer will authenticate as SIGNER_CALLER_ID and
+  # 009 refuses a grant owned by another caller as authorization_invalid.
+  GRANT_CALLER=$(psql_ro "SELECT caller_id FROM withdrawal_authorizations WHERE authorization_id='$AUTH_ID'") \
+    || fail "cannot read the grant owner from withdrawal_authorizations"
+  require_grant_principal "$GRANT_CALLER" "$SIGNER_CALLER_ID" \
+    || fail "grant principal mismatch: observed caller_id [$GRANT_CALLER], signer principal [$SIGNER_CALLER_ID]"
+  log "ok: grant owner == signer principal == $SIGNER_CALLER_ID"
 
   log "== setup: start serve + signer via start_detached (logs -> private/logs)"
   # stdout (the echoed PID) is discarded because the PID is taken from

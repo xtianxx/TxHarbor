@@ -153,6 +153,21 @@ from the earlier evidence-root step — still no containers, volumes, networks o
   (`55436`, `58547`, `18081`, `18091`): a stopped earlier stack releases them, and if anything
   still holds one, preflight refuses instead of retargeting.
 
+## Identities and credentials
+
+- One logical caller (`CALLER_ID=7001`) owns the withdrawal request and its `withdrawal_authorizations`
+  row **and** is the principal the 009 signer credential authenticates as. 009 scopes every grant read
+  to the authenticated `caller_id` and refuses a foreign-owned grant as `authorization_invalid` (403),
+  so a separate signer principal would stall stage B with the intent stuck in `executing`.
+- That is **one owner, not one secret**: the API key (`private/keys/caller.key`), the issuer key
+  (`private/keys/issuer.key`) and the signer credential (`private/keys/signer.cred`) are three
+  independently issued 0600 secrets; the worker is started with the signer credential only, and the
+  issuer stays its own identity (`ISSUER_CALLER_ID=9001`).
+- Preflight refuses a mismatched signer principal before any daemon/CLI/evidence action, and setup
+  reads the durable grant owner back (read-only `SELECT`) to refuse a foreign or missing `caller_id`
+  at setup time instead of 240s into stage B. Mock regression:
+  `checks/principal/run_checks.sh` (no daemon, no database).
+
 ## The “about 5 minutes” claim
 
 Five minutes describes the **walkthrough after preparation**: with images, tools and the fixture
