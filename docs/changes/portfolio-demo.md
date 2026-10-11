@@ -436,6 +436,9 @@ COMMIT;
 - 本方案 = **按 Spec Kit 轻量补充流程人工整理/修正**（变更说明 + 任务清单 + 验收条件），对应
   `docs/change-and-ci-policy.md`"补 CI、增加既有行为测试、调整构建工具且不改变业务契约"档；
   未新建业务阶段、未重跑 001–015、未写入 015 目录、未初始化/覆盖 `.specify` 配置。
+- 本批（NONCE-LEASE-FIX，见 §17）同为**人工轻量流程**：未调用 specify/clarify/plan/tasks/implement
+  任何命令（`specify` CLI 虽在 PATH，本步未使用，也不声称 Converged）；未新增 feature 阶段、未改
+  `.specify/feature.json`；最小规格补充 = `specs/008-nonce-manager/research.md` 新增 R14（占位行契约）。
 
 ## 13. 实现记录（RESUME-03；本地提交 SHA 见执行报告）
 
@@ -557,3 +560,37 @@ case 日志不含 dummy key。证据根：`.evidence/portfolio-demo-checks/walle
 
 **状态**：真实重试 **NOT RUN**（待 supervisor 授权新 run；本修复轮无 Docker/服务/网络调用）；
 03 系列证据复用，04 失败证据原样保留。
+
+## 17. 根因修复（RESUME-04-RETRY 定位 → NONCE-LEASE-FIX）
+
+**症状**：真实 run `run04r-20261011090209` 在 A 阶段失败——充值 tx 已上链（status `0x1`）但 120s
+内 `deposit_observations` count=0；serve 日志无 `lease acquired`，anvil 全程 `eth_getLogs`=0。
+
+**根因（实核）**：008 协调框架**首次物化**共享 `indexer_lease` 行时写入 `now() + 3600s`
+（`internal/nonce/coord.go` `lockChain` → `ensureCoordRowSQL`），该行因此成为**有效租约**最长 1 小时；
+002 的 `Lease.Acquire` CAS 只在 `expires_at < now()` 时接管，于是索引协调器只能静默 stand-by
+（`slog.Debug`，INFO 级不可见），扫描器从未启动。触发条件是常规顺序：demo 在启动 serve **之前**
+执行 `nonce-admin register`（→ `adminInTx` → `lockChain`），故不是 goroutine 竞争，而是"先 register
+即阻塞索引"。修复前实测（独立新 PG）：virgin chain 首物化行
+`owner=nonce-008 token=0 expires_at=+3600s expired=false`，随后真实 `Lease.Acquire` 返回 `won=false`。
+
+**修复（最小单点）**：首物化改为**生而过期**的占位行——`coordPlaceholderExpirySeconds = -3600`
+（由数据库 `now()` 决定，严格早于当前时刻）；SQL 形态不变（`INSERT … ON CONFLICT DO NOTHING`、
+`FOR UPDATE`、固定锁顺序均保留）；注释明确"只允许首次创建无效占位，不获取/续租/更新既有租约"。
+**不改**：`Acquire`、有效租约接管、fencing 算法、runtime TTL/heartbeat、owner 特殊豁免、serve 启动
+顺序；历史已被错误初始化的行**不自动改写**（fresh DB 修复边界清楚）。
+
+**回归（真实 PG；独立新库 `TXHARBOR_NONCE_LEASE_FIX_DSN`，不复用 testcontainers 清理）**：
+`internal/indexer/lease_placeholder_integration_test.go` 三类真实 API/SQL 用例——
+① 空 chain 真实 register 提交 → 行生而过期，真实 `Lease.Acquire` 立即 `token=1`；
+② 既有有效/过期租约经真实 008 写后 owner/token/expires_at/updated_at 逐值未变，有效租约 Acquire 拒、
+过期接管仅递增一次 fence；
+③ 真实协调事务持行锁 + 两个并发 `Acquire`（以 `pg_stat_activity` 可观察等待同步，probe deadline
+3s < `Acquire` 内部 5s 界），提交后恰一赢家且 loser 不覆盖 owner/fence。
+纯 unit 守卫 `internal/nonce/coord_placeholder_test.go` 钉住负偏移与 `ON CONFLICT DO NOTHING`。
+证据根 `.evidence/portfolio-demo-checks/nonce-lease-fix/<utc-pid>/`：`red-case1.json` rc=1（修复前）、
+`green-case1/2/3`、`green-all`、`green-all-rerun` rc=0、`green-unit`/`green-nonce-coord` rc=0、
+`build.rc`=0、`coord-before/after.sha256`、`pg-identity.txt`。
+
+**边界声明**：三类回归 PASS **不等于** demo 通过；RESUME-04 的充值失败结论与 B/N5 NOT RUN 状态保持，
+重跑需另行授权。本批未改 schema/migrations/业务契约、未新增依赖、未删除任何容器/卷/网络/DB 数据。
