@@ -208,3 +208,72 @@ func TestDispatchErrors(t *testing.T) {
 		t.Fatal("unknown command unexpectedly passed")
 	}
 }
+
+// solcSample builds minimal solc --standard-json output with the contract
+// output solc-check requires; inner is spliced in as the contract entry.
+func solcSample(inner string) string {
+	return `"contracts":{"MinimalERC20":{"MinimalERC20":{` + inner + `}}}`
+}
+
+const (
+	solcABI = `"abi":[{"type":"function","name":"transfer"}]`
+	solcEVM = `"evm":{"bytecode":{"object":"6080"},"deployedBytecode":{"object":"6080"}}`
+)
+
+func TestSolcCheckStrict(t *testing.T) {
+	ok := solcSample(solcABI + "," + solcEVM)
+	cases := []struct {
+		name    string
+		doc     string
+		args    []string
+		want    string
+		wantErr bool
+	}{
+		{"clean with warnings", `{"errors":[{"severity":"warning","message":"warn one"}],` + ok + `}`,
+			nil, "solc clean: 1 warning(s)\n", false},
+		{"clean without errors key", `{` + ok + `}`, nil, "solc clean: 0 warning(s)\n", false},
+		{"explicit contract arg",
+			`{"errors":[],"contracts":{"Token.sol":{"Token":{` + solcABI + `,` + solcEVM + `}}}}`,
+			[]string{"Token"}, "solc clean: 0 warning(s)\n", false},
+		{"severity error",
+			`{"errors":[{"severity":"warning","message":"w"},` +
+				`{"severity":"error","message":"boom happened"}],` + ok + `}`,
+			nil, "boom happened", true},
+		{"invalid json", `{"contracts":`, nil, "", true},
+		{"trailing data", `{}{}`, nil, "", true},
+		{"errors not an array", `{"errors":{},` + ok + `}`, nil, "", true},
+		{"errors element not an object", `{"errors":["boom"],` + ok + `}`, nil, "", true},
+		{"errors entry missing severity", `{"errors":[{"message":"boom"}],` + ok + `}`, nil, "", true},
+		{"unknown severity", `{"errors":[{"severity":"info","message":"hm"}],` + ok + `}`, nil, "", true},
+		{"top-level not an object", `[]`, nil, "", true},
+		{"missing contract output",
+			`{"errors":[],"contracts":{"Other.sol":{"Other":{` + solcABI + `,` + solcEVM + `}}}}`,
+			nil, "", true},
+		{"no contracts key", `{"errors":[]}`, nil, "", true},
+		{"empty bytecode",
+			`{"errors":[],` + solcSample(solcABI+`,"evm":{"bytecode":{"object":""},"deployedBytecode":{"object":"6080"}}`) + `}`,
+			nil, "", true},
+		{"abi not an array", `{"errors":[],` + solcSample(`"abi":"nope",`+solcEVM) + `}`, nil, "", true},
+		{"too many args", `{` + ok + `}`, []string{"MinimalERC20", "extra"}, "", true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			out, _, err := runCLI(t, tc.doc, append([]string{"solc-check"}, tc.args...)...)
+			if tc.wantErr {
+				if err == nil {
+					t.Fatalf("solc-check (%s) unexpectedly passed; output %q", tc.name, out)
+				}
+				if tc.want != "" && !strings.Contains(out, tc.want) {
+					t.Fatalf("solc-check (%s) output %q missing %q", tc.name, out, tc.want)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("solc-check (%s): %v", tc.name, err)
+			}
+			if out != tc.want {
+				t.Fatalf("solc-check (%s) = %q, want %q", tc.name, out, tc.want)
+			}
+		})
+	}
+}

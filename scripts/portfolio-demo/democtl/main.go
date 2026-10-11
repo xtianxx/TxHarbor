@@ -28,6 +28,10 @@ const usage = `usage:
   democtl uint256 hex <value>             print 0x + 64 hex digits (uint256)
   democtl solc-manifest <version>         read solc list.json from stdin;
                                           print path<TAB>longVersion<TAB>sha256
+  democtl solc-check [contract]           read solc --standard-json output from stdin; fail on
+                                          parse failure or severity "error"; require the
+                                          contract abi/creation/runtime output
+                                          (default contract: MinimalERC20)
 `
 
 func main() {
@@ -48,6 +52,8 @@ func run(args []string, stdin io.Reader, stdout io.Writer) error {
 		return runUint256(args[1:], stdout)
 	case "solc-manifest":
 		return runSolcManifest(args[1:], stdin, stdout)
+	case "solc-check":
+		return runSolcCheck(args[1:], stdin, stdout)
 	default:
 		return fmt.Errorf("unknown command %q\n%s", args[0], usage)
 	}
@@ -219,6 +225,130 @@ func runSolcManifest(args []string, stdin io.Reader, stdout io.Writer) error {
 		return fmt.Errorf("solc version %s: malformed sha256 %q", version, match.SHA256)
 	}
 	fmt.Fprintf(stdout, "%s\t%s\t%s\n", match.Path, match.LongVersion, match.SHA256)
+	return nil
+}
+
+// runSolcCheck validates solc --standard-json output read from stdin. A parse
+// failure is never treated as clean: the whole document must be an object and
+// errors must be an array of {severity,message} objects. Any severity "error"
+// fails and prints the messages; otherwise the expected contract output
+// (contracts.<file>.<contract> abi + creation/runtime bytecode) must be
+// present, and "solc clean: N warning(s)" is printed.
+func runSolcCheck(args []string, stdin io.Reader, stdout io.Writer) error {
+	if len(args) > 1 {
+		return errors.New(usage)
+	}
+	contract := "MinimalERC20"
+	if len(args) == 1 {
+		contract = args[0]
+	}
+	doc, err := decode(stdin)
+	if err != nil {
+		return fmt.Errorf("solc-check: %w", err)
+	}
+	obj, ok := doc.(map[string]any)
+	if !ok {
+		return errors.New("solc-check: top-level JSON value is not an object")
+	}
+	warnings := 0
+	if rawErrs, ok := obj["errors"]; ok {
+		errs, ok := rawErrs.([]any)
+		if !ok {
+			return errors.New("solc-check: errors is not an array")
+		}
+		var msgs []string
+		for i, e := range errs {
+			entry, ok := e.(map[string]any)
+			if !ok {
+				return fmt.Errorf("solc-check: errors[%d] is not an object", i)
+			}
+			sev, ok := entry["severity"].(string)
+			if !ok {
+				return fmt.Errorf("solc-check: errors[%d].severity is not a string", i)
+			}
+			msg, ok := entry["message"].(string)
+			if !ok {
+				return fmt.Errorf("solc-check: errors[%d].message is not a string", i)
+			}
+			switch sev {
+			case "error":
+				msgs = append(msgs, msg)
+			case "warning":
+				warnings++
+			default:
+				return fmt.Errorf("solc-check: errors[%d] has unknown severity %q", i, sev)
+			}
+		}
+		if len(msgs) > 0 {
+			for _, m := range msgs {
+				fmt.Fprintf(stdout, "error: %s\n", m)
+			}
+			return fmt.Errorf("solc reported %d error(s)", len(msgs))
+		}
+	}
+	if err := checkContractOutput(obj, contract); err != nil {
+		return err
+	}
+	fmt.Fprintf(stdout, "solc clean: %d warning(s)\n", warnings)
+	return nil
+}
+
+// checkContractOutput requires contracts.<file>.<contract> to exist for at
+// least one source file and to carry an abi array plus non-empty creation and
+// runtime bytecode objects; malformed contracts output fails.
+func checkContractOutput(obj map[string]any, contract string) error {
+	rawContracts, ok := obj["contracts"]
+	if !ok {
+		return errors.New("solc-check: contracts output is missing")
+	}
+	contracts, ok := rawContracts.(map[string]any)
+	if !ok {
+		return errors.New("solc-check: contracts output is not an object")
+	}
+	found := false
+	for file, rawFile := range contracts {
+		fileOut, ok := rawFile.(map[string]any)
+		if !ok {
+			return fmt.Errorf("solc-check: contracts.%s is not an object", file)
+		}
+		rawContract, ok := fileOut[contract]
+		if !ok {
+			continue
+		}
+		found = true
+		if err := checkContractEntry(file, contract, rawContract); err != nil {
+			return err
+		}
+	}
+	if !found {
+		return fmt.Errorf("solc-check: contract %q missing from contracts output", contract)
+	}
+	return nil
+}
+
+func checkContractEntry(file, contract string, raw any) error {
+	pre := fmt.Sprintf("contracts.%s.%s", file, contract)
+	entry, ok := raw.(map[string]any)
+	if !ok {
+		return fmt.Errorf("solc-check: %s is not an object", pre)
+	}
+	if _, ok := entry["abi"].([]any); !ok {
+		return fmt.Errorf("solc-check: %s.abi is not an array", pre)
+	}
+	evm, ok := entry["evm"].(map[string]any)
+	if !ok {
+		return fmt.Errorf("solc-check: %s.evm is not an object", pre)
+	}
+	for _, field := range []string{"bytecode", "deployedBytecode"} {
+		bc, ok := evm[field].(map[string]any)
+		if !ok {
+			return fmt.Errorf("solc-check: %s.evm.%s is not an object", pre, field)
+		}
+		object, ok := bc["object"].(string)
+		if !ok || object == "" {
+			return fmt.Errorf("solc-check: %s.evm.%s.object is not a non-empty string", pre, field)
+		}
+	}
 	return nil
 }
 

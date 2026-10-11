@@ -466,5 +466,43 @@ SQL 写面 = 仅 1 条 scope INSERT；危险模式扫描无实质命中；`--com
 **实现偏差（已披露）**：①`TXHARBOR_SIGNER_MAX_AMOUNT` 取 1e21（=WITHDRAW），因 1e18 会低于
 本演示提现金额而被 signer 策略拒绝（`internal/signer/policy.go`）；②token 部署先于 `migrate up`
 （serve.env 需含 TOKEN/WATCH；两者仍严格在所有权/新鲜度门之后）；③`signer.env`/`worker.env`
-复用 serve 必填键（`config.Load` 对 signer/worker 同样要求）；④`compile_token.sh` 内部
-`trap 'rm -rf "$tmp"' RETURN` 仅清理其 `mktemp -d` 临时目录，不涉及仓库/卷/容器资源。
+复用 serve 必填键（`config.Load` 对 signer/worker 同样要求）。
+
+## 14. 修复记录（RESUME-03-FIX：启动前独立验收 G1–G8）
+
+在 `4efeea8` 之上追加提交（SHA 见执行报告）；未 amend、未重写历史。逐项：
+
+- **G1**：①一次性 signer 增加 dev native ETH 资金（unlocked deployer 转账 1 ETH；断言 native
+  balance ≥ MAX_GAS_LIMIT×MAX_FEE_PER_GAS=2e15；证据入 private/logs + public summary）；
+  ②worker 凭据改由 `start_detached` 以 **export** 注入子进程（旧写法 `VAR=… exec` 不导出；
+  mock 回归证明 export=HAS_SECRET、旧模式=NOSECRET，且日志不含秘密值）。
+- **G2**：RUN_ID 限 `^[a-z0-9][a-z0-9-]{0,63}$`；evidence base 固定为 repo-ignored
+  `$REPO_ROOT/.evidence/portfolio-demo`（父目录 symlink/归属校验、缺失时安全创建、run root 原子
+  独占）；TOOLS_DIR 仅允许 `/tmp/opencode/txharbor-demo-tools` 或 repo 内固定目录（拒 symlink/
+  任意外部路径）；构建入 per-run 目录；部署前先执行 `compile_token.sh --verify`（哈希+内嵌源码+
+  固定 settings 校验）。
+- **G3**：所有 curl `--disable --noproxy '*'` + 固定 connect/max-timeout；净化全部
+  COMPOSE_*/DOCKER_*/proxy/CURL_*（DOCKER_CONFIG 拒绝）；PORTFOLIO_* 端口由脚本常量固定导出；
+  render 校验升级为逐服务（name/端口集/镜像/命令/卷名）；existing 资源按标签+实际名双查。
+- **G4**：不再 `compose stop`；仅停止 **project 标签 + `txharbor.demo.run_token` 标签**双匹配且
+  在捕获 ID 集合内的容器（overlay 注入该标签）；无法证明归属即不停止并报告保留；进程只 TERM、
+  超时不 KILL（保留并报失败）；所有 poll 检查进程存活；psql/cast/docker/curl 均有有限 timeout。
+- **G5**：秘密扫描移至全部 public 文件落盘之后（rc=0 命中→FAIL / 1 干净 / 其他→扫描错误 FAIL）；
+  不再向 stderr 输出 private 日志（只给路径）；public 导出 sql/http/chain（含 A 充值回执与 B
+  signing 回执）+ run-metadata（HEAD/dirty/脚本与 fixture 哈希）+ run-exit；A/B 均校验
+  status/from/to/block/log 地址/恰 3 topics/data/logIndex；B 另做固定观察 head 的 eth_getLogs
+  唯一性（恰 1 条且 tx hash 匹配）；attempt 计数仅诊断，不再参与观测窗恒等；观测结论限定窗口。
+- **G6**：scope INSERT 前置于同一事务的 `DO` 断言块（锁 grant+request；逐值核 caller/chain/
+  asset/recipient/amount、有效期限、request accepted、无既有 scope、audit 恰一条 supplied 且无
+  resupply/revoked）；version 使用 fresh 前置推导的字面 1（不再 max+1）；COMMIT 前恰 1 行，失败
+  RAISE + ON_ERROR_STOP 回滚；费用上限与 signer 策略界在 shell 直接断言。
+- **G7**：README 修正（标题=本地测试代币、非真实资金；输出顺序；Anvil 无状态持久化，仅保留
+  容器/PG 卷/导出链证据；固定端口；NOT RUN 声明；新增 timeout 前置）。
+- **G8**：compile_token 取消 `rm -rf` trap（临时目录保留于批准目录）；democtl 每次现构建；
+  新增 `democtl solc-check` 完整解析 errors（任何 severity=error 或解析失败均拒绝，ABI/bin 存在
+  也不放行）；`--verify` 增加固定 settings 与 compiler 字段核对；curl 同样加固。
+
+**回归证据**：`scripts/portfolio-demo/checks/run_checks.sh`（mock Docker/curl/CLI，无 daemon/RPC）
+83/83 PASS；日志 `.evidence/portfolio-demo-checks/03-fix/`。仍 **NOT RUN**：完整 demo 与真实负例。
+实现偏差：FEE_TOTAL 由 1e16 收敛为 2e15（= MAX_GAS_LIMIT×MAX_FEE_PER_GAS，与 signer 费用界一致）；
+render 端口集按真实行为固定为 {55436,58547}（profile 服务不参与渲染）。

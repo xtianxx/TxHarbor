@@ -44,12 +44,15 @@ verify_solc() {
 }
 
 democtl_bin() {
-  local bin="$TOOLS_DIR/bin/democtl"
-  if [ ! -x "$bin" ]; then
-    mkdir -p "$TOOLS_DIR/bin"
-    ( cd "$REPO_ROOT" && go build -o "$bin" ./scripts/portfolio-demo/democtl ) \
-      || die "democtl build failed"
-  fi
+  local dir="$TOOLS_DIR/build/helper.$$"
+  local bin="$dir/democtl"
+  [ ! -L "$TOOLS_DIR/build" ] || die "refusing symlinked build dir: $TOOLS_DIR/build"
+  [ ! -L "$dir" ] || die "refusing symlinked build dir: $dir"
+  [ ! -L "$bin" ] || die "refusing symlinked democtl target: $bin"
+  # Always build the current source: a pre-existing binary is never reused.
+  mkdir -p "$dir"
+  ( cd "$REPO_ROOT" && go build -o "$bin" ./scripts/portfolio-demo/democtl ) \
+    || die "democtl build failed"
   printf '%s\n' "$bin"
 }
 
@@ -58,7 +61,7 @@ fetch_solc() {
   mkdir -p "$TOOLS_DIR"
   local manifest="$TOOLS_DIR/solc-list.json"
   log "fetching $MANIFEST_URL"
-  curl -fsS --max-time 120 -o "$manifest" "$MANIFEST_URL" || die "manifest download failed"
+  curl --disable --noproxy '*' --connect-timeout 15 -fsS --max-time 120 -o "$manifest" "$MANIFEST_URL" || die "manifest download failed"
   local manifest_sha; manifest_sha="$(sha256sum "$manifest" | cut -d' ' -f1)"
   local democtl; democtl="$(democtl_bin)"
   local entry; entry="$("$democtl" solc-manifest "$SOLC_VERSION" < "$manifest")" \
@@ -70,7 +73,7 @@ fetch_solc() {
   [ "${sha#0x}" = "$SOLC_SHA256" ] || die "manifest sha256 mismatch: $sha"
   log "manifest ok (list.json sha256=$manifest_sha)"
   log "fetching $BINARY_URL"
-  curl -fsS --max-time 600 -o "$(solc_bin)" "$BINARY_URL" || die "solc binary download failed"
+  curl --disable --noproxy '*' --connect-timeout 15 -fsS --max-time 600 -o "$(solc_bin)" "$BINARY_URL" || die "solc binary download failed"
   chmod 700 "$(solc_bin)"
   verify_solc
   printf 'url=%s\nmanifest_url=%s\nmanifest_sha256=%s\nbinary_sha256=%s\nlong_version=%s\nfetched_at=%s\n' \
@@ -112,16 +115,16 @@ compile_fixture() {
   verify_solc
   local democtl; democtl="$(democtl_bin)"
   [ -f "$FIXTURES/compile-input.json" ] || die "missing compile-input.json"
-  local tmp; tmp="$(mktemp -d)"
-  trap 'rm -rf "$tmp"' RETURN
+  # The compile temp dir is kept (never deleted): the raw solc output stays
+  # inspectable under the approved tools dir.
+  mkdir -p "$TOOLS_DIR/build"
+  local tmp; tmp="$(mktemp -d "$TOOLS_DIR/build/compile.XXXXXX")"
   # solc --standard-json can exit 0 while reporting errors, so the JSON
-  # errors[].severity is the authoritative signal (never the exit code).
+  # errors[].severity is the authoritative signal (never the exit code); a
+  # parse failure in solc-check is a failure too, never a clean compile.
   "$(solc_bin)" --standard-json < "$FIXTURES/compile-input.json" > "$tmp/output.json" \
     || die "solc invocation failed"
-  if "$democtl" json get errors < "$tmp/output.json" 2>/dev/null | grep -q '"severity":"error"'; then
-    "$democtl" json get --pretty errors < "$tmp/output.json" >&2 || true
-    die "solc reported errors"
-  fi
+  "$democtl" solc-check < "$tmp/output.json" || die "solc-check failed"
   "$democtl" json get --pretty contracts.MinimalERC20.MinimalERC20.abi \
     < "$tmp/output.json" > "$tmp/abi.json" || die "abi extraction failed"
   "$democtl" json get contracts.MinimalERC20.MinimalERC20.evm.bytecode.object \
@@ -170,6 +173,31 @@ verify_artifacts() {
   if grep -Eq '"name": *"mint"' "$FIXTURES/MinimalERC20.abi.json"; then
     die "ABI unexpectedly exposes a mint function"
   fi
+  # Fixed compiler settings, checked as values (not just self-consistent
+  # hashes) directly against the compile input.
+  local expect
+  for expect in \
+    settings.evmVersion=cancun \
+    settings.optimizer.enabled=false \
+    settings.viaIR=false \
+    settings.metadata.bytecodeHash=none \
+    settings.metadata.appendCBOR=false
+  do
+    "$democtl" json require "${expect%%=*}" "${expect#*=}" < "$FIXTURES/compile-input.json" \
+      || die "compile-input.json: ${expect%%=*} is not ${expect#*=}"
+  done
+  # Fixed compiler identity and settings, pinned exactly in PROVENANCE.md.
+  for expect in \
+    "solc_version=$SOLC_LONG_VERSION" \
+    "solc_sha256=$SOLC_SHA256" \
+    settings_evm_version=cancun \
+    settings_optimizer=false \
+    settings_via_ir=false \
+    settings_metadata_bytecode_hash=none \
+    settings_metadata_append_cbor=false
+  do
+    grep -Fxq "$expect" "$FIXTURES/PROVENANCE.md" || die "PROVENANCE.md missing: $expect"
+  done
   local f
   for f in creation runtime; do
     [ -s "$FIXTURES/MinimalERC20.$f.bin" ] || die "$f.bin is empty"

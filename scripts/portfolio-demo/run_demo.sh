@@ -27,7 +27,8 @@ cd "$REPO_ROOT"
 # --- identity of this run -------------------------------------------------
 RUN_ID="${PORTFOLIO_RUN_ID:-$(date -u +%Y%m%d-%H%M%S)-$$}"
 PROJECT="txharbor-demo-$RUN_ID"
-EVIDENCE_BASE=".evidence/portfolio-demo"
+# FIXED absolute evidence base (no caller override); preflight prepares it.
+EVIDENCE_BASE="$REPO_ROOT/.evidence/portfolio-demo"
 EVIDENCE_ROOT="$EVIDENCE_BASE/$RUN_ID"
 
 # --- fixed demo port / policy constants -----------------------------------
@@ -52,7 +53,10 @@ WITHDRAW="1000000000000000000000"
 DEPLOYER_FINAL="982655000000000000000000"
 SIGNER_FINAL="4000000000000000000000"
 CONFLICT_AMOUNT="1000000000000000000001"   # WITHDRAW + 1, literal
-FEE_TOTAL="10000000000000000"
+# == MAX_GAS_LIMIT * MAX_FEE_PER_GAS (the literal product 2000000000000000):
+# the scope fee ceiling may never be looser than the signer's own policy
+# limits, so it IS that product (stage B asserts the relation in shell).
+FEE_TOTAL="2000000000000000"
 FEE_PER_GAS="10000000000"
 FEE_PRIORITY="1000000000"
 MAX_GAS_LIMIT="200000"
@@ -66,15 +70,22 @@ MAX_GAS_PRICE="10000000000"
 # meaningful, signable and >= 1000 tokens as the plan requires.
 MAX_AMOUNT="1000000000000000000000"
 
+# keccak256("Transfer(address,address,uint256)"): the fixture emits exactly
+# this event, so every receipt/log assertion compares against this literal.
+TRANSFER_SIG="0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef"
+
 # --- run state ------------------------------------------------------------
 STACK_STARTED=0
 RUN_OK=0
+RUN_TOKEN=""
+STARTED_PID=""
 OWNED_PIDS=()
 SERVE_PID=""
 SIGNER_PID=""
 WORKER_PID=""
 BIN=""
 DEMOCTL=""
+RUN_BIN=""
 TOKEN=""
 SIGNER_ADDR=""
 DEPLOYER=""
@@ -84,6 +95,8 @@ REQUEST_ID=""
 SIGNING_TX_HASH=""
 DEPLOY_TX=""
 DEPOSIT_TX=""
+NATIVE_FUND_TX=""
+SIGNER_NATIVE_BALANCE=""
 CALLER_KEY=""
 ISSUER_KEY=""
 SIGNER_CRED=""
@@ -101,11 +114,17 @@ declare -A CONTAINER_IDS=() CONTAINER_NAMES=()
 
 # --- runtime helpers ------------------------------------------------------
 # cast_rpc <subcommand> [args...] -- every chain call goes through the demo's
-# own anvil container (image-pinned cast; no host cast fallback).
+# own anvil container (image-pinned cast; no host cast fallback) and is
+# bounded by `timeout` (30s).
 cast_rpc() {
   local sub=$1
   shift
-  "${CAST[@]}" "$sub" --rpc-url "http://127.0.0.1:8545" "$@"
+  with_timeout 30 "${CAST[@]}" "$sub" --rpc-url "http://127.0.0.1:8545" "$@"
+}
+
+# cast_logs [args...] -- eth_getLogs through the same container (30s bound).
+cast_logs() {
+  with_timeout 30 "${CAST[@]}" logs --json --rpc-url "http://127.0.0.1:8545" "$@"
 }
 
 # cast_uint <token> <signature> [args...] -- decoded uint256 return; only the
@@ -113,33 +132,119 @@ cast_rpc() {
 cast_uint() {
   local target=$1 sig=$2
   shift 2
-  "${CAST[@]}" call "$target" "$sig" "$@" --rpc-url "http://127.0.0.1:8545" \
-    | awk '{print $1}'
+  with_timeout 30 "${CAST[@]}" call "$target" "$sig" "$@" \
+    --rpc-url "http://127.0.0.1:8545" | awk '{print $1}'
+}
+
+# cast_balance <address> -- native balance in wei (first token only: cast may
+# append a human hint).
+cast_balance() {
+  cast_rpc balance "$1" | awk '{print $1}'
 }
 
 # psql_ro <sql> -- one statement through the demo's own postgres container
-# (local connection inside the container; no password ever enters argv).
+# (local connection inside the container; no password ever enters argv),
+# bounded by `timeout` (20s).
 psql_ro() {
-  "${COMPOSE[@]}" exec -T postgres psql -w -U txharbor -d txharbor \
-    -v ON_ERROR_STOP=1 -qAt -c "$1"
+  with_timeout 20 "${COMPOSE[@]}" exec -T postgres psql -w -U txharbor \
+    -d txharbor -v ON_ERROR_STOP=1 -qAt -c "$1"
 }
 
 # psql_script -- multi-statement SQL on stdin through the same container.
 psql_script() {
-  "${COMPOSE[@]}" exec -T postgres psql -w -U txharbor -d txharbor \
-    -v ON_ERROR_STOP=1 -qAt
+  with_timeout 20 "${COMPOSE[@]}" exec -T postgres psql -w -U txharbor \
+    -d txharbor -v ON_ERROR_STOP=1 -qAt
 }
 
 # http_post <curl-conf> <body-file|-> <out-file> -- prints the HTTP status
 # code. The bearer lives in the 0600 curl config, never in argv; only the body
-# file path (never the body) is passed on the command line.
+# file path (never the body) is passed on the command line. `--disable` (no
+# .curlrc), `--noproxy '*'` (no proxy hook) and the fixed timeouts pin the
+# request to the demo's own loopback endpoint.
 http_post() {
   local conf=$1 body=$2 out=$3
   local -a args=(--config "$conf" --silent --show-error --output "$out" --write-out '%{http_code}')
   if [[ "$body" != "-" ]]; then
     args+=(--data-binary "@$body")
   fi
-  curl "${args[@]}"
+  curl "${args[@]}" --disable --noproxy '*' --connect-timeout 5 --max-time 30
+}
+
+# require_services_alive -- EVERY poll calls this: a started service that died
+# is reported at the point it happens, naming its private log (private logs
+# are never echoed to stderr). A zombie counts as dead.
+require_services_alive() {
+  local name pid
+  for name in serve signer worker; do
+    case "$name" in
+      serve)  pid=$SERVE_PID ;;
+      signer) pid=$SIGNER_PID ;;
+      worker) pid=$WORKER_PID ;;
+    esac
+    if [[ -n "$pid" ]] && ! pid_alive "$pid"; then
+      fail "$name (pid $pid) is no longer running; private log: $PRIVATE_DIR/logs/$name.log"
+    fi
+  done
+}
+
+# public_sql <name> <sql> -- export one read-only query to public/sql/<name>.out
+# (public evidence carries counts, statuses and hashes only).
+public_sql() {
+  mkdir -m 700 -p "$PUBLIC_DIR/sql" || fail "cannot create $PUBLIC_DIR/sql"
+  psql_ro "$2" > "$PUBLIC_DIR/sql/$1.out" || fail "public sql export $1 failed"
+}
+
+# compose_service_block <rendered-json> <service> -- the rendered object of one
+# service, from its key line up to the next sibling or the services map's
+# closing brace (indentation-agnostic: the service key's own indent defines the
+# block). Per-service checks then cannot match a sibling's value.
+compose_service_block() {
+  printf '%s\n' "$1" | awk -v svc="$2" '
+    {
+      if (inblock) {
+        match($0, /^[ ]*/)
+        if (RLENGTH <= padlen) exit
+        print
+        next
+      }
+      if ($0 ~ ("^[ ]*\"" svc "\":[ ]*[{]$")) {
+        match($0, /^[ ]*/)
+        padlen = RLENGTH
+        inblock = 1
+        print
+      }
+    }
+  '
+}
+
+# check_transfer_receipt <label> <receipt-json> <sender> <recipient> <amount>
+# The full ERC-20 transfer shape for BOTH real chain effects (stage A deposit
+# and stage B signing tx): the transaction was sent by <sender> to the token
+# CONTRACT (a transfer call's tx-level `to` is the contract, not the payee),
+# and the Transfer log carries exactly three topics -- the event signature plus
+# the zero-padded sender/recipient -- with the uint256 amount as data.
+check_transfer_receipt() {
+  local label=$1 rcpt=$2 sender=$3 recipient=$4 amount=$5
+  expect_eq "$label receipt status" "0x1" "$(printf '%s\n' "$rcpt" | json_get status)"
+  expect_eq "$label receipt from == sender" "$sender" \
+    "$(lower_hex "$(printf '%s\n' "$rcpt" | json_get from)")"
+  expect_eq "$label receipt to == token (contract call)" "$TOKEN" \
+    "$(lower_hex "$(printf '%s\n' "$rcpt" | json_get to)")"
+  require_nonempty "$label receipt blockNumber" "$(printf '%s\n' "$rcpt" | json_get blockNumber)"
+  expect_eq "$label log count" "1" "$(printf '%s\n' "$rcpt" | json_count logs)"
+  expect_eq "$label log address == token" "$TOKEN" \
+    "$(lower_hex "$(printf '%s\n' "$rcpt" | json_get 'logs[0].address')")"
+  expect_eq "$label topic count" "3" \
+    "$(printf '%s\n' "$rcpt" | json_get 'logs[0].topics' | json_count .)"
+  expect_eq "$label topic0 == Transfer signature" "$TRANSFER_SIG" \
+    "$(printf '%s\n' "$rcpt" | json_get 'logs[0].topics[0]')"
+  expect_eq "$label topic1 == transfer from" "0x000000000000000000000000${sender#0x}" \
+    "$(printf '%s\n' "$rcpt" | json_get 'logs[0].topics[1]')"
+  expect_eq "$label topic2 == transfer to" "0x000000000000000000000000${recipient#0x}" \
+    "$(printf '%s\n' "$rcpt" | json_get 'logs[0].topics[2]')"
+  expect_eq "$label data == amount" "$("$DEMOCTL" uint256 hex "$amount")" \
+    "$(printf '%s\n' "$rcpt" | json_get 'logs[0].data')"
+  require_nonempty "$label logIndex" "$(printf '%s\n' "$rcpt" | json_get 'logs[0].logIndex')"
 }
 
 # cli_secret <label> <cmd...> -- run an admin CLI command under the serve env
@@ -164,21 +269,20 @@ cli_run() {
 }
 
 # --- exit path ------------------------------------------------------------
-# stop_stack: stop this run's containers only. Never down, never -v, never rm,
-# never prune: volumes, containers and networks survive the run.
+# stop_stack: stop this run's own containers only, and only the ones this run
+# can prove it owns (project + run_token intersection). Never `compose
+# stop/down`, never -v, never rm, never prune: volumes, containers and
+# networks survive the run.
 stop_stack() {
   if [[ "$STACK_STARTED" != "1" ]]; then
     return 0
   fi
-  log "cleanup: compose stop (containers, volume and network are kept)"
-  if "${COMPOSE[@]}" stop; then
-    return 0
-  fi
-  return 1
+  stop_owned_containers
 }
 
-# stop_owned: TERM every still-tracked own PID, bounded wait, KILL escalation
-# only for own PIDs (which is itself a failure), then require exit 0 from each.
+# stop_owned: TERM every still-tracked own PID, bounded wait, then require
+# exit 0 from each. A PID that ignores TERM is left running (retained) and the
+# cleanup is reported as failed -- no KILL is ever sent.
 stop_owned() {
   local rc=0 pid st alive
   for pid in "${OWNED_PIDS[@]:-}"; do
@@ -199,8 +303,7 @@ stop_owned() {
   for pid in "${OWNED_PIDS[@]:-}"; do
     if [[ -z "$pid" ]]; then continue; fi
     if kill -0 "$pid" 2>/dev/null; then
-      warn "cleanup: pid $pid ignored TERM; escalating to KILL"
-      kill -KILL "$pid" 2>/dev/null || true
+      warn "cleanup: pid $pid ignored TERM; left running (retained), not killed"
       rc=1
     fi
   done
@@ -228,6 +331,16 @@ on_exit() {
     warn "cleanup did not complete cleanly"
     if (( rc == 0 )); then rc=1; fi
   fi
+  # public/run-exit.txt: this run's own outcome (written on every exit path
+  # once the evidence root exists; carries no secret material).
+  if [[ -n "$PUBLIC_DIR" && -d "$PUBLIC_DIR" ]]; then
+    {
+      printf 'exit_code=%s\n' "$rc"
+      printf 'cleanup_rc=%s\n' "$cleanup_rc"
+      printf 'run_id=%s project=%s\n' "$RUN_ID" "$PROJECT"
+      printf 'finished_at=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    } > "$PUBLIC_DIR/run-exit.txt"
+  fi
   if (( rc == 0 )); then
     # PASS is printed only after the whole run, cleanup included, succeeded.
     if (( ${RUN_OK:-0} == 1 )); then printf 'RESULT: PASS\n'; fi
@@ -239,16 +352,38 @@ on_exit() {
 trap on_exit EXIT
 
 # --- preflight ------------------------------------------------------------
-# Mandatory order; no run resource exists before every guard passed.
+# Mandatory order: identity check (step 0) -> refuse-only guards (RPC, docker)
+# -> sanitize -> tool dir/evidence root/run lock -> resource/port/render
+# checks. No docker daemon write, no chain call and no database call happens
+# before every guard passed; a refused RPC/docker input leaves no file side
+# effect at all (the evidence root is created only after the guards).
 preflight() {
+  # 0) Identity first: the run id must be a safe path/project segment; the
+  #    evidence root is only created after the refuse-only guards below.
+  #    EVIDENCE_BASE is the FIXED repo-ignored base (no caller override).
+  require_safe_run_id "$RUN_ID"
+  EVIDENCE_BASE="$REPO_ROOT/.evidence/portfolio-demo"
+  EVIDENCE_ROOT="$EVIDENCE_BASE/$RUN_ID"
+  # Per-run ownership token: exported (the compose overlay labels every
+  # container with it) and recorded in the public summary/resources.
+  RUN_TOKEN=$(od -An -N16 -tx1 /dev/urandom | tr -d ' \n')
+  if [[ ! "$RUN_TOKEN" =~ ^[0-9a-f]{32}$ ]]; then
+    fail "cannot generate a run token"
+  fi
+  export PORTFOLIO_RUN_TOKEN="$RUN_TOKEN"
+  command -v timeout >/dev/null 2>&1 \
+    || fail "refused: GNU coreutils 'timeout' is required on the host"
+  log "preflight: run_id=$RUN_ID project=$PROJECT evidence=$EVIDENCE_ROOT"
   # 1) No RPC override input: refuse before any connection (N3).
   if [[ -n "${TXHARBOR_RPC_URL:-}" ]]; then
     fail "refused: TXHARBOR_RPC_URL is set; the demo takes no RPC override input and made no connection"
   fi
   # 2) Docker guards: inspect only; never `docker context use`; never a write
-  #    to a caller-supplied remote daemon (N4).
+  #    to a caller-supplied remote daemon (N4). DOCKER_CONFIG is refused as
+  #    well: a caller-supplied client config could inject a plugin/credential
+  #    helper into the very CLI that drives the stack.
   local v
-  for v in DOCKER_HOST DOCKER_TLS_VERIFY DOCKER_CERT_PATH; do
+  for v in DOCKER_HOST DOCKER_TLS_VERIFY DOCKER_CERT_PATH DOCKER_CONFIG; do
     if [[ -n "${!v:-}" ]]; then
       fail "refused: $v is set; the demo runs only against a local unix-socket docker context"
     fi
@@ -256,67 +391,84 @@ preflight() {
   local ctx endpoint
   ctx="${DOCKER_CONTEXT:-}"
   if [[ -z "$ctx" ]]; then
-    ctx=$(docker context show) || fail "docker context show failed"
+    ctx=$(with_timeout 15 docker context show) || fail "docker context show failed"
   fi
-  endpoint=$(docker context inspect "$ctx" --format '{{.Endpoints.docker.Host}}') \
-    || fail "docker context inspect $ctx failed"
+  endpoint=$(with_timeout 15 docker context inspect "$ctx" \
+    --format '{{.Endpoints.docker.Host}}') || fail "docker context inspect $ctx failed"
   case "$endpoint" in
     unix://*) ;;
     *) fail "refused: docker context $ctx endpoint [$endpoint] is not a local unix socket" ;;
   esac
-  export DOCKER_CONTEXT="$ctx"
-  DOCKER=(docker --context "$DOCKER_CONTEXT")
+  # The inspected context is pinned into the argv below: step 3 unsets every
+  # caller DOCKER_*/COMPOSE_* variable, so nothing can re-point the run at
+  # another daemon, project or file set after this point.
+  DOCKER=(docker --context "$ctx")
   COMPOSE=("${DOCKER[@]}" compose -p "$PROJECT" --env-file /dev/null
            -f "$REPO_ROOT/compose.yaml"
            -f "$REPO_ROOT/scripts/portfolio-demo/compose.portfolio-demo.yaml")
   CAST=("${COMPOSE[@]}" exec -T anvil cast)
 
   # 3) Sanitize the caller environment AFTER the guards (names only are
-  #    logged). The repo `.env` is never sourced.
-  local name tx_names=""
-  for name in $(env | sed -n 's/^\(TXHARBOR_[A-Za-z0-9_]*\)=.*/\1/p' | sort); do
-    tx_names="$tx_names $name"
+  #    logged). The repo `.env` is never sourced. Everything the run derives
+  #    from the caller is removed here -- TXHARBOR_* inputs, every
+  #    COMPOSE_*/DOCKER_* override (the compose argv above already pins the
+  #    inspected context) plus every proxy/curl hook. PORTFOLIO_* is then set
+  #    by this script only.
+  local name names=""
+  for name in $(compgen -v | grep -E '^(TXHARBOR_|COMPOSE_|DOCKER_)' | sort -u); do
+    names="$names $name"
   done
-  if [[ -n "$tx_names" ]]; then
-    log "sanitize: unsetting caller vars:$tx_names"
-    for name in $tx_names; do
+  for name in http_proxy https_proxy all_proxy HTTP_PROXY HTTPS_PROXY ALL_PROXY \
+              NO_PROXY no_proxy CURL_HOME CURL_CA_BUNDLE CURL_SSL_BACKEND; do
+    if [[ -n "${!name:-}" ]]; then
+      names="$names $name"
+    fi
+  done
+  if [[ -n "$names" ]]; then
+    log "sanitize: unsetting caller vars:$names"
+    for name in $names; do
       unset "$name"
     done
   fi
-  unset COMPOSE_PROFILES COMPOSE_FILE COMPOSE_PROJECT_NAME
+  # Ports are re-exported from this script's own constants, so the overlay's
+  # PORTFOLIO_* knobs cannot be redirected away from the ports that are
+  # probed and asserted below.
+  export PORTFOLIO_PG_PORT="$PG_PORT" PORTFOLIO_ANVIL_PORT="$ANVIL_PORT"
+  log "sanitize: PORTFOLIO_PG_PORT=$PORTFOLIO_PG_PORT PORTFOLIO_ANVIL_PORT=$PORTFOLIO_ANVIL_PORT pinned"
 
-  # 4) Exclusive evidence root: refuse anything already at that path.
-  if [[ -e "$EVIDENCE_ROOT" || -L "$EVIDENCE_ROOT" ]]; then
-    fail "refused: evidence root already exists: $EVIDENCE_ROOT"
+  # 4) Tool dir + evidence root + run lock are created only now, after every
+  #    refuse-only guard above passed: a refused N3/N4 run leaves no file side
+  #    effect at all. The base is fixed and repo-ignored; the root is created
+  #    atomically (plain mkdir, refusing any existing path); the lock refuses a
+  #    concurrent run with the same id (TOCTOU guard).
+  validate_tools_dir
+  prepare_evidence_root
+  mkdir -m 700 -p "$EVIDENCE_BASE/.locks" || fail "cannot create $EVIDENCE_BASE/.locks"
+  if ! mkdir -m 700 "$EVIDENCE_BASE/.locks/$PROJECT"; then
+    fail "refused: run lock already held: $EVIDENCE_BASE/.locks/$PROJECT (another run with this id is active)"
   fi
-  mkdir -m 700 "$EVIDENCE_ROOT" || fail "cannot create evidence root $EVIDENCE_ROOT"
-  mkdir -m 700 "$EVIDENCE_ROOT/public" "$EVIDENCE_ROOT/private" \
-    "$EVIDENCE_ROOT/private/keys" "$EVIDENCE_ROOT/private/env" \
-    "$EVIDENCE_ROOT/private/curl" "$EVIDENCE_ROOT/private/logs" \
-    || fail "cannot create evidence subdirectories"
-  PUBLIC_DIR="$EVIDENCE_ROOT/public"
-  PRIVATE_DIR="$EVIDENCE_ROOT/private"
-  ENV_SERVE="$PRIVATE_DIR/env/serve.env"
-  ENV_SIGNER="$PRIVATE_DIR/env/signer.env"
-  ENV_WORKER="$PRIVATE_DIR/env/worker.env"
-  KEY_CALLER="$PRIVATE_DIR/keys/caller.key"
-  KEY_ISSUER="$PRIVATE_DIR/keys/issuer.key"
-  KEY_SIGNER="$PRIVATE_DIR/keys/signer.key"
-  KEY_SIGNER_CRED="$PRIVATE_DIR/keys/signer.cred"
 
-  # 5) Refuse pre-existing project resources (containers, network, volume).
+  # 5) Refuse pre-existing project resources: by label AND by actual name, so
+  #    a leftover collision is caught even when it carries no demo label.
   local found
-  found=$("${DOCKER[@]}" ps -aq --filter "label=com.docker.compose.project=$PROJECT")
+  found=$(with_timeout 15 "${DOCKER[@]}" ps -aq \
+    --filter "label=com.docker.compose.project=$PROJECT")
   if [[ -n "$found" ]]; then
     fail "refused: project $PROJECT already has containers: $found"
   fi
-  found=$("${DOCKER[@]}" network ls -q --filter "name=^${PROJECT}_default$")
+  found=$(with_timeout 15 "${DOCKER[@]}" ps -a --format '{{.Names}}' \
+    | grep -E "^${PROJECT}-" || true)
+  if [[ -n "$found" ]]; then
+    fail "refused: container name ${PROJECT}-* already exists: $found"
+  fi
+  found=$(with_timeout 15 "${DOCKER[@]}" network ls -q \
+    --filter "name=^${PROJECT}_default$")
   if [[ -n "$found" ]]; then
     fail "refused: network ${PROJECT}_default already exists"
   fi
-  found=$("${DOCKER[@]}" volume ls -q --filter "name=^${PROJECT}_pgdata$")
+  found=$(with_timeout 15 "${DOCKER[@]}" volume ls -q --filter "name=^${PROJECT}_")
   if [[ -n "$found" ]]; then
-    fail "refused: volume ${PROJECT}_pgdata already exists"
+    fail "refused: volume(s) named ${PROJECT}_* already exist: $found"
   fi
 
   # 6) Ports must be free (bash /dev/tcp probe only).
@@ -327,44 +479,78 @@ preflight() {
     fi
   done
 
-  # 7) Rendered config must carry this run's project name and overlay ports.
-  local rendered rendered_name
-  rendered=$("${COMPOSE[@]}" config --format json) || fail "compose config render failed"
+  # 7) The rendered config is checked per service against this run's own
+  #    project name, image pins, published host ports, anvil command and the
+  #    pgdata volume name -- a redirect here is caught before `up`.
+  local rendered rendered_name rendered_ports anvil_block pg_block want
+  rendered=$(with_timeout 30 "${COMPOSE[@]}" config --format json) \
+    || fail "compose config render failed"
   rendered_name=$(printf '%s\n' "$rendered" \
     | sed -n 's/^[[:space:]]*"name":[[:space:]]*"\([^"]*\)".*/\1/p' | head -n 1)
   expect_eq "compose project name" "$PROJECT" "$rendered_name"
-  for port in "$PG_PORT" "$ANVIL_PORT"; do
-    if ! printf '%s\n' "$rendered" \
-      | grep -Eq "\"published\"[[:space:]]*:[[:space:]]*\"?${port}\"?"; then
-      fail "compose config does not publish host port $port; overlay not applied?"
+  # The exact published host-port set: only the two baseline services are
+  # rendered (profile-gated redis/kafka are not active in this render), so the
+  # set must be exactly this run's PG/Anvil ports -- a caller redirect is
+  # caught here before `up`.
+  rendered_ports=$(printf '%s\n' "$rendered" \
+    | grep -o '"published"[[:space:]]*:[[:space:]]*"\?[0-9]\{1,5\}"\?' \
+    | grep -o '[0-9]\{1,5\}' | sort -u || true)
+  expect_eq "compose published host ports" \
+    "$(printf '%s\n' 55436 58547 | sort -u)" "$rendered_ports"
+  anvil_block=$(compose_service_block "$rendered" anvil)
+  pg_block=$(compose_service_block "$rendered" postgres)
+  if [[ -z "$anvil_block" || -z "$pg_block" ]]; then
+    fail "compose config render has no anvil/postgres service object"
+  fi
+  if ! printf '%s\n' "$pg_block" | grep -Fq '"image": "postgres:18.6-trixie"'; then
+    fail "compose config postgres image is not postgres:18.6-trixie"
+  fi
+  if ! printf '%s\n' "$anvil_block" \
+    | grep -Fq '"image": "ghcr.io/foundry-rs/foundry:v1.8.1"'; then
+    fail "compose config anvil image is not ghcr.io/foundry-rs/foundry:v1.8.1"
+  fi
+  for want in '"--chain-id"' '"31337"'; do
+    if ! printf '%s\n' "$anvil_block" | grep -Fq -- "$want"; then
+      fail "compose config anvil command does not carry $want"
     fi
   done
+  if ! printf '%s\n' "$rendered" | grep -Fq "\"${PROJECT}_pgdata\""; then
+    fail "compose config does not carry the scoped volume name ${PROJECT}_pgdata"
+  fi
   log "preflight: guards passed; no run resource created yet"
 }
 
 # --- setup ----------------------------------------------------------------
 setup() {
-  log "== setup: build demo tools into $TOOLS_DIR/bin"
-  mkdir -p "$TOOLS_DIR/bin" || fail "cannot create $TOOLS_DIR/bin"
-  BIN="$TOOLS_DIR/bin/txharbor"
-  DEMOCTL="$TOOLS_DIR/bin/democtl"
+  # Tools are built per run: $TOOLS_DIR/runs/$RUN_ID/bin. The shared
+  # $TOOLS_DIR/bin is never used or reused, so a stale binary from an earlier
+  # run can never execute, and a symlinked path is refused outright.
+  RUN_BIN="$TOOLS_DIR/runs/$RUN_ID/bin"
+  log "== setup: build demo tools into $RUN_BIN"
+  if [[ -L "$TOOLS_DIR/runs" || -L "$TOOLS_DIR/runs/$RUN_ID" || -L "$RUN_BIN" ]]; then
+    fail "refused: per-run tool path is a symlink: $RUN_BIN"
+  fi
+  mkdir -m 700 -p "$RUN_BIN" || fail "cannot create $RUN_BIN"
+  BIN="$RUN_BIN/txharbor"
+  DEMOCTL="$RUN_BIN/democtl"
   ( cd "$REPO_ROOT" && go build -o "$BIN" ./cmd/txharbor ) \
     || fail "go build ./cmd/txharbor failed"
   ( cd "$REPO_ROOT" && go build -o "$DEMOCTL" ./scripts/portfolio-demo/democtl ) \
     || fail "go build ./scripts/portfolio-demo/democtl failed"
-  require_file "token creation bytecode" \
-    "scripts/portfolio-demo/fixtures/MinimalERC20.creation.bin"
 
   log "== setup: compose up postgres + anvil (project $PROJECT)"
   STACK_STARTED=1
-  "${COMPOSE[@]}" up -d --wait --wait-timeout 180 postgres anvil \
+  with_timeout 300 "${COMPOSE[@]}" up -d --wait --wait-timeout 180 postgres anvil \
     || fail "compose up failed"
 
-  # Ownership: exactly one container per service, and it is this run's.
-  local svc id_list id n
+  # Ownership: exactly one container per service, selected by project AND by
+  # this run's token label, and the label is then read back from the container
+  # itself -- the ID is only captured once ownership is proven.
+  local svc id_list id n token
   for svc in postgres anvil; do
-    id_list=$("${DOCKER[@]}" ps -q \
+    id_list=$(with_timeout 15 "${DOCKER[@]}" ps -q \
       --filter "label=com.docker.compose.project=$PROJECT" \
+      --filter "label=txharbor.demo.run_token=$RUN_TOKEN" \
       --filter "label=com.docker.compose.service=$svc")
     local -a ids=()
     mapfile -t ids <<<"$id_list"
@@ -372,15 +558,19 @@ setup() {
     for id in "${ids[@]}"; do
       if [[ -n "$id" ]]; then n=$((n + 1)); fi
     done
-    expect_eq "$svc container count" "1" "$n"
+    expect_eq "$svc container count (project+run_token)" "1" "$n"
     CONTAINER_IDS[$svc]="${ids[0]}"
-    CONTAINER_NAMES[$svc]=$("${DOCKER[@]}" inspect --format '{{.Name}}' \
-      --type container "${ids[0]}" | sed 's|^/||')
+    token=$(with_timeout 15 "${DOCKER[@]}" inspect \
+      --format '{{index .Config.Labels "txharbor.demo.run_token"}}' \
+      --type container "${ids[0]}")
+    expect_eq "$svc container run_token label" "$RUN_TOKEN" "$token"
+    CONTAINER_NAMES[$svc]=$(with_timeout 15 "${DOCKER[@]}" inspect \
+      --format '{{.Name}}' --type container "${ids[0]}" | sed 's|^/||')
   done
   expect_eq "postgres host port" "127.0.0.1:$PG_PORT" \
-    "$("${COMPOSE[@]}" port postgres 5432)"
+    "$(with_timeout 15 "${COMPOSE[@]}" port postgres 5432)"
   expect_eq "anvil host port" "127.0.0.1:$ANVIL_PORT" \
-    "$("${COMPOSE[@]}" port anvil 8545)"
+    "$(with_timeout 15 "${COMPOSE[@]}" port anvil 8545)"
 
   # Freshness: empty demo DB, block 0, chain 31337, unlocked demo accounts.
   expect_eq "fresh DB user tables" "0" \
@@ -400,6 +590,16 @@ setup() {
   # The token is deployed before `migrate up` because serve.env carries the
   # deployed token/watch addresses and every CLI command loads the full serve
   # env (config.Load); both steps still happen only after the gates above.
+  log "== setup: verify the token fixture before deploying it"
+  # compile_token.sh --verify: fixture hashes + embedded source copy + settings.
+  # It points at THIS run's tool dir (freshly built democtl), so the run can
+  # never verify with a stale parser from the shared tools dir.
+  TXHARBOR_DEMO_TOOLS_DIR="$TOOLS_DIR/runs/$RUN_ID" \
+    bash "$SCRIPT_DIR/compile_token.sh" --verify \
+    || fail "compile_token.sh --verify failed (fixture hash, embedded source or settings)"
+  require_file "token creation bytecode" \
+    "scripts/portfolio-demo/fixtures/MinimalERC20.creation.bin"
+
   log "== setup: deploy the MinimalERC20 fixture on the fresh chain"
   local creation out
   creation=$(tr -d '[:space:]' < "scripts/portfolio-demo/fixtures/MinimalERC20.creation.bin")
@@ -452,7 +652,7 @@ EOF
 
   log "== setup: one-time signer key (cast wallet new, anvil image)"
   local key_out addr priv
-  key_out=$("${CAST[@]}" wallet new) || fail "cast wallet new failed"
+  key_out=$(with_timeout 30 "${CAST[@]}" wallet new) || fail "cast wallet new failed"
   addr=$(printf '%s\n' "$key_out" | sed -n 's/^Address:[[:space:]]*//p' | head -n 1)
   priv=$(printf '%s\n' "$key_out" | sed -n 's/^Private key:[[:space:]]*//p' | head -n 1)
   if [[ ! "$addr" =~ ^0x[0-9a-fA-F]{40}$ ]]; then
@@ -473,6 +673,29 @@ EOF
   expect_eq "fund tx status" "0x1" "$(printf '%s\n' "$fund_out" | json_get status)"
   expect_uint_eq "signer balance == FUND" "$FUND" \
     "$(cast_uint "$TOKEN" "balanceOf(address)(uint256)" "$SIGNER_ADDR")"
+
+  # The signer broadcasts its own transaction, so it needs NATIVE gas money on
+  # top of the ERC-20 funding: 1e18 wei from the unlocked deployer, and the
+  # balance must then cover one full-fee transfer, i.e. the literal product
+  # MAX_GAS_LIMIT * MAX_FEE_PER_GAS = 2000000000000000 wei. No token-balance
+  # assertion depends on this step.
+  log "== setup: fund the signer with native ETH from the deployer"
+  local native_out
+  native_out=$(cast_rpc send --unlocked --from "$DEPLOYER" "$SIGNER_ADDR" \
+    --value 1000000000000000000 --json) \
+    || fail "native ETH funding of the signer failed"
+  expect_eq "native fund tx status" "0x1" \
+    "$(printf '%s\n' "$native_out" | json_get status)"
+  NATIVE_FUND_TX=$(printf '%s\n' "$native_out" | json_get transactionHash)
+  require_nonempty "native fund tx hash" "$NATIVE_FUND_TX"
+  SIGNER_NATIVE_BALANCE=$(cast_balance "$SIGNER_ADDR")
+  expect_uint_ge "signer native balance >= MAX_GAS_LIMIT*MAX_FEE_PER_GAS" \
+    "$SIGNER_NATIVE_BALANCE" "2000000000000000"
+  {
+    printf 'signer_native_fund_tx=%s\n' "$NATIVE_FUND_TX"
+    printf 'signer_native_funded_value=%s\n' "1000000000000000000"
+    printf 'signer_native_balance_after=%s\n' "$SIGNER_NATIVE_BALANCE"
+  } >> "$PRIVATE_DIR/logs/token-deploy.txt"
 
   # signer-serve loads the SAME config.Load as serve/migrate, so its env file is
   # the serve key set plus the 009 signer policy keys (a bare TXHARBOR_SIGNER_*
@@ -550,29 +773,31 @@ EOF
     --asset "$TOKEN" --recipient "$RECIPIENT" --amount "$WITHDRAW" \
     --api-key-file "$KEY_ISSUER" --operator op --reason demo > /dev/null
 
-  log "== setup: start serve + signer (logs -> private/logs)"
-  ( set -a; . "$ENV_SERVE"; set +a; exec "$BIN" serve ) \
-    >> "$PRIVATE_DIR/logs/serve.log" 2>&1 &
-  SERVE_PID=$!
+  log "== setup: start serve + signer via start_detached (logs -> private/logs)"
+  # stdout (the echoed PID) is discarded because the PID is taken from
+  # STARTED_PID: only a PID owned by THIS shell can be `wait`ed for later.
+  start_detached "$ENV_SERVE" "$PRIVATE_DIR/logs/serve.log" -- "$BIN" serve > /dev/null \
+    || fail "cannot start serve"
+  SERVE_PID=$STARTED_PID
   OWNED_PIDS+=("$SERVE_PID")
-  ( set -a; . "$ENV_SIGNER"; set +a; exec "$BIN" signer-serve ) \
-    >> "$PRIVATE_DIR/logs/signer.log" 2>&1 &
-  SIGNER_PID=$!
+  start_detached "$ENV_SIGNER" "$PRIVATE_DIR/logs/signer.log" -- "$BIN" signer-serve > /dev/null \
+    || fail "cannot start signer-serve"
+  SIGNER_PID=$STARTED_PID
   OWNED_PIDS+=("$SIGNER_PID")
+  log "ok: serve pid=$SERVE_PID signer pid=$SIGNER_PID"
 
-  # serve readiness: /readyz answers 200.
+  # serve readiness: /readyz answers 200. Every poll also re-checks that both
+  # started services are still alive (a death is reported with its private log
+  # path -- private logs are never echoed to the terminal).
   local deadline=$((SECONDS + 60)) code
   while :; do
-    if ! kill -0 "$SERVE_PID" 2>/dev/null; then
-      tail -n 40 "$PRIVATE_DIR/logs/serve.log" >&2 || true
-      fail "serve exited during startup"
-    fi
+    require_services_alive
     code=$(curl --silent --output /dev/null --write-out '%{http_code}' \
+      --disable --noproxy '*' --connect-timeout 5 --max-time 5 \
       "http://127.0.0.1:$HTTP_PORT/readyz" || true)
     if [[ "$code" == "200" ]]; then break; fi
     if (( SECONDS >= deadline )); then
-      tail -n 40 "$PRIVATE_DIR/logs/serve.log" >&2 || true
-      fail "serve did not become ready within 60s"
+      fail "serve did not become ready within 60s; private log: $PRIVATE_DIR/logs/serve.log"
     fi
     sleep 1
   done
@@ -581,14 +806,10 @@ EOF
   # signer readiness: TCP port open (signer-serve exposes no HTTP probe).
   deadline=$((SECONDS + 60))
   while :; do
-    if ! kill -0 "$SIGNER_PID" 2>/dev/null; then
-      tail -n 40 "$PRIVATE_DIR/logs/signer.log" >&2 || true
-      fail "signer exited during startup"
-    fi
+    require_services_alive
     if ! port_free "$SIGNER_PORT"; then break; fi
     if (( SECONDS >= deadline )); then
-      tail -n 40 "$PRIVATE_DIR/logs/signer.log" >&2 || true
-      fail "signer did not open 127.0.0.1:$SIGNER_PORT within 60s"
+      fail "signer did not open 127.0.0.1:$SIGNER_PORT within 60s; private log: $PRIVATE_DIR/logs/signer.log"
     fi
     sleep 1
   done
@@ -608,6 +829,7 @@ stage_a() {
 
   deadline=$((SECONDS + 120))
   while :; do
+    require_services_alive
     n=$(psql_ro "SELECT count(*) FROM deposit_observations WHERE tx_hash='$tx' AND contract='$TOKEN' AND status='pending'")
     if [[ "$n" == "1" ]]; then break; fi
     if (( SECONDS >= deadline )); then
@@ -616,6 +838,8 @@ stage_a() {
     sleep 2
   done
   log "ok: deposit observed as pending (tx $tx)"
+  public_sql deposit-pending \
+    "SELECT status, block_number, confirm_tip_number, confirm_tip_hash, confirmations, confirm_threshold, confirm_policy_seq, confirmed_at FROM deposit_observations WHERE tx_hash='$tx'"
 
   expect_uint_eq "watch balance == DEPOSIT" "$DEPOSIT" \
     "$(cast_uint "$TOKEN" "balanceOf(address)(uint256)" "$WATCH")"
@@ -627,11 +851,14 @@ stage_a() {
   sleep 2
   expect_eq "status at depth N-1" "pending" \
     "$(psql_ro "SELECT status FROM deposit_observations WHERE tx_hash='$tx'")"
+  public_sql deposit-depth-n1 \
+    "SELECT status, block_number, confirm_tip_number, confirm_tip_hash, confirmations, confirm_threshold, confirm_policy_seq, confirmed_at FROM deposit_observations WHERE tx_hash='$tx'"
 
   # Depth N: the confirmation commit lands.
   cast_rpc rpc anvil_mine 0x1 > /dev/null
   deadline=$((SECONDS + 120))
   while :; do
+    require_services_alive
     n=$(psql_ro "SELECT count(*) FROM deposit_observations WHERE tx_hash='$tx' AND status='confirmed'")
     if [[ "$n" == "1" ]]; then break; fi
     if (( SECONDS >= deadline )); then
@@ -646,6 +873,8 @@ stage_a() {
     "$CONFIRM_DEPTH"
   expect_eq "confirm_policy_seq" "1" \
     "$(psql_ro "SELECT confirm_policy_seq FROM deposit_observations WHERE tx_hash='$tx'")"
+  public_sql deposit-confirmed \
+    "SELECT status, block_number, confirm_tip_number, confirm_tip_hash, confirmations, confirm_threshold, confirm_policy_seq, confirmed_at FROM deposit_observations WHERE tx_hash='$tx'"
   printf 'deposit_tx=%s\n' "$tx" > "$PRIVATE_DIR/logs/stage-a.txt"
   log "ok: deposit confirmed at depth N=$CONFIRM_DEPTH"
 }
@@ -658,8 +887,11 @@ stage_b() {
   local conf_nobearer="$PRIVATE_DIR/curl/admit-nobearer.conf"
   local body_create="$PRIVATE_DIR/curl/create.json"
   local body_conflict="$PRIVATE_DIR/curl/create-conflict.json"
-  local http_dir="$PRIVATE_DIR/logs"
+  # HTTP responses are public evidence (status-code evidence only; the scan at
+  # the end of verify re-checks them for secret material).
+  local http_dir="$PUBLIC_DIR/http"
   local code
+  mkdir -m 700 -p "$http_dir" || fail "cannot create $http_dir"
 
   cat > "$body_create" <<EOF
 {"idempotency_key":"$IDEM","chain_id":31337,"asset":"$TOKEN","recipient":"$RECIPIENT","amount":"$WITHDRAW","authorization_id":"$AUTH_ID"}
@@ -675,9 +907,9 @@ EOF
   chmod 600 "$body_create" "$body_conflict" "$conf_create"
 
   log "-- B1: POST /withdrawals (bearer from the 0600 curl config)"
-  code=$(http_post "$conf_create" "$body_create" "$http_dir/http-create-201.json")
+  code=$(http_post "$conf_create" "$body_create" "$http_dir/create-201.json")
   expect_eq "create HTTP status" "201" "$code"
-  REQUEST_ID=$(json_get request_id < "$http_dir/http-create-201.json")
+  REQUEST_ID=$(json_get request_id < "$http_dir/create-201.json")
   require_nonempty "request_id" "$REQUEST_ID"
   expect_eq "withdrawal_requests rows after create" "1" \
     "$(psql_ro 'SELECT count(*) FROM withdrawal_requests')"
@@ -694,13 +926,13 @@ EOF
   chmod 600 "$conf_admit" "$conf_nobearer"
 
   log "-- N5a: admission without bearer -> 401, zero intents"
-  code=$(http_post "$conf_nobearer" "-" "$http_dir/http-admit-401.json")
+  code=$(http_post "$conf_nobearer" "-" "$http_dir/admit-401.json")
   expect_eq "admission without bearer" "401" "$code"
   expect_eq "intents after 401" "0" \
     "$(psql_ro "SELECT count(*) FROM payment_intents WHERE request_id='$REQUEST_ID'")"
 
   log "-- N5c: same key, different amount -> 409, original request untouched"
-  code=$(http_post "$conf_create" "$body_conflict" "$http_dir/http-create-409.json")
+  code=$(http_post "$conf_create" "$body_conflict" "$http_dir/create-409.json")
   expect_eq "conflicting create" "409" "$code"
   expect_eq "requests(caller,key) after 409" "1" \
     "$(psql_ro "SELECT count(*) FROM withdrawal_requests WHERE caller_id=$CALLER_ID AND idempotency_key='$IDEM'")"
@@ -709,7 +941,7 @@ EOF
   cli_run "withdrawal-exec permission-set $CALLER_ID op-perm-2 (false)" \
     "$BIN" withdrawal-exec permission-set --caller-id "$CALLER_ID" \
     --can-execute=false --operation-id op-perm-2 --operator op --reason demo > /dev/null
-  code=$(http_post "$conf_admit" "-" "$http_dir/http-admit-403.json")
+  code=$(http_post "$conf_admit" "-" "$http_dir/admit-403.json")
   expect_eq "admission with can_execute=false" "403" "$code"
   expect_eq "intents after 403" "0" \
     "$(psql_ro "SELECT count(*) FROM payment_intents WHERE request_id='$REQUEST_ID'")"
@@ -717,101 +949,153 @@ EOF
     "$BIN" withdrawal-exec permission-set --caller-id "$CALLER_ID" \
     --can-execute=true --operation-id op-perm-3 --operator op --reason demo > /dev/null
 
-  # The ONLY SQL write of this run: one scope/config row, single statement in
-  # a transaction, exactly one RETURNING row (0 rows fails, no retry, no
-  # ON CONFLICT, no UPDATE). It records the authorization/fee ceilings only --
-  # request, intent, binding, signing, broadcast and chain effect below are all
-  # produced by the real production paths.
+  # The ONLY SQL write of this run. One transaction: a DO block asserts every
+  # fresh-first-supply precondition under FOR SHARE row locks on the grant and
+  # the request, then a plain INSERT with the LITERAL authorization_version 1
+  # (never max+1) writes exactly one scope row and returns it. Any RAISE --
+  # or a missing RETURNING row -- fails the run; ON_ERROR_STOP=1 aborts the
+  # whole transaction, so a refused precondition leaves no row behind.
+  log "-- B3: fee ceilings are within the signer's own policy limits"
+  # Both directions are exact: the scope caps may not exceed the signer's
+  # limits, and MAX_GAS_LIMIT * MAX_FEE_PER_GAS is the literal product.
+  expect_uint_ge "FEE_PER_GAS <= MAX_FEE_PER_GAS" "$MAX_FEE_PER_GAS" "$FEE_PER_GAS"
+  expect_uint_ge "FEE_PRIORITY <= MAX_PRIORITY_FEE_PER_GAS" \
+    "$MAX_PRIORITY_FEE_PER_GAS" "$FEE_PRIORITY"
+  expect_uint_ge "FEE_TOTAL <= MAX_GAS_LIMIT*MAX_FEE_PER_GAS" \
+    "2000000000000000" "$FEE_TOTAL"
+
   log "-- B3: one controlled scope row (withdrawal_authorization_scopes)"
   local sql_out rows extra
   sql_out=$(psql_script <<SQL
 BEGIN;
+DO \$\$
+DECLARE
+  n BIGINT;
+BEGIN
+  SELECT 1 INTO n
+    FROM withdrawal_authorizations g
+    JOIN withdrawal_requests r ON r.authorization_id = g.authorization_id
+   WHERE g.authorization_id = '$AUTH_ID'
+     AND r.request_id = '$REQUEST_ID'
+   FOR SHARE OF g, r;
+  IF n IS NULL THEN
+    RAISE EXCEPTION 'scope precondition: no locked grant+request pair for %/%', '$AUTH_ID', '$REQUEST_ID';
+  END IF;
+  SELECT count(*) INTO n FROM withdrawal_authorizations g
+   WHERE g.authorization_id = '$AUTH_ID'
+     AND g.state = 'active'
+     AND (g.expires_at IS NULL OR g.expires_at > now())
+     AND g.caller_id = $CALLER_ID
+     AND g.chain_id = 31337
+     AND g.asset = '$TOKEN'
+     AND g.recipient = '$RECIPIENT'
+     AND g.amount = $WITHDRAW;
+  IF n <> 1 THEN
+    RAISE EXCEPTION 'scope precondition: grant is not exactly one active, unexpired, matching row (n=%)', n;
+  END IF;
+  SELECT count(*) INTO n
+    FROM withdrawal_requests r
+    JOIN withdrawal_authorizations g ON g.authorization_id = r.authorization_id
+   WHERE r.request_id = '$REQUEST_ID'
+     AND r.authorization_id = '$AUTH_ID'
+     AND r.status = 'accepted'
+     AND r.caller_id = g.caller_id
+     AND r.chain_id = g.chain_id
+     AND r.asset = g.asset
+     AND r.recipient = g.recipient
+     AND r.amount = g.amount;
+  IF n <> 1 THEN
+    RAISE EXCEPTION 'scope precondition: request is not exactly one accepted row equal to its grant (n=%)', n;
+  END IF;
+  SELECT count(*) INTO n FROM withdrawal_authorization_scopes s
+   WHERE s.authorization_id = '$AUTH_ID';
+  IF n <> 0 THEN
+    RAISE EXCEPTION 'scope precondition: a scope row already exists for % (n=%)', '$AUTH_ID', n;
+  END IF;
+  SELECT count(*) INTO n FROM withdrawal_grant_audit a
+   WHERE a.authorization_id = '$AUTH_ID' AND a.action = 'supplied';
+  IF n <> 1 THEN
+    RAISE EXCEPTION 'scope precondition: expected exactly one supplied grant audit row (n=%)', n;
+  END IF;
+  SELECT count(*) INTO n FROM withdrawal_grant_audit a
+   WHERE a.authorization_id = '$AUTH_ID' AND a.action IN ('resupplied', 'revoked');
+  IF n <> 0 THEN
+    RAISE EXCEPTION 'scope precondition: grant carries a resupply/revocation audit row (n=%)', n;
+  END IF;
+END
+\$\$;
 INSERT INTO withdrawal_authorization_scopes
   (authorization_id, intent_id, request_id, sender,
    fee_max_total, fee_max_per_gas, fee_max_priority, allows_fee_replacement,
    authorization_version, attested_by)
-SELECT g.authorization_id, '$INTENT_ID', r.request_id, '$SIGNER_ADDR',
-       $FEE_TOTAL, $FEE_PER_GAS, $FEE_PRIORITY, TRUE,
-       COALESCE((SELECT max(s.authorization_version)
-                   FROM withdrawal_authorization_scopes s
-                  WHERE s.authorization_id = g.authorization_id), 0) + 1,
-       'demo-issuer'
-  FROM withdrawal_authorizations g
-  JOIN withdrawal_requests r ON r.authorization_id = g.authorization_id
- WHERE g.authorization_id = '$AUTH_ID'
-   AND g.state = 'active'
-   AND r.request_id = '$REQUEST_ID'
-   AND r.caller_id = g.caller_id
-   AND r.chain_id = g.chain_id
-   AND r.asset = g.asset
-   AND r.recipient = g.recipient
-   AND r.amount = g.amount
-   AND NOT EXISTS (SELECT 1 FROM withdrawal_authorization_scopes s2
-                    WHERE s2.authorization_id = g.authorization_id)
+VALUES ('$AUTH_ID', '$INTENT_ID', '$REQUEST_ID', '$SIGNER_ADDR',
+        $FEE_TOTAL, $FEE_PER_GAS, $FEE_PRIORITY, TRUE, 1, 'demo-issuer')
 RETURNING authorization_id;
 COMMIT;
 SQL
 ) || fail "scope insert failed"
   rows=$(printf '%s\n' "$sql_out" | grep -c -x "$AUTH_ID" || true)
   extra=$(printf '%s\n' "$sql_out" \
-    | grep -Ev -x -e '' -e 'BEGIN' -e 'COMMIT' -e 'INSERT 0 1' -e "$AUTH_ID" \
+    | grep -Ev -x -e '' -e 'BEGIN' -e 'DO' -e 'COMMIT' -e 'INSERT 0 1' -e "$AUTH_ID" \
     | grep -c . || true)
   expect_eq "scope insert RETURNING rows" "1" "$rows"
   expect_eq "scope insert unexpected output lines" "0" "$extra"
 
   log "-- B2: admission POST -> 201 intent_id == $INTENT_ID"
-  code=$(http_post "$conf_admit" "-" "$http_dir/http-admit-201.json")
+  code=$(http_post "$conf_admit" "-" "$http_dir/admit-201.json")
   expect_eq "admission HTTP status" "201" "$code"
   expect_eq "admission intent_id" "$INTENT_ID" \
-    "$(json_get intent_id < "$http_dir/http-admit-201.json")"
+    "$(json_get intent_id < "$http_dir/admit-201.json")"
   expect_eq "payment_intents rows after admission" "1" \
     "$(psql_ro 'SELECT count(*) FROM payment_intents')"
 
   log "-- B2: immediate replay of the (unfinished) admission -> 200, same intent"
-  code=$(http_post "$conf_admit" "-" "$http_dir/http-admit-200-unfinished.json")
+  code=$(http_post "$conf_admit" "-" "$http_dir/admit-200-unfinished.json")
   expect_eq "unfinished admission replay" "200" "$code"
   expect_eq "unfinished replay intent_id" "$INTENT_ID" \
-    "$(json_get intent_id < "$http_dir/http-admit-200-unfinished.json")"
+    "$(json_get intent_id < "$http_dir/admit-200-unfinished.json")"
 
-  log "-- B3: start withdrawal-worker (credential from the 0600 file, not argv)"
+  log "-- B3: start withdrawal-worker (credential exported from the 0600 file; never argv, never logs)"
   require_file "signer credential" "$KEY_SIGNER_CRED"
-  ( set -a; . "$ENV_WORKER"; set +a
-    TXHARBOR_TX_SIGNER_CREDENTIAL="$(cat "$KEY_SIGNER_CRED")"
-    exec "$BIN" withdrawal-worker ) >> "$PRIVATE_DIR/logs/worker.log" 2>&1 &
-  WORKER_PID=$!
+  start_detached "$ENV_WORKER" "$PRIVATE_DIR/logs/worker.log" \
+    TXHARBOR_TX_SIGNER_CREDENTIAL "$KEY_SIGNER_CRED" -- "$BIN" withdrawal-worker > /dev/null \
+    || fail "cannot start withdrawal-worker"
+  WORKER_PID=$STARTED_PID
   OWNED_PIDS+=("$WORKER_PID")
+  log "ok: withdrawal-worker pid=$WORKER_PID"
 
   log "-- B3: poll payment_intents.state == completed (mining only while a signing exists)"
   local deadline=$((SECONDS + 240)) state mines=0 has_signing
   while :; do
     state=$(psql_ro "SELECT state FROM payment_intents WHERE intent_id='$INTENT_ID'")
     if [[ "$state" == "completed" ]]; then break; fi
-    if ! kill -0 "$WORKER_PID" 2>/dev/null; then
-      tail -n 40 "$PRIVATE_DIR/logs/worker.log" >&2 || true
-      fail "withdrawal-worker exited before completion (state=$state)"
-    fi
+    require_services_alive
     has_signing=$(psql_ro "SELECT count(*) FROM tx_attempt_signings s JOIN tx_attempts a ON a.attempt_id = s.attempt_id WHERE a.intent_id='$INTENT_ID'")
     if [[ "$has_signing" != "0" ]] && (( mines < 60 )); then
       if cast_rpc rpc anvil_mine 0x1 > /dev/null; then mines=$((mines + 1)); fi
     fi
     if (( SECONDS >= deadline )); then
-      tail -n 40 "$PRIVATE_DIR/logs/worker.log" >&2 || true
-      fail "intent did not reach completed within 240s (state=$state, mines=$mines)"
+      fail "intent did not reach completed within 240s (state=$state, mines=$mines); private log: $PRIVATE_DIR/logs/worker.log"
     fi
     sleep 2
   done
   log "ok: payment intent completed (extra blocks mined=$mines)"
 
+  log "-- B3(b): export the B counts before the replay calls"
+  public_sql b-counts-before-replay "SELECT (SELECT count(*) FROM withdrawal_requests) AS requests, (SELECT count(*) FROM payment_intents) AS intents, (SELECT count(*) FROM nonce_bindings) AS bindings, (SELECT count(*) FROM outbox_events) AS outbox_rows"
+
   log "-- B4: create replay (same key) -> 200, same request_id"
-  code=$(http_post "$conf_create" "$body_create" "$http_dir/http-create-200-replay.json")
+  code=$(http_post "$conf_create" "$body_create" "$http_dir/create-200-replay.json")
   expect_eq "create replay HTTP status" "200" "$code"
   expect_eq "create replay request_id" "$REQUEST_ID" \
-    "$(json_get request_id < "$http_dir/http-create-200-replay.json")"
+    "$(json_get request_id < "$http_dir/create-200-replay.json")"
   log "-- B4: admission replay (completed) -> 200, same intent_id"
-  code=$(http_post "$conf_admit" "-" "$http_dir/http-admit-200-replay.json")
+  code=$(http_post "$conf_admit" "-" "$http_dir/admit-200-replay.json")
   expect_eq "completed admission replay" "200" "$code"
   expect_eq "completed replay intent_id" "$INTENT_ID" \
-    "$(json_get intent_id < "$http_dir/http-admit-200-replay.json")"
+    "$(json_get intent_id < "$http_dir/admit-200-replay.json")"
+  log "-- B4(b): export the B counts after the replay calls (unchanged)"
+  public_sql b-counts-after-replay "SELECT (SELECT count(*) FROM withdrawal_requests) AS requests, (SELECT count(*) FROM payment_intents) AS intents, (SELECT count(*) FROM nonce_bindings) AS bindings, (SELECT count(*) FROM outbox_events) AS outbox_rows"
 
   log "-- B5: unique request/intent/binding/outbox and a single chain effect"
   expect_eq "withdrawal_requests" "1" "$(psql_ro 'SELECT count(*) FROM withdrawal_requests')"
@@ -839,31 +1123,37 @@ SQL
     "$(cast_uint "$TOKEN" "balanceOf(address)(uint256)" "$RECIPIENT")"
   expect_eq "signer nonce" "1" "$(cast_rpc nonce "$SIGNER_ADDR")"
 
-  # One composite snapshot: request/intent/binding/outbox/event/attempt counts
-  # plus the two chain facts that must stay put.
+  # One composite snapshot of the durable facts that must stay put: request/
+  # intent/binding/outbox/state_changed counts plus the two chain facts.
+  # tx_attempt counts are deliberately NOT part of it -- a retry is legitimate
+  # retry diagnostics, so it must not be able to fail the stability check.
+  # The attempt counts are printed next to the snapshots instead.
   snapshot() {
-    printf '%s|%s|%s|%s|%s|%s|%s|%s\n' \
+    printf '%s|%s|%s|%s|%s|%s|%s\n' \
       "$(psql_ro 'SELECT count(*) FROM withdrawal_requests')" \
       "$(psql_ro 'SELECT count(*) FROM payment_intents')" \
       "$(psql_ro 'SELECT count(*) FROM nonce_bindings')" \
       "$(psql_ro "SELECT count(*) FROM outbox_events WHERE event_type='withdrawal.request.received'")" \
       "$(psql_ro "SELECT count(*) FROM execution_events WHERE intent_id='$INTENT_ID' AND kind='state_changed'")" \
-      "$(psql_ro "SELECT count(*) FROM tx_attempts WHERE intent_id='$INTENT_ID'")" \
       "$(cast_uint "$TOKEN" "balanceOf(address)(uint256)" "$RECIPIENT")" \
       "$(cast_rpc nonce "$SIGNER_ADDR")"
   }
-  local snap1 snap2 snap3 st
+  local snap1 snap2 snap3 st attempts_now
+  log "diag: tx_attempts for the intent=$total_attempts (nonce 0/authorization_version 1: $filtered_attempts) -- retry diagnostics, not part of the snapshot"
   snap1=$(snapshot)
   expect_eq "snapshot before the window" \
-    "1|1|1|1|$state_changed|$total_attempts|$WITHDRAW|1" "$snap1"
+    "1|1|1|1|$state_changed|$WITHDRAW|1" "$snap1"
+  public_sql b-outbox-aggregate-versions "SELECT aggregate_version, event_type FROM outbox_events WHERE aggregate_type='withdrawal_intent' AND aggregate_id='$INTENT_ID' ORDER BY aggregate_version"
 
   log "-- B6: bounded 30s observation with the worker still running"
   sleep 30
-  if ! kill -0 "$WORKER_PID" 2>/dev/null; then
-    fail "withdrawal-worker died during the observation window"
+  if ! pid_alive "$WORKER_PID"; then
+    fail "withdrawal-worker died during the observation window; private log: $PRIVATE_DIR/logs/worker.log"
   fi
   snap2=$(snapshot)
   expect_eq "snapshot after the 30s window" "$snap1" "$snap2"
+  attempts_now=$(psql_ro "SELECT count(*) FROM tx_attempts WHERE intent_id='$INTENT_ID'")
+  log "diag: tx_attempts after the 30s window=$attempts_now -- diagnostics only, not compared"
 
   log "-- B6: stop the worker gracefully and re-check the stable state"
   if graceful_stop "$WORKER_PID" "withdrawal-worker" 30; then st=0; else st=$?; fi
@@ -871,12 +1161,15 @@ SQL
   expect_eq "worker graceful exit status" "0" "$st"
   snap3=$(snapshot)
   expect_eq "snapshot after the worker stopped" "$snap1" "$snap3"
+  attempts_now=$(psql_ro "SELECT count(*) FROM tx_attempts WHERE intent_id='$INTENT_ID'")
+  log "diag: tx_attempts after the worker stopped=$attempts_now -- diagnostics only, not compared"
   {
     printf 'request_id=%s\n' "$REQUEST_ID"
     printf 'signing_tx=%s\n' "$SIGNING_TX_HASH"
     printf 'snapshot=%s\n' "$snap1"
+    printf 'tx_attempts=%s (diagnostics only)\n' "$attempts_now"
   } > "$PRIVATE_DIR/logs/stage-b.txt"
-  log "ok: stage B replay/observation window complete"
+  log "ok: stage B replay/observation window complete (the 30s window bounds what was observed, it is not a future guarantee)"
 }
 
 # --- verify ---------------------------------------------------------------
@@ -893,22 +1186,36 @@ verify() {
   expect_uint_eq "totalSupply == SUPPLY" "$SUPPLY" \
     "$(cast_uint "$TOKEN" "totalSupply()(uint256)")"
 
+  require_nonempty "deposit tx hash" "$DEPOSIT_TX"
   require_nonempty "signing tx hash" "$SIGNING_TX_HASH"
-  local receipt
-  receipt=$(cast_rpc receipt "$SIGNING_TX_HASH" --json) || fail "cast receipt failed"
-  mkdir -m 700 -p "$PUBLIC_DIR/chain"
-  printf '%s\n' "$receipt" > "$PUBLIC_DIR/chain/receipt.json"
-  expect_eq "signing receipt status" "0x1" "$(printf '%s\n' "$receipt" | json_get status)"
-  expect_eq "signing receipt log count" "1" "$(printf '%s\n' "$receipt" | json_count logs)"
-  expect_eq "transfer topic0 (Transfer event)" \
-    "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef" \
-    "$(printf '%s\n' "$receipt" | json_get 'logs[0].topics[0]')"
-  expect_eq "transfer topic1 (signer)" "0x000000000000000000000000${SIGNER_ADDR#0x}" \
-    "$(printf '%s\n' "$receipt" | json_get 'logs[0].topics[1]')"
-  expect_eq "transfer topic2 (recipient)" "0x000000000000000000000000${RECIPIENT#0x}" \
-    "$(printf '%s\n' "$receipt" | json_get 'logs[0].topics[2]')"
-  expect_eq "transfer data == WITHDRAW" "$("$DEMOCTL" uint256 hex "$WITHDRAW")" \
-    "$(printf '%s\n' "$receipt" | json_get 'logs[0].data')"
+  mkdir -m 700 -p "$PUBLIC_DIR/chain" || fail "cannot create $PUBLIC_DIR/chain"
+  local deposit_receipt signing_receipt observed_head logs_out logs_n logs_hash
+  deposit_receipt=$(cast_rpc receipt "$DEPOSIT_TX" --json) \
+    || fail "cast receipt (deposit, stage A) failed"
+  printf '%s\n' "$deposit_receipt" > "$PUBLIC_DIR/chain/deposit-receipt.json"
+  signing_receipt=$(cast_rpc receipt "$SIGNING_TX_HASH" --json) \
+    || fail "cast receipt (signing, stage B) failed"
+  printf '%s\n' "$signing_receipt" > "$PUBLIC_DIR/chain/signing-receipt.json"
+  # Both real chain effects are checked with the same shape: status, from/to,
+  # blockNumber, one log on the token, exactly three topics (Transfer signature
+  # + zero-padded from/to), the uint256 amount as data, and a logIndex.
+  check_transfer_receipt "stage A deposit receipt" "$deposit_receipt" \
+    "$DEPLOYER" "$WATCH" "$DEPOSIT"
+  check_transfer_receipt "stage B signing receipt" "$signing_receipt" \
+    "$SIGNER_ADDR" "$RECIPIENT" "$WITHDRAW"
+
+  # eth_getLogs uniqueness at a fixed observed head: across the whole chain
+  # there is exactly one Transfer(signer -> recipient), and it is the signing tx.
+  observed_head=$(cast_rpc block-number)
+  require_nonempty "observed head" "$observed_head"
+  logs_out=$(cast_logs --address "$TOKEN" --from-block 0 --to-block "$observed_head" \
+    "Transfer(address,address,uint256)" "$SIGNER_ADDR" "$RECIPIENT") \
+    || fail "cast logs (eth_getLogs) failed"
+  logs_n=$(printf '%s\n' "$logs_out" | json_count .)
+  expect_eq "getLogs Transfer(signer->recipient) count at head $observed_head" "1" "$logs_n"
+  logs_hash=$(lower_hex "$(printf '%s\n' "$logs_out" | json_get '[0].transactionHash')")
+  expect_eq "getLogs log transactionHash == signing tx" \
+    "$(lower_hex "$SIGNING_TX_HASH")" "$logs_hash"
 
   # Transactional outbox write (NOT event delivery): no events pipeline runs
   # here, so every outbox row must still be publish_state='pending'.
@@ -921,20 +1228,29 @@ verify() {
   fi
   log "ok: outbox rows=$outbox_total, all publish_state=pending (write only, no delivery)"
 
-  # Secrets scan over public/ only; the matched content is never printed.
-  log "-- verify: secrets scan over public/ (0600 pattern file, no output)"
-  printf '%s\n' "$CALLER_KEY" "$ISSUER_KEY" "$SIGNER_CRED" \
-    "$(cat "$KEY_SIGNER")" \
-    "postgres://txharbor:txharbor@127.0.0.1:$PG_PORT/txharbor?sslmode=disable" \
-    > "$PRIVATE_DIR/scan-patterns.txt"
-  chmod 600 "$PRIVATE_DIR/scan-patterns.txt"
-  if grep -RFq -f "$PRIVATE_DIR/scan-patterns.txt" "$PUBLIC_DIR"; then
-    fail "secret material found in public/ evidence"
-  fi
-  if grep -RFq 'signed_tx_bytes' "$PUBLIC_DIR"; then
-    fail "'signed_tx_bytes' marker found in public/ evidence"
-  fi
-  log "ok: public/ carries no secret value and no raw signed-material marker"
+  # Public run metadata: exactly what produced this evidence (git state, script
+  # and fixture hashes, ports, tool dir). No secrets. The secrets scan runs
+  # AFTER this file, at the very end of verify.
+  log "-- verify: public/run-metadata.txt (git + script/fixture hashes)"
+  local git_head dirty_count meta
+  git_head=$(git -C "$REPO_ROOT" rev-parse HEAD 2>/dev/null || printf 'unavailable')
+  dirty_count=$(git -C "$REPO_ROOT" status --porcelain 2>/dev/null | grep -c . || true)
+  {
+    printf 'run_id=%s project=%s\n' "$RUN_ID" "$PROJECT"
+    printf 'run_token=%s\n' "$RUN_TOKEN"
+    printf 'token=%s\n' "$TOKEN"
+    printf 'ports: pg=%s anvil=%s http=%s signer=%s\n' \
+      "$PG_PORT" "$ANVIL_PORT" "$HTTP_PORT" "$SIGNER_PORT"
+    printf 'tools_dir=%s run_bin=%s\n' "$TOOLS_DIR" "$RUN_BIN"
+    printf 'metadata_at=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    printf 'git_head=%s\ngit_dirty_files=%s\n' "$git_head" "$dirty_count"
+    for meta in "$SCRIPT_DIR/run_demo.sh" "$SCRIPT_DIR/lib.sh" \
+                "$SCRIPT_DIR/compile_token.sh" "$SCRIPT_DIR"/fixtures/*; do
+      printf 'sha256 %s = %s\n' "${meta#"$REPO_ROOT"/}" \
+        "$(sha256sum "$meta" | cut -d' ' -f1)"
+    done
+  } > "$PUBLIC_DIR/run-metadata.txt"
+  log "ok: public/run-metadata.txt written (git_head=$git_head dirty_files=$dirty_count)"
 
   local v_reqs v_intents v_bindings v_attempts v_sc v_agg
   v_reqs=$(psql_ro 'SELECT count(*) FROM withdrawal_requests')
@@ -950,11 +1266,14 @@ verify() {
 TxHarbor portfolio demo - run summary (public evidence, no secrets)
 run_id=$RUN_ID
 project=$PROJECT
+run_token=$RUN_TOKEN
 evidence_root=$EVIDENCE_ROOT
 token=$TOKEN chain_id=31337 (fresh anvil; block 0 at start of the run)
 deploy_tx=$DEPLOY_TX
 deposit_tx=$DEPOSIT_TX
 signing_tx=$SIGNING_TX_HASH
+signer_native: fund_tx=$NATIVE_FUND_TX funded=1000000000000000000 wei balance_after=$SIGNER_NATIVE_BALANCE wei
+               (>= 2000000000000000 wei = MAX_GAS_LIMIT * MAX_FEE_PER_GAS, so the signer pays its own gas)
 request_id=$REQUEST_ID intent_id=$INTENT_ID authorization_id=$AUTH_ID
 amounts: supply=$SUPPLY deposit=$DEPOSIT fund=$FUND withdraw=$WITHDRAW
 stage A: deposit observed pending -> depth N-1 still pending -> depth N=$CONFIRM_DEPTH confirmed
@@ -964,8 +1283,11 @@ stage B: create 201 -> admission 201 (intent_id=$INTENT_ID) -> real signer/worke
 negative: admission without bearer 401 (0 intents); same key + different amount 409 (1 request row);
           can_execute=false -> 403 (0 intents), then restored to true via the admin CLI
 execution: final state=completed; requests=$v_reqs intents=$v_intents nonce_bindings=$v_bindings
-           tx_attempts=$v_attempts for the intent (>= 1 with nonce 0, authorization_version 1)
+           tx_attempts=$v_attempts for the intent (retry diagnostics only, excluded from the
+           stability snapshot) (>= 1 with nonce 0, authorization_version 1)
            execution state_changed events=$v_sc == max outbox aggregate_version=$v_agg (>= 3)
+observation: the 30s stage-B window is WINDOW-LIMITED: it bounds what was observed while the
+             worker ran and after it was stopped. It is not a guarantee about future behaviour.
 outbox: all rows publish_state=pending -- this is the transactional outbox WRITE, not event delivery
 chain: watch=$WATCH ($DEPOSIT) signer=$SIGNER_ADDR ($SIGNER_FINAL) recipient=$RECIPIENT ($WITHDRAW)
        deployer=$DEPLOYER ($DEPLOYER_FINAL) totalSupply=$SUPPLY
@@ -976,15 +1298,38 @@ EOF
 TxHarbor portfolio demo - run resources (kept; nothing was deleted)
 run_id=$RUN_ID
 project=$PROJECT
+run_token=$RUN_TOKEN
 container postgres: name=${CONTAINER_NAMES[postgres]} id=${CONTAINER_IDS[postgres]}
 container anvil: name=${CONTAINER_NAMES[anvil]} id=${CONTAINER_IDS[anvil]}
 volume=${PROJECT}_pgdata
 network=${PROJECT}_default
 evidence_root=$EVIDENCE_ROOT
 statement: no volumes, containers or networks were deleted by this run; cleanup requires a
-separate explicit authorization (the script only ran \`compose stop\` for this run's project).
+separate explicit authorization (the script only stopped the containers it could prove it
+owns: compose project AND the run_token label above; never \`compose down\`, -v, rm or prune).
 EOF
   log "ok: public/summary.txt and public/resources.txt written"
+
+  # The secrets scan runs LAST, after every public file is on disk: the pattern
+  # file holds the exact secret values of this run (caller/issuer API keys, the
+  # signer credential, the signer private key, the full DSN) and the match is
+  # never printed. public/sql, public/http, public/chain, run-metadata.txt and
+  # both summaries are therefore all covered.
+  log "-- verify: secrets scan over public/ (0600 pattern file, no output)"
+  printf '%s\n' "$CALLER_KEY" "$ISSUER_KEY" "$SIGNER_CRED" \
+    "$(cat "$KEY_SIGNER")" \
+    "postgres://txharbor:txharbor@127.0.0.1:$PG_PORT/txharbor?sslmode=disable" \
+    > "$PRIVATE_DIR/scan-patterns.txt"
+  chmod 600 "$PRIVATE_DIR/scan-patterns.txt"
+  scan_public_for_secrets "$PUBLIC_DIR" "$PRIVATE_DIR/scan-patterns.txt"
+  local marker_rc=0
+  grep -RFq 'signed_tx_bytes' "$PUBLIC_DIR" || marker_rc=$?
+  case "$marker_rc" in
+    0) fail "'signed_tx_bytes' marker found in public/ evidence" ;;
+    1) log "ok: no 'signed_tx_bytes' marker in public/ evidence" ;;
+    *) fail "signed_tx_bytes scan failed (grep rc=$marker_rc)" ;;
+  esac
+  log "ok: public/ carries no secret value and no raw signed-material marker"
 }
 
 # --- entry points ---------------------------------------------------------
@@ -999,16 +1344,22 @@ Modes:
   --help            this text.
 
 Environment inputs (optional):
-  PORTFOLIO_RUN_ID          run id / compose project suffix (default UTC ts + pid)
-  TXHARBOR_DEMO_TOOLS_DIR   tool build dir (default /tmp/opencode/txharbor-demo-tools)
+  PORTFOLIO_RUN_ID          run id / compose project suffix (default UTC ts + pid);
+                            must match ^[a-z0-9][a-z0-9-]{0,63}$
+  TXHARBOR_DEMO_TOOLS_DIR   tool build dir; only /tmp/opencode/txharbor-demo-tools
+                            or <repo>/.evidence/portfolio-demo-tools are accepted
+                            (tools are always built per run, never reused)
 
 The host ports are fixed by run_demo.sh (postgres 55436, anvil 58547, HTTP 18081,
-signer 18091); the compose overlay's PORTFOLIO_PG_PORT/PORTFOLIO_ANVIL_PORT knobs
-must stay at those defaults for run_demo.sh runs.
+signer 18091); PORTFOLIO_PG_PORT/PORTFOLIO_ANVIL_PORT are re-exported from those
+constants, so the overlay cannot be redirected away from them.
 
-The demo refuses TXHARBOR_RPC_URL, DOCKER_HOST/DOCKER_TLS_VERIFY/DOCKER_CERT_PATH
-and non-unix docker contexts; it never sources the repo `.env`; it only ever
-stops its own containers (`compose stop`) and never down/-v/rm/prune.
+The demo refuses TXHARBOR_RPC_URL, DOCKER_HOST/DOCKER_TLS_VERIFY/DOCKER_CERT_PATH/
+DOCKER_CONFIG and non-unix docker contexts, then unsets every COMPOSE_*/DOCKER_*/
+TXHARBOR_* variable plus the proxy/CURL_* hooks before it renders the config. It
+never sources the repo `.env`; it stops only containers it can prove it owns
+(compose project AND the run's txharbor.demo.run_token label) and never runs
+`compose down`, -v, rm or prune.
 EOF
 }
 

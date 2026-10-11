@@ -3,8 +3,11 @@
 #
 # Sourced by run_demo.sh. Defines functions only -- no top-level side effects,
 # no external dependencies beyond the demo toolset (democtl, docker, curl,
-# psql/cast inside the demo containers). Amounts are never compared with bash
-# arithmetic: everything uint256 goes through `democtl uint256`.
+# psql/cast inside the demo containers) plus the host prerequisites `timeout`
+# (bounds every psql/cast/docker call; checked in preflight) and `stat`/`id`
+# plus /proc (evidence-root ownership and liveness checks). Amounts are never
+# compared with bash arithmetic: everything uint256 goes through `democtl
+# uint256`.
 set -euo pipefail
 
 log()  { printf '%s\n' "$*"; }
@@ -69,6 +72,88 @@ require_file() {
   fi
 }
 
+# require_safe_run_id <id> -- the run id becomes a compose project suffix, an
+# evidence directory name and part of every container name, so it must be one
+# safe path segment: lowercase alnum + dash, starting alnum, <= 64 chars (no
+# slash, dot, uppercase, leading dash or newline).
+require_safe_run_id() {
+  if [[ ! "$1" =~ ^[a-z0-9][a-z0-9-]{0,63}$ ]]; then
+    fail "refused: unsafe run id [$1] (allowed: lowercase a-z/0-9/dash, 1-64 chars, starting alnum)"
+  fi
+  log "ok: run id [$1] is a safe project/path segment"
+}
+
+# validate_tools_dir -- TOOLS_DIR is caller-influenced, so only two absolute
+# paths are accepted: the shared /tmp/opencode tools dir or the in-repo
+# evidence tools dir. Refuses symlinks on the directory and on its parent (a
+# symlinked /tmp/opencode resp. .evidence would let a build land anywhere) and
+# creates the approved directory (0700) when missing.
+validate_tools_dir() {
+  local tools=$TOOLS_DIR parent="$REPO_ROOT/.evidence"
+  case "$tools" in
+    /tmp/opencode/txharbor-demo-tools) ;;
+    "$REPO_ROOT/.evidence/portfolio-demo-tools") ;;
+    *) fail "refused: tool dir must be /tmp/opencode/txharbor-demo-tools or $REPO_ROOT/.evidence/portfolio-demo-tools, got [$tools]" ;;
+  esac
+  case "$tools" in
+    /tmp/*) parent=/tmp/opencode ;;
+  esac
+  if [[ -L "$tools" || -L "$parent" ]]; then
+    fail "refused: tool dir path is a symlink: $tools"
+  fi
+  if [[ -e "$tools" && ! -d "$tools" ]]; then
+    fail "refused: tool dir $tools exists and is not a directory"
+  fi
+  if [[ ! -d "$tools" ]]; then
+    mkdir -m 700 -p "$tools" || fail "cannot create tool dir $tools"
+  fi
+  log "ok: tool dir $tools (parent $parent)"
+}
+
+# prepare_evidence_root -- EVIDENCE_BASE is FIXED (no caller override):
+# $REPO_ROOT/.evidence/portfolio-demo. Refuses a symlinked or foreign-owned
+# base (when it exists), creates the base only when missing (it is
+# repo-ignored), then creates THIS run's root atomically -- a plain mkdir that
+# must fail if the root already exists (no -p, no reuse) -- and lays out
+# public/ + private/{keys,env,curl,logs}. Sets PUBLIC_DIR/PRIVATE_DIR/ENV_* and
+# the KEY_* paths for the caller.
+prepare_evidence_root() {
+  local base="$REPO_ROOT/.evidence/portfolio-demo" parent="$REPO_ROOT/.evidence" sub
+  EVIDENCE_BASE="$base"
+  EVIDENCE_ROOT="$base/$RUN_ID"
+  for sub in "$parent" "$base"; do
+    if [[ -L "$sub" ]]; then
+      fail "refused: $sub is a symlink"
+    fi
+    if [[ -e "$sub" ]]; then
+      if [[ ! -d "$sub" ]]; then
+        fail "refused: $sub exists and is not a directory"
+      fi
+      if [[ "$(stat -c %u "$sub")" != "$(id -u)" ]]; then
+        fail "refused: $sub is not owned by uid $(id -u)"
+      fi
+    else
+      mkdir -m 700 -p "$sub" || fail "cannot create $sub"
+    fi
+  done
+  if [[ -L "$EVIDENCE_ROOT" || -e "$EVIDENCE_ROOT" ]]; then
+    fail "refused: evidence root already exists: $EVIDENCE_ROOT"
+  fi
+  mkdir -m 700 "$EVIDENCE_ROOT" || fail "cannot create evidence root $EVIDENCE_ROOT"
+  for sub in public private private/keys private/env private/curl private/logs; do
+    mkdir -m 700 "$EVIDENCE_ROOT/$sub" || fail "cannot create $EVIDENCE_ROOT/$sub"
+  done
+  PUBLIC_DIR="$EVIDENCE_ROOT/public"
+  PRIVATE_DIR="$EVIDENCE_ROOT/private"
+  ENV_SERVE="$PRIVATE_DIR/env/serve.env"
+  ENV_SIGNER="$PRIVATE_DIR/env/signer.env"
+  ENV_WORKER="$PRIVATE_DIR/env/worker.env"
+  KEY_CALLER="$PRIVATE_DIR/keys/caller.key"
+  KEY_ISSUER="$PRIVATE_DIR/keys/issuer.key"
+  KEY_SIGNER="$PRIVATE_DIR/keys/signer.key"
+  KEY_SIGNER_CRED="$PRIVATE_DIR/keys/signer.cred"
+}
+
 # port_free <port> -- 0 when nothing accepts a TCP connect on 127.0.0.1:port.
 # Pure bash /dev/tcp probe; never talks to docker.
 port_free() {
@@ -76,6 +161,70 @@ port_free() {
     return 1
   fi
   return 0
+}
+
+# pid_alive <pid> -- 0 while the process still runs. A zombie has already
+# exited (it only waits for its parent to reap it), so it must never count as
+# running: the state letter in /proc/<pid>/stat is the authoritative check.
+pid_alive() {
+  local pid=$1 stat
+  kill -0 "$pid" 2>/dev/null || return 1
+  stat=$(cat /proc/"$pid"/stat 2>/dev/null) || return 1
+  stat=${stat##*\) }   # strip "pid (comm) ": comm may contain spaces/parens
+  [[ "${stat%% *}" != "Z" ]]
+}
+
+# with_timeout <secs> <cmd...> -- run cmd under the host `timeout` binary
+# (declared prerequisite, checked in preflight): every psql/cast/docker call
+# is bounded so a hung daemon or socket cannot hang the run. A timeout fails
+# the run with the command name (124, or 137 when TERM had to be escalated by
+# `timeout` itself); any other status is passed through unchanged.
+with_timeout() {
+  local secs=$1 rc=0
+  shift
+  timeout --kill-after=5 "$secs" "$@" || rc=$?
+  if (( rc == 124 || rc == 137 )); then
+    fail "timeout: [$1] did not finish within ${secs}s (rc=$rc)"
+  fi
+  return "$rc"
+}
+
+# start_detached <env-file> <log-file> [<var-name> <var-file>] -- <cmd...>
+# Start one long-lived service: a subshell sources the env file with `set -a`
+# (so every key reaches the child), optionally exports ONE secret read from a
+# 0600 file (the export is the point -- a bare assignment would not reach the
+# exec'd child), then `exec`s the command with stdout+stderr appended to the
+# log. The secret never appears in argv or in the log. Prints the child PID
+# and stores it in STARTED_PID.
+#
+# A caller that must later `wait` for the child (cleanup, graceful shutdown)
+# reads STARTED_PID instead of capturing stdout with $(...): a PID captured in
+# a command substitution belongs to a subshell, so `wait` could never report
+# that child's exit status from this shell.
+start_detached() {
+  local env_file=$1 log_file=$2
+  shift 2
+  local var_name="" var_file=""
+  if [[ "${1:-}" != "--" ]]; then
+    var_name=${1:-}
+    var_file=${2:-}
+    shift 2
+  fi
+  if [[ "${1:-}" != "--" ]]; then
+    fail "start_detached: expected -- before the command"
+  fi
+  shift
+  (
+    set -a
+    . "$env_file"
+    set +a
+    if [[ -n "$var_name" ]]; then
+      export "$var_name"="$(cat "$var_file")"
+    fi
+    exec "$@"
+  ) >> "$log_file" 2>&1 &
+  STARTED_PID=$!
+  printf '%s\n' "$STARTED_PID"
 }
 
 # with_env <env-file> <cmd...> -- run cmd with the file sourced (set -a).
@@ -87,21 +236,20 @@ with_env() {
   ( set -a; . "$env_file"; set +a; exec "$@" )
 }
 
-# graceful_stop <pid> <name> [seconds] -- TERM, bounded wait, KILL escalation
-# only for this PID. Returns the exit status; a KILL escalation returns 137 so
-# the caller must treat it as a failure.
+# graceful_stop <pid> <name> [seconds] -- TERM only, bounded wait, NO KILL
+# escalation ever: a process that ignores TERM is left running (retained) and
+# reported, returning 1. When the process does exit within the bound, its exit
+# status is returned (a process that dies from the TERM reports 143).
 graceful_stop() {
   local pid=$1 name=$2 secs=${3:-30} st=0
   local deadline=$((SECONDS + secs))
-  if kill -0 "$pid" 2>/dev/null; then
+  if pid_alive "$pid"; then
     kill -TERM "$pid" 2>/dev/null || true
   fi
-  while kill -0 "$pid" 2>/dev/null; do
+  while pid_alive "$pid"; do
     if (( SECONDS >= deadline )); then
-      warn "$name (pid $pid) did not exit within ${secs}s; escalating to KILL"
-      kill -KILL "$pid" 2>/dev/null || true
-      st=137
-      break
+      warn "$name (pid $pid) did not exit within ${secs}s; left running (retained), no further signal sent"
+      return 1
     fi
     sleep 0.2
   done
@@ -111,6 +259,55 @@ graceful_stop() {
     st=$?
   fi
   return "$st"
+}
+
+# stop_owned_containers -- stop ONLY containers this run can prove it owns:
+# the docker query selects by compose project AND by the per-run label
+# txharbor.demo.run_token, and the result is intersected with the IDs captured
+# at start. Never `compose stop/down`, never a project-wide stop. An empty
+# intersection (nothing provably owned) stops nothing and returns 0; a failed
+# query or a failed stop returns 1.
+stop_owned_containers() {
+  local -a owned=()
+  local id listed
+  if ! listed=$(with_timeout 15 "${DOCKER[@]}" ps -aq \
+      --filter "label=com.docker.compose.project=$PROJECT" \
+      --filter "label=txharbor.demo.run_token=$RUN_TOKEN" 2>&1); then
+    warn "cleanup: cannot list this run's containers (project+run_token): $listed"
+    return 1
+  fi
+  for id in "${CONTAINER_IDS[@]}"; do
+    if [[ -n "$id" ]] && printf '%s\n' "$listed" | grep -qx "$id"; then
+      owned+=("$id")
+    fi
+  done
+  if (( ${#owned[@]} == 0 )); then
+    log "cleanup: no container carries both project $PROJECT and run_token $RUN_TOKEN; nothing is provably owned, so nothing was stopped (retained)"
+    return 0
+  fi
+  log "cleanup: stopping own containers: ${owned[*]}"
+  # The subshell keeps a hard failure (e.g. with_timeout's own `fail`, which
+  # exits) from aborting the EXIT path: this must return, so the caller can
+  # finish writing the run record.
+  if ! ( with_timeout 60 "${DOCKER[@]}" stop "${owned[@]}" ); then
+    warn "cleanup: docker stop failed for the owned containers"
+    return 1
+  fi
+  return 0
+}
+
+# scan_public_for_secrets <public-dir> <patterns-file> -- grep -RFq over the
+# public evidence with the exact secret values (one per line). rc 0 means a
+# secret is present -> fail (the match itself is never printed); rc 1 is the
+# clean result; any other rc is a scan error and also fails.
+scan_public_for_secrets() {
+  local public=$1 patterns=$2 rc=0
+  grep -RFq -f "$patterns" "$public" || rc=$?
+  case "$rc" in
+    0) fail "secret material found in public evidence ($public); content not printed" ;;
+    1) log "ok: public evidence carries no secret value" ;;
+    *) fail "secrets scan failed (grep rc=$rc over $public)" ;;
+  esac
 }
 
 # untrack_pid <pid> -- drop a reaped PID from the OWNED_PIDS array so the EXIT

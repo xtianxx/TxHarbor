@@ -1,0 +1,128 @@
+#!/usr/bin/env bash
+# Mock `docker` for the RESUME-03-FIX regression suite. run_checks.sh puts this
+# directory first on PATH, so every demo call lands here; nothing ever talks to
+# a daemon, a socket or a network.
+#
+# Recording (both files are appended to, never truncated):
+#   $MOCK_LOG      one line per call: the full argv, space-joined.
+#   $MOCK_ENV_LOG  per call: a "# ARGV <argv>" header line followed by the
+#                  caller's sorted COMPOSE_/DOCKER_/PORTFOLIO_/proxy/CURL_
+#                  environment. The header lets a check inspect the env of one
+#                  specific call (e.g. the compose config render).
+#
+# Answers: see the dispatch below. `stop` accepts `MOCK_STOP_FAIL=1` to fail.
+set -uo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+: "${MOCK_LOG:=/dev/null}"
+: "${MOCK_ENV_LOG:=/dev/null}"
+
+argv=("$@")
+argv_str="$*"
+printf '%s\n' "$argv_str" >> "$MOCK_LOG"
+{
+  printf '# ARGV %s\n' "$argv_str"
+  env | grep -E '^(COMPOSE_|DOCKER_|PORTFOLIO_|http_proxy|https_proxy|CURL_)' | sort
+} >> "$MOCK_ENV_LOG"
+
+unexpected() {
+  printf 'UNEXPECTED %s\n' "$argv_str" >> "$MOCK_LOG"
+  printf 'mock docker: unexpected call: %s\n' "$argv_str" >&2
+  exit 1
+}
+
+# Strip a leading --context <name> / --context=<name>; only `default` runs.
+case "${argv[0]:-}" in
+  --context)
+    if [[ "${argv[1]:-}" != "default" ]]; then
+      printf 'REFUSED-CONTEXT %s\n' "${argv[1]:-}" >> "$MOCK_LOG"
+      printf 'mock docker: refusing non-default context: %s\n' "${argv[1]:-}" >&2
+      exit 1
+    fi
+    argv=("${argv[@]:2}")
+    ;;
+  --context=*)
+    if [[ "${argv[0]#--context=}" != "default" ]]; then
+      printf 'REFUSED-CONTEXT %s\n' "${argv[0]#--context=}" >> "$MOCK_LOG"
+      printf 'mock docker: refusing non-default context: %s\n' "${argv[0]#--context=}" >&2
+      exit 1
+    fi
+    argv=("${argv[@]:1}")
+    ;;
+esac
+
+cmd="${argv[0]:-}"
+sub="${argv[1]:-}"
+
+case "$cmd" in
+  context)
+    case "$sub" in
+      show)
+        printf 'default\n'
+        ;;
+      inspect)
+        if [[ "${MOCK_BAD_ENDPOINT:-0}" == "1" ]]; then
+          printf 'tcp://127.0.0.1:2375\n'
+        else
+          printf 'unix:///var/run/docker.sock\n'
+        fi
+        ;;
+      *)
+        unexpected
+        ;;
+    esac
+    ;;
+  ps)
+    case "$argv_str" in
+      *run_token*)
+        # Ownership query: one container id per line, docker ps -aq style
+        # (word splitting is intentional so MOCK_OWNED_IDS is a simple list).
+        # shellcheck disable=SC2086
+        if [[ -n "${MOCK_OWNED_IDS:-}" ]]; then
+          printf '%s\n' ${MOCK_OWNED_IDS}
+        fi
+        ;;
+      *)
+        : # no pre-existing containers
+        ;;
+    esac
+    ;;
+  network|volume)
+    if [[ "$sub" != "ls" ]]; then
+      unexpected
+    fi
+    # no pre-existing network or volume
+    ;;
+  compose)
+    case "$argv_str" in
+      *" config "*) ;;
+      *) unexpected ;;
+    esac
+    project=""
+    rest=("${argv[@]:1}")
+    while ((${#rest[@]})); do
+      case "${rest[0]}" in
+        -p|--project-name) project="${rest[1]:-}"; rest=("${rest[@]:2}") ;;
+        --project-name=*) project="${rest[0]#--project-name=}"; rest=("${rest[@]:1}") ;;
+        -p?*) project="${rest[0]#-p}"; rest=("${rest[@]:1}") ;;
+        *) rest=("${rest[@]:1}") ;;
+      esac
+    done
+    if [[ -z "$project" ]]; then
+      printf 'mock docker: compose config without -p\n' >&2
+      exit 1
+    fi
+    sed "s/__NAME__/$project/g" "$SCRIPT_DIR/../render.template.json"
+    ;;
+  stop)
+    ids=("${argv[@]:1}")
+    printf 'STOPPED %s\n' "${ids[*]}" >> "$MOCK_LOG"
+    if [[ "${MOCK_STOP_FAIL:-0}" == "1" ]]; then
+      exit 1
+    fi
+    ;;
+  *)
+    unexpected
+    ;;
+esac

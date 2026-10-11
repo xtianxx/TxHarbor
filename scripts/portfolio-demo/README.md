@@ -1,4 +1,4 @@
-# Portfolio demo (local, isolated, real money movement)
+# Portfolio demo (local, isolated, real execution paths on a test token)
 
 One shell entry point runs a complete local demo of TxHarbor:
 
@@ -20,8 +20,9 @@ ports are never touched, and **nothing is ever deleted** — see “Retention”
 
 ## Prerequisites
 
-- `bash` 5, `curl`, `go` (builds the two demo binaries), Docker CLI with Compose v2
-  (**≥ 2.24.4** — the port overlay uses the `!override` merge key).
+- `bash` 5, `curl`, `go` (builds the two demo binaries), GNU coreutils `timeout` (required for every
+  bounded call), Docker CLI with Compose v2 (**≥ 2.24.4** — the port overlay uses the `!override`
+  merge key).
 - A **local** docker context: `docker context inspect <ctx> --format '{{.Endpoints.docker.Host}}'`
   must be `unix://…`. `DOCKER_HOST`, `DOCKER_TLS_VERIFY`, `DOCKER_CERT_PATH` must be unset and
   the caller must not export `TXHARBOR_RPC_URL` (preflight refuses both before any connection).
@@ -48,9 +49,13 @@ bash scripts/portfolio-demo/run_demo.sh --preflight-only # guards only; prints "
 bash scripts/portfolio-demo/run_demo.sh --help
 ```
 
-A successful run prints `RESULT: PASS` followed by `EVIDENCE: .evidence/portfolio-demo/<run-id>`.
-Every failure prints `FAIL: …` (or `RESULT: FAIL exit=<rc>`) and exits non-zero; polling always has
-a deadline, so a hung step fails instead of hanging.
+A successful run prints `EVIDENCE: .evidence/portfolio-demo/<run-id>` when the stages finish and
+`RESULT: PASS` only after cleanup (process stop + container stop) also succeeded, so a stop failure
+can never read as a pass. Every failure prints `FAIL: …` (or `RESULT: FAIL exit=<rc>`) and exits
+non-zero; polling always has a deadline, so a hung step fails instead of hanging.
+
+**Status: NOT RUN.** This batch ships the harness plus static and mocked checks only; the demo
+itself has not been executed (awaiting authorization).
 
 Optional environment inputs: `PORTFOLIO_RUN_ID` (default `UTC-timestamp-PID`) and
 `TXHARBOR_DEMO_TOOLS_DIR`. Host ports are fixed by the script (`55436`, `58547`, `18081`, `18091`);
@@ -61,16 +66,21 @@ must stay at those defaults for `run_demo.sh`.
 
 ```
 .evidence/portfolio-demo/<run-id>/          (0700)
-  public/   0700 (files 0600)  summary.txt, resources.txt, chain/receipt.json
+  public/   0700 (files 0600)  summary.txt, resources.txt, run-metadata.txt, run-exit.txt
+                  chain/ (deposit-receipt.json, signing-receipt.json, transfer-log-query.json)
+                  http/  (create/admission/replay/negative HTTP bodies + statuses)
+                  sql/   (whitelisted read-only query snapshots)
   private/  0700  keys/ (0600 API keys, signer credential, dev signer key)
                   env/  (0600 serve.env / signer.env / worker.env; contains the dev DSN)
                   curl/(0600 request bodies + curl configs carrying the Bearer token)
-                  logs/ (service logs, CLI paper trail, HTTP responses)
+                  logs/ (service logs, CLI paper trail)
 ```
 
-- `public/summary.txt` is the human-readable run record (asserted facts, tx hashes, addresses,
-  counts); `public/resources.txt` lists the kept resources; `chain/receipt.json` is the raw
-  signing-transaction receipt.
+- `public/summary.txt` is the human-readable run record; `public/run-metadata.txt` records the git
+  HEAD/dirty count and the sha256 of every script and fixture used; `public/run-exit.txt` records
+  the final exit/cleanup codes; `public/chain/` holds the raw receipts (deposit and signing) plus
+  the `eth_getLogs` uniqueness query output, `public/http/` and `public/sql/` hold the status and
+  count snapshots the assertions are made from.
 - **The demo proves the evidence itself is clean**: it writes `private/scan-patterns.txt` (0600)
   with the exact secret values of this run and fails the run if any of them — or the marker
   `signed_tx_bytes` — appears anywhere under `public/`. Matched content is never printed.
@@ -124,17 +134,23 @@ from the earlier evidence-root step — still no containers, volumes, networks o
 ## Retention
 
 - **Nothing is deleted.** On exit (success or failure) the script stops *its own* processes with
-  `TERM` (bounded wait; a `KILL` escalation is itself reported as a failure) and issues
-  `compose stop` for its own project only. It never runs `down`, `down -v`, `rm`, `prune` or any
-  volume/network deletion.
+  `TERM` (bounded wait; a timeout is reported as a failure and the process is left running, never
+  `KILL`ed) and stops only the containers that carry both its compose project label and its
+  per-run `txharbor.demo.run_token` label — never `compose stop`/`down`, never by project name
+  alone. It never runs `down`, `down -v`, `rm`, `prune` or any volume/network deletion.
 - Containers, the `txharbor-demo-<run-id>_pgdata` volume and the `txharbor-demo-<run-id>_default`
-  network stay in place, stopped, with the full Postgres state and the Anvil chain data.
+  network stay in place, stopped, with the full Postgres volume state. Anvil has **no state
+  persistence** in the base compose file (in-memory chain): once the container stops the chain is
+  not resumable; only the exported chain evidence (`public/chain/` receipts and the log query
+  output) is retained, and no recovery feature is added.
 - Cleanup of a finished run (containers/volume/network/evidence) requires a **separate explicit
   authorization**; because runs are per-id, a new run never reuses or mutates an old one.
 - Evidence: keep `public/` for review, treat `private/` as secret material, delete a whole run
   directory only when its data is no longer needed.
 - Re-running is safe: a new `PORTFOLIO_RUN_ID` (timestamp + PID by default) means a new project,
-  new host ports, a new volume, a new evidence root and no interference with earlier runs.
+  a new volume, a new evidence root and no interference with earlier runs. Host ports are fixed
+  (`55436`, `58547`, `18081`, `18091`): a stopped earlier stack releases them, and if anything
+  still holds one, preflight refuses instead of retargeting.
 
 ## The “about 5 minutes” claim
 
