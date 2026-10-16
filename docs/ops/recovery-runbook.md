@@ -1,12 +1,18 @@
-# 015 Recovery Runbook（备份恢复与安全复服运维手册）
+# Recovery Runbook：备份恢复与安全复服运维手册
 
-- Feature: `015-backup-recovery-safe-resumption` ｜ 设计: [plan.md](../../specs/015-backup-recovery-safe-resumption/plan.md) · [quickstart.md](../../specs/015-backup-recovery-safe-resumption/quickstart.md) · [contracts/](../../specs/015-backup-recovery-safe-resumption/contracts/) · [data-model.md](../../specs/015-backup-recovery-safe-resumption/data-model.md) · [ADR-001](../../specs/015-backup-recovery-safe-resumption/adr/ADR-001-recovery-control-store.md)
-- 证据归口: [docs/evidence/015/README.md](../evidence/015/README.md)
-- **Gate: T000-P 保持 OPEN**。本文档不是发布，不宣称生产就绪；文内所有示例数值均为**本地测试输入**，生产 RPO/RTO/备份频率/保留期未裁决（FR-036），不得据本地值宣称符合生产恢复目标。
-- 本文档描述的是 015 受支持路径。风险接受后强制复服、损失核销、人工补偿付款、自动补造付款意图**不存在**（无命令、无权限行、无契约）；双人批准不得替代缺失证据（FR-019）。
-- 适用边界：仅 015 灾备后复服；不改变日常运行，不改变 014 已批权限，不新增紧急绕过/管理员强制入口（FR-023）。
+<a id="015-recovery-runbook备份恢复与安全复服运维手册"></a>
 
-角色边界（2026-09-28 裁决）：执行恢复（`recovery_execute`）、读取核验（`recovery_verify_read`）、批准复服（`recovery_approve`）为独立权限；恢复执行者可读授权范围内核验结果，但**不得批准/核验自己执行的实例**；新提款创建、既有提款恢复、向真实下游投递及可产生真实下游业务效果的消费恢复需**两名不同且均非本实例执行者**的已授权人员共同批准；其余能力由一名非执行者批准并审计（`contracts/approval-matrix.md` §1）。
+灾备恢复的受支持运维路径：备份 → 隔离验证 → 恢复 → 隔离与事实核验 → 按能力放行 → 失败处置与升级。恢复执行、读取核验与批准分属独立权限。
+
+[1. 配置键](#1-配置键示例中的值均为本地测试输入) · [2. 命令路径 S1–S12](#2-真实命令路径s1s12) · [3. 隔离证明](#3-隔离证明) · [4. 失败处置 F1–F7](#4-失败处置f1f7与升级) · [5. RTO 超限处理](#5-rto-超限处理) · [6. 控制库回退纪律](#6-控制库回退纪律f6dg-4) · [7. 身份映射](#7-身份映射维护边界与变更审计f19) · [8. 有界只读复核](#8-有界只读复核-boundsf13) · [9. 同实例储层同失](#9-同实例储层同失f14dg-3) · [10. 非声明](#10-非声明)
+
+**相关文档**：规格 [`specs/015-backup-recovery-safe-resumption/`](../../specs/015-backup-recovery-safe-resumption/)（[plan.md](../../specs/015-backup-recovery-safe-resumption/plan.md) · [quickstart.md](../../specs/015-backup-recovery-safe-resumption/quickstart.md) · [contracts/](../../specs/015-backup-recovery-safe-resumption/contracts/) · [data-model.md](../../specs/015-backup-recovery-safe-resumption/data-model.md) · [ADR-001](../../specs/015-backup-recovery-safe-resumption/adr/ADR-001-recovery-control-store.md)）· 证据归口 [evidence/015/README.md](../evidence/015/README.md) · [验证矩阵](../verification-matrix.md) · [架构与设计](../architecture.md)
+
+- **Gate: T000-P 保持 OPEN**。本文档不是发布，不宣称生产就绪；文内所有示例数值均为**本地测试输入**，生产 RPO/RTO/备份频率/保留期未裁决，不得据本地值宣称符合生产恢复目标。
+- 本文档只描述受支持路径。风险接受后强制复服、损失核销、人工补偿付款、自动补造付款意图**不存在**（无命令、无权限行、无契约）；双人批准不得替代缺失证据。
+- 适用边界：仅灾备后复服；不改变日常运行，不改变对账已批权限，不新增紧急绕过/管理员强制入口。
+
+角色边界（2026-09-28 裁决）：执行恢复（`recovery_execute`）、读取核验（`recovery_verify_read`）、批准复服（`recovery_approve`）为独立权限；恢复执行者可读授权范围内核验结果，但**不得批准/核验自己执行的实例**；新提款创建、既有提款恢复、向真实下游投递及可产生真实下游业务效果的消费恢复需**两名不同且均非本实例执行者**的已授权人员共同批准；其余能力由一名非执行者批准并审计（[contracts/approval-matrix.md](../../specs/015-backup-recovery-safe-resumption/contracts/approval-matrix.md) §1）。
 
 ---
 
@@ -14,7 +20,7 @@
 
 | 键 | 用途 | 必填性 | 本地测试示例（非生产值） |
 |---|---|---|---|
-| `TXHARBOR_RECOVERY_CONTROL_DSN` | 独立恢复控制库 DSN（恢复模式总开关）；与数据 DSN 相同 → 拒绝；明文 DSN 不落库/不入日志/不入证据 | 启用 015 时必填 | `postgres://txharbor:txharbor@127.0.0.1:5432/txharbor_recovery_control?sslmode=disable` |
+| `TXHARBOR_RECOVERY_CONTROL_DSN` | 独立恢复控制库 DSN（恢复模式总开关）；与数据 DSN 相同 → 拒绝；明文 DSN 不落库/不入日志/不入证据 | 启用恢复模式时必填 | `postgres://txharbor:txharbor@127.0.0.1:5432/txharbor_recovery_control?sslmode=disable` |
 | `TXHARBOR_RECOVERY_PRINCIPAL` | 部署受控调用主体 `<kind>:<id>`；必须命中有效身份映射与参与者注册；自由文本（`--operator/--reason`）仅审计，永不授权 | 每个命令必填（受控配置） | `deploy:recovery-exec-1` |
 | `TXHARBOR_RECOVERY_ARTIFACT_DIR` | `backup` 默认产物目录（dump + manifest） | 可选（`--out` 可覆盖） | `/tmp/opencode/015-artifacts` |
 | `TXHARBOR_RECOVERY_INSTANCE` | 把进程/命令绑定到一个实例 UUID；命令 `--instance` 与之不一致 → 拒绝 | 恢复期推荐 | `11111111-1111-1111-1111-111111111111` |
@@ -25,7 +31,7 @@
 | `TXHARBOR_RECOVERY_STATUS_TIMEOUT` | 一次 `status` 有界只读复核的墙钟预算；无默认 | `status` 必填 | `10s` |
 | `TXHARBOR_RECOVERY_STATUS_MAX_READS` | 一次复核可发出的有界读取/求值次数 | `status` 必填 | `200` |
 | `TXHARBOR_RECOVERY_STATUS_MAX_ROWS` | 单次有界读取可返回的行数 | `status` 必填 | `2000` |
-| `TXHARBOR_RECOVERY_RPO_TARGET` / `_RTO_TARGET` / `_BACKUP_FREQUENCY` / `_RETENTION` | 可配置目标/频率/保留（FR-036）；**未配置 = 显式未配置状态**，不得宣称符合生产目标 | 可选 | `10m` / `30m` / `1h` / `168h`（仅测试输入） |
+| `TXHARBOR_RECOVERY_RPO_TARGET` / `_RTO_TARGET` / `_BACKUP_FREQUENCY` / `_RETENTION` | 可配置目标/频率/保留；**未配置 = 显式未配置状态**，不得宣称符合生产目标 | 可选 | `10m` / `30m` / `1h` / `168h`（仅测试输入） |
 | `TXHARBOR_PG_DSN` / `TXHARBOR_RPC_URL` / `TXHARBOR_CHAIN_ID` | 数据 DB / 事实来源 / 链身份（核验与演练读取） | 核验/演练必填 | `postgres://…/txharbor` / `http://127.0.0.1:8545` / `31337` |
 
 说明：必需值缺失或非法一律**按精确键名拒绝**，没有内置默认；`SDK/CLI` 帮助里的全部键名以 `txharbor recovery-admin <action> --help` 输出为准。
@@ -56,10 +62,10 @@
 1. **控制库独立性**：`TXHARBOR_RECOVERY_CONTROL_DSN` 指向独立 database（可与数据 DB 同 PG 实例的另一 database）；控制 DSN 与数据 DSN 相同 → `migrate`/命令拒绝；**控制库不在数据 DB 的备份/恢复集内**（备份只覆盖数据 DB 权威对象；控制事实不随数据回滚复活或丢失）。
 2. **门禁 fail-closed**：控制库不可达、schema 版本未知/不兼容 → gated 能力拒绝（`control_store_unavailable`），无降级放行；进程绑定实例但未配置控制库 → 启动拒绝；无 open 实例 → 正常态直通（不改变日常运行）。
 3. **隔离检查项**：`isolation_dependency_set(C)` 全部 `verified` 前，能力不得放行。执行者采集证据（`checklist-set --evidence-ref`），非执行者确认（`checklist-verify`）；状态记录/摘要/口头确认不是证明；`verified_by` 必须 ≠ 本实例 executor。
-4. **程序边界（F3，不得声称运行时全覆盖）**：`reconcile-admin`（claim/dispose/reverify/scan/start/resume）、`events-admin`（replay/unblock/retention-prune）、外部定时调度与 `withdrawal-exec` 操作员路径**不在 015 运行时门禁接线内**。这些路径的隔离靠：停服/下线、访问与凭证移除（记录时间与主体）＋门禁审计＋`no_pre_release_effects`。**仅 checklist 签署不构成运行时隔离证明**；无法证明已停止/已失去权限 → 相关能力保持关闭，不得以超时/失联/人工知悉放行。若需运行时强制，另立 ADR/设计。
+4. **程序边界（F3，不得声称运行时全覆盖）**：`reconcile-admin`（claim/dispose/reverify/scan/start/resume）、`events-admin`（replay/unblock/retention-prune）、外部定时调度与 `withdrawal-exec` 操作员路径**不在运行时门禁接线内**。这些路径的隔离靠：停服/下线、访问与凭证移除（记录时间与主体）＋门禁审计＋`no_pre_release_effects`。**仅 checklist 签署不构成运行时隔离证明**；无法证明已停止/已失去权限 → 相关能力保持关闭，不得以超时/失联/人工知悉放行。若需运行时强制，另立 ADR/设计。
 5. **`no_pre_release_effects` 的确认方式**：以门禁审计为准——实例 open 后 0 次外部可见动作（无 `ok` 的准入、outbox/consumer 未推进）；不得以状态字段自证。
 6. **在途交错（OpenInstance 边界）**：*同一次调用*在 `instance-open` 前获准、在其后执行，不属于跨调用复用，也不产生新的准入审计。因此：隔离流程必须**等待/排空**这类在途动作（按各动作原门禁：nonce hold、发送/执行门禁、claim/lease、inbox/version 守卫，未知结果按 unknown 处理），把它记录进隔离证据包并在确认其已终结后才允许确认 `no_pre_release_effects`。**不得只以「下一次求值会拒绝」证明该交错已覆盖**；无法确认终结 → 相关能力保持关闭。
-7. **Signer 边界**：受支持的 `signer-serve` 装配受门禁 + 进程内检查点覆盖；受支持装配之外的直调/蓄意伪造门禁不自动检测，不得宣称任意 in-process 调用全覆盖（T070 边界）。
+7. **Signer 边界**：受支持的 `signer-serve` 装配受门禁 + 进程内检查点覆盖；受支持装配之外的直调/蓄意伪造门禁不自动检测，不得宣称任意 in-process 调用全覆盖。
 
 ## 4. 失败处置（F1–F7）与升级
 
@@ -76,11 +82,13 @@
 补充负例（本轮 analyze 增，不改 F1–F7 编号）：
 
 - **控制库盲恢复**：禁止按备份/快照直接回退控制库继续使用（§6）；在回退库内自写 `supersede` 行**不构成**重建证明。
-- **控制库 schema 版本未知/不兼容**：`migrate` 与 store 读取均拒绝（`control_store_unavailable` + 版本审计注记，T069）。
+- **控制库 schema 版本未知/不兼容**：`migrate` 与 store 读取均拒绝（`control_store_unavailable` + 版本审计注记）。
 - **Opaque/非规范 scope**：`scope_mismatch` 拒绝、零写入；旧批准须在规范 scope 上重核重批。
 - **Signer 非受支持装配残余**：见 §3.7，不声称全覆盖。
 
-## 5. RTO 超限处理（FR-031/036；C1）
+## 5. RTO 超限处理
+
+<a id="5-rto-超限处理fr-031036c1"></a>
 
 - 口径分开记录且不得混同：**恢复点、数据库恢复时间（`db_restore_seconds`）、核验时间（`verification_seconds`）、各能力安全复服时间（per capability）、backup_lag、uncovered_interval、缺口数量与处置**。**不得以「数据库可连接/恢复完成」单独宣称 RTO 达标**；RTO 只在全部 7 能力观测放行后按端到端口径判定（`drill` 记录）。
 - 配置了 `TXHARBOR_RECOVERY_RTO_TARGET` 且超时：**100% 记录不达标 + 告警 + 升级**；**不单独成为永久禁止后续安全复服的条件**。
@@ -95,15 +103,17 @@
   - 执行者失去旧权限的确认方式：旧 DSN/凭据吊销或新库新凭据，**记录时间与主体**；
   - 建新实例的可信依据：部署受控配置 + 恢复点证据 + 重新隔离清单；
   - 旧库标记 retired；旧实例绑定不匹配即拒绝。
-- **不得以「在已回退库内写 supersede 行」冒充可检/已重建**。015 不提供对盲恢复/旧副本的自动检测；「旧批准不自动重生效」仅就**数据 DB 回滚域**成立（控制域独立 + `instance_id` 绑定）；控制库回退域的普适保证须另立 ADR/裁决。
+- **不得以「在已回退库内写 supersede 行」冒充可检/已重建**。本方案不提供对盲恢复/旧副本的自动检测；「旧批准不自动重生效」仅就**数据 DB 回滚域**成立（控制域独立 + `instance_id` 绑定）；控制库回退域的普适保证须另立 ADR/裁决。
 
 ## 7. 身份映射维护边界与变更审计（F19）
 
-- `recovery_identity`（person ↔ principal）由部署受控特权路径维护（`control identity-map-set`），记录 `source/recorded_by/recorded_at`；**单特权维护无法由 015 证明双人真实性**（程序/人的边界，不虚构自动检测）。
+- `recovery_identity`（person ↔ principal）由部署受控特权路径维护（`control identity-map-set`），记录 `source/recorded_by/recorded_at`；**单特权维护无法由程序证明双人真实性**（程序/人的边界，不虚构自动检测）。
 - **映射变更（新增/改写/撤销）→ 以该映射为依据的既有批准立即失效、须重核重批**；审批有效性按当前映射重算，批准行 `person_id` 与当前映射不一致 → `approval_identity_unverified` 拒绝；**保守 dual 不抵消错映射**（映射缺失/冲突 → 0 放行）。
-- 生产身份名单待部署配置（plan「部署前裁决」）；本地路径以 `control identity-map-show` 复核。
+- 生产身份名单待部署配置（见规格 plan「部署前裁决」）；本地路径以 `control identity-map-show` 复核。
 
-## 8. 有界只读复核 bounds（F13；T051/T063）
+## 8. 有界只读复核 bounds（F13）
+
+<a id="8-有界只读复核-boundsf13t051t063"></a>
 
 - **可读范围**：本实例及授权 scope 内的证据/核验/缺口/审计行；禁止无界全表扫描（每次读取带实例谓词 + LIMIT）。
 - **次数/时间/资源预算**：`TXHARBOR_RECOVERY_STATUS_TIMEOUT` / `_MAX_READS` / `_MAX_ROWS`（部署配置，无默认；本地值仅测试输入）。
@@ -113,8 +123,10 @@
 
 ## 9. 同实例储层同失（F14/DG-3）
 
-同一 PG 实例失效时数据 DB 与控制库同失，超出逻辑回滚域：015 **不提供实例级独立性**、不虚构跨实例保护；两者同失时 fail-closed 重建控制事实后才可能放行。备份产物落盘/异地策略为部署前裁决（不阻塞实现）。
+同一 PG 实例失效时数据 DB 与控制库同失，超出逻辑回滚域：本方案**不提供实例级独立性**、不虚构跨实例保护；两者同失时 fail-closed 重建控制事实后才可能放行。备份产物落盘/异地策略为部署前裁决（不阻塞实现）。
 
 ## 10. 非声明
 
-T000-P 保持 OPEN；本手册不宣称生产就绪、不宣称外部账本一致、不承诺跨系统恰好一次；生产 RPO/RTO/频率/保留未裁决；本地示例数值不得当作生产阈值；风险接受/核销/补偿/自动补造意图不交付；既有资金门禁不可绕过（`indexer_pause`、日志/充值暂停、006 恢复行、nonce hold、授权范围暂停、容量红线）。
+T000-P 保持 OPEN；本手册不宣称生产就绪、不宣称外部账本一致、不承诺跨系统恰好一次；生产 RPO/RTO/频率/保留未裁决；本地示例数值不得当作生产阈值；风险接受/核销/补偿/自动补造意图不交付；既有资金门禁不可绕过（`indexer_pause`、日志/充值暂停、重组恢复行、nonce hold、授权范围暂停、容量红线）。
+
+**参考与出处（追溯）**：本手册对应规格 [`specs/015-backup-recovery-safe-resumption/`](../../specs/015-backup-recovery-safe-resumption/)；文内安全要求的规格编号：FR-019（证据不足 fail-closed；双人批准不得替代缺失证据）、FR-023（不新增紧急绕过）、FR-031/FR-036（RTO 记录与目标配置口径）、C1（RTO 口径）；任务追溯：T051/T063（§8 有界只读复核）、T069（§4 控制库 schema 版本拒绝注记）、T070（§3.7 Signer 受支持装配边界）。

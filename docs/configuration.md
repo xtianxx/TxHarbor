@@ -1,11 +1,17 @@
 # TxHarbor 配置参考（env-only）
 
-> **事实边界**：本文件描述当前实现的配置加载行为（`internal/config/config.go`）与模板
-> （`.env.example`）。项目未部署、T000-P 保持 OPEN。所有阈值类取值一律「待测/待裁决」，
+本项目配置的唯一载体是环境变量（无配置文件、无第三方配置库）。本文档给出加载规则、各进程的必填与可选键、可选组件、管理 CLI 配置与本地依赖端口。
+
+[1. 加载规则](#1-加载规则) · [2. 共享必填键](#2-所有进程共享的必填键serve--migrate) · [3. signer-serve](#3-signer-serve签名进程) · [4. withdrawal-worker](#4-withdrawal-worker执行进程) · [5. 接口与凭据](#5-接口与凭据) · [6. 事件基础设施](#6-事件基础设施可选) · [7. 管理 CLI](#7-管理-cli按命令取子集) · [8. 本地依赖端口](#8-本地依赖端口compose)
+
+**相关文档**：[架构与设计](architecture.md) · [验证矩阵](verification-matrix.md) · [恢复运维手册](ops/recovery-runbook.md) · 模板与依赖：[`.env.example`](../.env.example) · [`compose.yaml`](../compose.yaml) · [`compose.009.yaml`](../compose.009.yaml)
+
+> **事实边界**：本文件描述当前实现的配置加载行为（[`internal/config/config.go`](../internal/config/config.go)）与
+> 模板（[`.env.example`](../.env.example)）。项目未部署、T000-P 保持 OPEN。所有阈值类取值一律「待测/待裁决」，
 > 模板中出现的数值是测量示例或部署输入，**不是生产阈值**。
-> **验证状态**：`serve` 的冷启动路径（001–006 必填键组合）已由 `make smoke-quickstart`
-> （`scripts/quickstart-smoke/`，隔离环境）实际启动验证；其余键组合与 CLI 仍为源码常量、
-> 加载分支与模板注释的静态对照（**NOT VERIFIED**）。
+> **验证状态**：`serve` 的冷启动路径（模板必填键组合）已由 `make smoke-quickstart`
+> （[`scripts/quickstart-smoke/`](../scripts/quickstart-smoke/)，隔离环境）实际启动验证；其余键组合与 CLI
+> 仍为源码常量、加载分支与模板注释的静态对照（**NOT VERIFIED**）。
 
 ## 1. 加载规则
 
@@ -13,9 +19,11 @@
 - **缺失必填 → 拒绝启动并报出键名**（`missing required environment variable <KEY>`）；
   格式错误同样在加载期报错。
 - **fail-closed 的条件必填**：某些键只在特定模式/开关下必填（见下各节），缺失即拒绝启动或拒绝执行。
-- **凭据脱敏**：启动回显与日志经 `internal/logx.Redact` 处理；凭据不进入日志/错误/指标。
-- **模板覆盖范围**：`.env.example` 覆盖 001–006 的必填键，`serve` 可直接用模板启动；007–015 的键
-  以登记形式提供（signer / worker / 事件 / 管理 CLI，**默认注释**，按需启用）。
+- **凭据脱敏**：启动回显与日志经 [`internal/logx/redact.go`](../internal/logx/redact.go) 处理；
+  凭据不进入日志/错误/指标。
+- **模板覆盖范围**：[`.env.example`](../.env.example) 已包含 `serve` 启动所需的全部必填键
+  （`serve` 可直接用模板启动）；signer / worker / 事件 / 管理 CLI 的键以登记形式提供
+  （**默认注释**，按需启用）。
 
 ## 2. 所有进程共享的必填键（`serve` / `migrate`）
 
@@ -31,7 +39,7 @@
 | `TXHARBOR_DEPOSIT_CONTRACTS` | 充值合约白名单（`address[:effective]`；空列表拒绝） | 拒绝启动 |
 | `TXHARBOR_DEPOSIT_WATCH_ADDRESSES` | 监控收款地址（`address[:effective]`；空列表拒绝） | 拒绝启动 |
 | `TXHARBOR_CONFIRMATION_DEPTH` | 确认深度 N（正整数，无默认） | 拒绝启动 |
-| `TXHARBOR_REORG_MAX_DEPTH` | 重组最大深度（006，正整数，无默认；模板已含） | `serve` 拒绝启动 |
+| `TXHARBOR_REORG_MAX_DEPTH` | 重组最大深度（正整数，无默认；模板已含） | `serve` 拒绝启动 |
 
 常用可选键（含默认值）：`TXHARBOR_HTTP_ADDR`（`127.0.0.1:8080`）、`TXHARBOR_STARTUP_TIMEOUT`（30s）、
 `TXHARBOR_PROBE_INTERVAL`（2s）、`TXHARBOR_PROBE_TIMEOUT`（5s）、`TXHARBOR_SHUTDOWN_TIMEOUT`（15s）、
@@ -39,7 +47,9 @@
 `TXHARBOR_INDEX_RETRY_INITIAL`（200ms）、`TXHARBOR_INDEX_RETRY_MAX`（30s）、`TXHARBOR_LOG_BATCH_BLOCKS`（500）、
 `TXHARBOR_DEPOSIT_BATCH_BLOCKS`（500）、`TXHARBOR_REORG_REPLAY_BATCH`（500）。
 
-## 3. `signer-serve`（009）
+## 3. `signer-serve`（签名进程）
+
+<a id="3-signer-serve009"></a>
 
 | 键 | 必填性 | 说明 |
 | --- | --- | --- |
@@ -58,29 +68,35 @@
 可选：`TXHARBOR_SIGNER_HTTP_ADDR`（默认 `127.0.0.1:8091`）、`TXHARBOR_SIGNER_KEY_TIMEOUT`。
 签名凭据由 `signer-auth` 签发/轮换/吊销（持久化在 PG，不经 env 传递）。
 
-## 4. `withdrawal-worker`（011）
+## 4. `withdrawal-worker`（执行进程）
+
+<a id="4-withdrawal-worker011"></a>
 
 在共享必填键（§2）之外：
 
 | 键 | 必填性 | 说明 |
 | --- | --- | --- |
-| `TXHARBOR_TX_SIGNER_URL` | 必填 | 009 签名服务地址（如 `http://127.0.0.1:8091`） |
-| `TXHARBOR_TX_SIGNER_CREDENTIAL` | 必填 | 009 凭据（`signer-auth` 签发） |
+| `TXHARBOR_TX_SIGNER_URL` | 必填 | 签名服务地址（如 `http://127.0.0.1:8091`） |
+| `TXHARBOR_TX_SIGNER_CREDENTIAL` | 必填 | 签名凭据（`signer-auth` 签发） |
 
-以上任一缺失即拒绝启动（`internal/jointwire/assembly.go` 逐项报出键名）。
+以上任一缺失即拒绝启动（[`internal/jointwire/assembly.go`](../internal/jointwire/assembly.go) 逐项报出键名）。
 节奏类可选键（有初始默认）：`TXHARBOR_WORKER_TTL_SECONDS`、`TXHARBOR_WORKER_HEARTBEAT_SECONDS`、
 `TXHARBOR_WORKER_STALL_SECONDS`、`TXHARBOR_WORKER_BACKOFF_BASE_MS`、`TXHARBOR_WORKER_BACKOFF_MAX_MS`、
 `TXHARBOR_WORKER_SCAN_INTERVAL_MS`、`TXHARBOR_WORKER_LABEL`。
 
-## 5. 接口与凭据（007/008/012）
+## 5. 接口与凭据
 
-- **007 调用方凭据**：经 `apikey-auth`（issue/rotate/revoke）签发并持久化，不是 env 键；
+<a id="5-接口与凭据007008012"></a>
+
+- **调用方凭据**：经 `apikey-auth`（issue/rotate/revoke）签发并持久化，不是 env 键；
   请求用 Bearer 携带。
-- **008 只读端点**：`TXHARBOR_NONCE_READ_TOKEN`（未配置时拒绝一切读取；配置后按 Bearer 校验）。
-- **012 授权供给**：经 `withdrawal-authz supply/revoke` 受控 CLI；`TXHARBOR_AUTHZ_ISSUER_CALLERS`
-  为 issuer 允许列表（逗号分隔 caller_id；空 = deny-all；读取见 `internal/withdrawal/allowlist.go`）。
+- **nonce 只读端点**：`TXHARBOR_NONCE_READ_TOKEN`（未配置时拒绝一切读取；配置后按 Bearer 校验）。
+- **授权供给**：经 `withdrawal-authz supply/revoke` 受控 CLI；`TXHARBOR_AUTHZ_ISSUER_CALLERS`
+  为 issuer 允许列表（逗号分隔 caller_id；空 = deny-all；读取见 [`internal/withdrawal/allowlist.go`](../internal/withdrawal/allowlist.go)）。
 
-## 6. 013 事件基础设施（可选）
+## 6. 事件基础设施（可选）
+
+<a id="6-013-事件基础设施可选"></a>
 
 主开关 `TXHARBOR_EVENTS_ENABLED`（默认 `false`）。**启用时必填**（缺失即拒绝启动）：
 
@@ -99,12 +115,14 @@
 `TXHARBOR_EVENTS_ALERT_ENABLED`（默认 true）、`TXHARBOR_EVENTS_ALERT_SOFT_SUSTAINED_WINDOW`。
 
 注意：**仅设置 `TXHARBOR_REDIS_ADDR`（即使 `TXHARBOR_EVENTS_ENABLED=false`）就会装配缓存与限流**；
-Redis 不可用期间新提现创建按 PD-1 返回可重试拒绝（见 `docs/architecture.md` §1）。
+Redis 不可用期间新提现创建按 PD-1 返回可重试拒绝（见[架构与设计](architecture.md) §1）。
 
-## 7. 014/015 管理 CLI（按命令取子集）
+## 7. 管理 CLI（按命令取子集）
 
-- **014**：`reconcile-admin` 经 PG 与受控权限表工作（权限 grant/revoke/show），无独立 env 开关。
-- **015**：`recovery-admin` 使用独立控制库与主体：`TXHARBOR_RECOVERY_CONTROL_DSN`、
+<a id="7-014015-管理-cli按命令取子集"></a>
+
+- `reconcile-admin`：经 PG 与受控权限表工作（权限 grant/revoke/show），无独立 env 开关。
+- `recovery-admin`：使用独立控制库与主体：`TXHARBOR_RECOVERY_CONTROL_DSN`、
   `TXHARBOR_RECOVERY_PRINCIPAL`、`TXHARBOR_RECOVERY_ARTIFACT_DIR`（产物命令未给 `--out` 时要求）；
   按命令条件必需或可选：`TXHARBOR_RECOVERY_ISOLATED_TARGET_DSN`、`TXHARBOR_RECOVERY_OBSERVER_DSN`、
   `TXHARBOR_RECOVERY_GATE_DSN`、`TXHARBOR_RECOVERY_DEPLOYMENT_ADMIN_DSN`、`TXHARBOR_RECOVERY_INSTANCE`、
@@ -112,6 +130,7 @@ Redis 不可用期间新提现创建按 PD-1 返回可重试拒绝（见 `docs/a
   `TXHARBOR_RECOVERY_EVIDENCE_FRESHNESS_*`、`TXHARBOR_RECOVERY_RPO_TARGET`、`TXHARBOR_RECOVERY_RTO_TARGET`、
   `TXHARBOR_RECOVERY_BACKUP_FREQUENCY`、`TXHARBOR_RECOVERY_RETENTION`、`TXHARBOR_RECOVERY_STATUS_*`。
   缺失必需约束时只能报告「未配置」，不得宣称符合生产恢复目标。
+- 逐命令的键集与真实操作路径见[恢复运维手册](ops/recovery-runbook.md)。
 
 ## 8. 本地依赖端口（compose）
 
@@ -122,5 +141,5 @@ Redis 不可用期间新提现创建按 PD-1 返回可重试拒绝（见 `docs/a
 | Redis | `redis:8.2.10-alpine` | `127.0.0.1:6379` | 仅 `--profile events` |
 | Kafka | `apache/kafka:4.1.0` | `127.0.0.1:9092` | 仅 `--profile events`；单节点 KRaft；显式建 topic，auto-create 关闭 |
 
-009 隔离叠加：`compose.009.yaml` 提供 project `txharbor-009`、库 `txharbor_009`、`127.0.0.1:5433`
+签名隔离叠加：[`compose.009.yaml`](../compose.009.yaml) 提供 project `txharbor-009`、库 `txharbor_009`、`127.0.0.1:5433`
 与独立数据卷；叠加合并会保留默认 5432 映射，执行前先停默认项目并使用 5433 连接。
