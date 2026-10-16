@@ -34,3 +34,18 @@ Thumbs.db
 # Python bytecode caches.
 __pycache__/
 *.pyc
+
+# Local evidence workspace (raw run artifacts; local only, not distributed).
+/.evidence/
+
+# Local run outputs (the `recovery-admin drill` default archive dir; not
+# distributed; override with --out or the *_EVIDENCE_DIR env vars).
+/docs/evidence/
+
+# opencode local dependency metadata and caches. The shared workflow lives in
+# .opencode/commands/ and stays tracked.
+/.opencode/node_modules/
+/.opencode/package.json
+/.opencode/package-lock.json
+/.opencode/bun.lock
+/.opencode/.gitignore

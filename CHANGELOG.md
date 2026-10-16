@@ -8,7 +8,7 @@
 
 > **状态更新（2026-10-08）**：下列条目记录的是**合并前**的分支状态。此后 013（PR #25）、
 > 014（PR #27）、015（PR #38/#39）均已合入 main；「远程 CI 运行待核验」的表述已被后续
-> 运行取代（见 `docs/verification-matrix.md`）。三者**均未部署**，T000-P 保持 OPEN。
+> 运行取代。三者**均未部署**，T000-P 保持 OPEN。
 > 条目原文按记录保留，不追溯改写。
 
 ### Added
@@ -36,9 +36,7 @@
     `ci:integration-pending` 阻断合并纪律。
 - 验收状态（截至 B11）：90/90 任务勾选；**本地验收**（真实中间件/迁移）通过；
   **远程 CI 运行待核验**；**不宣称生产就绪**（T000-P 保持 OPEN）。
-  证据索引：`docs/evidence/013/quickstart_evidence_index.md`、
-  `docs/evidence/013/coverage_audit.md`、`docs/evidence/013/benchmark_report.md`、
-  `docs/evidence/013/ci_budget.md`。
+  （相关运行报告不随源码分发。）
 
 ### Known limitations（013，分支）
 
@@ -106,8 +104,8 @@
 
 ### Known limitations
 
-- **T000-P 保持 OPEN**：未部署，不宣称生产就绪（`docs/project-context.md:13`、
-  `specs/003-event-indexing/tasks.md:24`、`specs/005-confirmation-tracking/tasks.md:25`、
+- **T000-P 保持 OPEN**：未部署，不宣称生产就绪（`specs/003-event-indexing/tasks.md:24`、
+  `specs/005-confirmation-tracking/tasks.md:25`、
   `specs/004-deposit-detection/acceptance.md:56-57`）。A-13 已 CLOSED
   （`specs/011-withdrawal-executor/integration-readiness.md:348`），T000-P 独立 OPEN（同文件 `:350`）。
 - 无 KMS/HSM provider：v1 仅本地 development 密钥 provider，生产模式拒绝启动

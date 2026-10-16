@@ -4,15 +4,12 @@
 
 [1. 组件与数据流](#1-组件与数据流) · [2. Deposit 生命周期](#2-deposit-生命周期) · [3. Withdrawal 生命周期](#3-withdrawal-生命周期) · [4. PostgreSQL 权威状态设计](#4-postgresql-权威状态设计) · [5. Signer 隔离边界](#5-signer-隔离边界) · [6. Transactional Outbox / Inbox 语义](#6-transactional-outbox--inbox-语义) · [7. 故障恢复与对账](#7-故障恢复与对账) · [8. 关键设计决策与取舍](#8-关键设计决策与取舍) · [9. 图与代码一致性](#9-图与代码一致性可复核)
 
-**相关文档**：[配置参考](configuration.md) · [验证矩阵](verification-matrix.md) · [恢复运维手册](ops/recovery-runbook.md) · [规格目录](../specs/)
+**相关文档**：[配置参考](configuration.md) · [测试指南](testing.md) · [恢复运维手册](ops/recovery-runbook.md) · [规格目录](../specs/)
 
 > **事实边界**：本文件只描述已合入 main 的实现；项目**未部署**、T000-P 保持 OPEN、不宣称生产 SLO；
 > 性能相关内容只做「测量与定位」，不宣称性能提升。
 > **权威来源**：[规格目录](../specs/) 各阶段规格（spec / plan / data-model / contracts / ADR）、
 > [恢复运维手册](ops/recovery-runbook.md)、迁移与代码注释；与规格或代码冲突时，以规格与代码为准。
-> **Mermaid 图（历史记录）**：文中图曾在既往文档整理中通过 `mermaid.parse`（jsdom 环境，v11）
-> 语法解析（README 与本文件合计 4/4；本文件 3/3），当时未做像素级渲染验证；本轮整理未改动图的
-> 字节，也未重新解析。
 
 ## 1. 组件与数据流
 
@@ -204,8 +201,3 @@ flowchart LR
 | 对账 | [`migrations/000016_reconciliation_handling.sql`](../migrations/000016_reconciliation_handling.sql)；[`internal/reconciliation/doc.go`](../internal/reconciliation/doc.go) |
 | 恢复与门禁 | [`internal/recovery/doc.go`](../internal/recovery/doc.go)；[恢复规格 quickstart](../specs/015-backup-recovery-safe-resumption/quickstart.md)；[恢复运维手册](ops/recovery-runbook.md) |
 | 限流策略 | [`internal/ratelimit/policy.go`](../internal/ratelimit/policy.go)（429/503 分列与类语义） |
-
-**验证状态（历史记录）**：本文件的 Mermaid 图曾在既往文档整理中通过 `mermaid.parse`（jsdom 环境，
-mermaid v11）语法解析（README 与本文件合计 4/4；本文件 3/3）；图示状态词汇当时已与迁移 `CHECK`
-约束和包文档核对。当时**未做**像素级渲染验证，也**未**逐一执行运行时行为验证；本轮整理未改动图、
-未重新解析，行为结论与证据状态见 [验证矩阵](verification-matrix.md)。

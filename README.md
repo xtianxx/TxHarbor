@@ -19,16 +19,17 @@ PostgreSQL 保存权威业务状态，Redis / Kafka 是可选的缓存、限流�
 
 按读者任务选择入口：
 
+- **文档总入口** —— 全部分册与索引：[docs/README.md](docs/README.md)
 - **架构与设计取舍** —— 组件、数据流与信任边界：[docs/architecture.md](docs/architecture.md)
 - **配置参考** —— 环境变量、默认值与管理 CLI：[docs/configuration.md](docs/configuration.md)
-- **测试与验证** —— 分层入口、已留存状态与证据索引：[docs/verification-matrix.md](docs/verification-matrix.md)
+- **测试指南** —— 各层命令、依赖与运行产物位置：[docs/testing.md](docs/testing.md)
 - **备份与恢复运维** —— 备份、隔离验证、恢复核验与按能力放行：
   [docs/ops/recovery-runbook.md](docs/ops/recovery-runbook.md)
 - <a id="演示本地隔离"></a>**本地演示** —— 隔离 Anvil 上的真实充提与负例演练：
   [scripts/portfolio-demo/README.md](scripts/portfolio-demo/README.md)
 - **变更记录** —— 已合并变更与版本历史：[CHANGELOG.md](CHANGELOG.md)
-- **展示材料** —— 集中讲解提纲与面试要点：[docs/portfolio.md](docs/portfolio.md)
 - **规格文档** —— 各阶段 spec / plan / data-model / contracts / ADR：[specs/](specs/)
+- **贡献与安全** —— 参与方式：[CONTRIBUTING.md](CONTRIBUTING.md)；漏洞报告：[SECURITY.md](SECURITY.md)
 
 <a id="功能特性"></a>
 
@@ -87,9 +88,10 @@ make lint        # gofmt + go vet（含集成构建标签）
 make build       # 构建
 ```
 
-集成（PostgreSQL / Redis / Kafka）、E2E、故障注入、性能与灾备演练等分层入口需要 Docker；各层已
-留存状态与证据索引见 [docs/verification-matrix.md](docs/verification-matrix.md)。
+集成（PostgreSQL / Redis / Kafka）、E2E、故障注入、性能与灾备演练等分层入口需要 Docker；完整
+命令、前置与运行产物位置见[测试指南](docs/testing.md)。
 
 ## 许可证
 
-许可证待定：仓库暂无独立 LICENSE 文件；依赖与许可说明见 [THIRD_PARTY.md](THIRD_PARTY.md)。
+本项目采用 MIT 许可证，见 [LICENSE](LICENSE)；第三方依赖按其各自许可分发，说明见
+[THIRD_PARTY.md](THIRD_PARTY.md)。

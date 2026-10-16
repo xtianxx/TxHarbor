@@ -111,8 +111,8 @@
 `<= TXHARBOR_REDIS_TIMEOUT`（否则拒绝启动）；200/300ms 只是显式验证配置，
 **不是生产默认、不是 SLO**。令牌桶键 TTL 与此解耦：仍按原算法
 `2 × 有效 Redis.Timeout` 计算，缩短 L 不改变桶生命周期。013 既有键与
-新键在 `.env.example` 成组登记。设计与机制验证见
-[docs/evidence/013/redis-latency-budget-design.md](../../docs/evidence/013/redis-latency-budget-design.md)。
+新键在 `.env.example` 成组登记。设计与机制验证见历史档案
+`docs/evidence/013/redis-latency-budget-design.md`（历史运行报告不随源码分发）。
 
 **测量方法（阈值待测；本文件不编数值）**：
 1. **正常态误拒绝率** = 无故障负载下 NewWithdrawal 请求中出现
@@ -131,12 +131,12 @@
 ## 8. 实施与校准状态（B11 收口记录，2026-09-24）
 
 - **实现状态**：013 的 B1–B11 全部任务勾选（90/90）；本地验收证据索引见
-  [quickstart_evidence_index.md](../../docs/evidence/013/quickstart_evidence_index.md)，
-  覆盖审计见 [coverage_audit.md](../../docs/evidence/013/coverage_audit.md)。
+  历史档案 `docs/evidence/013/quickstart_evidence_index.md`，
+  覆盖审计见 `docs/evidence/013/coverage_audit.md`。
 - **阈值校准**：容量 soft/hard/reserve/retention、限流速率、退避/超时、追赶窗口、
   告警阈值**尚未校准**（无生产测量）；一律维持「待测/待裁决」，0 次表述为已达标。
 - **CI 耗时预算**：本地各层基线已实测并记录于
-  [ci_budget.md](../../docs/evidence/013/ci_budget.md)；目标 runner 基线与预算
+  历史档案 `docs/evidence/013/ci_budget.md`；目标 runner 基线与预算
   **待核验**（未推送、未触发远程 CI）。
 - **远程 CI**：`.github/workflows/ci.yml`（T082）与 `.github/workflows/fault-perf.yml`
   （T083）已完成本地静态校验（YAML/`bash -n`/触发矩阵断言），GitHub runner 实际运行

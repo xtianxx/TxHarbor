@@ -9,7 +9,7 @@
 # focus 定向运行（drill 标签）可用如下等价形式：
 #   docker run ... --entrypoint /bin/sh 'postgres@sha256:4ef4dbc9...' -ec \
 #     'cd /workspace && go test -tags "linux,drill" -count=1 -run REGEX -v ./internal/recovery/'
-# 归档与命令细节见 docs/evidence/015/verification-archive-2026-10-05/INDEX.md。
+# 当前测试方式见 docs/testing.md；历史归档不随源码分发。
 # 本注释块不改变任何执行逻辑。
 # -----------------------------------------------------------------------------
 set -euo pipefail

@@ -4,14 +4,12 @@
 
 [1. 加载规则](#1-加载规则) · [2. 共享必填键](#2-所有进程共享的必填键serve--migrate) · [3. signer-serve](#3-signer-serve签名进程) · [4. withdrawal-worker](#4-withdrawal-worker执行进程) · [5. 接口与凭据](#5-接口与凭据) · [6. 事件基础设施](#6-事件基础设施可选) · [7. 管理 CLI](#7-管理-cli按命令取子集) · [8. 本地依赖端口](#8-本地依赖端口compose)
 
-**相关文档**：[架构与设计](architecture.md) · [验证矩阵](verification-matrix.md) · [恢复运维手册](ops/recovery-runbook.md) · 模板与依赖：[`.env.example`](../.env.example) · [`compose.yaml`](../compose.yaml) · [`compose.009.yaml`](../compose.009.yaml)
+**相关文档**：[架构与设计](architecture.md) · [测试指南](testing.md) · [恢复运维手册](ops/recovery-runbook.md) · 模板与依赖：[`.env.example`](../.env.example) · [`compose.yaml`](../compose.yaml) · [`compose.009.yaml`](../compose.009.yaml)
 
 > **事实边界**：本文件描述当前实现的配置加载行为（[`internal/config/config.go`](../internal/config/config.go)）与
 > 模板（[`.env.example`](../.env.example)）。项目未部署、T000-P 保持 OPEN。所有阈值类取值一律「待测/待裁决」，
 > 模板中出现的数值是测量示例或部署输入，**不是生产阈值**。
-> **验证状态**：`serve` 的冷启动路径（模板必填键组合）已由 `make smoke-quickstart`
-> （[`scripts/quickstart-smoke/`](../scripts/quickstart-smoke/)，隔离环境）实际启动验证；其余键组合与 CLI
-> 仍为源码常量、加载分支与模板注释的静态对照（**NOT VERIFIED**）。
+> **运行验证**：如何启动依赖与运行各层测试见[测试指南](testing.md)。
 
 ## 1. 加载规则
 

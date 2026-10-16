@@ -54,18 +54,10 @@ A successful run prints `EVIDENCE: .evidence/portfolio-demo/<run-id>` when the s
 can never read as a pass. Every failure prints `FAIL: …` (or `RESULT: FAIL exit=<rc>`) and exits
 non-zero; polling always has a deadline, so a hung step fails instead of hanging.
 
-**Status: verified.** The last real run — `run04w-20261011130031` on 2026-10-11, at source
-HEAD `11d698c75edf14e28e7075300ca082fe6dc9a308` — completed all stages (A, B, N5 refusals, final
-verify), passed the public secrets scan, and exited `run_rc=0` / `exit_code=0` / `cleanup_rc=0`
-(`RESULT: PASS`; wall clock 132 s on an already-prepared host — not a cold-start promise). A
-curated, tracked excerpt of its public evidence (raw byte copies + provenance + `SHA256SUMS`)
-lives in
-[`docs/evidence/portfolio-demo/run04w-20261011130031/`](../../docs/evidence/portfolio-demo/run04w-20261011130031/README.md);
-the full original tree stays in the local git-ignored `.evidence/portfolio-demo/run04w-20261011130031/`.
-The talk track that walks through those files is §2.2 of
-[`docs/portfolio.md`](../../docs/portfolio.md). The negative-case drills (N1–N4) below were **not**
-re-run in that round. Runs are still per-id and disposable: this status describes one local
-execution, not a guarantee that other machines have reproduced it.
+Each run is per-id and disposable: it writes its own evidence root under the git-ignored
+`.evidence/portfolio-demo/<run-id>/`, and a new run never reuses or mutates an earlier one.
+This README documents how to run the demo and what it asserts; it does not claim that the
+current tree has been re-run, and no run artifacts are distributed with the repository.
 
 Optional environment inputs: `PORTFOLIO_RUN_ID` (default `UTC-timestamp-PID`) and
 `TXHARBOR_DEMO_TOOLS_DIR`. Host ports are fixed by the script (`55436`, `58547`, `18081`, `18091`);
@@ -104,15 +96,9 @@ must stay at those defaults for `run_demo.sh`.
   assertion, and only copied into `public/chain/` after every field check passed (the final
   secrets scan still governs what may be shared). Regression without a chain:
   `checks/log-filter/run_checks.sh` (pure mocks).
-- **Historical status of that check**: the pre-fix run `run04v-20261011120444` passed stage A and
-  stage B through B6 (completed intent, stable replays, conserved balances) but failed the final
-  verify on `getLogs ... count at head 9: want [1] got [4]`; its raw `getLogs` JSON was never
-  retained (the old code wrote it only after the count assertion), so the contents of those four
-  matched logs are unknown. The post-fix real rerun **passed** (`run04w-20261011130031`, see
-  `docs/changes/portfolio-demo.md` §19–§20) — the pre-fix failure record is kept, not rewritten.
 - `private/` is sensitive (keys, credentials, DSN password, full logs). Never commit, paste or
   package it; share `public/` only.
-- The `.evidence/` tree is already git-ignored (`.git/info/exclude`).
+- The `.evidence/` tree is git-ignored by the repository [`.gitignore`](../../.gitignore).
 - Honest boundaries: `outbox_events` rows are all `publish_state=pending` — this demonstrates the
   **transactional outbox write**, not event delivery (no events pipeline runs). Exactly one
   configuration row is written by SQL (the `withdrawal_authorization_scopes` scope/fee ceilings,
@@ -192,12 +178,3 @@ from the earlier evidence-root step — still no containers, volumes, networks o
   reads the durable grant owner back (read-only `SELECT`) to refuse a foreign or missing `caller_id`
   at setup time instead of 240s into stage B. Mock regression:
   `checks/principal/run_checks.sh` (no daemon, no database).
-
-## The “about 5 minutes” claim
-
-Five minutes describes the **walkthrough after preparation**: with images, tools and the fixture
-already built and the stack warm, narrating stage A (pending → N-1 → confirmed), stage B (create →
-admission → real execution → replays) and the verify output fits in a short talk. It is **not** a
-cold-start promise: the first run also pays for image pulls, the one-time `solc` fetch/compile,
-`go build`, migrations and the first indexer passes. Measured evidence lives in the run's own
-`public/summary.txt`; do not quote a duration the run did not measure.

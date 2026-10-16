@@ -6,7 +6,7 @@
 
 [1. 配置键](#1-配置键示例中的值均为本地测试输入) · [2. 命令路径 S1–S12](#2-真实命令路径s1s12) · [3. 隔离证明](#3-隔离证明) · [4. 失败处置 F1–F7](#4-失败处置f1f7与升级) · [5. RTO 超限处理](#5-rto-超限处理) · [6. 控制库回退纪律](#6-控制库回退纪律f6dg-4) · [7. 身份映射](#7-身份映射维护边界与变更审计f19) · [8. 有界只读复核](#8-有界只读复核-boundsf13) · [9. 同实例储层同失](#9-同实例储层同失f14dg-3) · [10. 非声明](#10-非声明)
 
-**相关文档**：规格 [`specs/015-backup-recovery-safe-resumption/`](../../specs/015-backup-recovery-safe-resumption/)（[plan.md](../../specs/015-backup-recovery-safe-resumption/plan.md) · [quickstart.md](../../specs/015-backup-recovery-safe-resumption/quickstart.md) · [contracts/](../../specs/015-backup-recovery-safe-resumption/contracts/) · [data-model.md](../../specs/015-backup-recovery-safe-resumption/data-model.md) · [ADR-001](../../specs/015-backup-recovery-safe-resumption/adr/ADR-001-recovery-control-store.md)）· 证据归口 [evidence/015/README.md](../evidence/015/README.md) · [验证矩阵](../verification-matrix.md) · [架构与设计](../architecture.md)
+**相关文档**：规格 [`specs/015-backup-recovery-safe-resumption/`](../../specs/015-backup-recovery-safe-resumption/)（[plan.md](../../specs/015-backup-recovery-safe-resumption/plan.md) · [quickstart.md](../../specs/015-backup-recovery-safe-resumption/quickstart.md) · [contracts/](../../specs/015-backup-recovery-safe-resumption/contracts/) · [data-model.md](../../specs/015-backup-recovery-safe-resumption/data-model.md) · [ADR-001](../../specs/015-backup-recovery-safe-resumption/adr/ADR-001-recovery-control-store.md)）· [架构与设计](../architecture.md) · [测试指南](../testing.md)
 
 - **Gate: T000-P 保持 OPEN**。本文档不是发布，不宣称生产就绪；文内所有示例数值均为**本地测试输入**，生产 RPO/RTO/备份频率/保留期未裁决，不得据本地值宣称符合生产恢复目标。
 - 本文档只描述受支持路径。风险接受后强制复服、损失核销、人工补偿付款、自动补造付款意图**不存在**（无命令、无权限行、无契约）；双人批准不得替代缺失证据。
